@@ -181,6 +181,142 @@ log "Upgrading pip..."
 python -m pip install --upgrade pip --quiet
 
 # =============================================================================
+# 2b. INSTALL NODE.JS 10+ INTO .venv
+# =============================================================================
+# Node.js is installed as a portable (no-install) binary inside .venv/node/
+# so it stays project-local and doesn't require system-level changes.
+# The .venv/bin (or Scripts) directory gets wrapper shims for node and npm.
+# =============================================================================
+header "Installing Node.js into .venv"
+
+NODE_DIR="$VENV_DIR/node"
+NODE_MIN_MAJOR=10
+NODE_VERSION="22.3.0"   # LTS — change if you need a different 10+ release
+NODE_WIN_ZIP="node-v${NODE_VERSION}-win-x64.zip"
+NODE_WIN_URL="https://nodejs.org/dist/v${NODE_VERSION}/${NODE_WIN_ZIP}"
+NODE_LINUX_TAR="node-v${NODE_VERSION}-linux-x64.tar.xz"
+NODE_LINUX_URL="https://nodejs.org/dist/v${NODE_VERSION}/${NODE_LINUX_TAR}"
+
+# Helper — checks if a binary satisfies Node 10+
+check_node() {
+    local cmd="$1"
+    if command -v "$cmd" &>/dev/null 2>&1 || [[ -x "$cmd" ]]; then
+        local major
+        major=$("$cmd" -e "process.stdout.write(String(process.versions.node.split('.')[0]))" 2>/dev/null)
+        if [[ -n "$major" && "$major" -ge "$NODE_MIN_MAJOR" ]]; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# Detect OS / shell environment
+detect_os() {
+    case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*) echo "windows" ;;
+        Darwin)               echo "macos"   ;;
+        Linux)                echo "linux"   ;;
+        *)                    echo "unknown" ;;
+    esac
+}
+OS=$(detect_os)
+
+# Shim dir — prefer bin/ (Unix) otherwise Scripts/ (Windows venv)
+if [[ -d "$VENV_DIR/bin" ]]; then
+    SHIM_DIR="$VENV_DIR/bin"
+else
+    SHIM_DIR="$VENV_DIR/Scripts"
+fi
+
+# Check if we already have a good Node inside .venv
+NODE_BIN="$NODE_DIR/node"
+[[ "$OS" == "windows" ]] && NODE_BIN="$NODE_DIR/node.exe"
+
+if check_node "$NODE_BIN"; then
+    NODE_VER=$("$NODE_BIN" --version 2>/dev/null)
+    log "Node.js already installed in .venv: $NODE_VER — skipping."
+else
+    log "Downloading Node.js v${NODE_VERSION} (portable) into $NODE_DIR ..."
+
+    mkdir -p "$NODE_DIR"
+
+    if [[ "$OS" == "windows" ]]; then
+        # ---- Windows: download zip, extract, flatten ----
+        TMP_ZIP="/tmp/${NODE_WIN_ZIP}"
+        if ! curl -fsSL "$NODE_WIN_URL" -o "$TMP_ZIP"; then
+            error "Failed to download Node.js. Check your internet connection.\n  URL: $NODE_WIN_URL"
+        fi
+
+        log "Extracting Node.js zip..."
+        # unzip is available in Git for Windows
+        if command -v unzip &>/dev/null 2>&1; then
+            unzip -q "$TMP_ZIP" -d "/tmp/node_extract"
+        else
+            error "unzip not found. Install Git for Windows (includes unzip) or add it to PATH."
+        fi
+
+        EXTRACTED_DIR=$(ls -d /tmp/node_extract/node-v*/ 2>/dev/null | head -1)
+        if [[ -z "$EXTRACTED_DIR" ]]; then
+            error "Could not locate extracted Node.js directory."
+        fi
+
+        # Move contents into $NODE_DIR (flatten one level)
+        cp -r "$EXTRACTED_DIR"* "$NODE_DIR/"
+        rm -rf "/tmp/node_extract" "$TMP_ZIP"
+
+        NODE_BIN="$NODE_DIR/node.exe"
+        NPM_BIN="$NODE_DIR/npm.cmd"
+
+        # Create shims in Scripts/ so `node` / `npm` work while venv is active
+        cat > "$SHIM_DIR/node" << SHIM
+#!/bin/bash
+exec "$NODE_BIN" "\$@"
+SHIM
+        cat > "$SHIM_DIR/npm" << SHIM
+#!/bin/bash
+exec "$NPM_BIN" "\$@"
+SHIM
+        chmod +x "$SHIM_DIR/node" "$SHIM_DIR/npm"
+
+    elif [[ "$OS" == "linux" || "$OS" == "macos" ]]; then
+        # ---- Linux / macOS: download tar.xz, extract, flatten ----
+        [[ "$OS" == "macos" ]] && NODE_LINUX_TAR="node-v${NODE_VERSION}-darwin-x64.tar.gz" \
+                                && NODE_LINUX_URL="https://nodejs.org/dist/v${NODE_VERSION}/${NODE_LINUX_TAR}"
+
+        TMP_TAR="/tmp/${NODE_LINUX_TAR}"
+        if ! curl -fsSL "$NODE_LINUX_URL" -o "$TMP_TAR"; then
+            error "Failed to download Node.js. Check your internet connection.\n  URL: $NODE_LINUX_URL"
+        fi
+
+        log "Extracting Node.js archive..."
+        mkdir -p /tmp/node_extract
+        tar -xf "$TMP_TAR" -C /tmp/node_extract --strip-components=1
+
+        cp -r /tmp/node_extract/* "$NODE_DIR/"
+        rm -rf /tmp/node_extract "$TMP_TAR"
+
+        NODE_BIN="$NODE_DIR/bin/node"
+        NPM_BIN="$NODE_DIR/bin/npm"
+
+        # Symlink into venv bin/ so they're on PATH while venv is active
+        ln -sf "$NODE_BIN" "$SHIM_DIR/node"
+        ln -sf "$NPM_BIN"  "$SHIM_DIR/npm"
+
+    else
+        warn "Unrecognised OS '$OS'. Skipping automatic Node.js install."
+        warn "Manually copy a Node.js 10+ binary to $NODE_DIR and add it to PATH."
+    fi
+
+    # Final check
+    if check_node "$NODE_BIN"; then
+        log "Node.js installed: $("$NODE_BIN" --version) at $NODE_BIN ✅"
+        log "npm:               $("$SHIM_DIR/npm" --version 2>/dev/null)"
+    else
+        warn "Node.js install may have failed — verify manually: $NODE_BIN --version"
+    fi
+fi
+
+# =============================================================================
 # 3. CUDA PRE-FLIGHT CHECK
 # =============================================================================
 # IMPORTANT: setup.sh CANNOT install the CUDA toolkit or GPU drivers for you.
@@ -437,6 +573,11 @@ header "Setup Complete"
 echo ""
 echo -e "${GREEN}✅ Python:${NC}          $(python --version) — $(which python)"
 echo -e "${GREEN}✅ Virtual env:${NC}     $VENV_DIR"
+if check_node "$NODE_BIN" 2>/dev/null || check_node "node" 2>/dev/null; then
+    echo -e "${GREEN}✅ Node.js:${NC}         $(node --version 2>/dev/null) — $NODE_DIR"
+else
+    echo -e "${YELLOW}⚠️  Node.js:${NC}         not found in .venv — check install logs above"
+fi
 echo -e "${GREEN}✅ PyTorch:${NC}         $(python -c 'import torch; print(torch.__version__)' 2>/dev/null)"
 CUDA_OK=$(python -c "import torch; print(torch.cuda.is_available())" 2>/dev/null)
 if [[ "$CUDA_OK" == "True" ]]; then
