@@ -5,11 +5,13 @@ VGCPlayer wraps a PyTorch model that maps an encoded battle state to
 two actions (one per active slot).  When the model is unavailable or
 produces an illegal action it falls back to a random legal move.
 
-Battle transitions are saved to a replay buffer (JSON-lines) for
-offline training.
+A separate *team-chooser* model handles the teampreview lead selection
+(which 4 Pokémon to send, and in what order).  Until that model is
+available the player defaults to a heuristic (best average type
+advantage against the visible opponent team).
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Network contract
+Network contract  (battle model)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Input  : float32 tensor  shape (STATE_DIM,)  or  (batch, STATE_DIM)
 Output : int64   tensor  shape (2,)           or  (batch, 2)
@@ -19,6 +21,16 @@ Output : int64   tensor  shape (2,)           or  (batch, 2)
 Action encoding (matches state_encoder.py):
     0–11  →  move_idx (0–3)  ×  target (0=opp0, 1=opp1, 2=ally)
     12–15 →  switch to bench slot (0–3)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Network contract  (team-chooser model)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Input  : float32 tensor  shape (TEAM_STATE_DIM,)   (TBD — your design)
+Output : int64   tensor  shape (4,)
+           indices into battle.teampreview_team (0-based, length-6 list)
+           first two entries are the *leads* sent to active slots.
+If model=None the heuristic fallback is used instead.
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Replay buffer format  (one JSON object per line)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -40,7 +52,7 @@ import json
 import logging
 import random
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import numpy as np
 
@@ -71,6 +83,9 @@ except ImportError:
 _TARGET_OPP0 = 0
 _TARGET_OPP1 = 1
 _TARGET_ALLY = 2
+
+# VGC: choose 4 leads from a 6-mon roster
+VGC_TEAM_SIZE = 4
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -143,6 +158,26 @@ def _count_lines(path: Path) -> int:
         return 0
     with path.open("r", encoding="utf-8") as f:
         return sum(1 for _ in f)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Teampreview heuristic
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _heuristic_team_order(battle: DoubleBattle) -> List[int]:
+    """
+    Return a list of 0-based indices into battle.teampreview_team.
+    Currently just picks the first VGC_TEAM_SIZE mons in roster order.
+    TODO: replace with type-advantage scoring once confirmed working.
+    """
+    team = list(battle.teampreview_team)
+    n    = min(VGC_TEAM_SIZE, len(team))
+    log.debug(
+        "Teampreview: first-%d roster order → %s",
+        n, [team[i].species for i in range(n)],
+    )
+    return list(range(n))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -276,20 +311,23 @@ def _random_legal_action(battle: DoubleBattle, slot: int) -> int:
 
 class VGCPlayer(Player):
     """
-    poke-env Player that uses a neural network to pick actions.
+    poke-env Player that uses a neural network to pick actions and,
+    optionally, a separate model to choose the team during teampreview.
 
     Parameters
     ----------
     model : nn.Module or None
-        PyTorch model with signature:
-            input  – float32 tensor (STATE_DIM,)
-            output – int64  tensor  (2,)   [action_slot0, action_slot1]
+        Battle-action model.  Input shape (STATE_DIM,), output shape (2,).
         Pass None to always use random-legal fallback.
+    team_chooser : nn.Module or None
+        Teampreview model.  Input/output contract is project-specific
+        (TBD when the network is designed).  Pass None to use the built-in
+        type-advantage heuristic.
     replay_path : Path or None
         Where to write the JSON-lines replay buffer.
         Defaults to  replay_buffer/replay.jsonl
     device : str
-        'cpu' or 'cuda' — where to run the model.
+        'cpu' or 'cuda' — where to run both models.
     **kwargs
         Forwarded to poke_env.player.Player (account_configuration,
         battle_format, team, max_concurrent_battles, …)
@@ -298,28 +336,76 @@ class VGCPlayer(Player):
     def __init__(
         self,
         model=None,
+        team_chooser=None,
         replay_path: Optional[Path] = None,
         device: str = "cpu",
         **kwargs,
     ):
         super().__init__(**kwargs)
-        self._encoder = StateEncoder()
-        self._model   = model
-        self._device  = device
+        self._encoder      = StateEncoder()
+        self._model        = model
+        self._team_chooser = team_chooser
+        self._device       = device
 
         if model is not None and _TORCH_AVAILABLE:
             self._model = model.to(device)
             self._model.eval()
 
+        if team_chooser is not None and _TORCH_AVAILABLE:
+            self._team_chooser = team_chooser.to(device)
+            self._team_chooser.eval()
+
         _rp = replay_path or Path("replay_buffer/replay.jsonl")
         self._replay = ReplayBuffer(_rp)
         log.info(
-            "VGCPlayer ready | model=%s | replay=%s",
-            "loaded" if model else "none (random fallback)",
+            "VGCPlayer ready | battle_model=%s | team_chooser=%s | replay=%s",
+            "loaded" if model        else "none (random fallback)",
+            "loaded" if team_chooser else "none (heuristic fallback)",
             _rp,
         )
 
     # ── poke-env entry points ─────────────────────────────────────────────────
+
+    def teampreview(self, battle: DoubleBattle) -> str:
+        """
+        Called once per battle during teampreview.
+        Must return a Showdown /team command string, e.g. '/team 1324'.
+        Indices are 1-based positions in battle.teampreview_team.
+
+        Strategy:
+          1. If team_chooser model is loaded → use it.
+          2. Otherwise → type-advantage heuristic.
+        """
+        team = list(battle.teampreview_team)
+        n    = min(VGC_TEAM_SIZE, len(team), battle.max_team_size)
+
+        order: List[int]  # 0-based indices into `team`
+
+        if self._team_chooser is not None and _TORCH_AVAILABLE:
+            order = self._run_team_chooser(battle, team, n)
+        else:
+            order = _heuristic_team_order(battle)[:n]
+
+        # Pad with any remaining mons not already selected (shouldn't be needed
+        # for VGC, but guards against edge cases with smaller rosters).
+        used = set(order)
+        for i in range(len(team)):
+            if len(order) >= n:
+                break
+            if i not in used:
+                order.append(i)
+
+        # poke-env expects 1-based indices
+        showdown_order = "".join(str(i + 1) for i in order)
+        species_names  = [team[i].species for i in order]
+        log.info(
+            "Teampreview [%s] → /team %s  (%s)",
+            battle.battle_tag,
+            showdown_order,
+            ", ".join(species_names),
+        )
+        return f"/team {showdown_order}"
+
     def choose_move(self, battle):
         """Required by poke-env Player ABC — not used in doubles."""
         return self.choose_random_move(battle)
@@ -329,6 +415,11 @@ class VGCPlayer(Player):
         state_vec = self._encoder.encode(battle)
 
         action_s0, action_s1, source = self._select_actions(battle, state_vec)
+
+        log.debug(
+            "Turn %d [%s] a0=%d a1=%d src=%s",
+            battle.turn, battle.battle_tag, action_s0, action_s1, source,
+        )
 
         # Record transition (outcome filled in later)
         self._replay.record(
@@ -345,7 +436,49 @@ class VGCPlayer(Player):
 
         return self.create_doubles_order(order_s0, order_s1)
 
+    # ── Team chooser (neural model path) ─────────────────────────────────────
+
+    def _run_team_chooser(
+        self,
+        battle: DoubleBattle,
+        team: list,
+        n: int,
+    ) -> List[int]:
+        """
+        Run the team_chooser model and return up to `n` 0-based team indices.
+        Falls back to the heuristic on any error or illegal output.
+
+        The input tensor format is intentionally left open — encode whatever
+        teampreview features you need before passing the model in.
+        This stub passes a zero vector of length 6*101 as a placeholder;
+        replace the encoding block once your TEAM_STATE_DIM is defined.
+        """
+        try:
+            # ── TODO: replace with real teampreview state encoding ────────────
+            TEAM_STATE_DIM = len(team) * 101   # placeholder
+            t = torch.zeros(TEAM_STATE_DIM, dtype=torch.float32, device=self._device)
+            # ──────────────────────────────────────────────────────────────────
+
+            with torch.no_grad():
+                out = self._team_chooser(t)   # expected shape: (n,)
+                indices = [int(x.item()) for x in out[:n]]
+
+            # Validate: must be unique valid indices
+            valid = [i for i in indices if 0 <= i < len(team)]
+            if len(set(valid)) == n:
+                return valid
+
+            log.warning(
+                "team_chooser produced invalid/duplicate indices %s — "
+                "falling back to heuristic.", indices
+            )
+        except Exception as exc:
+            log.warning("team_chooser inference failed (%s) — using heuristic.", exc)
+
+        return _heuristic_team_order(battle)[:n]
+
     # ── Action selection ──────────────────────────────────────────────────────
+
     def _select_actions(
         self,
         battle: DoubleBattle,
@@ -374,9 +507,11 @@ class VGCPlayer(Player):
 
             used_random = False
             if not (0 <= a0 < ACTIONS_PER_SLOT and mask0[a0]):
+                log.debug("Slot 0 model action %d illegal — random fallback.", a0)
                 a0 = _random_legal_action(battle, 0)
                 used_random = True
             if not (0 <= a1 < ACTIONS_PER_SLOT and mask1[a1]):
+                log.debug("Slot 1 model action %d illegal — random fallback.", a1)
                 a1 = _random_legal_action(battle, 1)
                 used_random = True
 
@@ -396,11 +531,12 @@ class VGCPlayer(Player):
         order = _action_to_poke_env(action, battle, slot)
         if order is not None:
             return order
-        # Last-resort: let poke-env pick any legal order for this slot
+        log.debug("_safe_order: action %d slot %d produced None — last-resort random.", action, slot)
         fallback_action = _random_legal_action(battle, slot)
         return _action_to_poke_env(fallback_action, battle, slot)
 
     # ── Battle result hook ────────────────────────────────────────────────────
+
     def _battle_finished_callback(self, battle: DoubleBattle) -> None:
         """Called by poke-env when a battle ends — back-fill outcomes."""
         if battle.won:
@@ -411,9 +547,12 @@ class VGCPlayer(Player):
             outcome = -1
         self._replay.finalise(battle.battle_tag, outcome)
         log.info(
-            "Battle %s finished — outcome: %s",
+            "Battle %s finished — outcome: %s  (W/L/D so far: %d/%d/%d)",
             battle.battle_tag,
             {1: "WIN", 0: "LOSS", -1: "DRAW"}[outcome],
+            self.n_won_battles,
+            self.n_lost_battles,
+            self.n_tied_battles,
         )
 
     def close(self) -> None:

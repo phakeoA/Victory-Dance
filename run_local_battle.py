@@ -11,6 +11,7 @@ Usage
     python run_local_battle.py              # 1 battle
     python run_local_battle.py -n 50        # 50 battles
     python run_local_battle.py --no-server  # if server is already running
+    python run_local_battle.py -v           # verbose (DEBUG) logging
  
 Requirements
 ------------
@@ -34,16 +35,24 @@ from poke_env import AccountConfiguration
 from player import VGCPlayer
  
 # ── Logging ───────────────────────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(message)s",
-    datefmt="%H:%M:%S",
-)
+def _configure_logging(verbose: bool) -> None:
+    level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    # poke-env's own websocket logger is noisy at DEBUG; keep it at WARNING
+    # unless the user explicitly wants it.
+    if not verbose:
+        logging.getLogger("poke_env").setLevel(logging.WARNING)
+        logging.getLogger("websockets").setLevel(logging.WARNING)
+
 log = logging.getLogger(__name__)
  
 # ── Defaults ──────────────────────────────────────────────────────────────────
 TEAM_FILE      = Path("teams/M-A/team1")
-BATTLE_FORMAT  = "[Gen 9 Champions] VGC 2026 Reg M-A"
+BATTLE_FORMAT  = "gen9championsvgc2026regma"#
 N_BATTLES_DEFAULT = 1
  
 SHOWDOWN_DIR   = Path("pokemon-showdown")   # relative to this script's cwd
@@ -61,24 +70,15 @@ _VENV_NODE_CANDIDATES = [
  
  
 def _find_node() -> str:
-    """
-    Return an absolute path to the node executable.
-    Checks the venv-local install first (put there by setup.sh), then falls
-    back to whatever 'node' resolves to on the system PATH.
-    Exits with a helpful message if nothing is found.
-    """
     import shutil
- 
     for candidate in _VENV_NODE_CANDIDATES:
         if candidate.exists():
             log.info("Using venv-local node: %s", candidate)
             return str(candidate)
- 
     system_node = shutil.which("node")
     if system_node:
         log.info("Using system node: %s", system_node)
         return system_node
- 
     log.error(
         "node executable not found.\n"
         "  Checked venv-local paths and system PATH.\n"
@@ -92,7 +92,6 @@ def _find_node() -> str:
 # ══════════════════════════════════════════════════════════════════════════════
  
 def _port_open(host: str, port: int) -> bool:
-    """Return True if something is already listening on host:port."""
     try:
         with socket.create_connection((host, port), timeout=1):
             return True
@@ -101,11 +100,6 @@ def _port_open(host: str, port: int) -> bool:
  
  
 def start_showdown() -> subprocess.Popen | None:
-    """
-    Launch `node pokemon-showdown start --no-security` as a background process.
-    Returns the Popen handle, or None if the server was already running.
-    Waits until the websocket port is accepting connections before returning.
-    """
     if _port_open(SHOWDOWN_HOST, SHOWDOWN_PORT):
         log.info("Showdown server already running on port %d — skipping launch.", SHOWDOWN_PORT)
         return None
@@ -120,9 +114,6 @@ def start_showdown() -> subprocess.Popen | None:
  
     node = _find_node()
     node_dir = str(Path(node).parent)
- 
-    # Inherit the current environment but ensure node is findable by any
-    # child processes Showdown spawns (e.g. `node build` on first launch).
     env = os.environ.copy()
     env["PATH"] = node_dir + os.pathsep + env.get("PATH", "")
  
@@ -136,7 +127,6 @@ def start_showdown() -> subprocess.Popen | None:
         stderr=subprocess.DEVNULL,
     )
  
-    # Wait until port is open (server is ready to accept websockets)
     deadline = time.monotonic() + SHOWDOWN_READY_TIMEOUT
     while time.monotonic() < deadline:
         if _port_open(SHOWDOWN_HOST, SHOWDOWN_PORT):
@@ -157,7 +147,6 @@ def start_showdown() -> subprocess.Popen | None:
  
  
 def stop_showdown(proc: subprocess.Popen | None) -> None:
-    """Terminate the server process we launched (no-op if we didn't start it)."""
     if proc is None:
         return
     log.info("Stopping Showdown server …")
@@ -189,14 +178,24 @@ def load_team(path: Path) -> str:
 # Players
 # ══════════════════════════════════════════════════════════════════════════════
  
-def make_player(username: str, team: str) -> VGCPlayer:
+def make_player(
+    username: str,
+    team: str,
+    *,
+    model=None,
+    team_chooser=None,
+) -> VGCPlayer:
     """
-    Build a VGCPlayer with no model (random-legal fallback) and a
-    replay buffer at replay_buffer/<username>.jsonl.
-    Swap in a trained model by passing model=your_net to VGCPlayer.
+    Build a VGCPlayer.
+
+    model        : trained battle nn.Module, or None (random fallback)
+    team_chooser : trained teampreview nn.Module, or None (heuristic fallback)
+
+    Swap in trained models when they are ready.
     """
     return VGCPlayer(
-        model=None,   # ← replace with your trained nn.Module when ready
+        model=model,
+        team_chooser=team_chooser,
         replay_path=Path(f"replay_buffer/{username}.jsonl"),
         device="cpu",
         account_configuration=AccountConfiguration(username, None),
@@ -215,8 +214,14 @@ async def run(n_battles: int, manage_server: bool) -> None:
     server_proc = start_showdown() if manage_server else None
  
     team_str = load_team(TEAM_FILE)
-    player1  = make_player("TrainerRed",  team_str)
-    player2  = make_player("TrainerBlue", team_str)
+
+    # ── Swap in trained models here when ready ────────────────────────────────
+    battle_model  = None   # your trained nn.Module for in-battle decisions
+    team_chooser  = None   # your trained nn.Module for teampreview selection
+    # ─────────────────────────────────────────────────────────────────────────
+
+    player1 = make_player("TrainerRed",  team_str, model=battle_model, team_chooser=team_chooser)
+    player2 = make_player("TrainerBlue", team_str, model=battle_model, team_chooser=team_chooser)
  
     log.info("Starting %d battle(s) — format: %s", n_battles, BATTLE_FORMAT)
  
@@ -255,11 +260,14 @@ def parse_args() -> argparse.Namespace:
                    help=f"Path to team paste file (default: {TEAM_FILE})")
     p.add_argument("--no-server", action="store_true",
                    help="Skip launching the server (use if it's already running)")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="Enable DEBUG-level logging (very noisy)")
     return p.parse_args()
  
  
 if __name__ == "__main__":
     args = parse_args()
+    _configure_logging(args.verbose)
     BATTLE_FORMAT = args.battle_format
     TEAM_FILE     = args.team
     asyncio.run(run(n_battles=args.battles, manage_server=not args.no_server))
