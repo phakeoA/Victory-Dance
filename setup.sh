@@ -375,7 +375,6 @@ else
 fi
 
 log "Pokémon Showdown server ready."
-log "  To start: cd pokemon-showdown && node pokemon-showdown start --no-security"
 
 # =============================================================================
 # 3. CUDA PRE-FLIGHT CHECK
@@ -659,11 +658,7 @@ fi
 echo ""
 echo -e "${YELLOW}Next steps:${NC}"
 echo "  1. Edit .env — fill in PS_USERNAME and PS_PASSWORD"
-echo "  2. Start the local server:"
-echo "       cd pokemon-showdown && node pokemon-showdown start --no-security"
-echo "  3. Open VS Code:  code ."
-echo "  4. VS Code terminal auto-activates Python venv"
-echo "  5. Run a test battle: python run_local_battle.py"
+echo "  2. Run a test battle: python run_local_battle.py"
 echo "  6. Scaffold src/bot/player.py  — VGCBot(Player) subclass"
 echo ""
 echo -e "${BLUE}Happy building! — Victory-Dance VGC Bot${NC}"
