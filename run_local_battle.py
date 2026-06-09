@@ -42,7 +42,7 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
-TEAM_FILE      = Path("team1.txt")
+TEAM_FILE      = Path("teams/M-A/team1")
 BATTLE_FORMAT  = "gen9championsvgc2026regma"
 N_BATTLES_DEFAULT = 1
 
@@ -50,6 +50,41 @@ SHOWDOWN_DIR   = Path("pokemon-showdown")   # relative to this script's cwd
 SHOWDOWN_HOST  = "localhost"
 SHOWDOWN_PORT  = 8000
 SHOWDOWN_READY_TIMEOUT = 30   # seconds to wait for server to accept connections
+
+# Venv-local node installed by setup.sh lives here (Windows exe or Unix bin)
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_VENV_NODE_CANDIDATES = [
+    _SCRIPT_DIR / ".venv" / "node" / "node.exe",   # Windows
+    _SCRIPT_DIR / ".venv" / "node" / "node",        # Linux/macOS
+    _SCRIPT_DIR / ".venv" / "bin"  / "node",        # symlink created by setup.sh
+]
+
+
+def _find_node() -> str:
+    """
+    Return an absolute path to the node executable.
+    Checks the venv-local install first (put there by setup.sh), then falls
+    back to whatever 'node' resolves to on the system PATH.
+    Exits with a helpful message if nothing is found.
+    """
+    import shutil
+
+    for candidate in _VENV_NODE_CANDIDATES:
+        if candidate.exists():
+            log.info("Using venv-local node: %s", candidate)
+            return str(candidate)
+
+    system_node = shutil.which("node")
+    if system_node:
+        log.info("Using system node: %s", system_node)
+        return system_node
+
+    log.error(
+        "node executable not found.\n"
+        "  Checked venv-local paths and system PATH.\n"
+        "  Re-run setup.sh, or install Node.js and add it to PATH."
+    )
+    sys.exit(1)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -83,12 +118,13 @@ def start_showdown() -> subprocess.Popen | None:
         )
         sys.exit(1)
 
+    node = _find_node()
     log.info("Starting Pokémon Showdown server …")
     proc = subprocess.Popen(
-        ["node", "pokemon-showdown", "start", "--no-security"],
+        [node, "pokemon-showdown", "start", "--no-security"],
         cwd=SHOWDOWN_DIR,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=None,   # let it print to terminal so we can diagnose
     )
 
     # Wait until port is open (server is ready to accept websockets)
