@@ -23,7 +23,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
-import signal
+import os
 import socket
 import subprocess
 import sys
@@ -49,7 +49,7 @@ N_BATTLES_DEFAULT = 1
 SHOWDOWN_DIR   = Path("pokemon-showdown")   # relative to this script's cwd
 SHOWDOWN_HOST  = "localhost"
 SHOWDOWN_PORT  = 8000
-SHOWDOWN_READY_TIMEOUT = 30   # seconds to wait for server to accept connections
+SHOWDOWN_READY_TIMEOUT = 120  # seconds — first launch builds Showdown (~30s)
 
 # Venv-local node installed by setup.sh lives here (Windows exe or Unix bin)
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -119,12 +119,21 @@ def start_showdown() -> subprocess.Popen | None:
         sys.exit(1)
 
     node = _find_node()
+    node_dir = str(Path(node).parent)
+
+    # Inherit the current environment but ensure node is findable by any
+    # child processes Showdown spawns (e.g. `node build` on first launch).
+    env = os.environ.copy()
+    env["PATH"] = node_dir + os.pathsep + env.get("PATH", "")
+
     log.info("Starting Pokémon Showdown server …")
+    log.info("(First launch will build Showdown — may take ~30s)")
     proc = subprocess.Popen(
         [node, "pokemon-showdown", "start", "--no-security"],
         cwd=SHOWDOWN_DIR,
+        env=env,
         stdout=subprocess.DEVNULL,
-        stderr=None,   # let it print to terminal so we can diagnose
+        stderr=subprocess.DEVNULL,
     )
 
     # Wait until port is open (server is ready to accept websockets)
@@ -196,11 +205,6 @@ def make_player(username: str, team: str) -> RandomPlayer:
 
 async def run(n_battles: int, manage_server: bool) -> None:
     server_proc = start_showdown() if manage_server else None
-
-    # Register Ctrl-C / SIGTERM so the server always gets shut down
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, lambda: (stop_showdown(server_proc), sys.exit(0)))
 
     team_str = load_team(TEAM_FILE)
     player1  = make_player("TrainerRed",  team_str)

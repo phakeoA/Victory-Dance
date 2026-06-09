@@ -1,7 +1,7 @@
 Kingambit @ Chople Berry  
 Ability: Defiant  
-EVs: 252 HP / 252 Atk / 4 Def  
-Brave Nature  
+EVs: 31 HP / 31 Atk / 2 Def  
+Serious Nature  
 - Sucker Punch  
 - Kowtow Cleave  
 - Iron Head  
@@ -9,9 +9,8 @@ Brave Nature
 
 Charizard @ Charizardite Y  
 Ability: Blaze  
-EVs: 252 HP / 252 SpA / 4 Spe  
-Modest Nature  
-IVs: 0 Atk  
+EVs: 2 HP / 32 SpA / 32 Spe  
+Timid Nature  
 - Solar Beam  
 - Heat Wave  
 - Weather Ball  
@@ -19,9 +18,8 @@ IVs: 0 Atk
 
 Sylveon @ Fairy Feather  
 Ability: Pixilate  
-EVs: 252 HP / 252 SpA / 4 Spe  
+EVs: 32 HP / 32 SpA / 2 Spe  
 Modest Nature  
-IVs: 0 Atk  
 - Hyper Voice  
 - Skill Swap  
 - Protect  
@@ -29,7 +27,7 @@ IVs: 0 Atk
 
 Sneasler @ White Herb  
 Ability: Unburden  
-EVs: 4 HP / 252 Atk / 252 Spe  
+EVs: 2 HP / 32 Atk / 32 Spe  
 Jolly Nature  
 - Close Combat  
 - Fake Out  
@@ -38,9 +36,8 @@ Jolly Nature
 
 Rotom-Wash @ Leftovers  
 Ability: Levitate  
-EVs: 252 HP / 252 SpA / 4 Spe  
+EVs: 32 HP / 32 SpA / 2 Spe  
 Modest Nature  
-IVs: 0 Atk  
 - Hydro Pump  
 - Thunderbolt  
 - Light Screen  
@@ -48,7 +45,7 @@ IVs: 0 Atk
 
 Talonflame  
 Ability: Flame Body  
-EVs: 4 HP / 252 Atk / 252 Spe  
+EVs: 2 HP / 32 Atk / 32 Spe  
 Jolly Nature  
 - Acrobatics  
 - Tailwind  
