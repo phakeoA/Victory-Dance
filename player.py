@@ -376,12 +376,9 @@ class VGCPlayer(Player):
           1. If team_chooser model is loaded → use it.
           2. Otherwise → first-N roster order.
         """
-        # teampreview_team is a set populated from |poke| messages.
-        # Fall back to battle.team if it's empty (shouldn't happen, but guard).
-        team = list(battle.teampreview_team)
-        if not team:
-            log.warning("teampreview_team empty — falling back to battle.team")
-            team = list(battle.team.values())
+        # This format doesn't send |poke| messages so teampreview_team is
+        # always empty. Use battle.team directly instead.
+        team = list(battle.teampreview_team) or list(battle.team.values())
 
         max_size = battle.max_team_size if battle.max_team_size else VGC_TEAM_SIZE
         n = min(VGC_TEAM_SIZE, len(team), max_size)
@@ -413,14 +410,15 @@ class VGCPlayer(Player):
         )
         return f"/team {showdown_order}"
 
-    def choose_move(self, battle):
-        """Required by poke-env Player ABC — not used in doubles."""
-        return self.choose_random_move(battle)
+    def choose_move(self, battle: DoubleBattle):
+        """
+        Called by poke-env every turn. For DoubleBattle we encode state,
+        select two actions, record the transition, and return a doubles order.
+        """
+        if not isinstance(battle, DoubleBattle):
+            return self.choose_random_move(battle)
 
-    def choose_doubles_move(self, battle: DoubleBattle):
-        """Called by poke-env each turn to get the player's orders."""
         state_vec = self._encoder.encode(battle)
-
         action_s0, action_s1, source = self._select_actions(battle, state_vec)
 
         log.debug(
@@ -428,14 +426,14 @@ class VGCPlayer(Player):
             battle.turn, battle.battle_tag, action_s0, action_s1, source,
         )
 
-        # Record transition (outcome filled in later)
+        # Record transition (outcome back-filled on battle end)
         self._replay.record(
-            battle_id  = battle.battle_tag,
-            turn       = battle.turn,
-            state      = state_vec,
-            action_s0  = action_s0,
-            action_s1  = action_s1,
-            source     = source,
+            battle_id = battle.battle_tag,
+            turn      = battle.turn,
+            state     = state_vec,
+            action_s0 = action_s0,
+            action_s1 = action_s1,
+            source    = source,
         )
 
         order_s0 = self._safe_order(action_s0, battle, slot=0)

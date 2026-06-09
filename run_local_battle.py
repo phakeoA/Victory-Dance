@@ -29,6 +29,7 @@ import socket
 import subprocess
 import sys
 import time
+import webbrowser
 from pathlib import Path
  
 from poke_env import AccountConfiguration
@@ -210,7 +211,7 @@ def make_player(
 # Main
 # ══════════════════════════════════════════════════════════════════════════════
  
-async def run(n_battles: int, manage_server: bool) -> None:
+async def run(n_battles: int, manage_server: bool, spectate: bool = True) -> None:
     server_proc = start_showdown() if manage_server else None
  
     team_str = load_team(TEAM_FILE)
@@ -224,8 +225,28 @@ async def run(n_battles: int, manage_server: bool) -> None:
     player2 = make_player("TrainerBlue", team_str, model=battle_model, team_chooser=team_chooser)
  
     log.info("Starting %d battle(s) — format: %s", n_battles, BATTLE_FORMAT)
- 
+
+    # Hook: open the browser to spectate the first battle as soon as it starts
+    _spectate_opened = False
+
+    async def _maybe_open_spectator():
+        if not spectate:
+            return
+        """Wait for the first battle tag to appear then open it in the browser."""
+        nonlocal _spectate_opened
+        for _ in range(60):          # wait up to 6 s for battle to start
+            await asyncio.sleep(0.1)
+            if player1.battles:
+                tag = next(iter(player1.battles))
+                url = f"http://{SHOWDOWN_HOST}:{SHOWDOWN_PORT}/{tag}"
+                log.info("Opening spectator view: %s", url)
+                webbrowser.open(url)
+                _spectate_opened = True
+                return
+        log.warning("Could not find battle tag to open spectator view.")
+
     try:
+        asyncio.ensure_future(_maybe_open_spectator())
         await player1.battle_against(player2, n_battles=n_battles)
     finally:
         await player1.ps_client.stop_listening()
@@ -262,6 +283,8 @@ def parse_args() -> argparse.Namespace:
                    help="Skip launching the server (use if it's already running)")
     p.add_argument("--verbose", "-v", action="store_true",
                    help="Enable DEBUG-level logging (very noisy)")
+    p.add_argument("--no-spectate", action="store_true",
+                   help="Do not open a browser tab to spectate")
     return p.parse_args()
  
  
@@ -270,4 +293,4 @@ if __name__ == "__main__":
     _configure_logging(args.verbose)
     BATTLE_FORMAT = args.battle_format
     TEAM_FILE     = args.team
-    asyncio.run(run(n_battles=args.battles, manage_server=not args.no_server))
+    asyncio.run(run(n_battles=args.battles, manage_server=not args.no_server, spectate=not args.no_spectate))
