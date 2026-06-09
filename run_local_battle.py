@@ -52,7 +52,7 @@ log = logging.getLogger(__name__)
  
 # ── Defaults ──────────────────────────────────────────────────────────────────
 TEAM_FILE      = Path("teams/M-A/team1")
-BATTLE_FORMAT  = "gen9championsvgc2026regma"#
+BATTLE_FORMAT  = "gen9championsvgc2026regma"
 N_BATTLES_DEFAULT = 1
  
 SHOWDOWN_DIR   = Path("pokemon-showdown")   # relative to this script's cwd
@@ -255,7 +255,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--battles", "-n", type=int, default=N_BATTLES_DEFAULT,
                    help=f"Number of battles (default: {N_BATTLES_DEFAULT})")
     p.add_argument("--format", "-f", default=BATTLE_FORMAT, dest="battle_format",
-                   help=f"Showdown format string (default: {BATTLE_FORMAT})")
+                   help=f"Showdown format ID (default: {BATTLE_FORMAT})")
     p.add_argument("--team", type=Path, default=TEAM_FILE,
                    help=f"Path to team paste file (default: {TEAM_FILE})")
     p.add_argument("--no-server", action="store_true",

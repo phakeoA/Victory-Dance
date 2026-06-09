@@ -374,10 +374,17 @@ class VGCPlayer(Player):
 
         Strategy:
           1. If team_chooser model is loaded → use it.
-          2. Otherwise → type-advantage heuristic.
+          2. Otherwise → first-N roster order.
         """
+        # teampreview_team is a set populated from |poke| messages.
+        # Fall back to battle.team if it's empty (shouldn't happen, but guard).
         team = list(battle.teampreview_team)
-        n    = min(VGC_TEAM_SIZE, len(team), battle.max_team_size)
+        if not team:
+            log.warning("teampreview_team empty — falling back to battle.team")
+            team = list(battle.team.values())
+
+        max_size = battle.max_team_size if battle.max_team_size else VGC_TEAM_SIZE
+        n = min(VGC_TEAM_SIZE, len(team), max_size)
 
         order: List[int]  # 0-based indices into `team`
 
