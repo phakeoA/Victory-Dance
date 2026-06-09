@@ -317,6 +317,67 @@ SHIM
 fi
 
 # =============================================================================
+# 2c. CLONE & SET UP POKÉMON SHOWDOWN SERVER
+# =============================================================================
+# Clones smogon/pokemon-showdown into ./pokemon-showdown (ignored by git).
+# Runs `npm install` to pull its dependencies, then copies the default config.
+# Safe to rerun — skips the clone if the folder already exists, skips npm
+# install if node_modules is already present.
+# =============================================================================
+header "Setting Up Pokémon Showdown Server"
+
+SHOWDOWN_DIR="$(pwd)/pokemon-showdown"
+SHOWDOWN_REPO="https://github.com/smogon/pokemon-showdown.git"
+
+if [[ -d "$SHOWDOWN_DIR/.git" ]]; then
+    log "pokemon-showdown already cloned at $SHOWDOWN_DIR — skipping clone."
+else
+    log "Cloning Pokémon Showdown into $SHOWDOWN_DIR ..."
+    if ! git clone "$SHOWDOWN_REPO" "$SHOWDOWN_DIR"; then
+        error "git clone failed. Check your internet connection and that git is on PATH."
+    fi
+    log "Clone complete ✅"
+fi
+
+# npm install (only if node_modules is missing or clearly incomplete)
+if [[ -d "$SHOWDOWN_DIR/node_modules" ]]; then
+    log "node_modules already present — skipping npm install."
+else
+    log "Running npm install inside pokemon-showdown (may take a minute) ..."
+    pushd "$SHOWDOWN_DIR" > /dev/null
+
+    # Use the venv-local npm shim if node was installed by this script,
+    # otherwise fall back to whatever npm is on PATH.
+    NPM_CMD="npm"
+    if [[ -x "$SHIM_DIR/npm" ]]; then
+        NPM_CMD="$SHIM_DIR/npm"
+    fi
+
+    if ! "$NPM_CMD" install; then
+        popd > /dev/null
+        error "npm install failed inside pokemon-showdown. Check Node.js is working: node --version"
+    fi
+
+    popd > /dev/null
+    log "npm install complete ✅"
+fi
+
+# Copy default config if not already present
+if [[ ! -f "$SHOWDOWN_DIR/config/config.js" ]]; then
+    if [[ -f "$SHOWDOWN_DIR/config/config-example.js" ]]; then
+        cp "$SHOWDOWN_DIR/config/config-example.js" "$SHOWDOWN_DIR/config/config.js"
+        log "Copied config-example.js → config.js ✅"
+    else
+        warn "config-example.js not found — config.js not created. You may need to create it manually."
+    fi
+else
+    log "config/config.js already exists — skipping."
+fi
+
+log "Pokémon Showdown server ready."
+log "  To start: cd pokemon-showdown && node pokemon-showdown start --no-security"
+
+# =============================================================================
 # 3. CUDA PRE-FLIGHT CHECK
 # =============================================================================
 # IMPORTANT: setup.sh CANNOT install the CUDA toolkit or GPU drivers for you.
@@ -590,13 +651,19 @@ echo -e "${GREEN}✅ Dependencies:${NC}    installed"
 echo -e "${GREEN}✅ .env:${NC}            ready — fill in credentials"
 echo -e "${GREEN}✅ .gitignore:${NC}      configured"
 echo -e "${GREEN}✅ VS Code:${NC}         .vscode/settings.json ready"
+if [[ -d "$(pwd)/pokemon-showdown/node_modules" ]]; then
+    echo -e "${GREEN}✅ Showdown server:${NC} $(pwd)/pokemon-showdown — ready"
+else
+    echo -e "${YELLOW}⚠️  Showdown server:${NC} npm install may not have completed — check logs above"
+fi
 echo ""
 echo -e "${YELLOW}Next steps:${NC}"
 echo "  1. Edit .env — fill in PS_USERNAME and PS_PASSWORD"
-echo "  2. Open VS Code:  code ."
-echo "  3. VS Code terminal auto-activates Python venv"
-echo "  4. Scaffold src/bot/player.py  — VGCBot(Player) subclass"
-echo "  5. Scaffold src/bot/embedder.py — embed_battle() state encoding"
-echo "  6. Run the bot:   python run.py"
+echo "  2. Start the local server:"
+echo "       cd pokemon-showdown && node pokemon-showdown start --no-security"
+echo "  3. Open VS Code:  code ."
+echo "  4. VS Code terminal auto-activates Python venv"
+echo "  5. Run a test battle: python run_local_battle.py"
+echo "  6. Scaffold src/bot/player.py  — VGCBot(Player) subclass"
 echo ""
 echo -e "${BLUE}Happy building! — Victory-Dance VGC Bot${NC}"

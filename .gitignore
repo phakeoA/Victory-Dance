@@ -19,3 +19,6 @@ target/
 *.pyc
 models/*.pt
 models/*.pth
+
+# Pokémon Showdown local server (cloned by setup.sh — not part of this repo)
+pokemon-showdown/
