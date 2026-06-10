@@ -4,6 +4,8 @@ A VGC Pokémon battle-bot built with AlphaZero-style reinforcement learning, run
 
 Victory-Dance plays **[Gen 9 Champions] VGC 2026 Reg M-A** doubles battles. Two neural networks handle separate responsibilities — one for in-battle action selection, one for teampreview lead selection — and train against each other through self-play.
 
+To use team builder for vod training
+python -m http.server 8000 for team_builder.html
 ## Python Version
 Requires Python 3.11+
 
