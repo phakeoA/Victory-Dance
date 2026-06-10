@@ -370,6 +370,9 @@ function mkBattle(name) {
 }
 
 function save() { localStorage.setItem("vd-battles", JSON.stringify(battles)); }
+function saveRawHtml(idx, html) { const bid = battles[idx]?.bid || String(idx); try { localStorage.setItem("vd-rawhtml-" + bid, html); } catch(e) { /* quota */ } }
+function loadRawHtml(idx) { const bid = battles[idx]?.bid || String(idx); return localStorage.getItem("vd-rawhtml-" + bid) || null; }
+function deleteRawHtml(idx) { const bid = battles[idx]?.bid || String(idx); localStorage.removeItem("vd-rawhtml-" + bid); }
 
 /* ═══════════════════════════════════════════════════════════════════
    LOAD DATA
@@ -378,12 +381,12 @@ async function loadData() {
   const status = document.getElementById("data-status");
   try {
     const [pr, mr] = await Promise.all([
-      fetch("../pokedex.json"),
-      fetch("../moves.json"),
+      fetch("data/pokedex.json"),
+      fetch("data/moves.json"),
     ]);
     loadMegaStones(); // non-blocking; fallback map populated async
-    if (!pr.ok) throw new Error("../pokedex.json not found (" + pr.status + ")");
-    if (!mr.ok) throw new Error("../moves.json not found (" + mr.status + ")");
+    if (!pr.ok) throw new Error("data/pokedex.json not found (" + pr.status + ")");
+    if (!mr.ok) throw new Error("data/moves.json not found (" + mr.status + ")");
     dex   = await pr.json();
     moves = await mr.json();
     mlist = Object.keys(moves).sort();
@@ -470,6 +473,7 @@ function renderList() {
 function loadBattle(i) {
   ai = i;
   const b = battles[i];
+  if (!b._rawHtml) b._rawHtml = loadRawHtml(i);  // restore from localStorage if present
   document.getElementById("bid-in").value       = b.bid       || "";
   document.getElementById("your-side").value    = b.yourSide  || "p1";
   document.getElementById("winner-sel").value   = b.winner    || "";
@@ -767,6 +771,7 @@ function newBattle() {
 }
 function delBattle(idx) {
   if (battles.length===1) { showNotif("⚠ Can't delete last battle", true); return; }
+  deleteRawHtml(idx);
   battles.splice(idx,1);
   if (ai>=battles.length) ai=battles.length-1;
   save(); renderList(); loadBattle(ai);
@@ -1096,13 +1101,14 @@ function loadReplay(e) {
   const r = new FileReader();
   r.onload = ev => {
     const html = ev.target.result;
-    battles[ai]._rawHtml = html;  // stored for server /parse and /export
     const parsed = parseReplayHTML(html);
 
     if (parsed.error) { showNotif("⚠ " + parsed.error, true); return; }
     if (!parsed.bid)  { showNotif("⚠ Couldn't find battle ID", true); return; }
 
-    applyParsedToBattle(parsed);
+    applyParsedToBattle(parsed);  // sets battles[ai].bid first
+    battles[ai]._rawHtml = html;  // stored for server /parse and /export
+    saveRawHtml(ai, html);        // persist across page reloads (keyed by bid)
 
     // Update UI
     document.getElementById("bid-in").value     = battles[ai].bid;

@@ -18,6 +18,9 @@ ENDPOINTS
 GET  /
     Serves team_builder.html
 
+GET  /data/<path:filename>
+    Serves any file under data/ (pokedex.json, moves.json, etc.)
+
 POST /parse
     Body: multipart/form-data
       replay_html : the uploaded .html replay file
@@ -86,7 +89,7 @@ except ImportError:
 from vod_parser import parse_replay_for_preview, replay_to_transitions
 
 # ── Globals (loaded once at startup) ─────────────────────────────────────────
-_BELIEF_PATH = _PROJECT_ROOT / "data" / "regulations" / "pikalytics_regma.json"
+_BELIEF_PATH = _PROJECT_ROOT / "data" / "pikalytics_regma.json"
 
 if not _BELIEF_PATH.exists():
     print(
@@ -112,6 +115,22 @@ CORS(app)  # allow requests from file:// during local dev
 def index():
     """Serve team_builder.html."""
     return send_file(_SCRIPTS_DIR / "team_builder.html")
+
+
+@app.get("/data/<path:filename>")
+def serve_data(filename):
+    """
+    Serve any file from the project's data/ directory.
+    Allows team_builder.html to fetch data/pokedex.json, data/moves.json, etc.
+    using the same relative paths regardless of how the page was opened.
+    """
+    target = (_PROJECT_ROOT / "data" / filename).resolve()
+    # Safety: ensure the resolved path is still inside data/
+    if not str(target).startswith(str((_PROJECT_ROOT / "data").resolve())):
+        return jsonify({"error": "Forbidden"}), 403
+    if not target.exists():
+        return jsonify({"error": f"Not found: data/{filename}"}), 404
+    return send_file(target)
 
 
 @app.post("/parse")

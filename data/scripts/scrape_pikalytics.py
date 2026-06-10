@@ -138,15 +138,40 @@ _TYPE_NOISE = {
 
 
 def _parse_section(markdown: str, header: str) -> list[dict]:
-    """Extract (name, pct) pairs from a named section."""
-    header_re = re.compile(
-        r"#{1,3}\s+" + re.escape(header) + r".*?\n(.*?)(?=#{1,3}\s|\Z)",
-        re.IGNORECASE | re.DOTALL,
+    """
+    Extract (name, pct) pairs from a named section.
+
+    Actual Pikalytics heading format: "## Best Moves for Sableye"
+    i.e. the section keyword appears after the ## but the full heading includes
+    " for <PokemonName>" — so we match the keyword anywhere in the heading line.
+
+    Strategy: find the heading line, slice from there to the next ## heading,
+    then run the PCT pattern over that slice. No DOTALL on the body capture to
+    avoid catastrophic backtracking.
+    """
+    base = header.split()[-1]           # "Moves", "Items", "Abilities", etc.
+    alternates = [
+        re.escape(header),              # "Best Moves"
+        re.escape(f"Top {base}"),       # "Top Moves"
+        re.escape(base),                # "Moves"
+    ]
+    keyword_pat = "(?:" + "|".join(alternates) + ")"
+
+    # Match a heading line that contains the keyword (with optional suffix like " for Sableye")
+    heading_re = re.compile(
+        r"^#{1,4}\s[^\n]*" + keyword_pat + r"[^\n]*$",
+        re.IGNORECASE | re.MULTILINE,
     )
-    m = header_re.search(markdown)
+    m = heading_re.search(markdown)
     if not m:
         return []
-    section_text = m.group(1)
+
+    # Slice from end of that heading line to the next heading (or EOF)
+    start = m.end()
+    next_heading = re.search(r"^#{1,4}\s", markdown[start:], re.MULTILINE)
+    end = start + next_heading.start() if next_heading else len(markdown)
+    section_text = markdown[start:end]
+
     results: list[dict] = []
     seen: set[str] = set()
     for match in _PCT_PATTERN.finditer(section_text):
@@ -159,6 +184,74 @@ def _parse_section(markdown: str, header: str) -> list[dict]:
             results.append({"name": name, "pct": pct})
     return results
 
+
+def _parse_moves(markdown: str) -> list[dict]:
+    """
+    Pikalytics move section layout (each entry spans 3 content lines):
+
+        Light Screen
+        psychic
+        74.917%
+
+    Standard _PCT_PATTERN grabs "psychic 74.917%" (the type, not the name).
+    Instead we find the section, split into lines, and walk them as a triplet:
+    name-line → type-line → pct-line.
+    """
+    heading_re = re.compile(
+        r"^#{1,4}\s[^\n]*(?:Best\s+Moves|Top\s+Moves|Moves)[^\n]*$",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    m = heading_re.search(markdown)
+    if not m:
+        return []
+    start = m.end()
+    next_heading = re.search(r"^#{1,4}\s", markdown[start:], re.MULTILINE)
+    end = start + next_heading.start() if next_heading else len(markdown)
+    section_text = markdown[start:end]
+
+    # Strip blank lines, collect non-empty content lines
+    lines = [l.strip() for l in section_text.splitlines() if l.strip()]
+
+    _TYPE_SET = {
+        "normal","fire","water","grass","electric","ice","fighting","poison",
+        "ground","flying","psychic","bug","rock","ghost","dragon","dark",
+        "steel","fairy","other",
+    }
+    _PCT_RE = re.compile(r"^(\d+\.\d+)%$")
+    _NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9 '\-\(\)]+$")
+
+    results: list[dict] = []
+    seen: set[str] = set()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        # Expect: move name (not a type word, not a percentage)
+        if _NAME_RE.match(line) and line.lower() not in _TYPE_SET and not _PCT_RE.match(line):
+            name = line
+            # Next non-empty line should be the type, then the pct
+            if i + 2 < len(lines):
+                type_line = lines[i + 1]
+                pct_line  = lines[i + 2]
+                if type_line.lower() in _TYPE_SET and _PCT_RE.match(pct_line):
+                    pct = float(pct_line.rstrip("%"))
+                    if name not in seen:
+                        seen.add(name)
+                        results.append({"name": name, "pct": pct})
+                    i += 3
+                    continue
+        i += 1
+    return results
+
+
+
+    spreads: list[dict] = []
+    for m in _SPREAD_PATTERN.finditer(markdown):
+        spreads.append({
+            "nature": m.group(1).capitalize(),
+            "evs":    [int(m.group(i)) for i in range(2, 8)],  # HP Atk Def SpA SpD Spe
+            "pct":    float(m.group(8)),
+        })
+    return spreads
 
 def _parse_spreads(markdown: str) -> list[dict]:
     spreads: list[dict] = []
@@ -180,16 +273,24 @@ def _parse_teammates(markdown: str) -> list[dict]:
     """
     Teammate links look like:
       [Sneasler Sneasler fightingpoison 52.142%](url)
+
+    Heading is "## Best Teammates for <Name>" — use the same slice approach
+    as _parse_section.
     """
     teammates: list[dict] = []
     seen: set[str] = set()
-    section_m = re.search(
-        r"Best Teammates.*?\n(.*?)(?=##|\Z)",
-        markdown, re.DOTALL | re.IGNORECASE,
-    )
-    if not section_m:
+
+    heading_re = re.compile(r"^#{1,4}\s[^\n]*Teammates[^\n]*$", re.IGNORECASE | re.MULTILINE)
+    m = heading_re.search(markdown)
+    if not m:
         return []
-    for match in re.finditer(r"\[(\S+)\s+\S+\s+\S+\s+(\d+\.\d+)%\]", section_m.group(1)):
+
+    start = m.end()
+    next_heading = re.search(r"^#{1,4}\s", markdown[start:], re.MULTILINE)
+    end = start + next_heading.start() if next_heading else len(markdown)
+    section_text = markdown[start:end]
+
+    for match in re.finditer(r"\[(\S+)\s+\S+\s+\S+\s+(\d+\.\d+)%\]", section_text):
         name = match.group(1)
         pct  = float(match.group(2))
         if name not in seen:
@@ -201,7 +302,7 @@ def _parse_teammates(markdown: str) -> list[dict]:
 def _parse_mon_page(markdown: str) -> dict:
     return {
         "usage_pct": _parse_usage(markdown),
-        "moves":     _parse_section(markdown, "Best Moves"),
+        "moves":     _parse_moves(markdown),
         "items":     _parse_section(markdown, "Best Items"),
         "abilities": _parse_section(markdown, "Best Abilities"),
         "spreads":   _parse_spreads(markdown),
@@ -232,7 +333,7 @@ def _make_run_config(*, use_extraction: bool = False) -> CrawlerRunConfig:
     """
     kwargs: dict = dict(
         cache_mode  = CacheMode.BYPASS,
-        magic       = True,
+        magic       = False,
         wait_until  = "load",
         page_timeout= 30_000,   # ms
         max_retries = 2,
@@ -386,6 +487,44 @@ async def main(limit: int, concurrency: int, resume: bool) -> None:
     print(f"\n[done] Saved {total} entries → {OUTPUT_FILE}  ({size_kb:.1f} KB)")
 
 
+# ── Debug helper ───────────────────────────────────────────────────────────────
+
+async def _debug_markdown(mon_slug: str) -> None:
+    """
+    Fetch one mon page and dump its raw markdown so you can inspect section
+    headers and diagnose parse failures.
+
+    Usage:  python scrape_pikalytics.py --debug-markdown kingambit
+    Output: debug_<mon_slug>.md  (written next to the script)
+    """
+    url = f"{INDEX_URL}/{mon_slug}"
+    print(f"[debug] Fetching {url}")
+    async with AsyncWebCrawler(config=_make_browser_config()) as crawler:
+        result = await crawler.arun(url, config=_make_run_config())
+
+    if not result.success:
+        print(f"[debug] FAILED: {result.error_message}")
+        return
+
+    markdown = result.markdown.raw_markdown if result.markdown else ""
+    out_path = _SCRIPT_DIR / f"debug_{mon_slug}.md"
+    out_path.write_text(markdown, encoding="utf-8")
+    print(f"[debug] Saved {len(markdown)} chars → {out_path}")
+
+    # Also run the parser and show what it found
+    data = _parse_mon_page(markdown)
+    print(f"\n[debug] Parsed result:")
+    for key, val in data.items():
+        print(f"  {key}: {val!r}")
+
+    # Show first 120 chars around the word "moves" in the markdown
+    lower_md = markdown.lower()
+    idx = lower_md.find("move")
+    if idx >= 0:
+        snippet = markdown[max(0, idx-20):idx+200]
+        print(f"\n[debug] Context around first 'move' mention:\n{snippet!r}")
+
+
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
 def cli() -> None:
@@ -408,8 +547,22 @@ def cli() -> None:
         action="store_true",
         help="Skip Pokémon already present in the output file",
     )
+    parser.add_argument(
+        "--debug-markdown",
+        metavar="MON",
+        default=None,
+        help=(
+            "Fetch a single mon page, print its raw markdown, and exit. "
+            "Useful for diagnosing section-header mismatches. "
+            "Example: --debug-markdown kingambit"
+        ),
+    )
     args = parser.parse_args()
-    asyncio.run(main(args.limit, args.concurrency, args.resume))
+
+    if args.debug_markdown:
+        asyncio.run(_debug_markdown(args.debug_markdown))
+    else:
+        asyncio.run(main(args.limit, args.concurrency, args.resume))
 
 
 if __name__ == "__main__":
