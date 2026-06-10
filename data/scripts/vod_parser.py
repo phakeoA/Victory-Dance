@@ -1,903 +1,951 @@
 """
 vod_parser.py
 =============
-Converts Pokémon Showdown HTML replay logs into replay buffer JSONL
-entries compatible with Victory-Dance's existing format.
+Parses a Pokémon Showdown replay .html file into the Victory-Dance training JSON schema.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-OUTPUT FORMAT  (one JSON object per line — same as self-play buffer)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-{
-  "battle_id":  "gen9championsvgc2026regma-XXXX",
-  "source":     "vod",
-  "player":     "p1",        ← which side is being encoded
-  "turn":       3,
-  "state":      [0.0, ...],  ← 882 floats from StateEncoder
-  "action_s0":  4,           ← action for active slot A (0-15, -1 = unknown)
-  "action_s1":  12,          ← action for active slot B
-  "outcome":    1            ← +1 win / -1 loss / 0 draw
-}
+Supports Type B VODs (Ranked Player replays):
+  - Both sides are public information extracted from the replay log.
+  - Exact EVs/IVs are unknown; damage events are recorded so a back-calculator
+    can later narrow down spread distributions.
+  - `predicted_action_by_bot` is always null (bot wasn't present).
+  - `source_type` is always "ranked_player_vod".
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-IMPERFECT-INFORMATION POLICY
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-For the perspective player ("p1" by default):
-  Own mons:  full info (moves revealed as used, HP from log)
-  Opp mons:  belief state until revealed, then actual revealed info
+Usage:
+    python vod_parser.py <replay.html> [--out output.json] [--player p1|p2]
 
-This mirrors exactly what the network sees during live play, making
-VOD training directly compatible with self-play training.
+The `--player` flag marks which side is "our" side vs. opponent.
+If omitted, defaults to p1.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-KNOWN TEAM OVERRIDES  (--known-teams)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-For replays where you know the exact sets (e.g. your own VODs),
-pass a JSON file structured as:
-
-  {
-    "battle-gen9championsvgc2026regma-1234": {
-      "p1": {
-        "Kingambit": {
-          "nature": "Adamant",
-          "evs": [252, 252, 0, 0, 4, 0],   ← actual EVs 0-252
-          "ivs": [31, 31, 31, 31, 31, 31],  ← optional, defaults to 31s
-          "item": "Chople Berry",
-          "ability": "Defiant",
-          "moves": ["Sucker Punch", "Kowtow Cleave", "Protect", "Low Kick"]
-        },
-        ...
-      }
-    }
-  }
-
-When a known-team entry exists for a battle, it completely overrides
-the belief-state for that player's mons — giving perfect information
-for your own replays.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-USAGE
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  # Single replay, both perspectives
-  python vod_parser.py replay.html
-
-  # Directory of replays
-  python vod_parser.py replays/ --out replay_buffer/vods.jsonl
-
-  # With exact team knowledge for your own replays
-  python vod_parser.py replays/ --known-teams known_teams.json
-
-  # Only your side (p1), with known teams
-  python vod_parser.py replays/ --player p1 --known-teams known_teams.json
+Changes vs. v1:
+  1. state_before_actions / state_after_actions — no future leakage.
+  2. revealed_moves tracking on PokemonSlot.
+  3. Item reveal tracking (known_item) via |-item| and |-enditem|.
+  4. Terastallization tracking via |-terastallize|.
+  5. Explicit is_protect flag on move events.
+  6. Damage source attribution — damage events carry source_slot/source_move.
+  7. Screen timer decrementing on upkeep.
+  8. Action execution order (execution_index) on move events.
+  9. Evolving known_team per player tracked per turn.
 """
 
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
 
-# ── Project imports ────────────────────────────────────────────────────────────
-import sys
-# All scripts live together at data/scripts/.
-# Add that directory to sys.path so state_encoder and belief_state are
-# importable regardless of the working directory.
-_SCRIPTS_DIR = Path(__file__).resolve().parent
-if str(_SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_DIR))
+# ---------------------------------------------------------------------------
+# Data structures
+# ---------------------------------------------------------------------------
 
-# Project root (two levels up) is still needed for locating data/ files.
-_PROJECT_ROOT = _SCRIPTS_DIR.parents[1]
-
-try:
-    from state_encoder import StateEncoder, STATE_DIM, ACTIONS_PER_SLOT
-    from belief_state import BeliefState
-except ImportError:
-    raise ImportError(
-        f"Could not import state_encoder / belief_state from {_SCRIPTS_DIR}. "
-        "Make sure those files exist at data/scripts/."
-    )
-
-from poke_env.battle import PokemonType, Status, MoveCategory
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# FakeMove — minimal duck-type for StateEncoder._write_move()
-# ══════════════════════════════════════════════════════════════════════════════
 @dataclass
-class FakeMove:
-    name: str
-    base_power: int = 80
-    type: PokemonType = PokemonType.NORMAL
-    category: MoveCategory = MoveCategory.PHYSICAL
-    priority: int = 0
-    accuracy: float = 1.0
-    max_pp: int = 10
-    current_pp: int = 10
-    is_protect_move: bool = False
-
-    def __post_init__(self):
-        self.is_protect_move = "protect" in self.name.lower()
-
-
-_MOVE_CACHE: dict[str, FakeMove] = {}
-
-
-def _lookup_move(move_name: str) -> FakeMove:
-    if move_name in _MOVE_CACHE:
-        return _MOVE_CACHE[move_name]
-    try:
-        from poke_env.data import GenData
-        gen_data = GenData.from_gen(9)
-        move_id = move_name.lower().replace(" ", "").replace("-", "").replace("'", "")
-        if move_id in gen_data.moves:
-            m = gen_data.moves[move_id]
-            fake = FakeMove(
-                name=move_name,
-                base_power=getattr(m, "base_power", 0) or 0,
-                type=getattr(m, "type", PokemonType.NORMAL),
-                category=getattr(m, "category", MoveCategory.PHYSICAL),
-                priority=getattr(m, "priority", 0),
-                accuracy=getattr(m, "accuracy", 1.0),
-                max_pp=getattr(m, "pp", 10),
-                current_pp=getattr(m, "pp", 10),
-            )
-        else:
-            fake = FakeMove(name=move_name)
-    except Exception:
-        fake = FakeMove(name=move_name)
-    _MOVE_CACHE[move_name] = fake
-    return fake
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# FakePokemon — duck-type for StateEncoder._write_pokemon()
-# ══════════════════════════════════════════════════════════════════════════════
-@dataclass
-class FakePokemon:
+class PokemonSlot:
+    """Tracks a single Pokémon's in-battle state snapshot."""
     species: str
-    level: int = 50
-    current_hp_fraction: float = 1.0
-    fainted: bool = False
-    type_1: PokemonType = PokemonType.NORMAL
-    type_2: Optional[PokemonType] = None
-    base_stats: dict = field(default_factory=lambda: {
-        "hp": 80, "atk": 80, "def": 80, "spa": 80, "spd": 80, "spe": 80
-    })
-    moves: dict = field(default_factory=dict)  # name → FakeMove
-    status: Optional[Status] = None
-    boosts: dict = field(default_factory=lambda: {
-        "atk": 0, "def": 0, "spa": 0, "spd": 0, "spe": 0,
-        "accuracy": 0, "evasion": 0,
-    })
+    nickname: str
+    player: str          # "p1" or "p2"
+    slot: str            # "a" or "b"  (active field position)
+    hp_current: Optional[float] = None   # percentage 0-100
+    hp_max: Optional[float] = 100.0
+    status: Optional[str] = None
+    boosts: dict = field(default_factory=dict)
+    is_mega: bool = False
+    is_fainted: bool = False
+    # --- new in v2 ---
+    revealed_moves: list = field(default_factory=list)   # moves seen this match
+    known_item: Optional[str] = None                     # item if revealed
+    known_tera_type: Optional[str] = None                # tera type if revealed
     is_terastallized: bool = False
-    revealed: bool = False
+    known_ability: Optional[str] = None                  # ability if revealed via |-ability|
 
-    @property
-    def types(self) -> frozenset:
-        t = {self.type_1}
-        if self.type_2:
-            t.add(self.type_2)
-        return frozenset(t)
+    def key(self) -> str:
+        return f"{self.player}{self.slot}"
 
-    def reveal_move(self, move_name: str) -> None:
-        if move_name not in self.moves:
-            m = _lookup_move(move_name)
-            m.current_pp = max(0, m.current_pp - 1)
-            self.moves[move_name] = m
-
-    def apply_belief(self, belief: BeliefState) -> None:
-        """Fill unknown move slots from meta usage data."""
-        known = set(self.moves.keys())
-        for move_name, _pct in belief.top_moves(self.species, n=4):
-            if len(self.moves) >= 4:
-                break
-            if move_name not in known:
-                self.moves[move_name] = _lookup_move(move_name)
-
-    def apply_known_set(self, known: dict) -> None:
-        """
-        Override with exact set data (for replays you produced).
-        known dict keys: nature, evs, ivs, item, ability, moves
-        """
-        if "moves" in known:
-            self.moves = {
-                m: _lookup_move(m) for m in known["moves"]
-            }
-        # EVs/nature/item/ability are stored on the mon for reference
-        # but don't map directly to FakePokemon fields used by the encoder
-        # (the encoder reads base_stats + hp_fraction, not actual EVs).
-        # They're preserved here for future use (damage calc, etc.).
-        self._known_nature  = known.get("nature", "Hardy")
-        self._known_evs     = known.get("evs", [0]*6)
-        self._known_ivs     = known.get("ivs", [31]*6)
-        self._known_item    = known.get("item")
-        self._known_ability = known.get("ability")
-
-
-def _load_base_data(species: str) -> dict:
-    try:
-        from poke_env.data import GenData
-        gen_data = GenData.from_gen(9)
-        sid = species.lower().replace("-", "").replace(" ", "")
-        if sid in gen_data.pokedex:
-            p = gen_data.pokedex[sid]
-            return {
-                "base_stats": p.get("baseStats", {}),
-                "type_1": p.get("types", ["Normal"])[0],
-                "type_2": p.get("types", [None, None])[1]
-                          if len(p.get("types", [])) > 1 else None,
-            }
-    except Exception:
-        pass
-    return {}
-
-
-def _parse_type(t_str: Optional[str]) -> Optional[PokemonType]:
-    if not t_str:
-        return None
-    try:
-        return PokemonType[t_str.upper()]
-    except KeyError:
-        return PokemonType.NORMAL
-
-
-def _make_fake_pokemon(species: str, belief: BeliefState) -> FakePokemon:
-    base = _load_base_data(species)
-    mon = FakePokemon(
-        species=species,
-        type_1=_parse_type(base.get("type_1", "Normal")),
-        type_2=_parse_type(base.get("type_2")),
-        base_stats=base.get("base_stats", {
-            "hp": 80, "atk": 80, "def": 80, "spa": 80, "spd": 80, "spe": 80,
-        }),
-    )
-    mon.apply_belief(belief)
-    return mon
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# ParsedBattle — game state tracked as we parse turns
-# ══════════════════════════════════════════════════════════════════════════════
-@dataclass
-class ParsedBattle:
-    battle_id: str
-    p1_name: str = ""
-    p2_name: str = ""
-    roster: dict = field(default_factory=lambda: {"p1": {}, "p2": {}})
-    active: dict = field(default_factory=lambda: {
-        "p1a": None, "p1b": None,
-        "p2a": None, "p2b": None,
-    })
-    turn: int = 0
-    winner: Optional[str] = None
-    your_side: Optional[str] = None  # set from _meta.yourSide
-    fields: dict = field(default_factory=dict)
-    p1_side: dict = field(default_factory=dict)
-    p2_side: dict = field(default_factory=dict)
-
-    def get_active_mon(self, slot: str) -> Optional[FakePokemon]:
-        species = self.active.get(slot)
-        if not species:
-            return None
-        side = slot[:2]
-        return self.roster[side].get(species)
-
-    def own_active(self, player: str) -> list[Optional[FakePokemon]]:
-        return [self.get_active_mon(f"{player}a"), self.get_active_mon(f"{player}b")]
-
-    def bench(self, player: str) -> list[FakePokemon]:
-        active_species = {
-            self.active.get(f"{player}a"),
-            self.active.get(f"{player}b"),
+    def to_dict(self) -> dict:
+        return {
+            "species": self.species,
+            "nickname": self.nickname,
+            "player": self.player,
+            "slot": self.slot,
+            "hp_pct": self.hp_current,
+            "status": self.status,
+            "boosts": dict(self.boosts),
+            "is_mega": self.is_mega,
+            "is_fainted": self.is_fainted,
+            "revealed_moves": list(self.revealed_moves),
+            "known_item": self.known_item,
+            "known_tera_type": self.known_tera_type,
+            "is_terastallized": self.is_terastallized,
+            # EVs/IVs unknown for Type B — left as distribution placeholder
+            "ev_spread": None,
+            "iv_spread": None,
+            "nature": None,
         }
-        return [
-            mon for sp, mon in self.roster[player].items()
-            if sp not in active_species and not mon.fainted
-        ]
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# FakeDoubleBattle — duck-type for StateEncoder.encode()
-# ══════════════════════════════════════════════════════════════════════════════
-class FakeDoubleBattle:
-    def __init__(self, battle: ParsedBattle, player: str, belief: BeliefState):
-        self._battle = battle
-        self._player = player
-        self._opp    = "p2" if player == "p1" else "p1"
-        self._belief = belief
+@dataclass
+class SideConditions:
+    tailwind: int = 0        # turns remaining (0 = inactive)
+    screens: dict = field(default_factory=dict)   # reflect / light screen / aurora veil
 
-    @property
-    def active_pokemon(self):
-        return self._battle.own_active(self._player)
-
-    @property
-    def opponent_active_pokemon(self):
-        mons = self._battle.own_active(self._opp)
-        for mon in mons:
-            if mon is not None:
-                mon.apply_belief(self._belief)
-        return mons
-
-    @property
-    def team(self):
-        return self._battle.roster[self._player]
-
-    @property
-    def weather(self):
-        return self._battle.fields.get("weather", {})
-
-    @property
-    def fields(self):
-        return self._battle.fields.get("fields", {})
-
-    @property
-    def side_conditions(self):
-        return getattr(self._battle, f"{self._player}_side", {})
-
-    @property
-    def opponent_side_conditions(self):
-        return getattr(self._battle, f"{self._opp}_side", {})
-
-    @property
-    def turn(self):
-        return self._battle.turn
+    def to_dict(self) -> dict:
+        return {
+            "tailwind_turns_remaining": self.tailwind,
+            "screens": dict(self.screens),
+        }
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Action inference
-# ══════════════════════════════════════════════════════════════════════════════
-def _infer_action(
-    turn_lines: list[str],
-    player: str,
-    slot: str,           # "a" or "b"
-    battle: ParsedBattle,
-) -> int:
+@dataclass
+class FieldConditions:
+    weather: Optional[str] = None
+    terrain: Optional[str] = None
+    trick_room: int = 0      # turns remaining
+
+    def to_dict(self) -> dict:
+        return {
+            "weather": self.weather,
+            "terrain": self.terrain,
+            "trick_room_turns_remaining": self.trick_room,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Parser
+# ---------------------------------------------------------------------------
+
+class ShowdownReplayParser:
     """
-    Infer action integer (0-15) from this turn's log lines for one slot.
-    Returns -1 if action cannot be determined.
+    Walks the Showdown protocol line-by-line and emits a list of turn snapshots.
 
-    Encoding (matches state_encoder.py):
-      0-11  → move_idx (0-3) × target_idx (0=opp_a, 1=opp_b, 2=ally)
-      12-15 → switch to bench slot 0-3
+    Each snapshot captures:
+      - state_before_actions: board state at the START of the turn (before any actions mutate it)
+      - actions: all events that occurred during the turn
+      - state_after_actions: board state at the END of the turn
     """
-    player_slot = f"{player}{slot}"
-    opp = "p2" if player == "p1" else "p1"
 
-    species = battle.active.get(player_slot)
-    if not species:
-        return -1
-    mon = battle.roster[player].get(species)
-    if not mon or mon.fainted:
-        return -1
+    def __init__(self, raw_log: str, our_player: str = "p1"):
+        self.lines = [l.strip() for l in raw_log.splitlines() if l.strip()]
+        self.our_player = our_player
 
-    # Check switch
-    switch_re = re.compile(rf"\|switch\|{player_slot}: ([^|]+)\|")
-    for line in turn_lines:
-        m = switch_re.match(line)
-        if m:
-            new_species = _normalize_species(m.group(1))
-            bench = battle.bench(player)
-            for i, bmon in enumerate(bench[:4]):
-                if bmon.species == new_species:
-                    return 12 + i
-            return 12  # fallback: bench slot 0
+        # ---- top-level metadata ----
+        self.replay_id: Optional[str] = None
+        self.format: Optional[str] = None
+        self.players: dict[str, str] = {}          # "p1" -> username
+        self.ratings: dict[str, int] = {}
+        self.rating_deltas: dict[str, int] = {}
+        self.winner: Optional[str] = None
 
-    # Check move
-    move_re = re.compile(rf"\|move\|{player_slot}: [^|]+\|([^|]+)\|([^|]*)")
-    for line in turn_lines:
-        m = move_re.match(line)
-        if m:
-            move_name  = m.group(1).strip()
-            target_str = m.group(2).strip()
+        # ---- roster (6-mon pools revealed at teampreview) ----
+        self.rosters: dict[str, list[str]] = {"p1": [], "p2": []}
 
-            move_names = list(mon.moves.keys())
-            move_idx   = move_names.index(move_name) if move_name in move_names else 0
+        # ---- evolving known team (species revealed so far this match) ----
+        self.known_team: dict[str, list[str]] = {"p1": [], "p2": []}
 
-            # Target
-            target_idx = 0
-            if f"{opp}a" in target_str:
-                target_idx = 0
-            elif f"{opp}b" in target_str:
-                target_idx = 1
-            elif player in target_str:
-                target_idx = 2
+        # ---- active field ----
+        self.field_conditions = FieldConditions()
+        self.side_conditions: dict[str, SideConditions] = {
+            "p1": SideConditions(),
+            "p2": SideConditions(),
+        }
 
-            return move_idx * 3 + target_idx
+        # slot_key -> PokemonSlot  (e.g. "p1a", "p1b", "p2a", "p2b")
+        self.active_slots: dict[str, PokemonSlot] = {}
 
-    return -1
+        # species -> PokemonSlot  (all mons seen, for back-reference and move history)
+        self.seen_mons: dict[str, PokemonSlot] = {}
 
+        # ---- turn tracking ----
+        self.current_turn: int = 0
+        self.turns: list[dict] = []
+        self._current_turn_actions: list[dict] = []
+        self._current_turn_damage_events: list[dict] = []
 
-# ══════════════════════════════════════════════════════════════════════════════
-# HTML replay parser
-# ══════════════════════════════════════════════════════════════════════════════
-def _normalize_species(raw: str) -> str:
-    return raw.split(",")[0].strip()
+        # Snapshot captured at the START of each turn (before any mutation)
+        self._state_before: Optional[dict] = None
 
+        # Tracks the most recent move action so damage events can be attributed
+        self._last_move_action: Optional[dict] = None
 
-def _extract_log_lines(html: str) -> Optional[list[str]]:
-    """Pull the raw battle log out of the Showdown HTML replay."""
-    m = re.search(
-        r'<script[^>]+class="battle-log-data"[^>]*>(.*?)</script>',
-        html, re.DOTALL,
-    )
-    if not m:
-        return None
-    return m.group(1).split("\n")
+        # Monotone counter for action execution order within a turn
+        self._execution_index: int = 0
 
+        # ---- team sizes chosen at preview ----
+        self.team_sizes: dict[str, int] = {}
 
-def parse_html_replay(
-    html_path: Path,
-    belief: BeliefState,
-    known_teams: Optional[dict] = None,  # battle_id → {p1: {...}, p2: {...}}
-) -> Optional[tuple["ParsedBattle", list[str]]]:
-    html  = html_path.read_text(encoding="utf-8")
-    lines = _extract_log_lines(html)
-    if lines is None:
-        return None
+    # ------------------------------------------------------------------
+    # Public entry point
+    # ------------------------------------------------------------------
 
-    # Battle ID
-    bid_m = re.search(r'name="replayid"\s+value="([^"]+)"', html)
-    battle_id = bid_m.group(1) if bid_m else html_path.stem
+    def parse(self) -> dict:
+        """Parse all lines and return the full structured output."""
+        for line in self.lines:
+            self._handle_line(line)
 
-    battle = ParsedBattle(battle_id=battle_id)
+        # Flush any last in-progress turn
+        if self._current_turn_actions or self._current_turn_damage_events:
+            self._flush_turn()
 
-    # ── Pass 1: roster + winner ───────────────────────────────────────────────
-    for line in lines:
-        if line.startswith("|player|p1|"):
-            battle.p1_name = line.split("|")[3]
-        elif line.startswith("|player|p2|"):
-            battle.p2_name = line.split("|")[3]
-        elif line.startswith("|poke|"):
-            parts   = line.split("|")
-            side    = parts[2]
-            species = _normalize_species(parts[3])
-            mon     = _make_fake_pokemon(species, belief)
-            battle.roster[side][species] = mon
-        elif line.startswith("|win|"):
-            winner_name = line[5:].strip()
-            if winner_name == battle.p1_name:
-                battle.winner = "p1"
-            elif winner_name == battle.p2_name:
-                battle.winner = "p2"
+        return self._build_output()
 
-    # ── Apply known-team overrides ────────────────────────────────────────────
-    if known_teams and battle_id in known_teams:
-        battle_entry = known_teams[battle_id]
+    # ------------------------------------------------------------------
+    # Line dispatcher
+    # ------------------------------------------------------------------
 
-        # _meta is authoritative — override anything re-derived from the log
-        meta = battle_entry.get("_meta", {})
-        if meta.get("winner"):
-            battle.winner = meta["winner"]
-        if meta.get("p1name"):
-            battle.p1_name = meta["p1name"]
-        if meta.get("p2name"):
-            battle.p2_name = meta["p2name"]
-        # yourSide stored on the battle so replay_to_transitions can read it
-        battle.your_side = meta.get("yourSide")
+    def _handle_line(self, line: str) -> None:
+        if not line.startswith("|"):
+            return
 
-        for side, mon_overrides in battle_entry.items():
-            if side == "_meta":
-                continue
-            for species, set_data in mon_overrides.items():
-                # Match by species (case-insensitive)
-                for roster_species, mon in battle.roster[side].items():
-                    if roster_species.lower() == species.lower():
-                        mon.apply_known_set(set_data)
-                        break
+        parts = line.split("|")
+        # parts[0] is always "" because line starts with "|"
+        if len(parts) < 2:
+            return
+        cmd = parts[1]
 
-    return battle, lines
+        # ---- metadata ----
+        if cmd == "player":
+            # |player|p1|steven he vgc|101|1733
+            pid = parts[2]
+            if len(parts) > 3 and parts[3]:
+                self.players[pid] = parts[3]
+            if len(parts) > 5 and parts[5]:
+                try:
+                    self.ratings[pid] = int(parts[5])
+                except ValueError:
+                    pass
 
+        elif cmd == "tier":
+            self.format = parts[2] if len(parts) > 2 else None
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Main transition extractor
-# ══════════════════════════════════════════════════════════════════════════════
-def replay_to_transitions(
-    html_path: Path,
-    belief: BeliefState,
-    encoder: StateEncoder,
-    players: list[str] = ("p1", "p2"),
-    known_teams: Optional[dict] = None,
-) -> list[dict]:
-    parsed = parse_html_replay(html_path, belief, known_teams)
-    if parsed is None:
-        print(f"  [skip] {html_path.name}: not a valid replay.")
-        return []
+        elif cmd == "poke":
+            # |poke|p1|Floette-Eternal, L50, F|
+            pid = parts[2]
+            species_info = parts[3].split(",")[0].strip() if len(parts) > 3 else "Unknown"
+            self.rosters[pid].append(species_info)
 
-    battle, lines = parsed
+        elif cmd == "teamsize":
+            self.team_sizes[parts[2]] = int(parts[3])
 
-    # _meta.yourSide takes priority over the CLI --player flag
-    if battle.your_side:
-        effective_players = [battle.your_side]
-    else:
-        effective_players = players
+        elif cmd == "win":
+            self.winner = parts[2] if len(parts) > 2 else None
 
-    outcome_map = (
-        {"p1": 1,  "p2": -1} if battle.winner == "p1" else
-        {"p1": -1, "p2": 1}  if battle.winner == "p2" else
-        {"p1": 0,  "p2": 0}
-    )
+        elif cmd == "raw":
+            # Capture rating deltas: "p1's rating: 1733 → 1746"
+            raw_text = parts[2] if len(parts) > 2 else ""
+            m = re.search(r"(\d+)\s*(?:&rarr;|→)\s*<strong>(\d+)<", raw_text)
+            if m:
+                for pid, uname in self.players.items():
+                    if uname and uname.lower() in raw_text.lower():
+                        self.rating_deltas[pid] = int(m.group(2)) - int(m.group(1))
 
-    transitions: list[dict] = []
-    current_turn_lines: list[str] = []
-    in_turn = False
+        # ---- start of new turn ----
+        elif cmd == "turn":
+            if self.current_turn > 0:
+                self._flush_turn()
+            self.current_turn = int(parts[2])
+            self._current_turn_actions = []
+            self._current_turn_damage_events = []
+            self._last_move_action = None
+            self._execution_index = 0
+            # Capture state BEFORE any actions mutate it
+            self._state_before = self._snapshot_state()
 
-    def _flush_turn(turn_num: int) -> None:
-        for player in effective_players:
-            fake = FakeDoubleBattle(battle, player, belief)
-            try:
-                state_vec = encoder.encode(fake)
-            except Exception:
-                return
+        # ---- field events ----
+        elif cmd == "switch" or cmd == "drag":
+            self._handle_switch(parts)
 
-            a0 = _infer_action(current_turn_lines, player, "a", battle)
-            a1 = _infer_action(current_turn_lines, player, "b", battle)
+        elif cmd == "detailschange":
+            self._handle_mega(parts)
 
-            if a0 < 0 and a1 < 0:
-                return
+        elif cmd == "move":
+            self._handle_move(parts)
 
-            transitions.append({
-                "battle_id": battle.battle_id,
-                "source":    "vod",
-                "player":    player,
-                "turn":      turn_num,
-                "state":     state_vec.tolist(),
-                "action_s0": max(a0, 0),
-                "action_s1": max(a1, 0),
-                "outcome":   outcome_map.get(player, 0),
+        elif cmd == "-damage" or cmd == "-heal":
+            self._handle_damage(parts, cmd)
+
+        elif cmd == "faint":
+            slot_key = self._slot_key_from_ident(parts[2])
+            if slot_key in self.active_slots:
+                self.active_slots[slot_key].is_fainted = True
+                self.active_slots[slot_key].hp_current = 0.0
+            self._current_turn_actions.append({
+                "event": "faint",
+                "slot": slot_key,
+                "species": self._species_from_ident(parts[2]),
             })
 
-    for line in lines:
-        # ── Turn boundary ─────────────────────────────────────────────────────
-        if line.startswith("|turn|"):
-            if in_turn and battle.turn > 0:
-                _flush_turn(battle.turn)
-            battle.turn = int(line.split("|")[2])
-            current_turn_lines = []
-            in_turn = True
-            continue
+        elif cmd == "-boost" or cmd == "-unboost":
+            self._handle_boost(parts, cmd)
 
-        if not in_turn:
-            continue
-        current_turn_lines.append(line)
+        elif cmd == "-status":
+            slot_key = self._slot_key_from_ident(parts[2])
+            status = parts[3] if len(parts) > 3 else None
+            if slot_key in self.active_slots:
+                self.active_slots[slot_key].status = status
+            self._current_turn_actions.append({
+                "event": "status",
+                "slot": slot_key,
+                "status": status,
+            })
 
-        # ── State mutations ───────────────────────────────────────────────────
+        elif cmd == "-curestatus":
+            slot_key = self._slot_key_from_ident(parts[2])
+            if slot_key in self.active_slots:
+                self.active_slots[slot_key].status = None
 
-        # Switch in
-        m = re.match(r"\|switch\|(\w+): ([^|]+)\|[^|]+\|(\d+)\/(\d+)", line)
-        if m:
-            slot_key, species_raw, cur_hp, max_hp = m.groups()
-            species  = _normalize_species(species_raw)
-            side     = slot_key[:2]
-            if species not in battle.roster[side]:
-                mon = _make_fake_pokemon(species, belief)
-                battle.roster[side][species] = mon
-            battle.active[slot_key] = species
-            mon = battle.roster[side][species]
-            mon.revealed = True
-            mon.current_hp_fraction = int(cur_hp) / int(max_hp)
-            continue
+        elif cmd == "-sidestart":
+            self._handle_sidestart(parts)
 
-        # Damage
-        m = re.match(r"\|-damage\|(\w+): [^|]+\|(\d+)\/(\d+)", line)
-        if m:
-            slot_key, cur_hp, max_hp = m.groups()
-            mon = battle.get_active_mon(slot_key)
-            if mon:
-                mon.current_hp_fraction = int(cur_hp) / int(max_hp)
-            continue
+        elif cmd == "-sideend":
+            self._handle_sideend(parts)
 
-        # Faint
-        m = re.match(r"\|faint\|(\w+):", line)
-        if m:
-            slot_key = m.group(1)
-            mon = battle.get_active_mon(slot_key)
-            if mon:
-                mon.fainted = True
-                mon.current_hp_fraction = 0.0
-            battle.active[slot_key] = None
-            continue
+        elif cmd == "-weather":
+            weather_val = parts[2] if len(parts) > 2 else None
+            self.field_conditions.weather = None if weather_val in (None, "none") else weather_val
 
-        # Move (reveals the move)
-        m = re.match(r"\|move\|(\w+): [^|]+\|([^|]+)", line)
-        if m:
-            slot_key, move_name = m.group(1), m.group(2).strip()
-            mon = battle.get_active_mon(slot_key)
-            if mon:
-                mon.reveal_move(move_name)
-                mon.revealed = True
-            continue
+        elif cmd == "-fieldstart":
+            raw = parts[2] if len(parts) > 2 else ""
+            if "Trick Room" in raw:
+                self.field_conditions.trick_room = 5
+            elif "terrain" in raw.lower():
+                self.field_conditions.terrain = raw
 
-        # Heal
-        m = re.match(r"\|-heal\|(\w+): [^|]+\|(\d+)\/(\d+)", line)
-        if m:
-            slot_key, cur_hp, max_hp = m.groups()
-            mon = battle.get_active_mon(slot_key)
-            if mon:
-                mon.current_hp_fraction = int(cur_hp) / int(max_hp)
-            continue
+        elif cmd == "-fieldend":
+            raw = parts[2] if len(parts) > 2 else ""
+            if "Trick Room" in raw:
+                self.field_conditions.trick_room = 0
+            elif "terrain" in raw.lower():
+                self.field_conditions.terrain = None
 
-        # Status
-        m = re.match(r"\|-status\|(\w+): [^|]+\|(\w+)", line)
-        if m:
-            slot_key, status_str = m.group(1), m.group(2)
-            mon = battle.get_active_mon(slot_key)
-            if mon:
-                try:
-                    mon.status = Status[status_str.upper()]
-                except KeyError:
-                    pass
-            continue
+        # ---- item reveals ----
+        elif cmd == "-item":
+            # |-item|p2a: Sneasler|White Herb
+            self._handle_item_reveal(parts, revealed=True)
 
-        # Terastallize
-        m = re.match(r"\|-terastallize\|(\w+):", line)
-        if m:
-            mon = battle.get_active_mon(m.group(1))
-            if mon:
-                mon.is_terastallized = True
-            continue
+        elif cmd == "-enditem":
+            # |-enditem|p2a: Sneasler|White Herb
+            self._handle_item_reveal(parts, revealed=True, consumed=True)
 
-        # Boost / Unboost
-        m = re.match(r"\|-(boost|unboost)\|(\w+): [^|]+\|(\w+)\|(\d+)", line)
-        if m:
-            direction, slot_key, stat, amount = m.groups()
-            mon = battle.get_active_mon(slot_key)
-            if mon and stat in mon.boosts:
-                delta = int(amount) * (1 if direction == "boost" else -1)
-                mon.boosts[stat] = max(-6, min(6, mon.boosts[stat] + delta))
-            continue
+        # ---- terastallization ----
+        elif cmd == "-terastallize":
+            # |-terastallize|p1a: Flutter Mane|Fairy
+            self._handle_tera(parts)
 
-        # Detailschange (e.g. Floette → Floette-Mega)
-        m = re.match(r"\|detailschange\|(\w+): [^|]+\|(.+)", line)
-        if m:
-            slot_key, new_raw = m.group(1), m.group(2)
-            new_species = _normalize_species(new_raw)
-            side        = slot_key[:2]
-            old_species = battle.active.get(slot_key)
-            if old_species and old_species in battle.roster[side]:
-                old_mon = battle.roster[side].pop(old_species)
-                old_mon.species = new_species
-                battle.roster[side][new_species] = old_mon
-                battle.active[slot_key] = new_species
-            continue
+        elif cmd == "-ability":
+            # |-ability|p1a: Aerodactyl|Unnerve  (ability activation / reveal)
+            self._handle_ability_reveal(parts)
 
-    # Flush last turn
-    if in_turn and battle.turn > 0:
-        _flush_turn(battle.turn)
+        elif cmd == "upkeep":
+            # Decrement all time-based counters
+            for sc in self.side_conditions.values():
+                if sc.tailwind > 0:
+                    sc.tailwind -= 1
+                # Decrement screen timers
+                expired = [k for k, v in sc.screens.items() if v <= 1]
+                for k in expired:
+                    del sc.screens[k]
+                for k in list(sc.screens):
+                    if sc.screens[k] > 1:
+                        sc.screens[k] -= 1
+            if self.field_conditions.trick_room > 0:
+                self.field_conditions.trick_room -= 1
+
+    # ------------------------------------------------------------------
+    # Sub-handlers
+    # ------------------------------------------------------------------
+
+    def _handle_switch(self, parts: list[str]) -> None:
+        # |switch|p1b: Incineroar|Incineroar, L50, F|100/100
+        ident = parts[2]
+        details = parts[3]
+        hp_str = parts[4] if len(parts) > 4 else "100/100"
+
+        slot_key = self._slot_key_from_ident(ident)
+        nickname = ident.split(": ", 1)[1] if ": " in ident else ident
+        species = details.split(",")[0].strip()
+        player = slot_key[:2]
+
+        hp_current, hp_max = self._parse_hp(hp_str)
+
+        # Reuse existing PokemonSlot if already seen (preserves revealed_moves, known_item, etc.)
+        seen_key = f"{player}:{species}"
+        if seen_key in self.seen_mons:
+            mon = self.seen_mons[seen_key]
+            mon.slot = slot_key[2]
+            mon.hp_current = hp_current
+            mon.is_fainted = False
+        else:
+            mon = PokemonSlot(
+                species=species,
+                nickname=nickname,
+                player=player,
+                slot=slot_key[2],
+                hp_current=hp_current,
+                hp_max=hp_max,
+            )
+            self.seen_mons[seen_key] = mon
+
+        self.active_slots[slot_key] = mon
+
+        # Track evolving known team
+        if species not in self.known_team[player]:
+            self.known_team[player].append(species)
+
+        self._current_turn_actions.append({
+            "event": "switch",
+            "slot": slot_key,
+            "species": species,
+            "player": player,
+        })
+
+    def _handle_mega(self, parts: list[str]) -> None:
+        # |detailschange|p1a: Floette|Floette-Mega, L50, F
+        ident = parts[2]
+        new_species = parts[3].split(",")[0].strip() if len(parts) > 3 else None
+        slot_key = self._slot_key_from_ident(ident)
+        if slot_key in self.active_slots and new_species:
+            self.active_slots[slot_key].species = new_species
+            self.active_slots[slot_key].is_mega = True
+        self._current_turn_actions.append({
+            "event": "mega_evolution",
+            "slot": slot_key,
+            "new_species": new_species,
+        })
+
+    def _handle_move(self, parts: list[str]) -> None:
+        # |move|p1b: Sneasler|Fake Out|p2a: Sneasler
+        user_ident = parts[2] if len(parts) > 2 else ""
+        move_name = parts[3] if len(parts) > 3 else ""
+        target_ident = parts[4] if len(parts) > 4 else None
+
+        user_slot = self._slot_key_from_ident(user_ident)
+        target_slot = self._slot_key_from_ident(target_ident) if target_ident else None
+
+        # Record the move on the Pokémon's revealed_moves list
+        if user_slot in self.active_slots:
+            mon = self.active_slots[user_slot]
+            if move_name and move_name not in mon.revealed_moves:
+                mon.revealed_moves.append(move_name)
+
+        is_protect = move_name.lower() in {
+            "protect", "detect", "wide guard", "quick guard",
+            "baneful bunker", "spiky shield", "silk trap", "burning bulwark",
+            "max guard",
+        }
+
+        action = {
+            "event": "move",
+            "execution_index": self._execution_index,
+            "user_slot": user_slot,
+            "user_species": self._species_from_ident(user_ident),
+            "move": move_name,
+            "target_slot": target_slot,
+            "target_species": self._species_from_ident(target_ident) if target_ident else None,
+            "is_protect": is_protect,
+        }
+        self._execution_index += 1
+        self._last_move_action = action
+        self._current_turn_actions.append(action)
+
+    def _handle_damage(self, parts: list[str], cmd: str) -> None:
+        # |-damage|p2a: Sneasler|74/100
+        ident = parts[2]
+        hp_str = parts[3] if len(parts) > 3 else "0/100"
+        slot_key = self._slot_key_from_ident(ident)
+
+        hp_current, hp_max = self._parse_hp(hp_str)
+        prev_hp = None
+        if slot_key in self.active_slots:
+            prev_hp = self.active_slots[slot_key].hp_current
+            self.active_slots[slot_key].hp_current = hp_current
+
+        delta_pct = None
+        if prev_hp is not None and hp_current is not None:
+            delta_pct = round(hp_current - prev_hp, 2)
+
+        # Attribute source from the most recent move action
+        source_slot = None
+        source_species = None
+        source_move = None
+        if self._last_move_action and cmd == "-damage":
+            source_slot = self._last_move_action.get("user_slot")
+            source_species = self._last_move_action.get("user_species")
+            source_move = self._last_move_action.get("move")
+
+        event = {
+            "event": cmd.lstrip("-"),   # "damage" or "heal"
+            "slot": slot_key,
+            "species": self._species_from_ident(ident),
+            "hp_pct_after": hp_current,
+            "hp_pct_delta": delta_pct,
+            "source_slot": source_slot,
+            "source_species": source_species,
+            "source_move": source_move,
+        }
+        self._current_turn_damage_events.append(event)
+        self._current_turn_actions.append(event)
+
+    def _handle_boost(self, parts: list[str], cmd: str) -> None:
+        # |-boost|p1a: Floette|spa|1
+        ident = parts[2]
+        stat = parts[3] if len(parts) > 3 else ""
+        amount = int(parts[4]) if len(parts) > 4 else 1
+        if cmd == "-unboost":
+            amount = -amount
+
+        slot_key = self._slot_key_from_ident(ident)
+        if slot_key in self.active_slots:
+            current = self.active_slots[slot_key].boosts.get(stat, 0)
+            self.active_slots[slot_key].boosts[stat] = current + amount
+
+        self._current_turn_actions.append({
+            "event": "stat_change",
+            "slot": slot_key,
+            "stat": stat,
+            "stages": amount,
+        })
+
+    def _handle_sidestart(self, parts: list[str]) -> None:
+        # |-sidestart|p2: speedyturtle87|move: Tailwind
+        raw_side = parts[2]
+        effect = parts[3] if len(parts) > 3 else ""
+        pid = raw_side.split(":")[0].strip()
+
+        if "Tailwind" in effect:
+            self.side_conditions[pid].tailwind = 4
+        elif "Reflect" in effect:
+            self.side_conditions[pid].screens["reflect"] = 5
+        elif "Light Screen" in effect:
+            self.side_conditions[pid].screens["light_screen"] = 5
+        elif "Aurora Veil" in effect:
+            self.side_conditions[pid].screens["aurora_veil"] = 5
+
+    def _handle_sideend(self, parts: list[str]) -> None:
+        raw_side = parts[2]
+        effect = parts[3] if len(parts) > 3 else ""
+        pid = raw_side.split(":")[0].strip()
+
+        if "Tailwind" in effect:
+            self.side_conditions[pid].tailwind = 0
+        elif "Reflect" in effect:
+            self.side_conditions[pid].screens.pop("reflect", None)
+        elif "Light Screen" in effect:
+            self.side_conditions[pid].screens.pop("light_screen", None)
+        elif "Aurora Veil" in effect:
+            self.side_conditions[pid].screens.pop("aurora_veil", None)
+
+    def _handle_item_reveal(self, parts: list[str], revealed: bool, consumed: bool = False) -> None:
+        # |-item|p2a: Sneasler|White Herb
+        # |-enditem|p2a: Sneasler|White Herb
+        ident = parts[2] if len(parts) > 2 else ""
+        item = parts[3] if len(parts) > 3 else None
+        slot_key = self._slot_key_from_ident(ident)
+
+        if slot_key in self.active_slots and item:
+            self.active_slots[slot_key].known_item = item
+
+        self._current_turn_actions.append({
+            "event": "item_consumed" if consumed else "item_revealed",
+            "slot": slot_key,
+            "species": self._species_from_ident(ident),
+            "item": item,
+        })
+
+    def _handle_tera(self, parts: list[str]) -> None:
+        # |-terastallize|p1a: Flutter Mane|Fairy
+        ident = parts[2] if len(parts) > 2 else ""
+        tera_type = parts[3] if len(parts) > 3 else None
+        slot_key = self._slot_key_from_ident(ident)
+
+        if slot_key in self.active_slots:
+            self.active_slots[slot_key].known_tera_type = tera_type
+            self.active_slots[slot_key].is_terastallized = True
+
+        self._current_turn_actions.append({
+            "event": "terastallize",
+            "slot": slot_key,
+            "species": self._species_from_ident(ident),
+            "tera_type": tera_type,
+        })
+
+    def _handle_ability_reveal(self, parts: list[str]) -> None:
+        # |-ability|p1a: Aerodactyl|Unnerve
+        # |-ability|p2b: Incineroar|Intimidate|[from] ability: Trace
+        ident = parts[2] if len(parts) > 2 else ""
+        ability = parts[3] if len(parts) > 3 else None
+        slot_key = self._slot_key_from_ident(ident)
+
+        if slot_key in self.active_slots and ability:
+            self.active_slots[slot_key].known_ability = ability
+            # Propagate to seen_mons so it survives switches
+            player = slot_key[:2]
+            species = self.active_slots[slot_key].species
+            seen_key = f"{player}:{species}"
+            if seen_key in self.seen_mons:
+                self.seen_mons[seen_key].known_ability = ability
+
+        self._current_turn_actions.append({
+            "event": "ability_revealed",
+            "slot": slot_key,
+            "species": self._species_from_ident(ident),
+            "ability": ability,
+        })
+
+    # ------------------------------------------------------------------
+    # State snapshot (deep copy so mutations don't bleed through)
+    # ------------------------------------------------------------------
+
+    def _snapshot_state(self) -> dict:
+        return {
+            "field": copy.deepcopy(self.field_conditions.to_dict()),
+            "side_conditions": {
+                pid: copy.deepcopy(sc.to_dict())
+                for pid, sc in self.side_conditions.items()
+            },
+            "active_pokemon": {
+                slot: copy.deepcopy(mon.to_dict())
+                for slot, mon in self.active_slots.items()
+                if not mon.is_fainted
+            },
+            "known_team": {
+                pid: list(team) for pid, team in self.known_team.items()
+            },
+        }
+
+    # ------------------------------------------------------------------
+    # Turn flush
+    # ------------------------------------------------------------------
+
+    def _flush_turn(self) -> None:
+        """Snapshot the board state before + after and record all actions."""
+        turn_snapshot = {
+            "turn": self.current_turn,
+            # State captured at the START of the turn (no future leakage)
+            "state_before_actions": self._state_before or self._snapshot_state(),
+            "actions": list(self._current_turn_actions),
+            "damage_events": list(self._current_turn_damage_events),
+            # State captured AFTER all actions have resolved
+            "state_after_actions": self._snapshot_state(),
+            # ---- Type B: prediction fields always null ----
+            "predicted_action_by_bot": None,
+        }
+        self.turns.append(turn_snapshot)
+
+    # ------------------------------------------------------------------
+    # Output assembly
+    # ------------------------------------------------------------------
+
+    def _build_output(self) -> dict:
+        # Aggregate everything the parser learned across the whole match into a
+        # flat dict keyed by "pid:species".  This is what the inject panel uses
+        # to pre-populate revealed moves, items, tera type, and ability.
+        revealed_info: dict[str, dict] = {}
+        for seen_key, mon in self.seen_mons.items():
+            # seen_key is already "pid:species"
+            revealed_info[seen_key] = {
+                "revealed_moves": list(mon.revealed_moves),
+                "known_item": mon.known_item,
+                "known_tera_type": mon.known_tera_type,
+                "is_terastallized": mon.is_terastallized,
+                "known_ability": mon.known_ability,
+            }
+
+        return {
+            "source_type": "ranked_player_vod",
+            "replay_id": None,      # caller can inject from filename
+            "format": self.format,
+            "players": {
+                "our_side": self.our_player,
+                "p1": {
+                    "username": self.players.get("p1"),
+                    "rating_before": self.ratings.get("p1"),
+                    "rating_delta": self.rating_deltas.get("p1"),
+                    "roster": self.rosters["p1"],
+                    "team_size_chosen": self.team_sizes.get("p1"),
+                },
+                "p2": {
+                    "username": self.players.get("p2"),
+                    "rating_before": self.ratings.get("p2"),
+                    "rating_delta": self.rating_deltas.get("p2"),
+                    "roster": self.rosters["p2"],
+                    "team_size_chosen": self.team_sizes.get("p2"),
+                },
+            },
+            "winner": self.winner,
+            "stats_quality": {
+                "our_side": "distribution",
+                "opp_side": "distribution",
+            },
+            # Everything the parser learned from the replay log — revealed moves,
+            # consumed/revealed items, tera type.  Used by the inject panel to
+            # pre-populate fields and show "confirmed" badges.
+            "revealed_info": revealed_info,
+            "turns": self.turns,
+        }
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _slot_key_from_ident(ident: Optional[str]) -> str:
+        if not ident:
+            return ""
+        m = re.match(r"(p[12][ab])", ident)
+        return m.group(1) if m else ident.split(":")[0].strip()
+
+    @staticmethod
+    def _species_from_ident(ident: Optional[str]) -> Optional[str]:
+        if not ident:
+            return None
+        if ": " in ident:
+            return ident.split(": ", 1)[1].strip()
+        return None
+
+    @staticmethod
+    def _parse_hp(hp_str: str) -> tuple[Optional[float], Optional[float]]:
+        hp_str = hp_str.split(" ")[0]  # strip " fnt"
+        if "/" in hp_str:
+            parts = hp_str.split("/")
+            try:
+                return float(parts[0]), float(parts[1])
+            except ValueError:
+                pass
+        try:
+            return float(hp_str), 100.0
+        except ValueError:
+            return None, None
+
+
+# ---------------------------------------------------------------------------
+# HTML extraction
+# ---------------------------------------------------------------------------
+
+def extract_log_from_html(html: str) -> str:
+    m = re.search(
+        r'<script[^>]+class="battle-log-data"[^>]*>(.*?)</script>',
+        html,
+        re.DOTALL,
+    )
+    if not m:
+        raise ValueError(
+            "Could not find battle-log-data script block in HTML. "
+            "Is this a valid Showdown replay file?"
+        )
+    raw = m.group(1)
+    raw = raw.replace(r"\/", "/")
+    return raw
+
+
+def extract_replay_id_from_html(html: str) -> Optional[str]:
+    m = re.search(r'name="replayid"\s+value="([^"]+)"', html)
+    return m.group(1) if m else None
+
+
+# ---------------------------------------------------------------------------
+# Server API helpers
+# ---------------------------------------------------------------------------
+
+def parse_replay_for_preview(
+    html_content: str,
+    belief=None,
+    known_entry: Optional[dict] = None,
+) -> dict:
+    """
+    Parse a Showdown replay HTML string and return the structured battle dict
+    that the team-builder UI expects.
+
+    Parameters
+    ----------
+    html_content : str
+        Raw contents of the .html replay file.
+    belief : BeliefState, optional
+        Pikalytics belief state (unused for now; accepted so the signature
+        stays stable when belief inference is wired in).
+    known_entry : dict, optional
+        A partial known_teams entry the user has already filled in.  Shape::
+
+            {
+              "p1": { "Kingambit": { "nature": "Adamant", ... } },
+              "p2": { ... },
+              "_meta": { "yourSide": "p1", "winner": "p1", ... }
+            }
+
+        When supplied, the ``_meta`` fields are merged into the preview's
+        top-level ``players`` dict and the per-species dicts are surfaced as
+        ``known_team_overrides`` so the UI can pre-populate injection cards.
+
+    Returns
+    -------
+    dict
+        Full battle object matching the shape produced by the JS
+        ``parseShowdownLog()`` function.
+    """
+    log = extract_log_from_html(html_content)
+    replay_id = extract_replay_id_from_html(html_content)
+
+    # Determine our_player from known_entry if present
+    our_player = "p1"
+    if known_entry:
+        meta = known_entry.get("_meta", {})
+        our_player = meta.get("yourSide", "p1") or "p1"
+
+    parser = ShowdownReplayParser(log, our_player=our_player)
+    result = parser.parse()
+    result["replay_id"] = replay_id
+    result["known_team_overrides"] = {}
+
+    # Merge known_entry into the result
+    if known_entry:
+        meta = known_entry.get("_meta", {})
+
+        if meta.get("winner"):
+            result["winner"] = meta["winner"]
+
+        # Surface per-species data as known_team_overrides
+        for pid in ("p1", "p2"):
+            for species, data in (known_entry.get(pid) or {}).items():
+                key = f"{pid}:{species}"
+                if any(v is not None for v in data.values()):
+                    result["known_team_overrides"][key] = data
+
+    return result
+
+
+def replay_to_transitions(
+    replay_path,
+    belief=None,
+    encoder=None,
+    players: Optional[list] = None,
+    known_teams: Optional[dict] = None,
+) -> list:
+    """
+    Parse a replay and convert every turn into a JSONL-ready transition dict.
+
+    Each transition records the state visible to one player at decision time,
+    the actions taken that turn, and the resulting state.  Fields that require
+    a trained encoder (numeric feature vectors) are left as null for now.
+
+    Parameters
+    ----------
+    replay_path : path-like
+        Path to the .html replay file.
+    belief : BeliefState, optional
+        Reserved for Pikalytics-based hidden-info inference.
+    encoder : StateEncoder, optional
+        Reserved for converting state dicts to float tensors.
+    players : list of str, optional
+        Which player perspectives to emit (e.g. ["p1"]).
+        Defaults to ["p1", "p2"].
+    known_teams : dict, optional
+        Map of battle_id -> known_teams_entry.  Used to inject exact stats
+        when available.
+
+    Returns
+    -------
+    list of dict
+        One dict per (turn, player) combination, ready for json.dumps.
+    """
+    html_content = Path(replay_path).read_text(encoding="utf-8")
+    replay_id = extract_replay_id_from_html(html_content) or Path(replay_path).stem
+
+    # Look up any injected team data for this battle
+    known_entry: dict = {}
+    if known_teams:
+        known_entry = known_teams.get(replay_id, {})
+
+    our_player = known_entry.get("_meta", {}).get("yourSide", "p1") or "p1"
+
+    log = extract_log_from_html(html_content)
+    parser = ShowdownReplayParser(log, our_player=our_player)
+    battle = parser.parse()
+    battle["replay_id"] = replay_id
+
+    if players is None:
+        players = ["p1", "p2"]
+
+    transitions = []
+
+    for turn in battle["turns"]:
+        for perspective in players:
+            # Inject known stats into active_pokemon for our side
+            after = copy.deepcopy(turn["state_after_actions"])
+            for slot_key, mon_dict in after.get("active_pokemon", {}).items():
+                pid = slot_key[:2]
+                species = mon_dict.get("species", "")
+                inj = (known_entry.get(pid) or {}).get(species, {})
+                if inj:
+                    mon_dict["ev_spread"] = inj.get("ev_spread")
+                    mon_dict["nature"] = inj.get("nature")
+                    mon_dict["known_item"] = mon_dict.get("known_item") or inj.get("item")
+                    if inj.get("moves"):
+                        mon_dict["known_moves"] = inj["moves"]
+
+            t = {
+                "source_type": battle.get("source_type", "ranked_player_vod"),
+                "replay_id": replay_id,
+                "format": battle.get("format"),
+                "perspective": perspective,
+                "turn": turn["turn"],
+                "winner": battle.get("winner"),
+                "state_before_actions": turn["state_before_actions"],
+                "state_after_actions": after,
+                "actions": turn["actions"],
+                "damage_events": turn["damage_events"],
+                # Placeholders for future encoder output
+                "state_vector": None,
+                "action_mask": None,
+                "predicted_action_by_bot": turn.get("predicted_action_by_bot"),
+                "players": {
+                    "our_side": our_player,
+                    "p1": battle["players"]["p1"],
+                    "p2": battle["players"]["p2"],
+                },
+            }
+            transitions.append(t)
 
     return transitions
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Server entry point (called by server.py / Flask, not the CLI)
-# ══════════════════════════════════════════════════════════════════════════════
-def parse_replay_for_preview(
-    html_content: str,
-    belief: BeliefState,
-    known_teams_entry: Optional[dict] = None,
-) -> dict:
-    """
-    Parse a replay HTML string and return a JSON-serializable preview dict
-    for the team_builder UI.
-
-    Parameters
-    ----------
-    html_content     : raw HTML of the replay file (uploaded via browser)
-    belief           : loaded BeliefState instance
-    known_teams_entry: the single-battle dict the UI has so far, e.g.
-                       {
-                         "p1": { "Kingambit": { "moves": [...], ... } },
-                         "p2": { ... },
-                         "_meta": { "yourSide": "p1", "winner": "p1", ... }
-                       }
-                       Pass None or {} if nothing is known yet.
-
-    Returns
-    -------
-    {
-      "battle_id": "...",
-      "p1name": "...",
-      "p2name": "...",
-      "winner": "p1" | "p2" | null,
-      "your_side": "p1" | "p2" | null,
-      "roster": {
-        "p1": {
-          "Kingambit": {
-            "moves": [
-              { "name": "Sucker Punch", "source": "log" },
-              { "name": "Kowtow Cleave", "source": "belief" },
-              ...
-            ],
-            "item":    { "value": "Chople Berry", "source": "known" },
-            "ability": { "value": "Defiant",      "source": "known" },
-            "nature":  { "value": "Adamant",       "source": "known" },
-            "evs":     { "value": [252,252,0,0,4,0], "source": "known" },
-          },
-          ...
-        },
-        "p2": { ... }
-      }
-    }
-
-    "source" values:
-      "log"    — seen in the replay log
-      "known"  — supplied by the user in team_builder
-      "belief" — inferred from Pikalytics (shown as [value] in the UI)
-    """
-    import tempfile, os
-
-    # Write HTML to a temp file so parse_html_replay can use Path.read_text
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".html", encoding="utf-8", delete=False
-    ) as tmp:
-        tmp.write(html_content)
-        tmp_path = tmp.name
-
-    try:
-        wrapped = None
-        if known_teams_entry:
-            # parse_html_replay expects known_teams keyed by battle_id,
-            # but we don't know the id yet — use a placeholder and patch after
-            wrapped = {"__preview__": known_teams_entry}
-
-        result = parse_html_replay(Path(tmp_path), belief, wrapped)
-        if result is None:
-            return {"error": "Could not extract battle log from HTML."}
-
-        battle, _ = result
-
-        # Re-key if we used placeholder
-        if wrapped and "__preview__" in wrapped:
-            wrapped[battle.battle_id] = wrapped.pop("__preview__")
-            # Re-parse with correct key so overrides apply
-            result = parse_html_replay(Path(tmp_path), belief, wrapped)
-            if result is None:
-                return {"error": "Re-parse failed."}
-            battle, _ = result
-
-    finally:
-        os.unlink(tmp_path)
-
-    # ── Build annotated roster ────────────────────────────────────────────────
-    known_entry = known_teams_entry or {}
-    roster_out: dict = {"p1": {}, "p2": {}}
-
-    for side in ("p1", "p2"):
-        known_side = known_entry.get(side, {})
-        for species, mon in battle.roster[side].items():
-            # Moves: tag each with its source
-            known_moves = set()
-            if species in known_side:
-                known_moves = set(known_side[species].get("moves", []))
-
-            move_list = []
-            log_moves = set()
-            for move_name in mon.moves:
-                if move_name in known_moves:
-                    move_list.append({"name": move_name, "source": "known"})
-                else:
-                    # Determine if it was revealed in the log or inferred
-                    # FakePokemon.reveal_move() sets current_pp -= 1;
-                    # belief-filled moves keep full pp
-                    fm = mon.moves[move_name]
-                    if fm.current_pp < fm.max_pp:
-                        move_list.append({"name": move_name, "source": "log"})
-                        log_moves.add(move_name)
-                    else:
-                        move_list.append({"name": move_name, "source": "belief"})
-
-            # Item / ability / nature / evs
-            def _sourced(attr, belief_fn):
-                if species in known_side and attr in known_side[species]:
-                    return {"value": known_side[species][attr], "source": "known"}
-                val = belief_fn()
-                return {"value": val, "source": "belief"} if val else None
-
-            top_item    = lambda: belief.top_item(species)
-            top_ability = lambda: belief.top_ability(species)
-            top_nature  = lambda: belief.top_spread(species)[0]
-            top_evs     = lambda: belief.top_spread(species)[1]
-
-            roster_out[side][species] = {
-                "moves":   move_list,
-                "item":    _sourced("item",    top_item),
-                "ability": _sourced("ability", top_ability),
-                "nature":  _sourced("nature",  top_nature),
-                "evs":     _sourced("evs",     top_evs),
-            }
-
-    meta = known_entry.get("_meta", {})
-    return {
-        "battle_id": battle.battle_id,
-        "p1name":    battle.p1_name,
-        "p2name":    battle.p2_name,
-        "winner":    battle.winner,
-        "your_side": battle.your_side or meta.get("yourSide"),
-        "roster":    roster_out,
-    }
-
-
-# ══════════════════════════════════════════════════════════════════════════════
+# ---------------------------------------------------------------------------
 # CLI
-# ══════════════════════════════════════════════════════════════════════════════
+# ---------------------------------------------------------------------------
+
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Parse Showdown replay VODs into replay buffer JSONL.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+    ap = argparse.ArgumentParser(description="Parse a Showdown replay HTML into Victory-Dance JSON.")
+    ap.add_argument("replay_html", help="Path to the .html replay file")
+    ap.add_argument("--out", default=None, help="Output JSON path (default: <replay>.json)")
+    ap.add_argument(
+        "--player",
+        choices=["p1", "p2"],
+        default="p1",
+        help="Which side is 'our' side (default: p1)",
     )
-    parser.add_argument(
-        "input",
-        help="Path to a single .html replay OR a directory containing .html files.",
-    )
-    parser.add_argument(
-        "--out", default="replay_buffer/vods.jsonl",
-        help="Output JSONL file (appended to, not overwritten). Default: replay_buffer/vods.jsonl",
-    )
-    parser.add_argument(
-        "--player", choices=["p1", "p2", "both"], default="both",
-        help="Which player perspective(s) to encode. Default: both",
-    )
-    parser.add_argument(
-        "--belief", default=None,
-        help=(
-            "Path to pikalytics_regma.json. "
-            "Defaults to <project_root>/data/regulations/pikalytics_regma.json"
-        ),
-    )
-    parser.add_argument(
-        "--known-teams", default=None, dest="known_teams",
-        help=(
-            "Path to a JSON file with exact set data for replays you produced. "
-            "See module docstring for the expected format."
-        ),
-    )
-    args = parser.parse_args()
+    args = ap.parse_args()
 
-    # ── Load supporting data ──────────────────────────────────────────────────
-    belief_path = Path(args.belief) if args.belief else (
-        _PROJECT_ROOT / "data" / "regulations" / "pikalytics_regma.json"
-    )
-    belief  = BeliefState(belief_path)
-    encoder = StateEncoder()
+    src = Path(args.replay_html)
+    if not src.exists():
+        print(f"ERROR: File not found: {src}", file=sys.stderr)
+        sys.exit(1)
 
-    known_teams: Optional[dict] = None
-    if args.known_teams:
-        with open(args.known_teams, encoding="utf-8") as f:
-            known_teams = json.load(f)
-        print(f"[known-teams] Loaded overrides for {len(known_teams)} battle(s).")
+    html = src.read_text(encoding="utf-8")
 
-    players = ["p1", "p2"] if args.player == "both" else [args.player]
+    log = extract_log_from_html(html)
+    replay_id = extract_replay_id_from_html(html)
 
-    # ── Collect replay files ──────────────────────────────────────────────────
-    input_path = Path(args.input)
-    replay_files = (
-        sorted(input_path.glob("*.html"))
-        if input_path.is_dir()
-        else [input_path]
-    )
-    print(f"[parse] {len(replay_files)} replay file(s) found.")
+    parser = ShowdownReplayParser(log, our_player=args.player)
+    result = parser.parse()
+    result["replay_id"] = replay_id
+    result["source_file"] = src.name
 
-    # ── Parse and write ───────────────────────────────────────────────────────
-    out_path = Path(args.out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    total = 0
-    with out_path.open("a", encoding="utf-8") as out_f:
-        for replay_file in replay_files:
-            print(f"  {replay_file.name}")
-            transitions = replay_to_transitions(
-                replay_file, belief, encoder, players, known_teams,
-            )
-            for t in transitions:
-                out_f.write(json.dumps(t) + "\n")
-            total += len(transitions)
-            print(f"    → {len(transitions)} transitions written")
-
-    print(f"\n[done] {total} total transitions → {out_path}")
+    out_path = Path(args.out) if args.out else src.with_suffix(".json")
+    out_path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"Wrote {len(result['turns'])} turns → {out_path}")
 
 
 if __name__ == "__main__":

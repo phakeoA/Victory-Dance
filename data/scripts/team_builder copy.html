@@ -1,0 +1,1089 @@
+<!DOCTYPE html>
+
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta content="width=device-width, initial-scale=1.0" name="viewport" />
+  <title>Victory-Dance Team Builder</title>
+  <style>
+    :root {
+      --bg: #1a1a2e;
+      --bg2: #16213e;
+      --bg3: #0f3460;
+      --surf: #1e2a45;
+      --surf2: #253354;
+      --bdr: #2e3f5c;
+      --bdr2: #3d5278;
+      --text: #e8eaf0;
+      --text2: #9ba8c0;
+      --text3: #6b7a96;
+      --accent: #e94560;
+      --accent2: #c73652;
+      --blue: #4a90d9;
+      --green: #4caf7d;
+      --yellow: #f5c842;
+      --red: #e74c3c;
+      --orange: #e67e22;
+      --p1col: #4a90d9;
+      --p2col: #e94560;
+      --rad: 8px;
+      --rad-lg: 12px;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      font-size: 14px;
+    }
+
+    /* ── Header ── */
+    #hdr {
+      background: var(--bg2);
+      border-bottom: 1px solid var(--bdr);
+      padding: 10px 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      position: sticky;
+      top: 0;
+      z-index: 30;
+    }
+
+    #hdr h1 {
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--accent);
+      letter-spacing: .4px;
+    }
+
+    #hdr .sub {
+      font-size: 11px;
+      color: var(--text3);
+    }
+
+    .sp {
+      flex: 1;
+    }
+
+    .btn {
+      background: var(--surf2);
+      border: 1px solid var(--bdr2);
+      color: var(--text);
+      padding: 6px 12px;
+      border-radius: var(--rad);
+      font-size: 12px;
+      cursor: pointer;
+      transition: background .12s, border-color .12s, color .12s;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      white-space: nowrap;
+    }
+
+    .btn:hover {
+      background: var(--bg3);
+      border-color: var(--blue);
+      color: var(--blue);
+    }
+
+    .btn.pri {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }
+
+    .btn.pri:hover {
+      background: var(--accent2);
+      border-color: var(--accent2);
+      color: #fff;
+    }
+
+    .btn.suc {
+      background: var(--green);
+      border-color: var(--green);
+      color: #fff;
+    }
+
+    .btn.suc:hover {
+      filter: brightness(.9);
+    }
+
+    /* ── Layout ── */
+    #app {
+      display: flex;
+      height: calc(100vh - 49px);
+    }
+
+    #side {
+      width: 234px;
+      background: var(--bg2);
+      border-right: 1px solid var(--bdr);
+      overflow-y: auto;
+      flex-shrink: 0;
+      display: flex;
+      flex-direction: column;
+    }
+
+    #main {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px;
+    }
+
+    /* ── Sidebar ── */
+    .sec {
+      padding: 10px 12px;
+    }
+
+    .sec+.sec {
+      border-top: 1px solid var(--bdr);
+    }
+
+    .sec h3 {
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--text3);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 8px;
+    }
+
+    .b-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 7px;
+      padding: 7px 9px;
+      border-radius: var(--rad);
+      cursor: pointer;
+      border: 1px solid transparent;
+      margin-bottom: 3px;
+    }
+
+    .b-item:hover {
+      background: var(--surf);
+      border-color: var(--bdr);
+    }
+
+    .b-item.active {
+      background: var(--bg3);
+      border-color: var(--blue);
+    }
+
+    .b-name {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 140px;
+    }
+
+    .b-meta {
+      font-size: 10px;
+      color: var(--text3);
+      margin-top: 1px;
+    }
+
+    .b-del {
+      margin-left: auto;
+      background: none;
+      border: none;
+      color: var(--text3);
+      cursor: pointer;
+      font-size: 13px;
+      padding: 2px 4px;
+      border-radius: 3px;
+      flex-shrink: 0;
+    }
+
+    .b-del:hover {
+      color: var(--red);
+      background: rgba(231, 76, 60, .15);
+    }
+
+    .b-sprs {
+      display: flex;
+      gap: 1px;
+      margin-top: 2px;
+      flex-wrap: wrap;
+    }
+
+    .b-sprs img {
+      width: 20px;
+      height: 20px;
+      image-rendering: pixelated;
+    }
+
+    /* ── Battle header ── */
+    #b-hdr {
+      display: flex;
+      align-items: flex-end;
+      gap: 10px;
+      margin-bottom: 14px;
+      flex-wrap: wrap;
+    }
+
+    .lbl-sm {
+      font-size: 10px;
+      color: var(--text3);
+      text-transform: uppercase;
+      letter-spacing: .5px;
+      margin-bottom: 3px;
+    }
+
+    .fld {
+      background: var(--bg);
+      border: 1px solid var(--bdr);
+      color: var(--text);
+      padding: 5px 8px;
+      border-radius: var(--rad);
+      font-size: 12px;
+    }
+
+    .fld:focus {
+      outline: none;
+      border-color: var(--blue);
+    }
+
+    .fld option {
+      background: var(--bg2);
+    }
+
+    #bid-in {
+      font-size: 13px;
+      font-weight: 600;
+      background: none;
+      border: none;
+      color: var(--text);
+      border-bottom: 2px solid transparent;
+      padding: 2px 4px;
+      min-width: 180px;
+      max-width: 340px;
+      width: 100%;
+    }
+
+    #bid-in:focus {
+      outline: none;
+      border-bottom-color: var(--blue);
+    }
+
+    #bid-in::placeholder {
+      color: var(--text3);
+      font-weight: 400;
+    }
+
+    /* ── Dual panel ── */
+    #dual {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+
+    @media (max-width: 1100px) {
+      #dual {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .panel {
+      background: var(--surf);
+      border: 1px solid var(--bdr);
+      border-radius: var(--rad-lg);
+      overflow: hidden;
+    }
+
+    .panel-hdr {
+      padding: 9px 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      border-bottom: 1px solid var(--bdr);
+    }
+
+    .panel-hdr.p1-hdr {
+      border-top: 3px solid var(--p1col);
+    }
+
+    .panel-hdr.p2-hdr {
+      border-top: 3px solid var(--p2col);
+    }
+
+    .panel-label {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .8px;
+    }
+
+    .p1-label {
+      color: var(--p1col);
+    }
+
+    .p2-label {
+      color: var(--p2col);
+    }
+
+    .player-name-in {
+      background: none;
+      border: none;
+      color: var(--text);
+      font-size: 13px;
+      font-weight: 600;
+      padding: 1px 4px;
+      border-bottom: 1px solid transparent;
+      min-width: 80px;
+    }
+
+    .player-name-in:focus {
+      outline: none;
+      border-bottom-color: var(--blue);
+    }
+
+    .winner-badge {
+      font-size: 10px;
+      background: var(--yellow);
+      color: #222;
+      padding: 1px 6px;
+      border-radius: 3px;
+      font-weight: 700;
+    }
+
+    .panel-body {
+      padding: 10px;
+    }
+
+    .mon-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+
+    /* ── Mon card ── */
+    .card {
+      background: var(--bg2);
+      border: 1px solid var(--bdr);
+      border-radius: var(--rad-lg);
+      overflow: hidden;
+    }
+
+    .card.empty {
+      border-style: dashed;
+      opacity: .65;
+      cursor: pointer;
+    }
+
+    .card.empty:hover {
+      opacity: 1;
+      border-color: var(--blue);
+    }
+
+    .card-hdr {
+      background: var(--surf2);
+      padding: 7px 9px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .card-hdr:hover {
+      background: var(--bg3);
+    }
+
+    .spr {
+      width: 40px;
+      height: 40px;
+      image-rendering: pixelated;
+      flex-shrink: 0;
+    }
+
+    .c-name {
+      font-size: 12px;
+      font-weight: 600;
+      line-height: 1.2;
+    }
+
+    .c-types {
+      display: flex;
+      gap: 3px;
+      margin-top: 2px;
+    }
+
+    .tbdg {
+      font-size: 9px;
+      font-weight: 700;
+      padding: 1px 5px;
+      border-radius: 3px;
+      text-transform: uppercase;
+      letter-spacing: .3px;
+    }
+
+    .c-del {
+      margin-left: auto;
+      background: none;
+      border: none;
+      color: var(--text3);
+      cursor: pointer;
+      font-size: 13px;
+      padding: 2px 4px;
+      border-radius: 4px;
+      flex-shrink: 0;
+    }
+
+    .c-del:hover {
+      color: var(--red);
+      background: rgba(231, 76, 60, .15);
+    }
+
+    .card-body {
+      padding: 9px;
+    }
+
+    /* ── Add slot ── */
+    .add-slot {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      min-height: 100px;
+      cursor: pointer;
+      padding: 12px;
+    }
+
+    .add-slot .plus {
+      font-size: 24px;
+      color: var(--text3);
+    }
+
+    .add-slot span {
+      font-size: 11px;
+      color: var(--text3);
+    }
+
+    /* ── Form rows ── */
+    .frow {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      margin-bottom: 6px;
+    }
+
+    .frow label {
+      font-size: 10px;
+      color: var(--text3);
+      width: 44px;
+      flex-shrink: 0;
+      text-transform: uppercase;
+      letter-spacing: .4px;
+    }
+
+    .frow select,
+    .frow input[type="text"] {
+      flex: 1;
+      background: var(--bg);
+      border: 1px solid var(--bdr);
+      color: var(--text);
+      padding: 3px 6px;
+      border-radius: var(--rad);
+      font-size: 11px;
+      min-width: 0;
+    }
+
+    .frow select:focus,
+    .frow input:focus {
+      outline: none;
+      border-color: var(--blue);
+    }
+
+    .frow select option {
+      background: var(--bg2);
+    }
+
+    /* ── Stats ── */
+    .stats {
+      margin-top: 7px;
+    }
+
+    .stat-hdr {
+      font-size: 10px;
+      color: var(--text3);
+      text-transform: uppercase;
+      letter-spacing: .5px;
+      margin-bottom: 3px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .srow {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      margin-bottom: 2px;
+    }
+
+    .slbl {
+      font-size: 9px;
+      color: var(--text3);
+      width: 26px;
+      text-align: right;
+      flex-shrink: 0;
+      text-transform: uppercase;
+    }
+
+    .sbar-w {
+      flex: 1;
+      background: var(--bg);
+      border-radius: 3px;
+      height: 6px;
+      overflow: hidden;
+    }
+
+    .sbar {
+      height: 100%;
+      border-radius: 3px;
+      transition: width .25s;
+    }
+
+    .sval {
+      font-size: 10px;
+      color: var(--text2);
+      width: 26px;
+      text-align: right;
+      flex-shrink: 0;
+    }
+
+    .ev-in {
+      width: 36px;
+      background: var(--bg);
+      border: 1px solid var(--bdr);
+      color: var(--text);
+      padding: 1px 2px;
+      border-radius: 3px;
+      font-size: 10px;
+      text-align: center;
+    }
+
+    .ev-in:focus {
+      outline: none;
+      border-color: var(--blue);
+    }
+
+    .ev-over {
+      color: var(--red);
+    }
+
+    /* ── Moves ── */
+    .moves {
+      margin-top: 7px;
+    }
+
+    .moves h4 {
+      font-size: 10px;
+      color: var(--text3);
+      text-transform: uppercase;
+      letter-spacing: .5px;
+      margin-bottom: 4px;
+    }
+
+    .mrow {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      margin-bottom: 3px;
+    }
+
+    .mbdg {
+      font-size: 9px;
+      padding: 1px 4px;
+      border-radius: 3px;
+      flex-shrink: 0;
+      text-transform: uppercase;
+      min-width: 34px;
+      text-align: center;
+    }
+
+    .acwrap {
+      position: relative;
+      flex: 1;
+    }
+
+    .ac-in {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--bdr);
+      color: var(--text);
+      padding: 3px 6px;
+      border-radius: var(--rad);
+      font-size: 11px;
+    }
+
+    .ac-in:focus {
+      outline: none;
+      border-color: var(--blue);
+    }
+
+    .ac-dd {
+      position: absolute;
+      top: 100%;
+      left: 0;
+      right: 0;
+      background: var(--bg2);
+      border: 1px solid var(--bdr2);
+      border-radius: var(--rad);
+      max-height: 140px;
+      overflow-y: auto;
+      z-index: 20;
+      display: none;
+    }
+
+    .ac-dd.open {
+      display: block;
+    }
+
+    .ac-itm {
+      padding: 4px 8px;
+      font-size: 11px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .ac-itm:hover {
+      background: var(--bg3);
+    }
+
+    /* ── Source badges ── */
+    .src-vod {
+      font-size: 9px;
+      background: var(--bg3);
+      border: 1px solid var(--blue);
+      color: var(--blue);
+      padding: 1px 4px;
+      border-radius: 3px;
+      margin-left: 3px;
+    }
+
+    .src-mega {
+      font-size: 9px;
+      background: rgba(245, 200, 66, .15);
+      border: 1px solid var(--yellow);
+      color: var(--yellow);
+      padding: 1px 4px;
+      border-radius: 3px;
+      margin-left: 3px;
+    }
+
+    /* ── Modal ── */
+    #moverlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, .72);
+      z-index: 100;
+      align-items: center;
+      justify-content: center;
+    }
+
+    #moverlay.open {
+      display: flex;
+    }
+
+    #modal {
+      background: var(--bg2);
+      border: 1px solid var(--bdr2);
+      border-radius: var(--rad-lg);
+      width: 460px;
+      max-height: 80vh;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    #m-hdr {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--bdr);
+      display: flex;
+      align-items: center;
+    }
+
+    #m-hdr h2 {
+      font-size: 15px;
+      font-weight: 600;
+      flex: 1;
+    }
+
+    #m-close {
+      background: none;
+      border: none;
+      color: var(--text2);
+      font-size: 18px;
+      cursor: pointer;
+      padding: 4px;
+    }
+
+    #m-search-w {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--bdr);
+    }
+
+    #m-search {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--bdr);
+      color: var(--text);
+      padding: 7px 11px;
+      border-radius: var(--rad);
+      font-size: 13px;
+    }
+
+    #m-search:focus {
+      outline: none;
+      border-color: var(--blue);
+    }
+
+    #m-list {
+      overflow-y: auto;
+    }
+
+    .m-item {
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      padding: 7px 14px;
+      cursor: pointer;
+      border-bottom: 1px solid var(--bdr);
+    }
+
+    .m-item:hover {
+      background: var(--surf);
+    }
+
+    .m-item img {
+      width: 36px;
+      height: 36px;
+      image-rendering: pixelated;
+    }
+
+    .m-item-name {
+      font-size: 13px;
+      font-weight: 500;
+    }
+
+    /* ── Stat bar colours ── */
+    .b-hp {
+      background: #ff5959;
+    }
+
+    .b-atk {
+      background: #f5ac78;
+    }
+
+    .b-def {
+      background: #faf778;
+    }
+
+    .b-spa {
+      background: #9db7f5;
+    }
+
+    .b-spd {
+      background: #a7db8d;
+    }
+
+    .b-spe {
+      background: #fa92b2;
+    }
+
+    /* ── Type colours ── */
+    .t-normal {
+      background: #9fa19f;
+      color: #fff;
+    }
+
+    .t-fire {
+      background: #e62829;
+      color: #fff;
+    }
+
+    .t-water {
+      background: #2980ef;
+      color: #fff;
+    }
+
+    .t-grass {
+      background: #3fa129;
+      color: #fff;
+    }
+
+    .t-electric {
+      background: #fac000;
+      color: #333;
+    }
+
+    .t-ice {
+      background: #3dcef3;
+      color: #333;
+    }
+
+    .t-fighting {
+      background: #ff8000;
+      color: #fff;
+    }
+
+    .t-poison {
+      background: #9141cb;
+      color: #fff;
+    }
+
+    .t-ground {
+      background: #915121;
+      color: #fff;
+    }
+
+    .t-flying {
+      background: #81b9ef;
+      color: #333;
+    }
+
+    .t-psychic {
+      background: #ef4179;
+      color: #fff;
+    }
+
+    .t-bug {
+      background: #91a119;
+      color: #fff;
+    }
+
+    .t-rock {
+      background: #afa981;
+      color: #fff;
+    }
+
+    .t-ghost {
+      background: #704170;
+      color: #fff;
+    }
+
+    .t-dragon {
+      background: #5060e1;
+      color: #fff;
+    }
+
+    .t-dark {
+      background: #624d4e;
+      color: #fff;
+    }
+
+    .t-steel {
+      background: #60a1b8;
+      color: #fff;
+    }
+
+    .t-fairy {
+      background: #ef70ef;
+      color: #fff;
+    }
+
+    .t-unknown {
+      background: var(--surf2);
+      color: var(--text3);
+    }
+
+    /* ── Notification ── */
+    #notif {
+      position: fixed;
+      bottom: 18px;
+      right: 18px;
+      background: var(--green);
+      color: #fff;
+      padding: 9px 15px;
+      border-radius: var(--rad);
+      font-size: 13px;
+      font-weight: 500;
+      display: none;
+      z-index: 200;
+      box-shadow: 0 3px 12px rgba(0, 0, 0, .4);
+    }
+
+    #loading {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+    }
+
+    #loading .inner {
+      text-align: center;
+      max-width: 380px;
+      padding: 20px;
+    }
+
+    ::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: var(--bg);
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: var(--bdr2);
+      border-radius: 3px;
+    }
+
+    /* ── Belief-state fills (from Pikalytics) ── */
+    .belief-val {
+      color: var(--yellow);
+    }
+
+    .belief-val::before {
+      content: '[';
+    }
+
+    .belief-val::after {
+      content: ']';
+    }
+
+    /* ── Your-side pill on panel header ── */
+    .your-side-tag {
+      font-size: 9px;
+      background: rgba(76, 175, 125, .2);
+      border: 1px solid var(--green);
+      color: var(--green);
+      padding: 1px 5px;
+      border-radius: 3px;
+      font-weight: 600;
+      letter-spacing: .3px;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="hdr">
+    <span style="font-size:20px">⚔️</span>
+    <div>
+      <h1>Victory-Dance</h1>
+      <div class="sub">Battle Builder · VOD Parser · known_teams.json editor</div>
+    </div>
+    <div class="sp"></div>
+    <button class="btn">+ New battle</button>
+    <input accept=".html" id="replay-file" style="display:none" type="file" />
+    <button class="btn">📂 Load replay</button>
+    <button class="btn">Import JSON</button>
+    <button class="btn" id="run-parser-btn">🔍 Run Parser</button>
+    <button class="btn suc">⬇ Export Training Data</button>
+  </div>
+  <div id="app">
+    <div id="side">
+      <div class="sec">
+        <h3>Battles</h3>
+        <div id="b-list"></div>
+        <button class="btn" style="width:100%;margin-top:4px">+ New battle</button>
+      </div>
+      <div class="sec" style="margin-top:auto">
+        <h3>Data</h3>
+        <div id="data-status" style="font-size:11px;color:var(--text3)">Loading…</div>
+        <div style="margin-top:8px;display:flex;align-items:center;gap:5px">
+          <span id="srv-dot"
+            style="width:8px;height:8px;border-radius:50%;background:var(--text3);flex-shrink:0;display:inline-block"></span>
+          <span id="srv-status" style="font-size:11px;color:var(--text3)">Server: checking…</span>
+        </div>
+      </div>
+    </div>
+    <div id="main">
+      <div id="loading">
+        <div class="inner">
+          <div style="font-size:28px;margin-bottom:10px">⏳</div>
+          <div style="color:var(--text2)">Loading Pokédex data…</div>
+        </div>
+      </div>
+      <div id="editor" style="display:none">
+        <!-- Battle metadata row -->
+        <div id="b-hdr">
+          <div style="flex:1">
+            <div class="lbl-sm" style="margin-bottom:3px">Battle ID</div>
+            <input id="bid-in" placeholder="battle-gen9championsvgc2026regma-1234567" type="text" />
+          </div>
+          <div>
+            <div class="lbl-sm">Your side</div>
+            <select class="fld" id="your-side"
+              title="Which side are YOU playing? Used by vod_parser.py to encode perspective.">
+              <option value="p1">p1</option>
+              <option value="p2">p2</option>
+            </select>
+          </div>
+          <div>
+            <div class="lbl-sm">Winner</div>
+            <select class="fld" id="winner-sel">
+              <option value="">Unknown</option>
+              <option value="p1">p1</option>
+              <option value="p2">p2</option>
+            </select>
+          </div>
+        </div>
+        <!-- Dual panel -->
+        <div id="dual">
+          <div class="panel" id="panel-p1">
+            <div class="panel-hdr p1-hdr">
+              <span class="panel-label p1-label">P1</span>
+              <input class="player-name-in" id="p1name-in" placeholder="Player 1" />
+              <span class="your-side-tag" id="p1-your-tag" style="display:none">YOUR SIDE</span>
+              <span class="winner-badge" id="p1-winner-tag" style="display:none">🏆 Winner</span>
+              <div class="sp"></div>
+              <span id="p1-count" style="font-size:10px;color:var(--text3)">0/6</span>
+            </div>
+            <div class="panel-body">
+              <div class="mon-grid" id="grid-p1"></div>
+            </div>
+          </div>
+          <div class="panel" id="panel-p2">
+            <div class="panel-hdr p2-hdr">
+              <span class="panel-label p2-label">P2</span>
+              <input class="player-name-in" id="p2name-in" placeholder="Player 2" />
+              <span class="your-side-tag" id="p2-your-tag" style="display:none">YOUR SIDE</span>
+              <span class="winner-badge" id="p2-winner-tag" style="display:none">🏆 Winner</span>
+              <div class="sp"></div>
+              <span id="p2-count" style="font-size:10px;color:var(--text3)">0/6</span>
+            </div>
+            <div class="panel-body">
+              <div class="mon-grid" id="grid-p2"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <!-- Picker modal -->
+  <div id="moverlay">
+    <div id="modal">
+      <div id="m-hdr">
+        <h2>Choose a Pokémon</h2>
+        <button id="m-close">✕</button>
+      </div>
+      <div id="m-search-w">
+        <input id="m-search" placeholder="Search by name…" type="text" />
+      </div>
+      <div id="m-list"></div>
+    </div>
+  </div>
+  <div id="notif"></div>
+  <input accept=".json" id="imp-file" style="display:none" type="file" />
+
+</body>
+
+</html>

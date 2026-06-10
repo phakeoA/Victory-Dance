@@ -76,33 +76,42 @@ except ImportError:
     )
 
 # ── Project imports (siblings in data/scripts/) ──────────────────────────────
-try:
-    from belief_state import BeliefState
-    from state_encoder import StateEncoder
-except ImportError:
-    raise ImportError(
-        f"Could not import belief_state / state_encoder from {_SCRIPTS_DIR}.\n"
-        "Make sure those files exist at data/scripts/."
-    )
-
-# vod_parser is a sibling script in data/scripts/
+# vod_parser is always required
 from vod_parser import parse_replay_for_preview, replay_to_transitions
+
+# belief_state and state_encoder are optional — they may not exist yet
+try:
+    from belief_state import BeliefState as _BeliefState
+except ImportError:
+    _BeliefState = None  # type: ignore
+
+try:
+    from state_encoder import StateEncoder as _StateEncoder
+except ImportError:
+    _StateEncoder = None  # type: ignore
 
 # ── Globals (loaded once at startup) ─────────────────────────────────────────
 _BELIEF_PATH = _PROJECT_ROOT / "data" / "pikalytics_regma.json"
 
-if not _BELIEF_PATH.exists():
+_belief = None
+_encoder = None
+
+if _BeliefState is None:
+    print("[warn] belief_state.py not found — Pikalytics inference unavailable.")
+elif not _BELIEF_PATH.exists():
     print(
         f"[warn] Belief state file not found at {_BELIEF_PATH}.\n"
         "       Pikalytics inference will be unavailable until it exists."
     )
-    _belief  = None
 else:
-    print(f"[startup] Loading belief state from {_BELIEF_PATH} …")
-    _belief  = BeliefState(_BELIEF_PATH)
+    print(f"[startup] Loading belief state from {_BELIEF_PATH} ...")
+    _belief = _BeliefState(_BELIEF_PATH)
     print("[startup] Belief state ready.")
 
-_encoder = StateEncoder()
+if _StateEncoder is not None:
+    _encoder = _StateEncoder()
+else:
+    print("[warn] state_encoder.py not found — encoding will be skipped.")
 
 # ── Flask app ─────────────────────────────────────────────────────────────────
 app = Flask(__name__, static_folder=str(_SCRIPTS_DIR), static_url_path="")
@@ -133,14 +142,22 @@ def serve_data(filename):
     return send_file(target)
 
 
+@app.get("/health")
+def health():
+    """Simple liveness check used by the UI status dot."""
+    return jsonify({
+        "ok": True,
+        "belief_loaded": _belief is not None,
+        "encoder_loaded": _encoder is not None,
+    })
+
+
 @app.post("/parse")
 def parse():
     """
     Accept an uploaded replay HTML + optional partial known_teams entry.
     Return the annotated preview dict so the UI can populate itself.
     """
-    if _belief is None:
-        return jsonify({"error": "Belief state file not found on server."}), 503
 
     # ── HTML file ─────────────────────────────────────────────────────────────
     if "replay_html" not in request.files:
@@ -173,8 +190,6 @@ def export():
     Accept the fully annotated, user-approved battle entry + raw replay HTML.
     Run replay_to_transitions() and return the JSONL as a downloadable file.
     """
-    if _belief is None:
-        return jsonify({"error": "Belief state file not found on server."}), 503
 
     body = request.get_json(silent=True)
     if not body:
