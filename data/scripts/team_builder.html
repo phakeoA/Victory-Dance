@@ -372,6 +372,7 @@ async function loadData() {
       fetch("../pokedex.json"),
       fetch("../moves.json"),
     ]);
+    loadMegaStones(); // non-blocking; fallback map populated async
     if (!pr.ok) throw new Error("../pokedex.json not found (" + pr.status + ")");
     if (!mr.ok) throw new Error("../moves.json not found (" + mr.status + ")");
     dex   = await pr.json();
@@ -652,27 +653,45 @@ function esc(s) {
    MEGA STONE LOOKUP
    |-mega|p1a: Charizard|Charizard-Mega-Y|Charizardite Y
    parts[4] = stone name directly from the log
-═══════════════════════════════════════════════════════════════════ */
-// Fallback map for when stone isn't in the log (shouldn't be needed but safety net)
-const MEGA_STONES = {
-  "venusaur-mega":"Venusaurite","charizard-mega-x":"Charizardite X",
-  "charizard-mega-y":"Charizardite Y","blastoise-mega":"Blastoisinite",
-  "alakazam-mega":"Alakazite","gengar-mega":"Gengarite","kangaskhan-mega":"Kangaskhanite",
-  "pinsir-mega":"Pinsirite","gyarados-mega":"Gyaradosite","aerodactyl-mega":"Aerodactylite",
-  "mewtwo-mega-x":"Mewtwonite X","mewtwo-mega-y":"Mewtwonite Y","ampharos-mega":"Ampharosite",
-  "scizor-mega":"Scizorite","heracross-mega":"Heracronite","houndoom-mega":"Houndoominite",
-  "tyranitar-mega":"Tyranitarite","blaziken-mega":"Blazikenite","gardevoir-mega":"Gardevoirite",
-  "mawile-mega":"Mawilite","aggron-mega":"Aggronite","medicham-mega":"Medichamite",
-  "manectric-mega":"Manectite","banette-mega":"Banettite","absol-mega":"Absolite",
-  "garchomp-mega":"Garchompite","lucario-mega":"Lucarionite","abomasnow-mega":"Abomasite",
-  "beedrill-mega":"Beedrillite","pidgeot-mega":"Pidgeotite","slowbro-mega":"Slowbronite",
-  "steelix-mega":"Steelixite","sceptile-mega":"Sceptilite","swampert-mega":"Swampertite",
-  "sableye-mega":"Sableyite","sharpedo-mega":"Sharpedonite","camerupt-mega":"Cameruptite",
-  "altaria-mega":"Altarianite","glalie-mega":"Glalitite","salamence-mega":"Salamencite",
-  "metagross-mega":"Metagrossite","latias-mega":"Latiasite","latios-mega":"Latiosite",
-  "lopunny-mega":"Lopunnite","gallade-mega":"Galladite","audino-mega":"Audinite",
-  "diancie-mega":"Diancite","rayquaza-mega":"","floette-eternal":"",
-};
+═══════════════════════════════════════════════════════════════ */
+// Fallback map built at load time from data/serebii_champions_items.json.
+// Keys are normalised mega-species keys (e.g. "floette-mega"), values are
+// the stone name as it appears in Showdown logs (e.g. "Floettite").
+let MEGA_STONES = {};
+
+// Derive the species lookup key from a stone name.
+//   "Floettite"      -> "floette-mega"
+//   "Charizardite X" -> "charizard-mega-x"
+//   "Mewtwonite Y"   -> "mewtwo-mega-y"
+// Returns "" for items that are not mega stones.
+function stoneToSpeciesKey(stone) {
+  // Match "<base>ite" or "<base>nite" with optional " X"/" Y" suffix
+  const m = stone.match(/^(.+?)n?ite(?: ([XY]))?$/i);
+  if (!m) return "";
+  const base    = m[1].toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  const variant = m[2] ? "-" + m[2].toLowerCase() : "";
+  return base + "-mega" + variant;
+}
+
+async function loadMegaStones() {
+  try {
+    const res  = await fetch("data/serebii_champions_items.json");
+    const data = await res.json();
+    const nameRe = /\[([^\]]+)\]\([^)]+\)/;
+    for (const item of (data.items || [])) {
+      const stone = (item.name || "").replace(nameRe, "$1").trim();
+      if (!stone) continue;
+      const key = stoneToSpeciesKey(stone);
+      if (key) MEGA_STONES[key] = stone;
+    }
+    // Rayquaza mega-evolves via Dragon Ascent — no held stone
+    MEGA_STONES["rayquaza-mega"] = "";
+    // Floette-Eternal uses a non-standard item name in some log formats
+    MEGA_STONES["floette-eternal"] = "Eternal Flower";
+  } catch (e) {
+    console.warn("Could not load serebii_champions_items.json — mega stone fallback unavailable:", e);
+  }
+}
 
 function getMegaStone(megaSpeciesKey, stoneFromLog) {
   if (stoneFromLog && stoneFromLog.trim()) return stoneFromLog.trim();
@@ -925,26 +944,34 @@ function parseReplayHTML(html) {
       }
     }
     // |-mega| — definitively reveals held mega stone
-    // Format: |-mega|p1a: Charizard|Charizard-Mega-Y|Charizardite Y
+    // Standard format: |-mega|p1a: Charizard|Charizard-Mega-Y|Charizardite Y  (5 fields)
+    // Compact format:  |-mega|p1b: Floette|Floette|Floettite                   (4 fields, stone in parts[4])
     else if (tag === "-mega") {
       const slotKey = parts[2]?.split(":")[0];
       if (!slotKey) continue;
       const side = sideOf(slotKey);
-      const preMegaSpecies = normSpecies(parts[3]||"");   // base form from log nick
-      const megaSpeciesRaw = normSpecies(parts[4]||"");   // e.g. "Charizard-Mega-Y"
-      const stoneFromLog   = parts[5]?.trim() || "";      // e.g. "Charizardite Y" (may be absent)
+      const preMegaSpecies = normSpecies(parts[3]||"");
+
+      // If parts[5] is present, this is the 5-field standard format with an explicit mega name.
+      // Otherwise it's the 4-field compact format: parts[4] is the stone, mega name comes from active slot.
+      const hasMegaName = !!(parts[5]?.trim());
+      const megaSpeciesRaw = hasMegaName ? normSpecies(parts[4]||"") : (active[slotKey] || preMegaSpecies);
+      const stoneFromLog   = hasMegaName ? (parts[5]?.trim()||"") : (parts[4]?.trim()||"");
 
       const megaKey = megaSpeciesRaw.toLowerCase().replace(/[^a-z0-9-]/g,"");
       const stone = getMegaStone(megaKey, stoneFromLog);
 
-      // The pre-mega entry is the source of truth (it already has moves/ability from earlier)
-      // Rename it to the mega form and set its item
-      const preEntry = result.roster[side][preMegaSpecies];
+      // Find the pre-mega entry: try base name first, then active slot name (detailschange
+      // may have already renamed it to the mega form before this line fires).
+      const activeSpecies = active[slotKey];
+      const preEntry = result.roster[side][preMegaSpecies]
+                    || (activeSpecies && result.roster[side][activeSpecies]);
       if (preEntry) {
         preEntry.species = megaSpeciesRaw;
         if (stone) { preEntry.item = stone; preEntry._megaItem = true; }
         result.roster[side][megaSpeciesRaw] = preEntry;
         if (preMegaSpecies !== megaSpeciesRaw) delete result.roster[side][preMegaSpecies];
+        if (activeSpecies && activeSpecies !== megaSpeciesRaw) delete result.roster[side][activeSpecies];
         active[slotKey] = megaSpeciesRaw;
       } else {
         // Didn't see the base form yet — create entry for mega form
