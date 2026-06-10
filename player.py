@@ -417,12 +417,21 @@ class VGCPlayer(Player):
 
     def choose_move(self, battle: DoubleBattle):
         """
-        Called by poke-env every turn. For DoubleBattle we encode state,
-        select two actions, record the transition, and return a doubles order.
+        Called by poke-env every turn. Handles three distinct request types:
+
+        1. forceSwitch  — one or both active slots fainted; must send in bench mons.
+                          Slots that did NOT faint get PassBattleOrder.
+        2. Normal turn  — encode state, pick actions, record to replay buffer.
+        3. Non-doubles  — shouldn't happen, but falls back to random just in case.
         """
         if not isinstance(battle, DoubleBattle):
             return self.choose_random_move(battle)
 
+        # ── forceSwitch: ignore the model, just send in bench replacements ────
+        if any(battle.force_switch):
+            return self._handle_force_switch(battle)
+
+        # ── Normal turn ───────────────────────────────────────────────────────
         state_vec = self._encoder.encode(battle)
         action_s0, action_s1, source = self._select_actions(battle, state_vec)
 
@@ -443,6 +452,60 @@ class VGCPlayer(Player):
 
         order_s0 = self._safe_order(action_s0, battle, slot=0)
         order_s1 = self._safe_order(action_s1, battle, slot=1)
+
+        return DoubleBattleOrder(order_s0, order_s1)
+
+    def _handle_force_switch(self, battle: DoubleBattle) -> DoubleBattleOrder:
+        """
+        Handle a forceSwitch request.
+
+        For each slot:
+          - force_switch[i] == True  → that slot fainted; pick a bench replacement.
+          - force_switch[i] == False → that slot is still alive; send PassBattleOrder.
+
+        bench candidates are drawn from battle.available_switches, which is a
+        List[List[Pokemon]] — one list per slot — already filtered by poke-env to
+        exclude fainted mons and mons already on the field.
+        """
+        force = battle.force_switch          # List[bool], length 2
+        switches = battle.available_switches  # List[List[Pokemon]], length 2
+
+        orders: list = []
+        used_switches: set = set()
+
+        for slot in range(2):
+            if slot >= len(force):
+                orders.append(PassBattleOrder())
+                continue
+
+            if not force[slot]:
+                # Slot still alive — no action needed
+                orders.append(PassBattleOrder())
+            else:
+                # Pick a bench mon not already chosen this turn
+                candidates = [
+                    p for p in (switches[slot] if slot < len(switches) else [])
+                    if id(p) not in used_switches
+                ]
+                if candidates:
+                    chosen = random.choice(candidates)
+                    used_switches.add(id(chosen))
+                    orders.append(Player.create_order(chosen))
+                else:
+                    # No candidates (shouldn't happen mid-battle) — pass and hope
+                    log.warning(
+                        "forceSwitch slot %d: no available switches found — sending Pass.", slot
+                    )
+                    orders.append(PassBattleOrder())
+
+        order_s0 = orders[0] if len(orders) > 0 else PassBattleOrder()
+        order_s1 = orders[1] if len(orders) > 1 else PassBattleOrder()
+
+        log.debug(
+            "forceSwitch [%s] force=%s → %s / %s",
+            battle.battle_tag, force,
+            order_s0.message, order_s1.message,
+        )
 
         return DoubleBattleOrder(order_s0, order_s1)
 
@@ -537,13 +600,21 @@ class VGCPlayer(Player):
             )
 
     def _safe_order(self, action: int, battle: DoubleBattle, slot: int):
-        """Convert action int → poke-env SingleBattleOrder, falling back to random if needed."""
+        """
+        Convert action int → poke-env SingleBattleOrder, falling back to random,
+        then to PassBattleOrder if the slot truly has nothing to do.
+        DoubleBattleOrder never accepts None — Pass is the correct no-op.
+        """
         order = _action_to_poke_env(action, battle, slot)
         if order is not None:
             return order
         log.debug("_safe_order: action %d slot %d produced None — last-resort random.", action, slot)
         fallback_action = _random_legal_action(battle, slot)
-        return _action_to_poke_env(fallback_action, battle, slot)
+        order = _action_to_poke_env(fallback_action, battle, slot)
+        if order is not None:
+            return order
+        log.debug("_safe_order: slot %d has no legal actions — sending Pass.", slot)
+        return PassBattleOrder()
 
     # ── Battle result hook ────────────────────────────────────────────────────
 
