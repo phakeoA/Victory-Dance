@@ -264,7 +264,7 @@ async def run(n_battles: int, manage_server: bool, spectate: bool = True) -> Non
         await player2.ps_client.stop_listening()
         player1.close()
         player2.close()
-        stop_showdown(server_proc)
+        #stop_showdown(server_proc)
  
     # ── Results ───────────────────────────────────────────────────────────────
     total   = player1.n_finished_battles

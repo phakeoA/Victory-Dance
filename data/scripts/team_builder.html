@@ -1,0 +1,736 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Victory-Dance Team Builder</title>
+<style>
+  :root {
+    --bg: #0d0f14;
+    --surface: #161920;
+    --surface2: #1e222c;
+    --surface3: #252a36;
+    --border: rgba(255,255,255,0.08);
+    --border2: rgba(255,255,255,0.14);
+    --text: #e8eaf0;
+    --text2: #8b90a0;
+    --text3: #555b6e;
+    --accent: #6c63ff;
+    --accent2: #4e46e5;
+    --accent-glow: rgba(108,99,255,0.18);
+    --red: #e05252;
+    --green: #3ecf8e;
+    --amber: #f4a83a;
+    --type-normal:#a0a29f;--type-fire:#f97b3b;--type-water:#4f9fdf;
+    --type-grass:#5db85f;--type-electric:#f4d44c;--type-ice:#6bcfcf;
+    --type-fighting:#cc4c4c;--type-poison:#9d5cb5;--type-ground:#c4a85a;
+    --type-flying:#8ea5d4;--type-psychic:#e55a8a;--type-bug:#a1b336;
+    --type-rock:#b0975a;--type-ghost:#5a5a9e;--type-dragon:#6e54c4;
+    --type-dark:#5a4a3e;--type-steel:#a8b8c4;--type-fairy:#e08ec4;
+    --type-shadow:#333;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; font-size: 14px; min-height: 100vh; }
+
+  /* ── Layout ── */
+  .app { display: grid; grid-template-columns: 260px 1fr; grid-template-rows: 56px 1fr; height: 100vh; overflow: hidden; }
+  .topbar { grid-column: 1/-1; background: var(--surface); border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; padding: 0 20px; }
+  .topbar .logo { font-size: 16px; font-weight: 700; letter-spacing: -0.3px; color: var(--text); }
+  .topbar .logo span { color: var(--accent); }
+  .topbar-actions { margin-left: auto; display: flex; gap: 8px; }
+  .sidebar { background: var(--surface); border-right: 1px solid var(--border); overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 6px; }
+  .main { overflow-y: auto; padding: 20px; }
+
+  /* ── Buttons ── */
+  .btn { display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; border-radius: 7px; border: 1px solid var(--border2); background: var(--surface2); color: var(--text); font-size: 13px; cursor: pointer; transition: background 0.15s, border-color 0.15s; white-space: nowrap; }
+  .btn:hover { background: var(--surface3); border-color: rgba(255,255,255,0.22); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn.primary:hover { background: var(--accent2); }
+  .btn.danger { border-color: rgba(224,82,82,0.4); color: var(--red); }
+  .btn.danger:hover { background: rgba(224,82,82,0.12); }
+  .btn.sm { padding: 4px 10px; font-size: 12px; }
+  .btn.icon-only { padding: 6px 8px; }
+  .btn svg { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
+
+  /* ── Sidebar team slots ── */
+  .slot-btn { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 8px; border: 1px solid transparent; background: transparent; color: var(--text2); cursor: pointer; width: 100%; text-align: left; transition: all 0.12s; position: relative; }
+  .slot-btn:hover { background: var(--surface2); color: var(--text); }
+  .slot-btn.active { background: var(--accent-glow); border-color: var(--accent); color: var(--text); }
+  .slot-num { font-size: 11px; color: var(--text3); width: 16px; text-align: center; flex-shrink: 0; }
+  .slot-sprite { width: 40px; height: 40px; image-rendering: pixelated; flex-shrink: 0; }
+  .slot-sprite.empty { width: 40px; height: 40px; border-radius: 50%; background: var(--surface3); border: 1px dashed var(--border2); flex-shrink: 0; }
+  .slot-info { flex: 1; min-width: 0; }
+  .slot-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .slot-sub { font-size: 11px; color: var(--text3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .slot-types { display: flex; gap: 3px; margin-top: 2px; }
+  .type-pip { font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 3px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .sidebar-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: var(--text3); padding: 8px 10px 4px; }
+  .sidebar-divider { height: 1px; background: var(--border); margin: 4px 0; }
+
+  /* ── Main editor ── */
+  .editor-header { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; flex-wrap: wrap; }
+  .editor-title { font-size: 20px; font-weight: 700; flex: 1; }
+  .section-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: var(--text3); margin-bottom: 6px; }
+
+  /* ── Mon card grid ── */
+  .mon-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+  .mon-card-header { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 18px; }
+  .mon-sprite-lg { width: 80px; height: 80px; image-rendering: pixelated; flex-shrink: 0; }
+  .mon-sprite-lg.empty { width: 80px; height: 80px; border-radius: 12px; background: var(--surface2); border: 1px dashed var(--border2); display: flex; align-items: center; justify-content: center; color: var(--text3); font-size: 28px; }
+  .mon-identity { flex: 1; }
+  .mon-name-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .mon-name-input { font-size: 18px; font-weight: 700; background: transparent; border: none; color: var(--text); outline: none; flex: 1; min-width: 0; }
+  .mon-name-input::placeholder { color: var(--text3); }
+
+  /* Autocomplete */
+  .autocomplete-wrap { position: relative; flex: 1; }
+  .autocomplete-list { position: absolute; top: 100%; left: 0; right: 0; background: var(--surface3); border: 1px solid var(--border2); border-radius: 8px; z-index: 100; max-height: 180px; overflow-y: auto; margin-top: 2px; }
+  .ac-item { padding: 7px 12px; cursor: pointer; font-size: 13px; display: flex; align-items: center; gap: 8px; }
+  .ac-item:hover, .ac-item.focused { background: var(--accent-glow); }
+  .ac-sprite { width: 28px; height: 28px; image-rendering: pixelated; }
+
+  /* Form fields */
+  .fields-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-bottom: 14px; }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; color: var(--text3); }
+  .field input, .field select { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 7px 10px; font-size: 13px; outline: none; transition: border-color 0.15s; width: 100%; }
+  .field input:focus, .field select:focus { border-color: var(--accent); }
+  .field select option { background: var(--surface3); }
+
+  /* EVs */
+  .evs-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
+  .ev-field { display: flex; flex-direction: column; align-items: center; gap: 3px; }
+  .ev-label { font-size: 10px; font-weight: 700; color: var(--text3); text-transform: uppercase; }
+  .ev-input { width: 100%; text-align: center; background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 6px 4px; font-size: 13px; outline: none; }
+  .ev-input:focus { border-color: var(--accent); }
+  .ev-total { font-size: 11px; text-align: right; margin-top: 4px; }
+  .ev-total.over { color: var(--red); }
+  .ev-total.ok { color: var(--text3); }
+
+  /* Moves */
+  .moves-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .move-field { display: flex; flex-direction: column; gap: 3px; }
+  .move-label { font-size: 10px; font-weight: 700; color: var(--text3); text-transform: uppercase; letter-spacing: 0.8px; }
+  .move-input { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 7px 10px; font-size: 13px; outline: none; }
+  .move-input:focus { border-color: var(--accent); }
+
+  /* Type badges */
+  .type-badge { font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.5px; display: inline-block; }
+
+  /* Empty state */
+  .empty-state { text-align: center; padding: 60px 20px; color: var(--text3); }
+  .empty-state .big { font-size: 48px; margin-bottom: 12px; }
+  .empty-state h2 { font-size: 18px; color: var(--text2); margin-bottom: 8px; }
+
+  /* Tabs */
+  .tabs { display: flex; gap: 2px; background: var(--surface2); padding: 3px; border-radius: 8px; margin-bottom: 16px; }
+  .tab { flex: 1; padding: 6px 10px; border-radius: 6px; border: none; background: transparent; color: var(--text3); font-size: 13px; cursor: pointer; transition: all 0.12s; text-align: center; }
+  .tab.active { background: var(--surface3); color: var(--text); }
+
+  /* Import/Export modal */
+  .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 200; display: flex; align-items: center; justify-content: center; }
+  .modal { background: var(--surface); border: 1px solid var(--border2); border-radius: 14px; padding: 24px; width: 560px; max-width: 95vw; max-height: 85vh; overflow-y: auto; }
+  .modal h2 { font-size: 16px; font-weight: 700; margin-bottom: 16px; }
+  .modal textarea { width: 100%; height: 280px; background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 12px; font-family: 'Courier New', monospace; font-size: 12px; resize: vertical; outline: none; }
+  .modal textarea:focus { border-color: var(--accent); }
+  .modal-actions { display: flex; gap: 8px; margin-top: 12px; justify-content: flex-end; }
+  .modal-tabs { display: flex; gap: 2px; background: var(--surface2); padding: 3px; border-radius: 8px; margin-bottom: 14px; width: fit-content; }
+  .modal-tab { padding: 5px 14px; border-radius: 6px; border: none; background: transparent; color: var(--text3); font-size: 13px; cursor: pointer; }
+  .modal-tab.active { background: var(--surface3); color: var(--text); }
+  .msg { font-size: 12px; padding: 8px 12px; border-radius: 6px; margin-bottom: 10px; }
+  .msg.error { background: rgba(224,82,82,0.12); color: var(--red); border: 1px solid rgba(224,82,82,0.3); }
+  .msg.success { background: rgba(62,207,142,0.1); color: var(--green); border: 1px solid rgba(62,207,142,0.25); }
+
+  /* Stat bar */
+  .stat-row { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+  .stat-name { width: 34px; font-size: 11px; font-weight: 700; color: var(--text3); text-transform: uppercase; }
+  .stat-bar-wrap { flex: 1; height: 6px; background: var(--surface3); border-radius: 3px; overflow: hidden; }
+  .stat-bar { height: 100%; border-radius: 3px; transition: width 0.3s; }
+  .stat-val { width: 32px; font-size: 12px; text-align: right; color: var(--text2); }
+
+  /* Nature effect indicators */
+  .nature-up { color: #f87171; font-size: 10px; }
+  .nature-dn { color: #60a5fa; font-size: 10px; }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 5px; height: 5px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--surface3); border-radius: 10px; }
+
+  @media (max-width: 700px) {
+    .app { grid-template-columns: 1fr; grid-template-rows: 56px auto 1fr; }
+    .sidebar { max-height: 160px; overflow-x: auto; flex-direction: row; border-right: none; border-bottom: 1px solid var(--border); padding: 8px; }
+    .slot-info, .slot-types { display: none; }
+    .fields-grid { grid-template-columns: 1fr 1fr; }
+    .evs-grid { grid-template-columns: repeat(3,1fr); }
+  }
+</style>
+</head>
+<body>
+
+<div class="app">
+  <!-- Topbar -->
+  <div class="topbar">
+    <div class="logo">Victory<span>-Dance</span> Team Builder</div>
+    <div class="topbar-actions">
+      <button class="btn sm" onclick="openModal('import')">
+        <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Import
+      </button>
+      <button class="btn sm primary" onclick="openModal('export')">
+        <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        Export
+      </button>
+    </div>
+  </div>
+
+  <!-- Sidebar -->
+  <div class="sidebar" id="sidebar">
+    <div class="sidebar-label">Team (6)</div>
+    <!-- slots rendered by JS -->
+  </div>
+
+  <!-- Main -->
+  <div class="main" id="main">
+    <div class="empty-state" id="empty-state">
+      <div class="big">⚔️</div>
+      <h2>No Pokémon selected</h2>
+      <p>Pick a slot from the sidebar to edit it, or import a team.</p>
+    </div>
+    <div id="editor" style="display:none"></div>
+  </div>
+</div>
+
+<!-- Modal -->
+<div class="modal-backdrop" id="modal" style="display:none" onclick="if(event.target===this)closeModal()">
+  <div class="modal">
+    <h2 id="modal-title">Import / Export</h2>
+    <div class="modal-tabs">
+      <button class="modal-tab active" id="tab-showdown" onclick="setModalTab('showdown')">Showdown paste</button>
+      <button class="modal-tab" id="tab-json" onclick="setModalTab('json')">JSON</button>
+    </div>
+    <div id="modal-msg"></div>
+    <textarea id="modal-ta" placeholder="Paste your team here..."></textarea>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn primary" id="modal-confirm-btn" onclick="modalConfirm()">Import</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── Constants ──────────────────────────────────────────────────────────────────
+const NATURES = ["Adamant","Bashful","Bold","Brave","Calm","Careful","Docile",
+  "Gentle","Hardy","Hasty","Impish","Jolly","Lax","Lonely","Mild","Modest",
+  "Naive","Naughty","Quiet","Quirky","Rash","Relaxed","Sassy","Serious","Timid"];
+
+const NATURE_EFFECTS = {
+  Adamant:{up:"atk",dn:"spa"},Modest:{up:"spa",dn:"atk"},
+  Jolly:{up:"spe",dn:"spa"},Timid:{up:"spe",dn:"atk"},
+  Brave:{up:"atk",dn:"spe"},Quiet:{up:"spa",dn:"spe"},
+  Impish:{up:"def",dn:"spa"},Bold:{up:"def",dn:"atk"},
+  Careful:{up:"spd",dn:"spa"},Calm:{up:"spd",dn:"atk"},
+  Sassy:{up:"spd",dn:"spe"},Relaxed:{up:"def",dn:"spe"},
+  Gentle:{up:"spd",dn:"def"},Hasty:{up:"spe",dn:"def"},
+  Naive:{up:"spe",dn:"spd"},Lax:{up:"def",dn:"spd"},
+  Rash:{up:"spa",dn:"spd"},Naughty:{up:"atk",dn:"spd"},
+  Lonely:{up:"atk",dn:"def"},Mild:{up:"spa",dn:"def"},
+};
+
+const STAT_LABELS = ["HP","Atk","Def","SpA","SpD","Spe"];
+const STAT_KEYS   = ["hp","atk","def","spa","spd","spe"];
+const STAT_COLORS = ["#3ecf8e","#f97b3b","#f4a83a","#6c63ff","#4f9fdf","#e05252"];
+
+const TYPE_COLORS = {
+  Normal:"#a0a29f",Fire:"#f97b3b",Water:"#4f9fdf",Grass:"#5db85f",
+  Electric:"#f4d44c",Ice:"#6bcfcf",Fighting:"#cc4c4c",Poison:"#9d5cb5",
+  Ground:"#c4a85a",Flying:"#8ea5d4",Psychic:"#e55a8a",Bug:"#a1b336",
+  Rock:"#b0975a",Ghost:"#5a5a9e",Dragon:"#6e54c4",Dark:"#5a4a3e",
+  Steel:"#a8b8c4",Fairy:"#e08ec4",Shadow:"#333",
+};
+
+const EMPTY_MON = () => ({
+  species:"",item:"",ability:"",nature:"Hardy",
+  evs:[0,0,0,0,0,0],ivs:[31,31,31,31,31,31],
+  moves:["","","",""]
+});
+
+// ── State ──────────────────────────────────────────────────────────────────────
+let team = Array.from({length:6}, EMPTY_MON);
+let active = 0;
+let pokedex = {};
+let modalMode = "import";
+let modalTab = "showdown";
+
+// ── Pokedex loader ─────────────────────────────────────────────────────────────
+async function loadPokedex() {
+  try {
+    const r = await fetch("../data/pokedex.json");
+    if (!r.ok) throw new Error();
+    pokedex = await r.json();
+  } catch {
+    // Fallback: minimal data for demo
+    pokedex = {};
+    console.warn("pokedex.json not found at ../data/pokedex.json — autocomplete limited.");
+  }
+}
+
+function getMonData(species) {
+  if (!species) return null;
+  const key = species.toLowerCase().replace(/[^a-z0-9]/g,"");
+  return pokedex[key] || pokedex[species.toLowerCase()] || null;
+}
+
+function getSpriteUrl(species) {
+  if (!species) return "";
+  const key = species.toLowerCase().replace(/[- ]/g,"").replace(/'/g,"");
+  return `https://play.pokemonshowdown.com/sprites/gen5/${key}.png`;
+}
+
+function getTypes(species) {
+  const d = getMonData(species);
+  if (!d) return [];
+  return d.types || [];
+}
+
+function getBaseStats(species) {
+  const d = getMonData(species);
+  return d ? (d.baseStats || d.base_stats || {}) : {};
+}
+
+// ── Stat calc ──────────────────────────────────────────────────────────────────
+function calcStat(base, ev, iv, nature, statKey) {
+  const level = 50;
+  if (!base) return 0;
+  if (statKey === "hp") return Math.floor((2*base + iv + Math.floor(ev/4)) * level/100) + level + 10;
+  let raw = Math.floor((2*base + iv + Math.floor(ev/4)) * level/100) + 5;
+  const mon = team[active];
+  const eff = NATURE_EFFECTS[mon.nature];
+  if (eff && eff.up === statKey) raw = Math.floor(raw * 1.1);
+  if (eff && eff.dn === statKey) raw = Math.floor(raw * 0.9);
+  return raw;
+}
+
+// ── Sidebar ────────────────────────────────────────────────────────────────────
+function renderSidebar() {
+  const sb = document.getElementById("sidebar");
+  sb.innerHTML = '<div class="sidebar-label">Team (6)</div>';
+  team.forEach((mon, i) => {
+    const types = getTypes(mon.species);
+    const typePips = types.map(t => {
+      const c = TYPE_COLORS[t] || "#888";
+      return `<span class="type-pip" style="background:${c}22;color:${c}">${t}</span>`;
+    }).join("");
+    const spriteEl = mon.species
+      ? `<img class="slot-sprite" src="${getSpriteUrl(mon.species)}" onerror="this.style.display='none'" alt="">`
+      : `<div class="slot-sprite empty"></div>`;
+    sb.innerHTML += `
+      <button class="slot-btn ${i===active?"active":""}" onclick="selectSlot(${i})">
+        <span class="slot-num">${i+1}</span>
+        ${spriteEl}
+        <div class="slot-info">
+          <div class="slot-name">${mon.species || "<empty>"}</div>
+          <div class="slot-sub">${mon.item || "No item"}</div>
+          <div class="slot-types">${typePips}</div>
+        </div>
+      </button>`;
+  });
+}
+
+function selectSlot(i) {
+  active = i;
+  renderSidebar();
+  renderEditor();
+}
+
+// ── Editor ─────────────────────────────────────────────────────────────────────
+function renderEditor() {
+  const mon = team[active];
+  const types = getTypes(mon.species);
+  const bs = getBaseStats(mon.species);
+  document.getElementById("empty-state").style.display = "none";
+  document.getElementById("editor").style.display = "block";
+
+  const totalEV = mon.evs.reduce((a,b)=>a+b,0);
+  const evOver = totalEV > 508;
+
+  const typeHtml = types.map(t => {
+    const c = TYPE_COLORS[t] || "#888";
+    return `<span class="type-badge" style="background:${c}22;color:${c}">${t}</span>`;
+  }).join(" ");
+
+  const statsHtml = STAT_KEYS.map((k,i) => {
+    const base = bs[k] || 0;
+    const actual = calcStat(base, mon.evs[i], mon.ivs[i], mon.nature, k);
+    const pct = Math.min(100, Math.round(base / 255 * 100));
+    const eff = NATURE_EFFECTS[mon.nature];
+    const upMark  = eff && eff.up===k ? '<span class="nature-up">▲</span>' : "";
+    const dnMark  = eff && eff.dn===k ? '<span class="nature-dn">▼</span>' : "";
+    return `<div class="stat-row">
+      <div class="stat-name">${STAT_LABELS[i]}</div>
+      <div class="stat-bar-wrap"><div class="stat-bar" style="width:${pct}%;background:${STAT_COLORS[i]}"></div></div>
+      <div class="stat-val">${base}</div>
+      <div style="width:38px;font-size:12px;color:var(--text)">${actual}${upMark}${dnMark}</div>
+    </div>`;
+  }).join("");
+
+  const evsHtml = STAT_KEYS.map((k,i) => `
+    <div class="ev-field">
+      <div class="ev-label">${STAT_LABELS[i]}</div>
+      <input class="ev-input" type="number" min="0" max="252" value="${mon.evs[i]}"
+        oninput="updateEV(${i},this.value)">
+    </div>`).join("");
+
+  const movesHtml = [0,1,2,3].map(mi => `
+    <div class="move-field">
+      <div class="move-label">Move ${mi+1}</div>
+      <input class="move-input" type="text" value="${mon.moves[mi]||""}"
+        placeholder="Move ${mi+1}"
+        oninput="updateField('moves',${mi},this.value)">
+    </div>`).join("");
+
+  const natureOpts = NATURES.map(n => `<option ${n===mon.nature?"selected":""}>${n}</option>`).join("");
+
+  document.getElementById("editor").innerHTML = `
+    <div class="mon-card">
+      <div class="mon-card-header">
+        <img class="mon-sprite-lg" id="main-sprite"
+          src="${mon.species ? getSpriteUrl(mon.species) : ""}"
+          onerror="this.src=''" style="${mon.species?'':'display:none'}" alt="">
+        <div class="mon-sprite-lg empty" id="main-sprite-empty" style="${mon.species?'display:none':'display:flex'}">+</div>
+        <div class="mon-identity">
+          <div class="mon-name-row">
+            <div class="autocomplete-wrap" style="flex:1">
+              <input class="mon-name-input" id="species-input" type="text"
+                placeholder="Pokémon name…" value="${mon.species}"
+                oninput="onSpeciesInput(this.value)" autocomplete="off">
+              <div class="autocomplete-list" id="ac-list" style="display:none"></div>
+            </div>
+          </div>
+          <div style="margin-bottom:6px">${typeHtml || '<span style="color:var(--text3);font-size:12px">Type appears after selecting a Pokémon</span>'}</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <div class="field" style="flex:1;min-width:120px">
+              <label>Item</label>
+              <input type="text" value="${mon.item}" placeholder="Held item"
+                oninput="updateSimple('item',this.value)">
+            </div>
+            <div class="field" style="flex:1;min-width:120px">
+              <label>Ability</label>
+              <input type="text" value="${mon.ability}" placeholder="Ability"
+                oninput="updateSimple('ability',this.value)">
+            </div>
+            <div class="field" style="min-width:100px">
+              <label>Nature</label>
+              <select onchange="updateSimple('nature',this.value)">${natureOpts}</select>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:16px">
+        <div>
+          <div class="section-label">EVs <span style="font-weight:400;text-transform:none;letter-spacing:0" class="${evOver?'nature-up':''}">(${totalEV}/508)</span></div>
+          <div class="evs-grid">${evsHtml}</div>
+        </div>
+        <div>
+          <div class="section-label">Base stats → actual (lv50)</div>
+          ${statsHtml}
+        </div>
+      </div>
+
+      <div>
+        <div class="section-label">Moves</div>
+        <div class="moves-grid">${movesHtml}</div>
+      </div>
+    </div>`;
+}
+
+// ── Field update helpers ───────────────────────────────────────────────────────
+function updateSimple(key, val) {
+  team[active][key] = val;
+  renderSidebar();
+  const bs = getBaseStats(team[active].species);
+  if (key === "nature" && Object.keys(bs).length) {
+    renderEditor();
+  }
+}
+
+function updateEV(idx, val) {
+  team[active].evs[idx] = Math.max(0, Math.min(252, parseInt(val)||0));
+  const totalEV = team[active].evs.reduce((a,b)=>a+b,0);
+  const bs = getBaseStats(team[active].species);
+  if (Object.keys(bs).length) renderEditor();
+  else {
+    const totalSpan = document.querySelector('.ev-total');
+    if (totalSpan) { totalSpan.textContent = `${totalEV}/508`; totalSpan.className = `ev-total ${totalEV>508?'over':'ok'}`; }
+  }
+}
+
+function updateField(key, idx, val) {
+  team[active][key][idx] = val;
+}
+
+// ── Species autocomplete ───────────────────────────────────────────────────────
+let acSelected = -1;
+function onSpeciesInput(val) {
+  team[active].species = val;
+  showAC(val);
+  updateSpriteFromInput(val);
+  renderSidebar();
+}
+
+function updateSpriteFromInput(species) {
+  const img = document.getElementById("main-sprite");
+  const empty = document.getElementById("main-sprite-empty");
+  if (!img || !empty) return;
+  if (species) {
+    img.src = getSpriteUrl(species);
+    img.style.display = "";
+    empty.style.display = "none";
+  } else {
+    img.style.display = "none";
+    empty.style.display = "flex";
+  }
+}
+
+function showAC(val) {
+  const list = document.getElementById("ac-list");
+  if (!val || val.length < 2) { list.style.display="none"; return; }
+  const q = val.toLowerCase();
+  const keys = Object.keys(pokedex).filter(k => k.startsWith(q) || pokedex[k].name?.toLowerCase().startsWith(q)).slice(0,8);
+  if (!keys.length) { list.style.display="none"; return; }
+  acSelected = -1;
+  list.innerHTML = keys.map((k,i) => {
+    const d = pokedex[k];
+    const name = d.name || k;
+    const types = (d.types||[]).map(t=>{
+      const c=TYPE_COLORS[t]||"#888";
+      return `<span class="type-pip" style="background:${c}22;color:${c}">${t}</span>`;
+    }).join("");
+    return `<div class="ac-item" onclick="selectSpecies('${name}')" data-idx="${i}">
+      <img class="ac-sprite" src="${getSpriteUrl(name)}" onerror="this.src=''" alt="">
+      <span style="flex:1">${name}</span>
+      <span style="display:flex;gap:3px">${types}</span>
+    </div>`;
+  }).join("");
+  list.style.display = "block";
+
+  // keyboard nav
+  const inp = document.getElementById("species-input");
+  inp.onkeydown = e => {
+    const items = list.querySelectorAll(".ac-item");
+    if (e.key === "ArrowDown") { acSelected = Math.min(acSelected+1, items.length-1); items.forEach((el,i)=>el.classList.toggle("focused",i===acSelected)); e.preventDefault(); }
+    else if (e.key === "ArrowUp") { acSelected = Math.max(acSelected-1,-1); items.forEach((el,i)=>el.classList.toggle("focused",i===acSelected)); e.preventDefault(); }
+    else if (e.key === "Enter" && acSelected >= 0) { const name = items[acSelected].querySelector("span").textContent; selectSpecies(name); e.preventDefault(); }
+    else if (e.key === "Escape") list.style.display="none";
+  };
+}
+
+function selectSpecies(name) {
+  team[active].species = name;
+  const d = getMonData(name);
+  if (d) {
+    if (!team[active].ability && d.abilities) {
+      team[active].ability = Object.values(d.abilities)[0] || "";
+    }
+  }
+  document.getElementById("ac-list").style.display = "none";
+  renderSidebar();
+  renderEditor();
+}
+
+document.addEventListener("click", e => {
+  if (!e.target.closest(".autocomplete-wrap")) {
+    const l = document.getElementById("ac-list");
+    if (l) l.style.display = "none";
+  }
+});
+
+// ── Import / Export modal ──────────────────────────────────────────────────────
+function openModal(mode) {
+  modalMode = mode;
+  const modal = document.getElementById("modal");
+  document.getElementById("modal-title").textContent = mode === "import" ? "Import team" : "Export team";
+  document.getElementById("modal-confirm-btn").textContent = mode === "import" ? "Import" : "Copy";
+  document.getElementById("modal-msg").innerHTML = "";
+  const ta = document.getElementById("modal-ta");
+  if (mode === "export") {
+    ta.value = modalTab === "json" ? exportJSON() : exportShowdown();
+    ta.readOnly = true;
+  } else {
+    ta.value = "";
+    ta.readOnly = false;
+  }
+  modal.style.display = "flex";
+  if (mode === "export") ta.select();
+}
+
+function closeModal() { document.getElementById("modal").style.display="none"; }
+
+function setModalTab(tab) {
+  modalTab = tab;
+  document.getElementById("tab-showdown").classList.toggle("active", tab==="showdown");
+  document.getElementById("tab-json").classList.toggle("active", tab==="json");
+  const ta = document.getElementById("modal-ta");
+  if (modalMode === "export") {
+    ta.value = tab === "json" ? exportJSON() : exportShowdown();
+  } else {
+    ta.placeholder = tab === "json" ? '{"team":[...]}' : "Kingambit @ Chople Berry\nAbility: Defiant\n...";
+  }
+}
+
+function modalConfirm() {
+  const ta = document.getElementById("modal-ta");
+  if (modalMode === "export") {
+    navigator.clipboard.writeText(ta.value).then(() => {
+      showModalMsg("Copied to clipboard!", "success");
+    }).catch(() => { ta.select(); document.execCommand("copy"); showModalMsg("Copied!", "success"); });
+    return;
+  }
+  const text = ta.value.trim();
+  if (!text) return;
+  try {
+    if (modalTab === "json") importJSON(text);
+    else importShowdown(text);
+    closeModal();
+    renderSidebar();
+    renderEditor();
+  } catch(e) {
+    showModalMsg("Parse error: " + e.message, "error");
+  }
+}
+
+function showModalMsg(msg, type) {
+  document.getElementById("modal-msg").innerHTML = `<div class="msg ${type}">${msg}</div>`;
+  if (type === "success") setTimeout(() => document.getElementById("modal-msg").innerHTML="", 2500);
+}
+
+// ── Showdown paste parser ──────────────────────────────────────────────────────
+function parseShowdownPaste(text) {
+  const mons = [];
+  const blocks = text.split(/\n\s*\n/).map(b=>b.trim()).filter(Boolean);
+  for (const block of blocks) {
+    const lines = block.split("\n").map(l=>l.trim()).filter(Boolean);
+    if (!lines.length) continue;
+    const mon = EMPTY_MON();
+    // First line: Name @ Item  OR  Name
+    const firstLine = lines[0];
+    const atMatch = firstLine.match(/^(.+?)\s*@\s*(.+)$/);
+    if (atMatch) { mon.species = atMatch[1].trim(); mon.item = atMatch[2].trim(); }
+    else { mon.species = firstLine.trim(); }
+    // Remove nickname: "Nickname (Species)" pattern
+    const nicknameMatch = mon.species.match(/^.+\((.+)\)$/);
+    if (nicknameMatch) mon.species = nicknameMatch[1];
+
+    let evLine = false;
+    for (let i=1; i<lines.length; i++) {
+      const l = lines[i];
+      if (l.startsWith("Ability:")) { mon.ability = l.slice(8).trim(); }
+      else if (l.startsWith("EVs:")) {
+        evLine = true;
+        const parts = l.slice(4).split("/");
+        const map = {HP:0,Atk:1,Def:2,SpA:3,SpD:4,Spe:5};
+        parts.forEach(p => {
+          const m = p.trim().match(/^(\d+)\s+(.+)$/);
+          if (m) {
+            const idx = map[m[2].trim()];
+            if (idx !== undefined) mon.evs[idx] = parseInt(m[1]);
+          }
+        });
+      }
+      else if (l.endsWith("Nature")) { mon.nature = l.split(" ")[0]; }
+      else if (l.startsWith("- ")) {
+        const moveName = l.slice(2).trim();
+        const slot = mon.moves.findIndex(m=>!m);
+        if (slot >= 0) mon.moves[slot] = moveName;
+      }
+      else if (l.startsWith("IVs:")) {
+        const parts = l.slice(4).split("/");
+        const map = {HP:0,Atk:1,Def:2,SpA:3,SpD:4,Spe:5};
+        parts.forEach(p => {
+          const m = p.trim().match(/^(\d+)\s+(.+)$/);
+          if (m) {
+            const idx = map[m[2].trim()];
+            if (idx !== undefined) mon.ivs[idx] = parseInt(m[1]);
+          }
+        });
+      }
+    }
+    mons.push(mon);
+  }
+  return mons;
+}
+
+function importShowdown(text) {
+  const mons = parseShowdownPaste(text);
+  if (!mons.length) throw new Error("No Pokémon found in paste.");
+  for (let i=0; i<6; i++) team[i] = mons[i] || EMPTY_MON();
+}
+
+function exportShowdown() {
+  return team.filter(m=>m.species).map(mon => {
+    const evParts = STAT_KEYS.map((k,i) => mon.evs[i] ? `${mon.evs[i]} ${STAT_LABELS[i]}` : null).filter(Boolean);
+    const ivParts = STAT_KEYS.map((k,i) => mon.ivs[i]!==31 ? `${mon.ivs[i]} ${STAT_LABELS[i]}` : null).filter(Boolean);
+    let out = `${mon.species}${mon.item ? " @ "+mon.item : ""}\n`;
+    if (mon.ability) out += `Ability: ${mon.ability}\n`;
+    if (evParts.length) out += `EVs: ${evParts.join(" / ")}\n`;
+    if (ivParts.length) out += `IVs: ${ivParts.join(" / ")}\n`;
+    out += `${mon.nature} Nature\n`;
+    mon.moves.filter(Boolean).forEach(m => out += `- ${m}\n`);
+    return out.trim();
+  }).join("\n\n");
+}
+
+// ── JSON import / export ───────────────────────────────────────────────────────
+function exportJSON() {
+  const out = {
+    format: "gen9championsvgc2026regma",
+    team: team.filter(m=>m.species).map(mon => ({
+      species: mon.species,
+      item: mon.item,
+      ability: mon.ability,
+      nature: mon.nature,
+      evs: mon.evs,
+      ivs: mon.ivs,
+      moves: mon.moves.filter(Boolean),
+    }))
+  };
+  return JSON.stringify(out, null, 2);
+}
+
+function importJSON(text) {
+  const raw = JSON.parse(text);
+  const mons = (raw.team || raw.pokemon || raw);
+  if (!Array.isArray(mons)) throw new Error("Expected a JSON array or {team:[...]} object.");
+  for (let i=0; i<6; i++) {
+    if (!mons[i]) { team[i] = EMPTY_MON(); continue; }
+    const m = mons[i];
+    team[i] = {
+      species: m.species || m.name || "",
+      item: m.item || "",
+      ability: m.ability || "",
+      nature: m.nature || "Hardy",
+      evs: Array.isArray(m.evs) && m.evs.length===6 ? m.evs : [0,0,0,0,0,0],
+      ivs: Array.isArray(m.ivs) && m.ivs.length===6 ? m.ivs : [31,31,31,31,31,31],
+      moves: Array.isArray(m.moves) ? [...m.moves, "","","",""].slice(0,4) : ["","","",""],
+    };
+  }
+}
+
+// ── Also expose a "save JSON file" helper via export ──────────────────────────
+// (The export modal handles copy; file download is an extra option)
+function downloadJSON() {
+  const blob = new Blob([exportJSON()], {type:"application/json"});
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+  a.download = "team.json"; a.click();
+}
+
+// ── Init ───────────────────────────────────────────────────────────────────────
+(async () => {
+  await loadPokedex();
+  renderSidebar();
+  renderEditor();
+})();
+</script>
+</body>
+</html>
