@@ -579,15 +579,20 @@ function renderMain() {
     <button class="btn" onclick="exportJSON()">⬇ Export JSON</button>
   </div>
 
-  <div id="view-tabs">
-    <button class="vtab${activeTab === 'turns' ? ' active' : ''}" onclick="setTab('turns')">📽 Turn Viewer</button>
-    <button class="vtab${activeTab === 'inject' ? ' active' : ''}" onclick="setTab('inject')">✏️ Inject Stats</button>
-    <button class="vtab${activeTab === 'json' ? ' active' : ''}" onclick="setTab('json')">{ } Raw JSON</button>
-  </div>
-
+  <div id="view-tabs"></div>
   <div id="tab-content"></div>`;
 
+  renderTabBar();
   renderTabContent();
+}
+
+function renderTabBar() {
+  const el = document.getElementById('view-tabs');
+  if (!el) return;
+  el.innerHTML = `
+    <button class="vtab${activeTab === 'turns'  ? ' active' : ''}" onclick="setTab('turns')">📽 Turn Viewer</button>
+    <button class="vtab${activeTab === 'inject' ? ' active' : ''}" onclick="setTab('inject')">✏️ Inject Stats</button>
+    <button class="vtab${activeTab === 'json'   ? ' active' : ''}" onclick="setTab('json')">{ } Raw JSON</button>`;
 }
 
 function renderTabContent() {
@@ -658,7 +663,8 @@ function renderSideSlots(turn, pid, b) {
     .filter(([k]) => k.startsWith(pid))
     .map(([k, m]) => ({ ...m, slotKey: k }));
 
-  const rosterHtml = roster.map(species => {
+  // Helper: build data for one roster entry
+  function monData(species) {
     const active = activeForPlayer.find(m => m.species === species || m.species.startsWith(species.split('-')[0]));
     const inj = b.known_team_overrides?.[`${pid}:${species}`];
     const hp = active ? active.hp_current : null;
@@ -666,28 +672,65 @@ function renderSideSlots(turn, pid, b) {
     const isMega = active ? active.is_mega : false;
     const onField = !!active && !fainted;
     const boosts = active ? (active.boosts || {}) : {};
+    return { active, inj, hp, fainted, isMega, onField, boosts, displaySpecies: active?.species || species, species };
+  }
 
-    const hpBar = hp !== null
-      ? `<div class="slot-hp-bar"><div class="slot-hp-fill ${hpColor(hp)}" style="width:${hp}%"></div></div><div class="slot-meta">${hp.toFixed(0)}% HP${active.known_item ? ` · ${active.known_item}` : ''}</div>`
-      : `<div class="slot-meta" style="margin-top:4px">Not yet seen</div>`;
+  // ── Active (on-field) slots: up to 2, shown large ─────────────────────
+  // Drive from the actual activeForPlayer slots so order matches p1a/p1b
+  const fieldSlots = activeForPlayer
+    .filter(m => !m.is_fainted)
+    .sort((a, b) => a.slotKey.localeCompare(b.slotKey));
 
-    const boostHtml = Object.entries(boosts).filter(([,v]) => v !== 0).map(([s,v]) =>
-      `<span class="boost-pip ${v>0?'boost-pos':'boost-neg'}">${STAT_LABELS[s]||s} ${v>0?'+':''}${v}</span>`
-    ).join('');
+  const fieldHtml = fieldSlots.length
+    ? fieldSlots.map(m => {
+        const inj = b.known_team_overrides?.[`${pid}:${m.species.replace(/-Mega$/,'')}`]
+                 || b.known_team_overrides?.[`${pid}:${m.species}`];
+        const boosts = m.boosts || {};
+        const boostHtml = Object.entries(boosts).filter(([,v]) => v !== 0).map(([s,v]) =>
+          `<span class="boost-pip ${v>0?'boost-pos':'boost-neg'}">${STAT_LABELS[s]||s} ${v>0?'+':''}${v}</span>`
+        ).join('');
+        const slotLetter = m.slotKey.slice(-1).toUpperCase(); // 'A' or 'B'
+        const teraTag  = m.is_terastallized ? `<span class="active-badge tera-badge">TERA</span>` : '';
+        const megaTag  = m.is_mega ? `<span class="active-badge mega-badge">MEGA</span>` : '';
+        const slotTag  = `<span class="active-slot-letter">${slotLetter}</span>`;
+        const itemLine = m.known_item ? `<div class="active-item">🎒 ${m.known_item}</div>` : '';
+        const hp = m.hp_current ?? 100;
+        return `<div class="active-slot-card">
+          <div class="active-slot-top">${slotTag}${teraTag}${megaTag}</div>
+          <div class="active-species">${m.species}${inj ? ' <span class="inj-known">✓</span>' : ''}</div>
+          <div class="active-hp-bar"><div class="slot-hp-fill ${hpColor(hp)}" style="width:${hp}%"></div></div>
+          <div class="active-hp-num">${hp.toFixed(0)}% HP</div>
+          ${itemLine}
+          ${boostHtml ? `<div class="slot-boosts">${boostHtml}</div>` : ''}
+        </div>`;
+      }).join('')
+    : `<div class="active-empty">— no active Pokémon —</div>`;
 
-    const teraTag = active?.is_terastallized ? `<span class="slot-badge" style="background:rgba(239,65,121,.15);color:#ef4179;border:1px solid #ef4179">TERA</span>` : '';
+  // ── Bench row: all 6 (or fewer) as compact chips ──────────────────────
+  // A mon on field but fainted appears greyed out; not-yet-seen appears as species name only
+  const benchHtml = roster.map(species => {
+    const d = monData(species);
+    let cls = 'bench-chip';
+    if (d.fainted) cls += ' bench-fainted';
+    else if (d.onField) cls += ' bench-onfield';
 
-    return `<div class="slot-card${fainted?' fainted':''}${onField?' on-field':''}">
-      ${teraTag || (isMega ? '<span class="slot-badge badge-mega">MEGA</span>' : onField ? '<span class="slot-badge badge-field">FIELD</span>' : '')}
-      <div class="slot-species">${active?.species || species}${inj ? ' <span class="inj-known">✓</span>' : ''}</div>
-      ${hpBar}
-      ${boostHtml ? `<div class="slot-boosts">${boostHtml}</div>` : ''}
+    const hp = d.hp !== null ? `<span class="bench-hp">${d.hp.toFixed(0)}%</span>` : '';
+    const megaTag = d.isMega ? `<span class="bench-mega">M</span>` : '';
+    const teraTag = d.active?.is_terastallized ? `<span class="bench-tera">T</span>` : '';
+    return `<div class="${cls}" title="${d.displaySpecies}${d.hp !== null ? ' · ' + d.hp.toFixed(0) + '%' : ''}">
+      <span class="bench-name">${d.displaySpecies}</span>${megaTag}${teraTag}${hp}
     </div>`;
   }).join('');
 
   return `<div class="tb-panel">
     <div class="tb-phdr ${isP1?'p1h':'p2h'}">${pid.toUpperCase()} · ${username} ${yourTag} ${winTag}</div>
-    <div class="tb-slots">${rosterHtml || '<div style="padding:10px;color:var(--text3);font-size:11px">No roster info</div>'}</div>
+    <div class="tb-field-row">${fieldSlots.length
+      ? fieldHtml
+      : '<div class="active-empty">— no active Pokémon recorded —</div>'}</div>
+    ${roster.length ? `<div class="tb-bench-row">
+      <span class="bench-label">Bench</span>
+      <div class="bench-chips">${benchHtml}</div>
+    </div>` : ''}
   </div>`;
 }
 
@@ -871,8 +914,16 @@ function renderJsonTab(el) {
 // 5.  ACTIONS
 // ═══════════════════════════════════════════════════════════
 
-function setTurn(idx) { activeTurnIdx = idx; renderTabContent(); }
-function setTab(tab)  { activeTab = tab; renderTabContent(); }
+function setTurn(idx) {
+  activeTurnIdx = idx;
+  renderTabContent();
+  // Reset scroll so the board is always visible at the top after navigation
+  const tv = document.getElementById('turn-viewer');
+  if (tv) tv.scrollIntoView({ block: 'start', behavior: 'instant' });
+  const main = document.getElementById('main');
+  if (main) main.scrollTop = 0;
+}
+function setTab(tab)  { activeTab = tab; renderTabBar(); renderTabContent(); }
 
 function setOurSide(val) {
   if (activeBattle) { activeBattle.players.our_side = val; renderMain(); }
@@ -981,30 +1032,20 @@ async function loadReplayFile(file) {
   showNotif('Parsing replay…');
   let battle = null;
 
-  // Try server first
+  // Always parse client-side for display — the server schema may differ from
+  // what the render functions expect, and the client parser is fully validated.
+  // The server is only needed at *export* time (doExport -> exportViaServer).
+  const html = await file.text();
   try {
-    const serverOk = await checkServer();
-    if (serverOk) {
-      battle = await parseReplayViaServer(file);
-      if (!battle.known_team_overrides) battle.known_team_overrides = {};
-    }
+    const log = extractLog(html);
+    const rid = extractReplayId(html);
+    battle = parseShowdownLog(log, 'p1');
+    battle.replay_id = rid;
+    battle._rawHtml = html;   // kept so exportViaServer can POST it
+    if (!battle.known_team_overrides) battle.known_team_overrides = {};
   } catch (err) {
-    console.warn('Server parse failed, falling back to client-side parser:', err);
-  }
-
-  // Client-side fallback
-  if (!battle) {
-    const html = await file.text();
-    try {
-      const log = extractLog(html);
-      const rid = extractReplayId(html);
-      battle = parseShowdownLog(log, 'p1');
-      battle.replay_id = rid;
-      battle._rawHtml = html;
-    } catch (err) {
-      alert('Parse error: ' + err.message);
-      return;
-    }
+    alert('Parse error: ' + err.message);
+    return;
   }
 
   battle.source_file = file.name;
