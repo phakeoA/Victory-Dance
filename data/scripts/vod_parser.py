@@ -41,6 +41,95 @@ from typing import Optional
 
 
 # ---------------------------------------------------------------------------
+# Mega stone lookup  (derived from data/serebii_champions_items.json)
+# Keys are the PRE-mega species name as it appears in the Showdown roster.
+# Values are the exact item string used in known_item / inject panel.
+# Charizard is special: new_species will be "Charizard-Mega-X" or "Charizard-Mega-Y",
+# so we check for that suffix rather than using this table for that case.
+# ---------------------------------------------------------------------------
+MEGA_STONE_MAP: dict[str, str] = {
+    "Abomasnow":   "Abomasite",
+    "Absol":       "Absolite",
+    "Aerodactyl":  "Aerodactylite",
+    "Aggron":      "Aggronite",
+    "Alakazam":    "Alakazite",
+    "Altaria":     "Altarianite",
+    "Ampharos":    "Ampharosite",
+    "Audino":      "Audinite",
+    "Banette":     "Banettite",
+    "Beedrill":    "Beedrillite",
+    "Blastoise":   "Blastoisinite",
+    "Camerupt":    "Cameruptite",
+    "Chandelure":  "Chandelurite",
+    "Charizard":   "Charizardite Y",   # default; overridden by new_species check below
+    "Chesnaught":  "Chesnaughtite",
+    "Chimecho":    "Chimechite",
+    "Clefable":    "Clefablite",
+    "Crabominable":"Crabominite",
+    "Delphox":     "Delphoxite",
+    "Dragonite":   "Dragoninite",
+    "Drampa":      "Drampanite",
+    "Emboar":      "Emboarite",
+    "Excadrill":   "Excadrite",
+    "Feraligatr":  "Feraligite",
+    "Floette":     "Floettite",
+    "Froslass":    "Froslassite",
+    "Gallade":     "Galladite",
+    "Garchomp":    "Garchompite",
+    "Gardevoir":   "Gardevoirite",
+    "Gengar":      "Gengarite",
+    "Glalie":      "Glalitite",
+    "Glimmora":    "Glimmoranite",
+    "Golurk":      "Golurkite",
+    "Greninja":    "Greninjite",
+    "Gyarados":    "Gyaradosite",
+    "Hawlucha":    "Hawluchanite",
+    "Heracross":   "Heracronite",
+    "Houndoom":    "Houndoominite",
+    "Kangaskhan":  "Kangaskhanite",
+    "Lopunny":     "Lopunnite",
+    "Lucario":     "Lucarionite",
+    "Manectric":   "Manectite",
+    "Medicham":    "Medichamite",
+    "Meganium":    "Meganiumite",
+    "Meowstic":    "Meowsticite",
+    "Pidgeot":     "Pidgeotite",
+    "Pinsir":      "Pinsirite",
+    "Sableye":     "Sablenite",
+    "Scizor":      "Scizorite",
+    "Scovillain":  "Scovillainite",
+    "Sharpedo":    "Sharpedonite",
+    "Skarmory":    "Skarmorite",
+    "Slowbro":     "Slowbronite",
+    "Starmie":     "Starminite",
+    "Steelix":     "Steelixite",
+    "Tyranitar":   "Tyranitarite",
+    "Venusaur":    "Venusaurite",
+    "Victreebel":  "Victreebelite",
+}
+
+
+def _resolve_mega_stone(pre_mega_species: str, new_species: str) -> Optional[str]:
+    """
+    Return the correct mega stone item name for a species that just mega evolved.
+
+    Parameters
+    ----------
+    pre_mega_species : str
+        The species name BEFORE the detailschange line (e.g. "Charizard").
+    new_species : str
+        The species name AFTER the detailschange line (e.g. "Charizard-Mega-X").
+        Used to disambiguate Charizardite X vs Y.
+    """
+    # Charizard disambiguation: new_species carries the variant
+    if pre_mega_species == "Charizard":
+        if new_species and new_species.endswith("-X"):
+            return "Charizardite X"
+        return "Charizardite Y"
+    return MEGA_STONE_MAP.get(pre_mega_species)
+
+
+# ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
 
@@ -262,6 +351,10 @@ class ShowdownReplayParser:
         elif cmd == "detailschange":
             self._handle_mega(parts)
 
+        elif cmd == "-mega":
+            # |-mega|p1a: Floette|Floette|Floettite  — explicit stone reveal
+            self._handle_mega_stone(parts)
+
         elif cmd == "move":
             self._handle_move(parts)
 
@@ -405,17 +498,60 @@ class ShowdownReplayParser:
 
     def _handle_mega(self, parts: list[str]) -> None:
         # |detailschange|p1a: Floette|Floette-Mega, L50, F
+        # Mutates species + sets is_mega.  The |-mega| line that fires immediately
+        # after carries the explicit stone name and calls _handle_mega_stone().
+        # The lookup table is only a fallback for replays that lack |-mega|.
         ident = parts[2]
         new_species = parts[3].split(",")[0].strip() if len(parts) > 3 else None
         slot_key = self._slot_key_from_ident(ident)
+
         if slot_key in self.active_slots and new_species:
+            pre_mega_species = self.active_slots[slot_key].species
             self.active_slots[slot_key].species = new_species
             self.active_slots[slot_key].is_mega = True
+            # Fallback only — |-mega| will overwrite with the explicit stone name
+            if not self.active_slots[slot_key].known_item:
+                inferred = _resolve_mega_stone(pre_mega_species, new_species)
+                if inferred:
+                    self._set_mega_stone(slot_key, new_species, pre_mega_species, inferred)
+
         self._current_turn_actions.append({
             "event": "mega_evolution",
             "slot": slot_key,
             "new_species": new_species,
+            "mega_stone": self.active_slots[slot_key].known_item if slot_key in self.active_slots else None,
         })
+
+    def _handle_mega_stone(self, parts: list[str]) -> None:
+        # |-mega|p1a: Floette|Floette|Floettite
+        # parts: ['', '-mega', 'p1a: Floette', 'Floette', 'Floettite']
+        ident    = parts[2] if len(parts) > 2 else ""
+        stone    = parts[4] if len(parts) > 4 else None
+        slot_key = self._slot_key_from_ident(ident)
+
+        if stone and slot_key in self.active_slots:
+            mega_species  = self.active_slots[slot_key].species   # already the Mega form
+            pre_mega      = parts[3] if len(parts) > 3 else mega_species
+            self._set_mega_stone(slot_key, mega_species, pre_mega, stone)
+            # Patch the mega_stone field on the most recent mega_evolution action
+            for action in reversed(self._current_turn_actions):
+                if action.get("event") == "mega_evolution" and action.get("slot") == slot_key:
+                    action["mega_stone"] = stone
+                    break
+
+    def _set_mega_stone(
+        self,
+        slot_key: str,
+        mega_species: str,
+        pre_mega_species: str,
+        stone: str,
+    ) -> None:
+        """Write the mega stone into the active slot and both seen_mons keys."""
+        player = slot_key[:2]
+        self.active_slots[slot_key].known_item = stone
+        for sk in (f"{player}:{mega_species}", f"{player}:{pre_mega_species}"):
+            if sk in self.seen_mons:
+                self.seen_mons[sk].known_item = stone
 
     def _handle_move(self, parts: list[str]) -> None:
         # |move|p1b: Sneasler|Fake Out|p2a: Sneasler

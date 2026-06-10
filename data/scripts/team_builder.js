@@ -9,6 +9,76 @@ const NATURES = ['Hardy','Lonely','Brave','Adamant','Naughty','Bold','Docile','R
 const STAT_NAMES = ['hp','atk','def','spa','spd','spe'];
 const STAT_LABELS = { hp:'HP', atk:'Atk', def:'Def', spa:'SpA', spd:'SpD', spe:'Spe' };
 
+// Mega stone lookup — mirrors vod_parser.py MEGA_STONE_MAP.
+// Keys are the PRE-mega Showdown species name; values are the item string.
+const MEGA_STONE_MAP = {
+  Abomasnow:    'Abomasite',
+  Absol:        'Absolite',
+  Aerodactyl:   'Aerodactylite',
+  Aggron:       'Aggronite',
+  Alakazam:     'Alakazite',
+  Altaria:      'Altarianite',
+  Ampharos:     'Ampharosite',
+  Audino:       'Audinite',
+  Banette:      'Banettite',
+  Beedrill:     'Beedrillite',
+  Blastoise:    'Blastoisinite',
+  Camerupt:     'Cameruptite',
+  Chandelure:   'Chandelurite',
+  Charizard:    'Charizardite Y',   // default; X/Y resolved by newSpecies below
+  Chesnaught:   'Chesnaughtite',
+  Chimecho:     'Chimechite',
+  Clefable:     'Clefablite',
+  Crabominable: 'Crabominite',
+  Delphox:      'Delphoxite',
+  Dragonite:    'Dragoninite',
+  Drampa:       'Drampanite',
+  Emboar:       'Emboarite',
+  Excadrill:    'Excadrite',
+  Feraligatr:   'Feraligite',
+  Floette:      'Floettite',
+  Froslass:     'Froslassite',
+  Gallade:      'Galladite',
+  Garchomp:     'Garchompite',
+  Gardevoir:    'Gardevoirite',
+  Gengar:       'Gengarite',
+  Glalie:       'Glalitite',
+  Glimmora:     'Glimmoranite',
+  Golurk:       'Golurkite',
+  Greninja:     'Greninjite',
+  Gyarados:     'Gyaradosite',
+  Hawlucha:     'Hawluchanite',
+  Heracross:    'Heracronite',
+  Houndoom:     'Houndoominite',
+  Kangaskhan:   'Kangaskhanite',
+  Lopunny:      'Lopunnite',
+  Lucario:      'Lucarionite',
+  Manectric:    'Manectite',
+  Medicham:     'Medichamite',
+  Meganium:     'Meganiumite',
+  Meowstic:     'Meowsticite',
+  Pidgeot:      'Pidgeotite',
+  Pinsir:       'Pinsirite',
+  Sableye:      'Sablenite',
+  Scizor:       'Scizorite',
+  Scovillain:   'Scovillainite',
+  Sharpedo:     'Sharpedonite',
+  Skarmory:     'Skarmorite',
+  Slowbro:      'Slowbronite',
+  Starmie:      'Starminite',
+  Steelix:      'Steelixite',
+  Tyranitar:    'Tyranitarite',
+  Venusaur:     'Venusaurite',
+  Victreebel:   'Victreebelite',
+};
+
+function resolveMegaStone(preMegaSpecies, newSpecies) {
+  if (preMegaSpecies === 'Charizard') {
+    return newSpecies && newSpecies.endsWith('-X') ? 'Charizardite X' : 'Charizardite Y';
+  }
+  return MEGA_STONE_MAP[preMegaSpecies] || null;
+}
+
 function hpColor(pct) {
   if (pct > 50) return 'hp-hi';
   if (pct > 20) return 'hp-mid';
@@ -180,6 +250,13 @@ function parseShowdownLog(rawLog, ourPlayer = 'p1') {
       predicted_action_by_bot: null,
     });
   }
+  function setMegaStone(slotKey, megaSpecies, preMegaSpecies, stone) {
+    if (activeSlots[slotKey]) activeSlots[slotKey].known_item = stone;
+    const pid = slotKey.slice(0, 2);
+    for (const sk of [`${pid}:${megaSpecies}`, `${pid}:${preMegaSpecies}`]) {
+      if (seenMons[sk]) seenMons[sk].known_item = stone;
+    }
+  }
 
   for (const line of lines) {
     if (!line.startsWith('|')) continue;
@@ -246,8 +323,35 @@ function parseShowdownLog(rawLog, ourPlayer = 'p1') {
     } else if (cmd === 'detailschange') {
       const slotKey = slotKeyFromIdent(parts[2]);
       const newSpecies = parts[3] ? parts[3].split(',')[0].trim() : null;
-      if (activeSlots[slotKey] && newSpecies) { activeSlots[slotKey].species = newSpecies; activeSlots[slotKey].is_mega = true; }
-      turnActions.push({ event: 'mega_evolution', slot: slotKey, new_species: newSpecies });
+      if (activeSlots[slotKey] && newSpecies) {
+        const preMegaSpecies = activeSlots[slotKey].species;
+        activeSlots[slotKey].species = newSpecies;
+        activeSlots[slotKey].is_mega = true;
+        // Fallback only — |-mega| fires next and will set the explicit stone name
+        if (!activeSlots[slotKey].known_item) {
+          const inferred = resolveMegaStone(preMegaSpecies, newSpecies);
+          if (inferred) setMegaStone(slotKey, newSpecies, preMegaSpecies, inferred);
+        }
+      }
+      turnActions.push({ event: 'mega_evolution', slot: slotKey, new_species: newSpecies,
+        mega_stone: activeSlots[slotKey]?.known_item || null });
+
+    } else if (cmd === '-mega') {
+      // |-mega|p1a: Floette|Floette|Floettite  — explicit stone name from the protocol
+      const slotKey = slotKeyFromIdent(parts[2]);
+      const preMega = parts[3] || null;
+      const stone   = parts[4] || null;
+      if (stone && activeSlots[slotKey]) {
+        const megaSpecies = activeSlots[slotKey].species;  // already mutated by detailschange
+        setMegaStone(slotKey, megaSpecies, preMega || megaSpecies, stone);
+        // Patch the mega_stone on the most recent mega_evolution action
+        for (let i = turnActions.length - 1; i >= 0; i--) {
+          if (turnActions[i].event === 'mega_evolution' && turnActions[i].slot === slotKey) {
+            turnActions[i].mega_stone = stone;
+            break;
+          }
+        }
+      }
 
     } else if (cmd === 'move') {
       const userIdent = parts[2] || '', moveName = parts[3] || '', targetIdent = parts[4] || null;
