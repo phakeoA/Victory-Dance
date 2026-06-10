@@ -23,6 +23,8 @@
     --yellow:  #f5c842;
     --red:     #e74c3c;
     --orange:  #e67e22;
+    --p1col:   #4a90d9;
+    --p2col:   #e94560;
     --rad:     8px;
     --rad-lg:  12px;
   }
@@ -43,88 +45,106 @@
 
   /* ── Layout ── */
   #app  { display: flex; height: calc(100vh - 49px); }
-  #side { width: 240px; background: var(--bg2); border-right: 1px solid var(--bdr); overflow-y: auto; flex-shrink: 0; display: flex; flex-direction: column; }
+  #side { width: 234px; background: var(--bg2); border-right: 1px solid var(--bdr); overflow-y: auto; flex-shrink: 0; display: flex; flex-direction: column; }
   #main { flex: 1; overflow-y: auto; padding: 16px; }
 
   /* ── Sidebar ── */
   .sec { padding: 10px 12px; }
   .sec + .sec { border-top: 1px solid var(--bdr); }
   .sec h3 { font-size: 10px; font-weight: 600; color: var(--text3); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
-  .t-item { display: flex; align-items: flex-start; gap: 8px; padding: 7px 9px; border-radius: var(--rad); cursor: pointer; border: 1px solid transparent; margin-bottom: 3px; }
-  .t-item:hover { background: var(--surf); border-color: var(--bdr); }
-  .t-item.active { background: var(--bg3); border-color: var(--blue); }
-  .t-name { font-size: 12px; font-weight: 500; }
-  .t-sprites { display: flex; gap: 1px; margin-top: 2px; flex-wrap: wrap; }
-  .t-sprites img { width: 22px; height: 22px; image-rendering: pixelated; }
-  .t-del { margin-left: auto; background: none; border: none; color: var(--text3); cursor: pointer; font-size: 13px; padding: 2px 4px; border-radius: 3px; flex-shrink: 0; }
-  .t-del:hover { color: var(--red); background: rgba(231,76,60,.15); }
+  .b-item { display: flex; align-items: flex-start; gap: 7px; padding: 7px 9px; border-radius: var(--rad); cursor: pointer; border: 1px solid transparent; margin-bottom: 3px; }
+  .b-item:hover { background: var(--surf); border-color: var(--bdr); }
+  .b-item.active { background: var(--bg3); border-color: var(--blue); }
+  .b-name { font-size: 11px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 140px; }
+  .b-meta { font-size: 10px; color: var(--text3); margin-top: 1px; }
+  .b-del { margin-left: auto; background: none; border: none; color: var(--text3); cursor: pointer; font-size: 13px; padding: 2px 4px; border-radius: 3px; flex-shrink: 0; }
+  .b-del:hover { color: var(--red); background: rgba(231,76,60,.15); }
+  .b-sprs { display: flex; gap: 1px; margin-top: 2px; flex-wrap: wrap; }
+  .b-sprs img { width: 20px; height: 20px; image-rendering: pixelated; }
 
-  /* ── Team header ── */
-  #t-hdr { display: flex; align-items: flex-end; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
-  #t-name { font-size: 18px; font-weight: 700; background: none; border: none; color: var(--text); border-bottom: 2px solid transparent; padding: 2px 4px; min-width: 140px; }
-  #t-name:focus { outline: none; border-bottom-color: var(--blue); }
-  #t-name::placeholder { color: var(--text3); }
+  /* ── Battle header ── */
+  #b-hdr { display: flex; align-items: flex-end; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
   .lbl-sm { font-size: 10px; color: var(--text3); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 3px; }
   .fld { background: var(--bg); border: 1px solid var(--bdr); color: var(--text); padding: 5px 8px; border-radius: var(--rad); font-size: 12px; }
   .fld:focus { outline: none; border-color: var(--blue); }
   .fld option { background: var(--bg2); }
+  #bid-in { font-size: 13px; font-weight: 600; background: none; border: none; color: var(--text); border-bottom: 2px solid transparent; padding: 2px 4px; min-width: 180px; max-width: 340px; width: 100%; }
+  #bid-in:focus { outline: none; border-bottom-color: var(--blue); }
+  #bid-in::placeholder { color: var(--text3); font-weight: 400; }
 
-  /* ── Mon grid ── */
-  #grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; max-width: 900px; }
+  /* ── Dual panel ── */
+  #dual { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 1100px) { #dual { grid-template-columns: 1fr; } }
+  .panel { background: var(--surf); border: 1px solid var(--bdr); border-radius: var(--rad-lg); overflow: hidden; }
+  .panel-hdr { padding: 9px 12px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--bdr); }
+  .panel-hdr.p1-hdr { border-top: 3px solid var(--p1col); }
+  .panel-hdr.p2-hdr { border-top: 3px solid var(--p2col); }
+  .panel-label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .8px; }
+  .p1-label { color: var(--p1col); }
+  .p2-label { color: var(--p2col); }
+  .player-name-in { background: none; border: none; color: var(--text); font-size: 13px; font-weight: 600; padding: 1px 4px; border-bottom: 1px solid transparent; min-width: 80px; }
+  .player-name-in:focus { outline: none; border-bottom-color: var(--blue); }
+  .winner-badge { font-size: 10px; background: var(--yellow); color: #222; padding: 1px 6px; border-radius: 3px; font-weight: 700; }
+  .panel-body { padding: 10px; }
+  .mon-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
 
   /* ── Mon card ── */
-  .card { background: var(--surf); border: 1px solid var(--bdr); border-radius: var(--rad-lg); overflow: hidden; }
+  .card { background: var(--bg2); border: 1px solid var(--bdr); border-radius: var(--rad-lg); overflow: hidden; }
   .card.empty { border-style: dashed; opacity: .65; cursor: pointer; }
   .card.empty:hover { opacity: 1; border-color: var(--blue); }
-  .card-hdr { background: var(--surf2); padding: 8px 10px; display: flex; align-items: center; gap: 7px; cursor: pointer; user-select: none; }
+  .card-hdr { background: var(--surf2); padding: 7px 9px; display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
   .card-hdr:hover { background: var(--bg3); }
-  .spr { width: 44px; height: 44px; image-rendering: pixelated; flex-shrink: 0; }
-  .c-name { font-size: 13px; font-weight: 600; }
+  .spr { width: 40px; height: 40px; image-rendering: pixelated; flex-shrink: 0; }
+  .c-name { font-size: 12px; font-weight: 600; line-height: 1.2; }
   .c-types { display: flex; gap: 3px; margin-top: 2px; }
   .tbdg { font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 3px; text-transform: uppercase; letter-spacing: .3px; }
-  .c-del { margin-left: auto; background: none; border: none; color: var(--text3); cursor: pointer; font-size: 14px; padding: 3px 5px; border-radius: 4px; flex-shrink: 0; }
+  .c-del { margin-left: auto; background: none; border: none; color: var(--text3); cursor: pointer; font-size: 13px; padding: 2px 4px; border-radius: 4px; flex-shrink: 0; }
   .c-del:hover { color: var(--red); background: rgba(231,76,60,.15); }
-  .card-body { padding: 10px; }
+  .card-body { padding: 9px; }
 
   /* ── Add slot ── */
-  .add-slot { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; min-height: 110px; cursor: pointer; padding: 16px; }
-  .add-slot .plus { font-size: 28px; color: var(--text3); }
-  .add-slot span  { font-size: 12px; color: var(--text3); }
+  .add-slot { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; min-height: 100px; cursor: pointer; padding: 12px; }
+  .add-slot .plus { font-size: 24px; color: var(--text3); }
+  .add-slot span  { font-size: 11px; color: var(--text3); }
 
   /* ── Form rows ── */
-  .frow { display: flex; align-items: center; gap: 6px; margin-bottom: 7px; }
-  .frow label { font-size: 10px; color: var(--text3); width: 46px; flex-shrink: 0; text-transform: uppercase; letter-spacing: .4px; }
+  .frow { display: flex; align-items: center; gap: 5px; margin-bottom: 6px; }
+  .frow label { font-size: 10px; color: var(--text3); width: 44px; flex-shrink: 0; text-transform: uppercase; letter-spacing: .4px; }
   .frow select, .frow input[type="text"] {
     flex: 1; background: var(--bg); border: 1px solid var(--bdr); color: var(--text);
-    padding: 4px 7px; border-radius: var(--rad); font-size: 12px; min-width: 0;
+    padding: 3px 6px; border-radius: var(--rad); font-size: 11px; min-width: 0;
   }
   .frow select:focus, .frow input:focus { outline: none; border-color: var(--blue); }
   .frow select option { background: var(--bg2); }
 
   /* ── Stats ── */
-  .stats { margin-top: 8px; }
-  .stat-hdr { font-size: 10px; color: var(--text3); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 4px; display: flex; align-items: center; gap: 6px; }
-  .srow { display: flex; align-items: center; gap: 5px; margin-bottom: 3px; }
+  .stats { margin-top: 7px; }
+  .stat-hdr { font-size: 10px; color: var(--text3); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 3px; display: flex; align-items: center; gap: 6px; }
+  .srow { display: flex; align-items: center; gap: 4px; margin-bottom: 2px; }
   .slbl { font-size: 9px; color: var(--text3); width: 26px; text-align: right; flex-shrink: 0; text-transform: uppercase; }
-  .sbar-w { flex: 1; background: var(--bg); border-radius: 3px; height: 7px; overflow: hidden; }
+  .sbar-w { flex: 1; background: var(--bg); border-radius: 3px; height: 6px; overflow: hidden; }
   .sbar { height: 100%; border-radius: 3px; transition: width .25s; }
-  .sval { font-size: 10px; color: var(--text2); width: 28px; text-align: right; flex-shrink: 0; }
-  .ev-in { width: 40px; background: var(--bg); border: 1px solid var(--bdr); color: var(--text); padding: 1px 3px; border-radius: 3px; font-size: 10px; text-align: center; }
+  .sval { font-size: 10px; color: var(--text2); width: 26px; text-align: right; flex-shrink: 0; }
+  .ev-in { width: 36px; background: var(--bg); border: 1px solid var(--bdr); color: var(--text); padding: 1px 2px; border-radius: 3px; font-size: 10px; text-align: center; }
   .ev-in:focus { outline: none; border-color: var(--blue); }
   .ev-over { color: var(--red); }
 
   /* ── Moves ── */
-  .moves { margin-top: 8px; }
-  .moves h4 { font-size: 10px; color: var(--text3); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 5px; }
-  .mrow { display: flex; align-items: center; gap: 5px; margin-bottom: 4px; }
-  .mbdg { font-size: 9px; padding: 1px 4px; border-radius: 3px; flex-shrink: 0; text-transform: uppercase; min-width: 36px; text-align: center; }
+  .moves { margin-top: 7px; }
+  .moves h4 { font-size: 10px; color: var(--text3); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 4px; }
+  .mrow { display: flex; align-items: center; gap: 4px; margin-bottom: 3px; }
+  .mbdg { font-size: 9px; padding: 1px 4px; border-radius: 3px; flex-shrink: 0; text-transform: uppercase; min-width: 34px; text-align: center; }
   .acwrap { position: relative; flex: 1; }
-  .ac-in { width: 100%; background: var(--bg); border: 1px solid var(--bdr); color: var(--text); padding: 4px 7px; border-radius: var(--rad); font-size: 11px; }
+  .ac-in { width: 100%; background: var(--bg); border: 1px solid var(--bdr); color: var(--text); padding: 3px 6px; border-radius: var(--rad); font-size: 11px; }
   .ac-in:focus { outline: none; border-color: var(--blue); }
-  .ac-dd { position: absolute; top: 100%; left: 0; right: 0; background: var(--bg2); border: 1px solid var(--bdr2); border-radius: var(--rad); max-height: 160px; overflow-y: auto; z-index: 20; display: none; }
+  .ac-dd { position: absolute; top: 100%; left: 0; right: 0; background: var(--bg2); border: 1px solid var(--bdr2); border-radius: var(--rad); max-height: 140px; overflow-y: auto; z-index: 20; display: none; }
   .ac-dd.open { display: block; }
-  .ac-itm { padding: 5px 9px; font-size: 11px; cursor: pointer; display: flex; align-items: center; gap: 7px; }
-  .ac-itm:hover, .ac-itm.sel { background: var(--bg3); }
+  .ac-itm { padding: 4px 8px; font-size: 11px; cursor: pointer; display: flex; align-items: center; gap: 6px; }
+  .ac-itm:hover { background: var(--bg3); }
+
+  /* ── Source badges ── */
+  .src-vod  { font-size: 9px; background: var(--bg3); border: 1px solid var(--blue); color: var(--blue); padding: 1px 4px; border-radius: 3px; margin-left: 3px; }
+  .src-mega { font-size: 9px; background: rgba(245,200,66,.15); border: 1px solid var(--yellow); color: var(--yellow); padding: 1px 4px; border-radius: 3px; margin-left: 3px; }
 
   /* ── Modal ── */
   #moverlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.72); z-index: 100; align-items: center; justify-content: center; }
@@ -139,7 +159,7 @@
   #m-list { overflow-y: auto; }
   .m-item { display: flex; align-items: center; gap: 11px; padding: 7px 14px; cursor: pointer; border-bottom: 1px solid var(--bdr); }
   .m-item:hover { background: var(--surf); }
-  .m-item img { width: 38px; height: 38px; image-rendering: pixelated; }
+  .m-item img { width: 36px; height: 36px; image-rendering: pixelated; }
   .m-item-name { font-size: 13px; font-weight: 500; }
 
   /* ── Stat bar colours ── */
@@ -148,61 +168,47 @@
   .b-spd { background: #a7db8d; } .b-spe { background: #fa92b2; }
 
   /* ── Type colours ── */
-  .t-normal   { background: #9fa19f; color: #fff; }
-  .t-fire     { background: #e62829; color: #fff; }
-  .t-water    { background: #2980ef; color: #fff; }
-  .t-grass    { background: #3fa129; color: #fff; }
-  .t-electric { background: #fac000; color: #333; }
-  .t-ice      { background: #3dcef3; color: #333; }
-  .t-fighting { background: #ff8000; color: #fff; }
-  .t-poison   { background: #9141cb; color: #fff; }
-  .t-ground   { background: #915121; color: #fff; }
-  .t-flying   { background: #81b9ef; color: #333; }
-  .t-psychic  { background: #ef4179; color: #fff; }
-  .t-bug      { background: #91a119; color: #fff; }
-  .t-rock     { background: #afa981; color: #fff; }
-  .t-ghost    { background: #704170; color: #fff; }
-  .t-dragon   { background: #5060e1; color: #fff; }
-  .t-dark     { background: #624d4e; color: #fff; }
-  .t-steel    { background: #60a1b8; color: #fff; }
-  .t-fairy    { background: #ef70ef; color: #fff; }
+  .t-normal   { background: #9fa19f; color: #fff; } .t-fire     { background: #e62829; color: #fff; }
+  .t-water    { background: #2980ef; color: #fff; } .t-grass    { background: #3fa129; color: #fff; }
+  .t-electric { background: #fac000; color: #333; } .t-ice      { background: #3dcef3; color: #333; }
+  .t-fighting { background: #ff8000; color: #fff; } .t-poison   { background: #9141cb; color: #fff; }
+  .t-ground   { background: #915121; color: #fff; } .t-flying   { background: #81b9ef; color: #333; }
+  .t-psychic  { background: #ef4179; color: #fff; } .t-bug      { background: #91a119; color: #fff; }
+  .t-rock     { background: #afa981; color: #fff; } .t-ghost    { background: #704170; color: #fff; }
+  .t-dragon   { background: #5060e1; color: #fff; } .t-dark     { background: #624d4e; color: #fff; }
+  .t-steel    { background: #60a1b8; color: #fff; } .t-fairy    { background: #ef70ef; color: #fff; }
   .t-unknown  { background: var(--surf2); color: var(--text3); }
 
   /* ── Notification ── */
-  #notif { position: fixed; bottom: 18px; right: 18px; background: var(--green); color: #fff; padding: 9px 15px; border-radius: var(--rad); font-size: 13px; font-weight: 500; display: none; z-index: 200; }
-
-  /* ── Loading / error ── */
+  #notif { position: fixed; bottom: 18px; right: 18px; background: var(--green); color: #fff; padding: 9px 15px; border-radius: var(--rad); font-size: 13px; font-weight: 500; display: none; z-index: 200; box-shadow: 0 3px 12px rgba(0,0,0,.4); }
   #loading { display: flex; align-items: center; justify-content: center; height: 100%; }
   #loading .inner { text-align: center; max-width: 380px; padding: 20px; }
-
-  /* scrollbar */
   ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-track { background: var(--bg); } ::-webkit-scrollbar-thumb { background: var(--bdr2); border-radius: 3px; }
+  
+  /* ── Your-side pill on panel header ── */
+  .your-side-tag { font-size: 9px; background: rgba(76,175,125,.2); border: 1px solid var(--green); color: var(--green); padding: 1px 5px; border-radius: 3px; font-weight: 600; letter-spacing: .3px; }
 </style>
 </head>
 <body>
 
 <div id="hdr">
   <span style="font-size:20px">⚔️</span>
-  <div><h1>Victory-Dance</h1><div class="sub">Team Builder · known_teams.json editor</div></div>
+  <div><h1>Victory-Dance</h1><div class="sub">Battle Builder · VOD Parser · known_teams.json editor</div></div>
   <div class="sp"></div>
-  <button class="btn" onclick="newTeam()">+ New team</button>
+  <button class="btn" onclick="newBattle()">+ New battle</button>
+  <input type="file" id="replay-file" accept=".html" style="display:none" onchange="loadReplay(event)">
+  <button class="btn" onclick="document.getElementById('replay-file').click()">📂 Load replay</button>
   <button class="btn" onclick="importJSON()">Import JSON</button>
-  <button class="btn suc" onclick="exportTeam()">Export team</button>
-  <button class="btn pri" onclick="exportKnownTeams()">Save known_teams.json</button>
+  <button class="btn suc" style="background:var(--blue);border-color:var(--blue)" onclick="exportVOD()">⬇ Export VOD</button>
+  <button class="btn pri" onclick="exportKnownTeams()">💾 Save known_teams.json</button>
 </div>
 
 <div id="app">
   <div id="side">
     <div class="sec">
-      <h3>Teams</h3>
-      <div id="t-list"></div>
-      <button class="btn" style="width:100%;margin-top:4px" onclick="newTeam()">+ New team</button>
-    </div>
-    <div class="sec">
-      <h3>Import replay</h3>
-      <div style="font-size:11px;color:var(--text3);margin-bottom:7px">Extract battle ID from a saved HTML replay</div>
-      <input type="file" id="replay-file" accept=".html" style="display:none" onchange="loadReplay(event)">
-      <button class="btn" style="width:100%" onclick="document.getElementById('replay-file').click()">Load replay HTML</button>
+      <h3>Battles</h3>
+      <div id="b-list"></div>
+      <button class="btn" style="width:100%;margin-top:4px" onclick="newBattle()">+ New battle</button>
     </div>
     <div class="sec" style="margin-top:auto">
       <h3>Data</h3>
@@ -218,21 +224,58 @@
       </div>
     </div>
     <div id="editor" style="display:none">
-      <div id="t-hdr">
-        <input type="text" id="t-name" placeholder="Team name" maxlength="32">
-        <div>
-          <div class="lbl-sm">Battle ID</div>
-          <input type="text" id="bid" class="fld" placeholder="battle-gen9championsvgc2026regma-1234" style="width:300px">
+      <!-- Battle metadata row -->
+      <div id="b-hdr">
+        <div style="flex:1">
+          <div class="lbl-sm" style="margin-bottom:3px">Battle ID</div>
+          <input type="text" id="bid-in" placeholder="battle-gen9championsvgc2026regma-1234567">
         </div>
         <div>
           <div class="lbl-sm">Your side</div>
-          <select id="t-side" class="fld">
+          <select id="your-side" class="fld" title="Which side are YOU playing? Used by vod_parser.py to encode perspective.">
+            <option value="p1">p1</option>
+            <option value="p2">p2</option>
+          </select>
+        </div>
+        <div>
+          <div class="lbl-sm">Winner</div>
+          <select id="winner-sel" class="fld">
+            <option value="">Unknown</option>
             <option value="p1">p1</option>
             <option value="p2">p2</option>
           </select>
         </div>
       </div>
-      <div id="grid"></div>
+
+      <!-- Dual panel -->
+      <div id="dual">
+        <div class="panel" id="panel-p1">
+          <div class="panel-hdr p1-hdr">
+            <span class="panel-label p1-label">P1</span>
+            <input class="player-name-in" id="p1name-in" placeholder="Player 1" oninput="saveMeta()">
+            <span id="p1-your-tag" class="your-side-tag" style="display:none">YOUR SIDE</span>
+            <span id="p1-winner-tag" class="winner-badge" style="display:none">🏆 Winner</span>
+            <div class="sp"></div>
+            <span id="p1-count" style="font-size:10px;color:var(--text3)">0/6</span>
+          </div>
+          <div class="panel-body">
+            <div class="mon-grid" id="grid-p1"></div>
+          </div>
+        </div>
+        <div class="panel" id="panel-p2">
+          <div class="panel-hdr p2-hdr">
+            <span class="panel-label p2-label">P2</span>
+            <input class="player-name-in" id="p2name-in" placeholder="Player 2" oninput="saveMeta()">
+            <span id="p2-your-tag" class="your-side-tag" style="display:none">YOUR SIDE</span>
+            <span id="p2-winner-tag" class="winner-badge" style="display:none">🏆 Winner</span>
+            <div class="sp"></div>
+            <span id="p2-count" style="font-size:10px;color:var(--text3)">0/6</span>
+          </div>
+          <div class="panel-body">
+            <div class="mon-grid" id="grid-p2"></div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -255,25 +298,36 @@
 <input type="file" id="imp-file" accept=".json" style="display:none" onchange="handleImport(event)">
 
 <script>
-/* ─── data ─── */
-let dex   = {};   // pokedex keyed by lowercase species id
-let moves = {};   // moves.json
-let mlist = [];   // sorted move keys
+/* ═══════════════════════════════════════════════════════════════════
+   DATA & STATE
+═══════════════════════════════════════════════════════════════════ */
+let dex   = {};
+let moves = {};
+let mlist = [];
 
-/* ─── state ─── */
-let teams = [];
-let ai = 0;       // active team index
-let mcb = null;   // modal callback
+/* battles[] — each battle has BOTH sides
+   {
+     bid:    string,
+     yourSide: "p1"|"p2",
+     winner: "p1"|"p2"|"",
+     p1name: string,
+     p2name: string,
+     p1: { mons: [mon×6] },
+     p2: { mons: [mon×6] }
+   }
+*/
+let battles = [];
+let ai = 0;   // active battle index
+let mcb = null;
 
 const NATURES = ["Adamant","Bashful","Bold","Brave","Calm","Careful","Docile",
-  "Gentle","Hardy","Hasty","Impish","Jolly","Lax","Lazy","Lonely","Mild",
+  "Gentle","Hardy","Hasty","Impish","Jolly","Lax","Lonely","Mild",
   "Modest","Naive","Naughty","Quiet","Quirky","Rash","Relaxed","Sassy",
   "Serious","Timid"];
-const STAT_KEYS = ["hp","atk","def","spa","spd","spe"];
+const STAT_KEYS   = ["hp","atk","def","spa","spd","spe"];
 const STAT_LABELS = ["HP","Atk","Def","SpA","SpD","Spe"];
-const BAR_CLS = ["b-hp","b-atk","b-def","b-spa","b-spd","b-spe"];
+const BAR_CLS     = ["b-hp","b-atk","b-def","b-spa","b-spd","b-spe"];
 
-/* ─── nature mult table ─── */
 const NM = {
   Adamant:{atk:1.1,spa:.9}, Modest:{spa:1.1,atk:.9}, Jolly:{spe:1.1,spa:.9},
   Timid:{spe:1.1,atk:.9},   Brave:{atk:1.1,spe:.9},  Quiet:{spa:1.1,spe:.9},
@@ -292,11 +346,28 @@ function calcStat(stat, base, ev, nature) {
   return m ? Math.floor(raw*(m[stat]||1)) : raw;
 }
 
-/* ─── load ─── */
+/* ─── Factories ─── */
+function mkMon() {
+  return { species:"", item:"", ability:"", nature:"Adamant",
+           evs:[0,0,0,0,0,0], moves:["","","",""],
+           _fromLog: false, _revealedMoves: [], _megaItem: false };
+}
+function mkBattle(name) {
+  return {
+    bid: "", yourSide: "p1", winner: "", p1name: name||"p1", p2name: "p2",
+    p1: { mons: Array(6).fill(null).map(mkMon) },
+    p2: { mons: Array(6).fill(null).map(mkMon) },
+  };
+}
+
+function save() { localStorage.setItem("vd-battles", JSON.stringify(battles)); }
+
+/* ═══════════════════════════════════════════════════════════════════
+   LOAD DATA
+═══════════════════════════════════════════════════════════════════ */
 async function loadData() {
   const status = document.getElementById("data-status");
   try {
-    /* team_builder.html lives at data/scripts/ — data/ is one level up */
     const [pr, mr] = await Promise.all([
       fetch("../pokedex.json"),
       fetch("../moves.json"),
@@ -331,77 +402,124 @@ async function loadData() {
 function init() {
   document.getElementById("loading").style.display = "none";
   document.getElementById("editor").style.display  = "block";
-  try { teams = JSON.parse(localStorage.getItem("vd-teams") || "[]"); } catch { teams = []; }
-  if (!teams.length) teams = [mkTeam("My Team")];
+  try { battles = JSON.parse(localStorage.getItem("vd-battles") || "[]"); } catch { battles = []; }
+  // Migrate old teams[] format if present
+  try {
+    const old = JSON.parse(localStorage.getItem("vd-teams") || "[]");
+    if (old.length && !battles.length) battles = migrateOldTeams(old);
+  } catch {}
+  if (!battles.length) battles = [mkBattle("New Battle")];
   renderList();
-  loadTeam(0);
+  loadBattle(0);
 }
 
-/* ─── team factory ─── */
-function mkTeam(name) {
-  return { name: name||"Team", bid: "", side: "p1",
-           mons: Array(6).fill(null).map(mkMon) };
-}
-function mkMon() {
-  return { species:"", item:"", ability:"", nature:"Adamant",
-           evs:[0,0,0,0,0,0], moves:["","","",""] };
+function migrateOldTeams(teams) {
+  // Group by bid, combine p1/p2 entries
+  const byBid = {};
+  teams.forEach(t => {
+    const key = t.bid || ("_nobid_" + Math.random());
+    if (!byBid[key]) byBid[key] = mkBattle(t.name || key);
+    byBid[key].bid = t.bid || "";
+    byBid[key][t.side || "p1"].mons = t.mons.map(m => ({
+      ...mkMon(), ...m,
+      _fromLog: false, _revealedMoves: [], _megaItem: false
+    }));
+  });
+  return Object.values(byBid);
 }
 
-function save() { localStorage.setItem("vd-teams", JSON.stringify(teams)); }
-
-/* ─── list ─── */
+/* ═══════════════════════════════════════════════════════════════════
+   SIDEBAR
+═══════════════════════════════════════════════════════════════════ */
 function renderList() {
-  const el = document.getElementById("t-list");
+  const el = document.getElementById("b-list");
   el.innerHTML = "";
-  teams.forEach((t, i) => {
+  battles.forEach((b, i) => {
     const d = document.createElement("div");
-    d.className = "t-item" + (i===ai?" active":"");
-    const filled = t.mons.filter(m=>m.species);
-    const sprs = filled.slice(0,6).map(m =>
+    d.className = "b-item" + (i===ai?" active":"");
+    const p1filled = b.p1.mons.filter(m=>m.species);
+    const p2filled = b.p2.mons.filter(m=>m.species);
+    const allSprs = [...p1filled, ...p2filled].slice(0,8).map(m =>
       `<img src="${spr(m.species)}" onerror="this.style.display='none'" title="${m.species}">`).join("");
-    d.innerHTML = `<div style="flex:1"><div class="t-name">${esc(t.name||"Untitled")}</div>
-      <div class="t-sprites">${sprs}</div></div>
-      <div style="font-size:10px;color:var(--text3);flex-shrink:0">${filled.length}/6</div>
-      <button class="t-del" onclick="event.stopPropagation();delTeam(${i})" title="Delete">✕</button>`;
-    d.onclick = () => { ai=i; renderList(); loadTeam(i); };
+    const shortBid = b.bid ? b.bid.replace(/^battle-[^-]+-/i,"#") : "No ID";
+    d.innerHTML = `<div style="flex:1;min-width:0">
+        <div class="b-name">${esc(b.p1name||"p1")} vs ${esc(b.p2name||"p2")}</div>
+        <div class="b-meta">${esc(shortBid)}</div>
+        <div class="b-sprs">${allSprs}</div>
+      </div>
+      <button class="b-del" onclick="event.stopPropagation();delBattle(${i})" title="Delete">✕</button>`;
+    d.onclick = () => { ai=i; renderList(); loadBattle(i); };
     el.appendChild(d);
   });
 }
 
-function loadTeam(i) {
+/* ═══════════════════════════════════════════════════════════════════
+   LOAD BATTLE
+═══════════════════════════════════════════════════════════════════ */
+function loadBattle(i) {
   ai = i;
-  const t = teams[i];
-  document.getElementById("t-name").value  = t.name  || "";
-  document.getElementById("bid").value      = t.bid   || "";
-  document.getElementById("t-side").value   = t.side  || "p1";
-  renderGrid();
+  const b = battles[i];
+  document.getElementById("bid-in").value       = b.bid       || "";
+  document.getElementById("your-side").value    = b.yourSide  || "p1";
+  document.getElementById("winner-sel").value   = b.winner    || "";
+  document.getElementById("p1name-in").value    = b.p1name    || "";
+  document.getElementById("p2name-in").value    = b.p2name    || "";
+  updateYourSideTags();
+  updateWinnerTags();
+  renderGrid("p1");
+  renderGrid("p2");
 }
 
-/* ─── grid ─── */
-function renderGrid() {
-  const g = document.getElementById("grid");
+/* ─── Metadata listeners ─── */
+document.getElementById("bid-in").addEventListener("input", e => { battles[ai].bid = e.target.value; save(); renderList(); });
+document.getElementById("your-side").addEventListener("change", e => { battles[ai].yourSide = e.target.value; save(); updateYourSideTags(); });
+document.getElementById("winner-sel").addEventListener("change", e => { battles[ai].winner = e.target.value; save(); updateWinnerTags(); });
+
+function saveMeta() {
+  battles[ai].p1name = document.getElementById("p1name-in").value;
+  battles[ai].p2name = document.getElementById("p2name-in").value;
+  save(); renderList();
+}
+
+function updateYourSideTags() {
+  const ys = battles[ai]?.yourSide || "p1";
+  document.getElementById("p1-your-tag").style.display = ys==="p1" ? "" : "none";
+  document.getElementById("p2-your-tag").style.display = ys==="p2" ? "" : "none";
+}
+function updateWinnerTags() {
+  const w = battles[ai]?.winner || "";
+  document.getElementById("p1-winner-tag").style.display = w==="p1" ? "" : "none";
+  document.getElementById("p2-winner-tag").style.display = w==="p2" ? "" : "none";
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   RENDER GRID (one side)
+═══════════════════════════════════════════════════════════════════ */
+function renderGrid(side) {
+  const g = document.getElementById(`grid-${side}`);
   g.innerHTML = "";
-  teams[ai].mons.forEach((mon, i) => {
+  battles[ai][side].mons.forEach((mon, i) => {
     const el = document.createElement("div");
     el.className = "card" + (mon.species ? "" : " empty");
-    el.id = `slot-${i}`;
-    el.innerHTML = mon.species ? buildCard(mon, i) : buildEmpty(i);
+    el.id = `slot-${side}-${i}`;
+    el.innerHTML = mon.species ? buildCard(mon, side, i) : buildEmpty(side, i);
     g.appendChild(el);
   });
+  // Update count
+  const filled = battles[ai][side].mons.filter(m=>m.species).length;
+  document.getElementById(`${side}-count`).textContent = `${filled}/6`;
 }
 
-function buildEmpty(i) {
-  return `<div class="add-slot" onclick="openPicker(${i})">
+function buildEmpty(side, i) {
+  return `<div class="add-slot" onclick="openPicker('${side}',${i})">
     <div class="plus">+</div><span>Add Pokémon</span></div>`;
 }
 
-function buildCard(mon, i) {
+function buildCard(mon, side, i) {
   const pd = getDex(mon.species);
   const types = pd ? (pd.types||[]) : [];
-  const tHtml = types.map(t =>
-    `<span class="tbdg t-${t.toLowerCase()}">${t}</span>`).join("");
+  const tHtml = types.map(t => `<span class="tbdg t-${t.toLowerCase()}">${t}</span>`).join("");
 
-  /* abilities from dex */
   const abs = pd ? Object.values(pd.abilities||{}).filter(Boolean) : [];
   const abOpts = ["<option value=''>— select —</option>",
     ...abs.map(a => `<option value="${esc(a)}"${a===mon.ability?" selected":""}>${esc(a)}</option>`)
@@ -423,10 +541,12 @@ function buildCard(mon, i) {
       <div class="slbl">${STAT_LABELS[si]}</div>
       <div class="sbar-w"><div class="sbar ${BAR_CLS[si]}" style="width:${pct}%"></div></div>
       <input class="ev-in" type="number" min="0" max="32" value="${ev}"
-        onchange="setEV(${i},${si},this.value)" title="${STAT_LABELS[si]} EV">
-      <div class="sval" id="sv-${i}-${s}">${final}</div>
+        onchange="setEV('${side}',${i},${si},this.value)" title="${STAT_LABELS[si]} EV">
+      <div class="sval" id="sv-${side}-${i}-${s}">${final}</div>
     </div>`;
   }).join("");
+
+  const revealedSet = new Set(mon._revealedMoves || []);
 
   const movesHtml = [0,1,2,3].map(mi => {
     const mv  = mon.moves[mi]||"";
@@ -435,44 +555,72 @@ function buildCard(mon, i) {
     const badge = mtype
       ? `<span class="mbdg t-${mtype.toLowerCase()}">${mtype}</span>`
       : `<span class="mbdg t-unknown">—</span>`;
+    const seenDot = mv && revealedSet.has(mv)
+      ? `<span title="Seen in replay" style="color:var(--green);font-size:11px;flex-shrink:0">●</span>`
+      : `<span title="Unknown" style="color:var(--bdr2);font-size:11px;flex-shrink:0">○</span>`;
     return `<div class="mrow">${badge}
       <div class="acwrap">
-        <input class="ac-in" data-i="${i}" data-mi="${mi}" value="${esc(mdn)}"
+        <input class="ac-in" data-side="${side}" data-i="${i}" data-mi="${mi}" value="${esc(mdn)}"
           placeholder="Move ${mi+1}" oninput="onMvIn(this)" onblur="onMvBlur(this)" autocomplete="off">
-        <div class="ac-dd" id="ac-${i}-${mi}"></div>
-      </div></div>`;
+        <div class="ac-dd" id="ac-${side}-${i}-${mi}"></div>
+      </div>${seenDot}</div>`;
   }).join("");
 
+  const vodBadge = mon._fromLog
+    ? `<span class="src-vod">VOD</span>` : "";
+  // If species is a mega form but item is blank, infer the stone.
+  // Dex keys strip hyphens ("blastoisemega") but MEGA_STONES uses hyphens
+  // ("blastoise-mega"), so rebuild the hyphenated form before lookup.
+  if (!mon.item && mon.species) {
+    const noHyph = mon.species.toLowerCase().replace(/[^a-z0-9]/g, "");
+    const hyphen = noHyph.replace(/(mega|eternal)/, "-$1");
+    if (hyphen.includes("mega") || hyphen.includes("eternal")) {
+      const inferred = getMegaStone(hyphen, "");
+      if (inferred) { mon.item = inferred; mon._megaItem = true; save(); }
+    }
+  }
+  const megaBadge = mon._megaItem
+    ? `<span class="src-mega">MEGA</span>` : "";
+  const itemRevealed = mon._fromLog && mon.item;
+
   return `
-  <div class="card-hdr" onclick="openPicker(${i})">
+  <div class="card-hdr" onclick="openPicker('${side}',${i})">
     <img class="spr" src="${spr(mon.species)}" onerror="this.src=''" title="${esc(mon.species)}">
-    <div style="flex:1">
-      <div class="c-name">${esc(dispName(mon.species))}</div>
+    <div style="flex:1;min-width:0">
+      <div class="c-name" style="display:flex;align-items:center;gap:2px;flex-wrap:wrap">
+        ${esc(dispName(mon.species))}${vodBadge}${megaBadge}
+      </div>
       <div class="c-types">${tHtml}</div>
     </div>
-    <button class="c-del" onclick="event.stopPropagation();delMon(${i})" title="Remove">✕</button>
+    <button class="c-del" onclick="event.stopPropagation();delMon('${side}',${i})" title="Remove">✕</button>
   </div>
   <div class="card-body">
     <div class="frow"><label>Item</label>
-      <input type="text" value="${esc(mon.item||"")}" placeholder="e.g. Life Orb"
-        onchange="setField(${i},'item',this.value)"></div>
+      <input type="text" value="${esc(mon.item||"")}" placeholder="${itemRevealed ? '✓ from log' : 'e.g. Life Orb'}"
+        onchange="setField('${side}',${i},'item',this.value)"
+        style="${itemRevealed ? 'border-color:var(--green)' : ''}"></div>
     <div class="frow"><label>Ability</label>
-      <select onchange="setField(${i},'ability',this.value)">${abOpts}</select></div>
+      <select onchange="setField('${side}',${i},'ability',this.value)">${abOpts}</select></div>
     <div class="frow"><label>Nature</label>
-      <select onchange="setField(${i},'nature',this.value)">${natOpts}</select></div>
+      <select onchange="setField('${side}',${i},'nature',this.value)">${natOpts}</select></div>
     <div class="stats">
       <div class="stat-hdr">Stats
-        <span class="${evCls}" id="evt-${i}">(${evTotal}/66 EVs)</span>
+        <span class="${evCls}" id="evt-${side}-${i}">(${evTotal}/66 EVs)</span>
       </div>
       ${statsHtml}
     </div>
-    <div class="moves"><h4>Moves</h4>${movesHtml}</div>
+    <div class="moves">
+      <h4>Moves <span style="font-size:9px;font-weight:400;color:var(--text3)">● seen in log &nbsp; ○ unknown</span></h4>
+      ${movesHtml}
+    </div>
   </div>`;
 }
 
-/* ─── helpers ─── */
+/* ═══════════════════════════════════════════════════════════════════
+   HELPERS
+═══════════════════════════════════════════════════════════════════ */
 function spr(sp) {
-  const id = (sp||"").toLowerCase().replace(/[^a-z0-9]/g,"");
+  const id = (sp||"").toLowerCase().replace(/[^a-z0-9-]/g,"");
   return `https://play.pokemonshowdown.com/sprites/gen5/${id}.png`;
 }
 function getDex(sp) {
@@ -489,7 +637,7 @@ function displayMove(key) {
   return key.split("-").map(w=>w.charAt(0).toUpperCase()+w.slice(1)).join(" ");
 }
 function moveKey(display) {
-  return display.toLowerCase().replace(/ /g,"-").replace(/[^a-z0-9-]/g,"");
+  return (display||"").toLowerCase().replace(/ /g,"-").replace(/[^a-z0-9-]/g,"");
 }
 function getMoveType(key) {
   if (!key) return "";
@@ -500,9 +648,42 @@ function esc(s) {
   return (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
 }
 
-/* ─── picker ─── */
-function openPicker(idx) {
-  mcb = sp => { setSpecies(idx, sp); closeModal(); };
+/* ═══════════════════════════════════════════════════════════════════
+   MEGA STONE LOOKUP
+   |-mega|p1a: Charizard|Charizard-Mega-Y|Charizardite Y
+   parts[4] = stone name directly from the log
+═══════════════════════════════════════════════════════════════════ */
+// Fallback map for when stone isn't in the log (shouldn't be needed but safety net)
+const MEGA_STONES = {
+  "venusaur-mega":"Venusaurite","charizard-mega-x":"Charizardite X",
+  "charizard-mega-y":"Charizardite Y","blastoise-mega":"Blastoisinite",
+  "alakazam-mega":"Alakazite","gengar-mega":"Gengarite","kangaskhan-mega":"Kangaskhanite",
+  "pinsir-mega":"Pinsirite","gyarados-mega":"Gyaradosite","aerodactyl-mega":"Aerodactylite",
+  "mewtwo-mega-x":"Mewtwonite X","mewtwo-mega-y":"Mewtwonite Y","ampharos-mega":"Ampharosite",
+  "scizor-mega":"Scizorite","heracross-mega":"Heracronite","houndoom-mega":"Houndoominite",
+  "tyranitar-mega":"Tyranitarite","blaziken-mega":"Blazikenite","gardevoir-mega":"Gardevoirite",
+  "mawile-mega":"Mawilite","aggron-mega":"Aggronite","medicham-mega":"Medichamite",
+  "manectric-mega":"Manectite","banette-mega":"Banettite","absol-mega":"Absolite",
+  "garchomp-mega":"Garchompite","lucario-mega":"Lucarionite","abomasnow-mega":"Abomasite",
+  "beedrill-mega":"Beedrillite","pidgeot-mega":"Pidgeotite","slowbro-mega":"Slowbronite",
+  "steelix-mega":"Steelixite","sceptile-mega":"Sceptilite","swampert-mega":"Swampertite",
+  "sableye-mega":"Sableyite","sharpedo-mega":"Sharpedonite","camerupt-mega":"Cameruptite",
+  "altaria-mega":"Altarianite","glalie-mega":"Glalitite","salamence-mega":"Salamencite",
+  "metagross-mega":"Metagrossite","latias-mega":"Latiasite","latios-mega":"Latiosite",
+  "lopunny-mega":"Lopunnite","gallade-mega":"Galladite","audino-mega":"Audinite",
+  "diancie-mega":"Diancite","rayquaza-mega":"","floette-eternal":"",
+};
+
+function getMegaStone(megaSpeciesKey, stoneFromLog) {
+  if (stoneFromLog && stoneFromLog.trim()) return stoneFromLog.trim();
+  return MEGA_STONES[megaSpeciesKey] || "";
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   PICKER
+═══════════════════════════════════════════════════════════════════ */
+function openPicker(side, idx) {
+  mcb = sp => { setSpecies(side, idx, sp); closeModal(); };
   buildModalList("");
   document.getElementById("moverlay").classList.add("open");
   const ms = document.getElementById("m-search");
@@ -521,86 +702,93 @@ function buildModalList(q) {
   ).slice(0,80);
   list.innerHTML = keys.map(k => {
     const pd = dex[k];
-    const name = pd.name || k;
     const types = (pd.types||[]).map(t =>
       `<span class="tbdg t-${t.toLowerCase()}">${t}</span>`).join("");
     return `<div class="m-item" onclick="mcb && mcb('${k}')">
-      <img src="${spr(k)}" onerror="this.src=''" width="38" height="38">
-      <div><div class="m-item-name">${esc(name)}</div><div class="c-types" style="margin-top:2px">${types}</div></div>
+      <img src="${spr(k)}" onerror="this.src=''" width="36" height="36">
+      <div><div class="m-item-name">${esc(pd.name||k)}</div><div class="c-types" style="margin-top:2px">${types}</div></div>
     </div>`;
   }).join("") || `<div style="padding:14px;color:var(--text3);font-size:12px">No results</div>`;
 }
 
-/* ─── setters ─── */
-function setSpecies(idx, sp) {
-  const mon = teams[ai].mons[idx];
-  if (!mon.species) Object.assign(mon, mkMon());
+/* ═══════════════════════════════════════════════════════════════════
+   SETTERS
+═══════════════════════════════════════════════════════════════════ */
+function setSpecies(side, idx, sp) {
+  const mon = battles[ai][side].mons[idx];
+  const was = mon.species;
+  if (!was) Object.assign(mon, mkMon());
   mon.species = sp;
   const pd = getDex(sp);
   if (pd && pd.abilities && !mon.ability) {
     mon.ability = Object.values(pd.abilities).find(Boolean) || "";
   }
-  save(); renderGrid(); renderList();
+  save(); renderGrid(side); renderList();
 }
-function delMon(idx) { teams[ai].mons[idx]=mkMon(); save(); renderGrid(); renderList(); }
-function delTeam(idx) {
-  if (teams.length===1) { showNotif("⚠ Can't delete last team", true); return; }
-  teams.splice(idx,1);
-  if (ai>=teams.length) ai=teams.length-1;
-  save(); renderList(); loadTeam(ai);
+function delMon(side, idx) {
+  battles[ai][side].mons[idx] = mkMon(); save(); renderGrid(side); renderList();
 }
-function newTeam() {
-  teams.push(mkTeam("New Team "+(teams.length+1)));
-  ai=teams.length-1; save(); renderList(); loadTeam(ai);
+function newBattle() {
+  battles.push(mkBattle("New Battle " + (battles.length+1)));
+  ai = battles.length-1; save(); renderList(); loadBattle(ai);
 }
-function setField(idx, field, val) {
-  teams[ai].mons[idx][field]=val; save();
-  if (field==="nature") refreshStats(idx);
+function delBattle(idx) {
+  if (battles.length===1) { showNotif("⚠ Can't delete last battle", true); return; }
+  battles.splice(idx,1);
+  if (ai>=battles.length) ai=battles.length-1;
+  save(); renderList(); loadBattle(ai);
 }
-function setEV(idx, si, val) {
+function setField(side, idx, field, val) {
+  battles[ai][side].mons[idx][field] = val; save();
+  if (field==="nature") refreshStats(side, idx);
+}
+function setEV(side, idx, si, val) {
   const v = Math.max(0,Math.min(32,parseInt(val)||0));
-  teams[ai].mons[idx].evs[si]=v; save(); refreshStats(idx);
+  battles[ai][side].mons[idx].evs[si] = v; save(); refreshStats(side, idx);
 }
-function refreshStats(idx) {
-  const mon = teams[ai].mons[idx];
+function refreshStats(side, idx) {
+  const mon = battles[ai][side].mons[idx];
   const pd  = getDex(mon.species);
   const tot = mon.evs.reduce((s,v)=>s+(v||0),0);
-  const te  = document.getElementById(`evt-${idx}`);
+  const te  = document.getElementById(`evt-${side}-${idx}`);
   if (te) { te.textContent=`(${tot}/66 EVs)`; te.className=tot>66?"ev-over":""; }
   STAT_KEYS.forEach((s,si) => {
     const base  = pd&&pd.baseStats?(pd.baseStats[s]||50):50;
     const final = calcStat(s, base, mon.evs[si]||0, mon.nature);
-    const el    = document.getElementById(`sv-${idx}-${s}`);
+    const el    = document.getElementById(`sv-${side}-${idx}-${s}`);
     if (el) el.textContent=final;
     const max   = s==="hp"?714:614;
     const pct   = Math.round(final/max*100);
-    const wrap  = el?.parentElement;
-    if (wrap) { const bar=wrap.querySelector(".sbar"); if(bar) bar.style.width=pct+"%"; }
+    if (el) {
+      const wrap = el.parentElement;
+      if (wrap) { const bar=wrap.querySelector(".sbar"); if(bar) bar.style.width=pct+"%"; }
+    }
   });
 }
 
-/* ─── move autocomplete ─── */
+/* ═══════════════════════════════════════════════════════════════════
+   MOVE AUTOCOMPLETE
+═══════════════════════════════════════════════════════════════════ */
 function onMvIn(input) {
-  const i=+input.dataset.i, mi=+input.dataset.mi;
+  const side=input.dataset.side, i=+input.dataset.i, mi=+input.dataset.mi;
   const q=input.value.toLowerCase().replace(/[^a-z0-9]/g,"");
-  const dd=document.getElementById(`ac-${i}-${mi}`);
+  const dd=document.getElementById(`ac-${side}-${i}-${mi}`);
   if (!q) { dd.classList.remove("open"); return; }
   const matches=mlist.filter(k=>k.replace(/-/g,"").includes(q)).slice(0,18);
   dd.innerHTML=matches.map(k=>{
     const mt=moves[k]?moves[k].type||"":"";
     const badge=mt?`<span class="tbdg t-${mt.toLowerCase()}" style="font-size:8px">${mt}</span>`:"";
-    return `<div class="ac-itm" onmousedown="selectMove(${i},${mi},'${k}')">${badge}${esc(displayMove(k))}</div>`;
+    return `<div class="ac-itm" onmousedown="selectMove('${side}',${i},${mi},'${k}')">${badge}${esc(displayMove(k))}</div>`;
   }).join("");
   dd.classList.toggle("open", matches.length>0);
 }
 function onMvBlur(input) {
-  const i=+input.dataset.i, mi=+input.dataset.mi;
+  const side=input.dataset.side, i=+input.dataset.i, mi=+input.dataset.mi;
   setTimeout(()=>{
-    const dd=document.getElementById(`ac-${i}-${mi}`);
+    const dd=document.getElementById(`ac-${side}-${i}-${mi}`);
     if(dd) dd.classList.remove("open");
     const k = moveKey(input.value.trim());
-    teams[ai].mons[i].moves[mi]=k; save();
-    /* update badge */
+    battles[ai][side].mons[i].moves[mi]=k; save();
     const mtype=getMoveType(k);
     const mrow=input.closest(".mrow");
     if(mrow){
@@ -609,11 +797,11 @@ function onMvBlur(input) {
     }
   }, 150);
 }
-function selectMove(i, mi, key) {
-  teams[ai].mons[i].moves[mi]=key; save();
-  const inp=document.querySelector(`.ac-in[data-i="${i}"][data-mi="${mi}"]`);
+function selectMove(side, i, mi, key) {
+  battles[ai][side].mons[i].moves[mi]=key; save();
+  const inp=document.querySelector(`.ac-in[data-side="${side}"][data-i="${i}"][data-mi="${mi}"]`);
   if(inp) inp.value=displayMove(key);
-  const dd=document.getElementById(`ac-${i}-${mi}`);
+  const dd=document.getElementById(`ac-${side}-${i}-${mi}`);
   if(dd) dd.classList.remove("open");
   const mtype=getMoveType(key);
   const mrow=inp?.closest(".mrow");
@@ -623,77 +811,418 @@ function selectMove(i, mi, key) {
   }
 }
 
-/* ─── team metadata listeners ─── */
-document.getElementById("t-name").addEventListener("input",e=>{
-  teams[ai].name=e.target.value; save(); renderList(); });
-document.getElementById("bid").addEventListener("input",e=>{
-  teams[ai].bid=e.target.value; save(); });
-document.getElementById("t-side").addEventListener("change",e=>{
-  teams[ai].side=e.target.value; save(); });
+/* ═══════════════════════════════════════════════════════════════════
+   REPLAY PARSER
+   Extracts both sides simultaneously — no side picker needed.
+   Returns { bid, p1name, p2name, winner, roster:{p1:{}, p2:{}} }
+═══════════════════════════════════════════════════════════════════ */
+function parseReplayHTML(html) {
+  const m1 = html.match(/name="replayid"\s+value="([^"]+)"/);
+  const m2 = html.match(/(battle-gen\d[a-z0-9]+-\d+)/i);
+  const bid = (m1||m2||[null,null])[1] || "";
 
-/* ─── export ─── */
+  const logMatch = html.match(/<script[^>]+class="battle-log-data"[^>]*>([\s\S]*?)<\/script>/);
+  if (!logMatch) return { bid, error: "No battle log found in HTML" };
+  const lines = logMatch[1].split("\n");
 
-/*
-  known_teams.json format expected by vod_parser.py (lines 457-464):
-  {
-    "<battle_id>": {
-      "<side>": {
-        "<Species>": {
-          "nature": "Adamant",
-          "evs":    [32, 32, 0, 0, 2, 0],   ← [hp,atk,def,spa,spd,spe] actual 0-32 (Champions: max 32/stat, total 66)
-          "ivs":    [31, 31, 31, 31, 31, 31],  ← optional
-          "item":   "Chople Berry",
-          "ability":"Defiant",
-          "moves":  ["Sucker Punch", "Kowtow Cleave", "Protect", "Low Kick"]
+  const result = {
+    bid,
+    p1name: "", p2name: "",
+    joinOrder: [],
+    winner: null,
+    roster: { p1: {}, p2: {} }
+  };
+
+  function normSpecies(raw) { return raw.split(",")[0].trim(); }
+  function sideOf(slotKey) { return slotKey.slice(0,2); }
+
+  const active = { p1a:null, p1b:null, p2a:null, p2b:null };
+
+  for (const line of lines) {
+    const parts = line.split("|");
+    if (parts.length < 2) continue;
+    const tag = parts[1];
+
+    if (tag === "j") {
+      const name = (parts[2]||"").replace(/^[☆★✓\s]+/, "").trim();
+      if (name && result.joinOrder.length < 2) result.joinOrder.push(name);
+    }
+    else if (tag === "player") {
+      if (parts[2]==="p1") result.p1name = parts[3]||"";
+      if (parts[2]==="p2") result.p2name = parts[3]||"";
+    }
+    // Team preview roster reveal
+    else if (tag === "poke") {
+      const side = parts[2];
+      const species = normSpecies(parts[3]||"");
+      if (side && species && result.roster[side]) {
+        if (!result.roster[side][species]) {
+          result.roster[side][species] = {
+            species, moves: new Set(), item: "", ability: "",
+            revealed: false, _megaItem: false
+          };
         }
       }
     }
+    // Switch / drag
+    else if (tag === "switch" || tag === "drag") {
+      const slotKey = parts[2]?.split(":")[0];
+      if (!slotKey) continue;
+      const side = sideOf(slotKey);
+      const species = normSpecies(parts[3]||"");
+      active[slotKey] = species;
+      if (!result.roster[side]) continue;
+      if (!result.roster[side][species]) {
+        result.roster[side][species] = {
+          species, moves: new Set(), item: "", ability: "",
+          revealed: true, _megaItem: false
+        };
+      }
+      result.roster[side][species].revealed = true;
+    }
+    // Move reveal
+    else if (tag === "move") {
+      const slotKey = parts[2]?.split(":")[0];
+      if (!slotKey) continue;
+      const side = sideOf(slotKey);
+      const moveName = parts[3]?.trim();
+      const species = active[slotKey];
+      if (species && moveName && result.roster[side]?.[species]) {
+        if (moveName.toLowerCase() !== "struggle")
+          result.roster[side][species].moves.add(moveName);
+      }
+    }
+    // |-item| reveal
+    else if (tag === "-item") {
+      const slotKey = parts[2]?.split(":")[0];
+      if (!slotKey) continue;
+      const side = sideOf(slotKey);
+      const item = parts[3]?.trim();
+      const species = active[slotKey];
+      if (species && item && result.roster[side]?.[species])
+        result.roster[side][species].item = item;
+    }
+    // |-ability| reveal
+    else if (tag === "-ability") {
+      const slotKey = parts[2]?.split(":")[0];
+      if (!slotKey) continue;
+      const side = sideOf(slotKey);
+      const ability = parts[3]?.trim();
+      const species = active[slotKey];
+      if (species && ability && result.roster[side]?.[species])
+        result.roster[side][species].ability = ability;
+    }
+    // -enditem: item consumed but still reveals what it was
+    else if (tag === "-enditem") {
+      const slotKey = parts[2]?.split(":")[0];
+      if (!slotKey) continue;
+      const side = sideOf(slotKey);
+      const item = parts[3]?.trim();
+      const species = active[slotKey];
+      if (species && item && result.roster[side]?.[species]) {
+        if (!result.roster[side][species].item)
+          result.roster[side][species].item = item;
+      }
+    }
+    // |-mega| — definitively reveals held mega stone
+    // Format: |-mega|p1a: Charizard|Charizard-Mega-Y|Charizardite Y
+    else if (tag === "-mega") {
+      const slotKey = parts[2]?.split(":")[0];
+      if (!slotKey) continue;
+      const side = sideOf(slotKey);
+      const preMegaSpecies = normSpecies(parts[3]||"");   // base form from log nick
+      const megaSpeciesRaw = normSpecies(parts[4]||"");   // e.g. "Charizard-Mega-Y"
+      const stoneFromLog   = parts[5]?.trim() || "";      // e.g. "Charizardite Y" (may be absent)
+
+      const megaKey = megaSpeciesRaw.toLowerCase().replace(/[^a-z0-9-]/g,"");
+      const stone = getMegaStone(megaKey, stoneFromLog);
+
+      // The pre-mega entry is the source of truth (it already has moves/ability from earlier)
+      // Rename it to the mega form and set its item
+      const preEntry = result.roster[side][preMegaSpecies];
+      if (preEntry) {
+        preEntry.species = megaSpeciesRaw;
+        if (stone) { preEntry.item = stone; preEntry._megaItem = true; }
+        result.roster[side][megaSpeciesRaw] = preEntry;
+        if (preMegaSpecies !== megaSpeciesRaw) delete result.roster[side][preMegaSpecies];
+        active[slotKey] = megaSpeciesRaw;
+      } else {
+        // Didn't see the base form yet — create entry for mega form
+        const entry = {
+          species: megaSpeciesRaw, moves: new Set(), item: stone,
+          ability: "", revealed: true, _megaItem: !!stone
+        };
+        result.roster[side][megaSpeciesRaw] = entry;
+        active[slotKey] = megaSpeciesRaw;
+      }
+    }
+    // detailschange / formechange (non-mega form changes)
+    else if (tag === "detailschange" || tag === "-formechange") {
+      const slotKey = parts[2]?.split(":")[0];
+      if (!slotKey) continue;
+      const newSpecies = normSpecies(parts[3]||"");
+      const side = sideOf(slotKey);
+      const oldSpecies = active[slotKey];
+      if (oldSpecies && newSpecies && result.roster[side]?.[oldSpecies]) {
+        const old = result.roster[side][oldSpecies];
+        result.roster[side][newSpecies] = { ...old, species: newSpecies };
+        if (oldSpecies !== newSpecies) delete result.roster[side][oldSpecies];
+        active[slotKey] = newSpecies;
+      }
+    }
+    else if (tag === "faint") {
+      const slotKey = parts[2]?.split(":")[0];
+      if (slotKey) active[slotKey] = null;
+    }
+    else if (tag === "win") {
+      const winnerName = parts[2]?.trim();
+      if (winnerName === result.p1name) result.winner = "p1";
+      else if (winnerName === result.p2name) result.winner = "p2";
+    }
   }
-*/
-function buildMonEntry(mon) {
-  return {
-    nature:  mon.nature || "Hardy",
-    evs:     mon.evs.slice(),          // already [hp,atk,def,spa,spd,spe] array
-    ivs:     [31,31,31,31,31,31],
-    item:    mon.item    || "",
-    ability: mon.ability || "",
-    moves:   mon.moves
-               .filter(m=>m)
-               .map(k => displayMove(k))  // vod_parser expects readable names
-  };
+
+  if (!result.p1name && result.joinOrder[0]) result.p1name = result.joinOrder[0];
+  if (!result.p2name && result.joinOrder[1]) result.p2name = result.joinOrder[1];
+
+  return result;
 }
 
-function exportTeam() {
-  const t = teams[ai];
-  const obj = {
-    name: t.name, bid: t.bid, side: t.side,
-    mons: t.mons.filter(m=>m.species).map(m => ({ species:m.species, ...buildMonEntry(m) }))
+/* ═══════════════════════════════════════════════════════════════════
+   APPLY PARSED REPLAY → BATTLE (both sides at once)
+═══════════════════════════════════════════════════════════════════ */
+function applyParsedToBattle(parsed) {
+  // Create or reuse a battle for this bid
+  let bIdx = battles.findIndex(b => b.bid && b.bid === parsed.bid);
+  if (bIdx === -1) {
+    battles.push(mkBattle());
+    bIdx = battles.length - 1;
+  }
+  ai = bIdx;
+
+  const b = battles[ai];
+  b.bid     = parsed.bid;
+  b.winner  = parsed.winner || "";
+  b.p1name  = parsed.p1name || "p1";
+  b.p2name  = parsed.p2name || "p2";
+
+  ["p1","p2"].forEach(side => {
+    const roster = parsed.roster[side] || {};
+    const mons   = Object.values(roster);
+    b[side].mons = Array(6).fill(null).map(mkMon);
+
+    mons.forEach((pmon, slotIdx) => {
+      if (slotIdx >= 6) return;
+      const slot = b[side].mons[slotIdx];
+
+      // Normalize species key
+      const stripped = pmon.species.toLowerCase().replace(/[^a-z0-9-]/g,"").replace(/-/g,"");
+      const dexKey = Object.keys(dex).find(k => k === stripped) ||
+                     Object.keys(dex).find(k =>
+                       (dex[k]?.name||"").toLowerCase().replace(/[^a-z0-9]/g,"") === stripped
+                     ) ||
+                     Object.keys(dex).find(k => {
+                       const dk = k.replace(/-/g,"");
+                       return dk === stripped;
+                     }) || pmon.species.toLowerCase().replace(/[^a-z0-9-]/g,"");
+
+      slot.species        = dexKey;
+      slot._fromLog       = true;
+      slot._megaItem      = pmon._megaItem || false;
+      slot._revealedMoves = [...pmon.moves].map(mv => moveKey(mv));
+
+      const revealedArr = [...pmon.moves].slice(0,4);
+      revealedArr.forEach((mv, mi) => { slot.moves[mi] = moveKey(mv); });
+      for (let mi = revealedArr.length; mi < 4; mi++) slot.moves[mi] = "";
+
+      if (pmon.ability) slot.ability = pmon.ability;
+      else {
+        const pd = getDex(dexKey);
+        slot.ability = pd ? (Object.values(pd.abilities||{}).find(Boolean)||"") : "";
+      }
+
+      if (pmon.item) slot.item = pmon.item;
+    });
+  });
+
+  save();
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   LOAD REPLAY FILE
+═══════════════════════════════════════════════════════════════════ */
+function loadReplay(e) {
+  const f = e.target.files[0]; if(!f) return;
+  const r = new FileReader();
+  r.onload = ev => {
+    const html = ev.target.result;
+    const parsed = parseReplayHTML(html);
+
+    if (parsed.error) { showNotif("⚠ " + parsed.error, true); return; }
+    if (!parsed.bid)  { showNotif("⚠ Couldn't find battle ID", true); return; }
+
+    applyParsedToBattle(parsed);
+
+    // Update UI
+    document.getElementById("bid-in").value     = battles[ai].bid;
+    document.getElementById("p1name-in").value  = battles[ai].p1name;
+    document.getElementById("p2name-in").value  = battles[ai].p2name;
+    document.getElementById("winner-sel").value = battles[ai].winner || "";
+    updateYourSideTags(); updateWinnerTags();
+    renderGrid("p1"); renderGrid("p2");
+    renderList();
+
+    const p1mons = Object.values(parsed.roster.p1||{});
+    const p2mons = Object.values(parsed.roster.p2||{});
+    const moveCnt = (mons) => mons.reduce((n,m)=>n+m.moves.size,0);
+    const itemCnt = (mons) => mons.filter(m=>m.item).length;
+    const megaCnt = (mons) => mons.filter(m=>m._megaItem).length;
+
+    const winner = parsed.winner ? ` · 🏆 ${parsed.winner==="p1"?parsed.p1name:parsed.p2name}` : "";
+    showNotif(`Parsed both sides${winner} — moves: ${moveCnt(p1mons)+moveCnt(p2mons)}, items: ${itemCnt(p1mons)+itemCnt(p2mons)}, mega stones: ${megaCnt(p1mons)+megaCnt(p2mons)}`);
   };
-  dl(JSON.stringify(obj, null, 2),
-     (t.name||"team").replace(/[^a-z0-9_-]/gi,"_")+".json");
-  showNotif("Team exported!");
+  r.readAsText(f); e.target.value="";
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   EXPORT
+   known_teams.json format:
+   {
+     "<battle_id>": {
+       "p1": { "<Species>": { nature, evs, ivs, item, ability, moves } },
+       "p2": { ... },
+       "_meta": { yourSide, winner, p1name, p2name }
+     }
+   }
+═══════════════════════════════════════════════════════════════════ */
+function buildMonEntry(mon) {
+  const entry = {};
+  if (mon.nature && mon.nature !== "Hardy") entry.nature = mon.nature;
+  if (mon.ability) entry.ability = mon.ability;
+  if (mon.item)    entry.item    = mon.item;
+  const evTotal = mon.evs.reduce((s,v)=>s+(v||0),0);
+  if (evTotal > 0) entry.evs = mon.evs.slice();
+  entry.ivs = [31,31,31,31,31,31];
+  const knownMoves = mon.moves.filter(m=>m).map(k => displayMove(k));
+  if (knownMoves.length) entry.moves = knownMoves;
+  return entry;
+}
+
+function exportVOD() {
+  const b = battles[ai];
+  if (!b.bid) { showNotif("⚠ No Battle ID — load a replay or enter one", true); return; }
+
+  const p1filled = b.p1.mons.filter(m=>m.species);
+  const p2filled = b.p2.mons.filter(m=>m.species);
+  if (!p1filled.length && !p2filled.length) {
+    showNotif("⚠ No Pokémon in either side", true); return;
+  }
+
+  const sideObj = (mons) => {
+    const obj = {};
+    mons.forEach(mon => {
+      const key = dispName(mon.species) || mon.species;
+      obj[key] = buildMonEntry(mon);
+    });
+    return obj;
+  };
+
+  const out = {
+    [b.bid]: {
+      p1: sideObj(p1filled),
+      p2: sideObj(p2filled),
+      _meta: {
+        yourSide: b.yourSide || "p1",
+        winner:   b.winner   || "",
+        p1name:   b.p1name   || "",
+        p2name:   b.p2name   || "",
+      }
+    }
+  };
+
+  const fname = b.bid.replace(/[^a-z0-9_-]/gi,"_") + "_known.json";
+  dl(JSON.stringify(out, null, 2), fname);
+
+  const totalMoves  = (p1filled.length + p2filled.length) * 4;
+  const knownMoves  = [...p1filled,...p2filled].reduce((n,m)=>n+m.moves.filter(x=>x).length,0);
+  const knownItems  = [...p1filled,...p2filled].filter(m=>m.item).length;
+  showNotif(`Exported both sides — moves: ${knownMoves}/${totalMoves}, items: ${knownItems}/${p1filled.length+p2filled.length}`);
 }
 
 function exportKnownTeams() {
   const out = {};
   let count = 0;
-  teams.forEach(t => {
-    if (!t.bid) return;
-    const side = t.side || "p1";
-    const filled = t.mons.filter(m => m.species);
-    if (!filled.length) return;
-    if (!out[t.bid]) out[t.bid] = {};
-    if (!out[t.bid][side]) out[t.bid][side] = {};
-    filled.forEach(mon => {
-      /* Use the display name as the key — vod_parser matches case-insensitively */
-      const key = dispName(mon.species) || mon.species;
-      out[t.bid][side][key] = buildMonEntry(mon);
-    });
+  battles.forEach(b => {
+    if (!b.bid) return;
+    const p1f = b.p1.mons.filter(m=>m.species);
+    const p2f = b.p2.mons.filter(m=>m.species);
+    if (!p1f.length && !p2f.length) return;
+
+    const sideObj = (mons) => {
+      const obj = {};
+      mons.forEach(mon => {
+        obj[dispName(mon.species)||mon.species] = buildMonEntry(mon);
+      });
+      return obj;
+    };
+
+    out[b.bid] = {
+      p1: sideObj(p1f),
+      p2: sideObj(p2f),
+      _meta: { yourSide: b.yourSide||"p1", winner: b.winner||"", p1name: b.p1name||"", p2name: b.p2name||"" }
+    };
     count++;
   });
-  if (!count) { showNotif("⚠ No teams have a Battle ID set", true); return; }
+
+  if (!count) { showNotif("⚠ No battles have a Battle ID set", true); return; }
   dl(JSON.stringify(out, null, 2), "known_teams.json");
-  showNotif(`known_teams.json saved (${count} battle${count>1?"s":""})`);
+  showNotif(`known_teams.json saved — ${count} battle${count>1?"s":""}`);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   IMPORT JSON
+═══════════════════════════════════════════════════════════════════ */
+function importJSON() { document.getElementById("imp-file").click(); }
+function handleImport(e) {
+  const f = e.target.files[0]; if(!f) return;
+  const reader = new FileReader();
+  reader.onload = ev => {
+    try {
+      const d = JSON.parse(ev.target.result);
+      // known_teams.json format: { bid: { p1:{...}, p2:{...}, _meta:{...} } }
+      let imported = 0;
+      Object.entries(d).forEach(([bid, entry]) => {
+        if (!entry.p1 && !entry.p2) return;
+        const b = mkBattle();
+        b.bid = bid;
+        if (entry._meta) {
+          b.yourSide = entry._meta.yourSide || "p1";
+          b.winner   = entry._meta.winner   || "";
+          b.p1name   = entry._meta.p1name   || "p1";
+          b.p2name   = entry._meta.p2name   || "p2";
+        }
+        ["p1","p2"].forEach(side => {
+          if (!entry[side]) return;
+          let idx = 0;
+          Object.entries(entry[side]).forEach(([species, m]) => {
+            if (idx >= 6) return;
+            const slot = b[side].mons[idx++];
+            const stripped = species.toLowerCase().replace(/[^a-z0-9]/g,"");
+            slot.species = Object.keys(dex).find(k=>k===stripped||
+              (dex[k]?.name||"").toLowerCase().replace(/[^a-z0-9]/g,"")=== stripped) || stripped;
+            slot.nature  = m.nature  || "Hardy";
+            slot.ability = m.ability || "";
+            slot.item    = m.item    || "";
+            slot.evs     = Array.isArray(m.evs)&&m.evs.length===6 ? m.evs : [0,0,0,0,0,0];
+            slot.moves   = (m.moves||[]).concat(["","","",""]).slice(0,4).map(mv=>moveKey(mv));
+          });
+        });
+        battles.push(b); imported++;
+      });
+      if (imported) { ai=battles.length-1; save(); renderList(); loadBattle(ai); showNotif(`Imported ${imported} battle${imported>1?"s":""}`); }
+      else showNotif("⚠ Unrecognised format — expected known_teams.json", true);
+    } catch { showNotif("⚠ Failed to parse JSON", true); }
+  };
+  reader.readAsText(f); e.target.value="";
 }
 
 function dl(text, filename) {
@@ -702,68 +1231,15 @@ function dl(text, filename) {
   a.download = filename; a.click();
 }
 
-/* ─── import ─── */
-function importJSON() { document.getElementById("imp-file").click(); }
-function handleImport(e) {
-  const f = e.target.files[0]; if(!f) return;
-  const r = new FileReader();
-  r.onload = ev => {
-    try {
-      const d = JSON.parse(ev.target.result);
-      /* single team file */
-      if (d.mons) {
-        const t = mkTeam(d.name || f.name.replace(".json",""));
-        t.bid  = d.bid  || "";
-        t.side = d.side || "p1";
-        d.mons.forEach((m,i)=>{
-          if(i>=6) return;
-          t.mons[i]={
-            species: m.species||"",
-            item:    m.item||"",
-            ability: m.ability||"",
-            nature:  m.nature||"Hardy",
-            evs:     Array.isArray(m.evs)&&m.evs.length===6 ? m.evs : [0,0,0,0,0,0],
-            moves:   (m.moves||[]).concat(["","","",""]).slice(0,4).map(mv=>moveKey(mv))
-          };
-        });
-        teams.push(t); ai=teams.length-1; save(); renderList(); loadTeam(ai);
-        showNotif("Team imported!");
-      } else {
-        showNotif("⚠ Not a recognised team JSON", true);
-      }
-    } catch { showNotif("⚠ Failed to parse JSON", true); }
-  };
-  r.readAsText(f); e.target.value="";
-}
-
-/* ─── replay HTML → battle ID ─── */
-function loadReplay(e) {
-  const f = e.target.files[0]; if(!f) return;
-  const r = new FileReader();
-  r.onload = ev => {
-    const html = ev.target.result;
-    /* match the replayid meta tag first, then fall back to URL patterns */
-    const m1 = html.match(/name="replayid"\s+value="([^"]+)"/);
-    const m2 = html.match(/(battle-gen\d[a-z0-9]+-\d+)/i);
-    const bid = (m1||m2||[null,null])[1];
-    if (bid) {
-      teams[ai].bid = bid;
-      document.getElementById("bid").value = bid;
-      save(); showNotif("Battle ID: "+bid);
-    } else {
-      showNotif("⚠ Couldn't find battle ID in replay", true);
-    }
-  };
-  r.readAsText(f); e.target.value="";
-}
-
-/* ─── notification ─── */
+/* ═══════════════════════════════════════════════════════════════════
+   NOTIFICATION
+═══════════════════════════════════════════════════════════════════ */
 function showNotif(msg, warn) {
   const el=document.getElementById("notif");
   el.textContent=msg; el.style.background=warn?"var(--orange)":"var(--green)";
   el.style.display="block";
   clearTimeout(showNotif._t);
-  showNotif._t=setTimeout(()=>el.style.display="none",2600);
+  showNotif._t=setTimeout(()=>el.style.display="none",3000);
 }
 
 loadData();
