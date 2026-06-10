@@ -77,7 +77,15 @@ from crawl4ai import JsonCssExtractionStrategy
 FORMAT_SLUG  = "gen9championsvgc2026regma"
 BASE_URL     = "https://www.pikalytics.com"
 INDEX_URL    = f"{BASE_URL}/pokedex/{FORMAT_SLUG}"
-OUTPUT_FILE  = Path("pikalytics_regma.json")
+
+# Output goes to  <project_root>/data/pikalytics_regma.json
+# __file__ is     <project_root>/data/scripts/scrape_pikalytics.py
+# .parent  → data/scripts/   .parent.parent → project root   / "data" → data/
+_SCRIPT_DIR = Path(__file__).resolve().parent        # data/scripts/
+OUTPUT_DIR  = _SCRIPT_DIR.parent.parent / "data"     # <project_root>/data/
+OUTPUT_FILE = OUTPUT_DIR / "pikalytics_regma.json"
+
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)        # create data/ if missing
 
 # Realistic Chrome 124 user-agent — stealth mode will also randomise navigator
 USER_AGENT = (
