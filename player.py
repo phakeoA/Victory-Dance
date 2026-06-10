@@ -57,6 +57,7 @@ from typing import List, Optional
 import numpy as np
 
 from poke_env.player import Player
+from poke_env.player.battle_order import DoubleBattleOrder, PassBattleOrder, SingleBattleOrder
 from poke_env.battle import DoubleBattle, Move, Pokemon
 
 from state_encoder import (
@@ -247,9 +248,11 @@ def _action_to_poke_env(
     slot: int,
 ):
     """
-    Convert an integer action (0–15) into the poke-env order object
-    for the given slot.  Returns None if the action cannot be executed
-    (caller should fall back to random).
+    Convert an integer action (0–15) into a SingleBattleOrder for the given slot.
+    Returns None if the action cannot be executed (caller should fall back to random).
+
+    Uses Player.create_order (static) with an integer move_target from
+    DoubleBattle.to_showdown_target(), as required by poke-env's doubles API.
     """
     try:
         active = battle.active_pokemon
@@ -270,7 +273,7 @@ def _action_to_poke_env(
             return None
         move = moves[move_idx]
 
-        # Resolve poke-env target
+        # Resolve target Pokemon
         if target_code == _TARGET_OPP0:
             targets = [p for p in opp_active if p is not None]
             target_mon = targets[0] if targets else None
@@ -284,7 +287,9 @@ def _action_to_poke_env(
         if target_mon is None:
             return None
 
-        return battle.create_order(move, move_target=target_mon)
+        # move_target must be the Showdown integer position, not a Pokemon object
+        showdown_target = battle.to_showdown_target(move, target_mon)
+        return Player.create_order(move, move_target=showdown_target)
 
     else:
         # Switch action
@@ -295,7 +300,7 @@ def _action_to_poke_env(
         ]
         if bench_idx >= len(bench):
             return None
-        return battle.create_order(bench[bench_idx])
+        return Player.create_order(bench[bench_idx])
 
 
 def _random_legal_action(battle: DoubleBattle, slot: int) -> int:
@@ -439,7 +444,7 @@ class VGCPlayer(Player):
         order_s0 = self._safe_order(action_s0, battle, slot=0)
         order_s1 = self._safe_order(action_s1, battle, slot=1)
 
-        return self.create_doubles_order(order_s0, order_s1)
+        return DoubleBattleOrder(order_s0, order_s1)
 
     # ── Team chooser (neural model path) ─────────────────────────────────────
 
@@ -532,7 +537,7 @@ class VGCPlayer(Player):
             )
 
     def _safe_order(self, action: int, battle: DoubleBattle, slot: int):
-        """Convert action int → poke-env order, falling back to random if needed."""
+        """Convert action int → poke-env SingleBattleOrder, falling back to random if needed."""
         order = _action_to_poke_env(action, battle, slot)
         if order is not None:
             return order
