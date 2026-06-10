@@ -488,18 +488,44 @@ fi
 # =============================================================================
 header "Installing Remaining Dependencies"
 
-log "Installing numpy, poke-env, and utilities..."
-pip install \
-    "numpy==2.4.6" \
-    "poke-env>=0.14.0" \
-    "python-dotenv>=1.0.0" \
-    "aiohttp>=3.9.0" \
-    "requests>=2.33.0" \
-    "pytest>=8.0.0" \
-    "black>=24.0.0" \
-    "flake8>=7.0.0"
+if [[ ! -f "requirements.txt" ]]; then
+    error "requirements.txt not found. Make sure it lives next to setup.sh in D:\\ShowdownProject\\Victory-Dance."
+fi
+
+log "Installing from requirements.txt..."
+pip install -r requirements.txt
 
 log "Dependencies installed."
+
+# =============================================================================
+# 3d. INSTALL PLAYWRIGHT CHROMIUM BROWSER BINARY
+# =============================================================================
+# crawl4ai uses Playwright under the hood. The Python package is installed via
+# requirements.txt but the actual browser binary must be downloaded separately.
+# This step is idempotent — skipped automatically if the binary already exists.
+# =============================================================================
+header "Installing Playwright Chromium"
+
+CHROMIUM_BIN=$(python -c "
+try:
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        print(p.chromium.executable_path)
+except Exception:
+    print('')
+" 2>/dev/null)
+
+if [[ -n "$CHROMIUM_BIN" && -f "$CHROMIUM_BIN" ]]; then
+    log "Playwright Chromium already installed at $CHROMIUM_BIN — skipping."
+else
+    log "Downloading Playwright Chromium browser binary (~150 MB)..."
+    python -m playwright install chromium
+    if [[ $? -ne 0 ]]; then
+        error "Playwright Chromium install failed. Try manually:\n  python -m playwright install chromium"
+    fi
+    log "Playwright Chromium installed ✅"
+fi
+
 
 # =============================================================================
 # 4. CREATE .env FILE IF MISSING
