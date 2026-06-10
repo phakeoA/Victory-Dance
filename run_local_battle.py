@@ -34,6 +34,7 @@ from pathlib import Path
  
 from poke_env import AccountConfiguration
 from player import VGCPlayer
+from random_player import RandomVGCPlayer
  
 # ── Logging ───────────────────────────────────────────────────────────────────
 def _configure_logging(verbose: bool) -> None:
@@ -183,20 +184,30 @@ def make_player(
     username: str,
     team: str,
     *,
-    model=None,
-    team_chooser=None,
+    model_path: Path = None,
+    team_chooser_path: Path = None,
 ) -> VGCPlayer:
     """
     Build a VGCPlayer.
 
-    model        : trained battle nn.Module, or None (random fallback)
-    team_chooser : trained teampreview nn.Module, or None (heuristic fallback)
+    model_path        : path to a saved battle nn.Module (.pt file), or None
+    team_chooser_path : path to a saved team-chooser nn.Module, or None
 
-    Swap in trained models when they are ready.
+    When model_path is None the player behaves identically to RandomVGCPlayer.
+    Swap in a path once a model checkpoint is ready.
     """
+    if model_path is None:
+        return RandomVGCPlayer(
+            replay_path=Path(f"replay_buffer/{username}.jsonl"),
+            account_configuration=AccountConfiguration(username, None),
+            battle_format=BATTLE_FORMAT,
+            team=team,
+            max_concurrent_battles=1,
+            log_level=logging.WARNING,
+        )
     return VGCPlayer(
-        model=model,
-        team_chooser=team_chooser,
+        model_path=model_path,
+        team_chooser_path=team_chooser_path,
         replay_path=Path(f"replay_buffer/{username}.jsonl"),
         device="cpu",
         account_configuration=AccountConfiguration(username, None),
@@ -216,13 +227,13 @@ async def run(n_battles: int, manage_server: bool, spectate: bool = True) -> Non
  
     team_str = load_team(TEAM_FILE)
 
-    # ── Swap in trained models here when ready ────────────────────────────────
-    battle_model  = None   # your trained nn.Module for in-battle decisions
-    team_chooser  = None   # your trained nn.Module for teampreview selection
+    # ── Swap in model paths here when checkpoints are ready ───────────────────
+    battle_model_path   = None   # e.g. Path("checkpoints/battle_model.pt")
+    team_chooser_path   = None   # e.g. Path("checkpoints/team_chooser.pt")
     # ─────────────────────────────────────────────────────────────────────────
 
-    player1 = make_player("TrainerRed",  team_str, model=battle_model, team_chooser=team_chooser)
-    player2 = make_player("TrainerBlue", team_str, model=battle_model, team_chooser=team_chooser)
+    player1 = make_player("TrainerRed",  team_str, model_path=battle_model_path, team_chooser_path=team_chooser_path)
+    player2 = make_player("TrainerBlue", team_str, model_path=battle_model_path, team_chooser_path=team_chooser_path)
  
     log.info("Starting %d battle(s) — format: %s", n_battles, BATTLE_FORMAT)
 
@@ -253,7 +264,7 @@ async def run(n_battles: int, manage_server: bool, spectate: bool = True) -> Non
         await player2.ps_client.stop_listening()
         player1.close()
         player2.close()
-        #stop_showdown(server_proc)
+        stop_showdown(server_proc)
  
     # ── Results ───────────────────────────────────────────────────────────────
     total   = player1.n_finished_battles
