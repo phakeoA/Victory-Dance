@@ -357,9 +357,10 @@ function calcStat(stat, base, ev, nature) {
 
 /* ─── Factories ─── */
 function mkMon() {
-  return { species:"", item:"", ability:"", nature:"Adamant",
+  return { species:"", item:"", ability:"", nature:"",
            evs:[0,0,0,0,0,0], moves:["","","",""],
-           _fromLog: false, _revealedMoves: [], _megaItem: false };
+           _fromLog: false, _revealedMoves: [], _megaItem: false,
+           _beliefFields: {}, _beliefMoves: [] };
 }
 function mkBattle(name) {
   return {
@@ -570,10 +571,10 @@ function buildCard(mon, side, i) {
     const badge = mtype
       ? `<span class="mbdg t-${mtype.toLowerCase()}">${mtype}</span>`
       : `<span class="mbdg t-unknown">—</span>`;
-    const beliefSet = new Set(mon._beliefMoves || []);
+    const beliefArr = mon._beliefMoves || [];
     const seenDot = mv && revealedSet.has(mv)
       ? `<span title="Seen in replay" style="color:var(--green);font-size:11px;flex-shrink:0">●</span>`
-      : mv && beliefSet.has(mv)
+      : mv && beliefArr.includes(mv)
       ? `<span title="From Pikalytics" style="color:var(--yellow);font-size:11px;flex-shrink:0">◆</span>`
       : `<span title="Unknown" style="color:var(--bdr2);font-size:11px;flex-shrink:0">○</span>`;
     return `<div class="mrow">${badge}
@@ -1227,13 +1228,14 @@ function applyServerPreview(data) {
       if (!entry) return;
 
       // Moves: fill empty slots with server suggestions, tag source
-      if (!mon._beliefMoves) mon._beliefMoves = new Set();
+      if (!mon._beliefMoves) mon._beliefMoves = [];
       (entry.moves || []).forEach((mv, idx) => {
         if (idx >= 4) return;
         const k = moveKey(mv.name);
         if (!mon.moves[idx]) {
           mon.moves[idx] = k;
-          if (mv.source === 'belief') mon._beliefMoves.add(k);
+          if (mv.source === 'belief' && !mon._beliefMoves.includes(k))
+            mon._beliefMoves.push(k);
         }
       });
 
@@ -1247,12 +1249,13 @@ function applyServerPreview(data) {
         mon.ability = entry.ability.value;
         if (entry.ability.source === 'belief') mon._beliefFields.ability = true;
       }
-      if ((!mon.nature || mon.nature === 'Hardy') && entry.nature?.value) {
+      if ((!mon.nature || mon.nature === 'Hardy' || mon.nature === 'Adamant') && entry.nature?.value) {
         mon.nature = entry.nature.value;
         if (entry.nature.source === 'belief') mon._beliefFields.nature = true;
       }
       if (!mon.evs.some(v=>v>0) && entry.evs?.value) {
-        mon.evs = entry.evs.value;
+        // Server returns actual EVs (0-252); UI stores bucket EVs (0-32, each = 8 actual)
+        mon.evs = entry.evs.value.map(v => Math.min(32, Math.round(v / 8)));
         if (entry.evs.source === 'belief') mon._beliefFields.evs = true;
       }
     });
