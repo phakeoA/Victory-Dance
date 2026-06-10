@@ -185,6 +185,11 @@
   #loading .inner { text-align: center; max-width: 380px; padding: 20px; }
   ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-track { background: var(--bg); } ::-webkit-scrollbar-thumb { background: var(--bdr2); border-radius: 3px; }
   
+  /* ── Belief-state fills (from Pikalytics) ── */
+  .belief-val { color: var(--yellow); }
+  .belief-val::before { content: '['; }
+  .belief-val::after  { content: ']'; }
+
   /* ── Your-side pill on panel header ── */
   .your-side-tag { font-size: 9px; background: rgba(76,175,125,.2); border: 1px solid var(--green); color: var(--green); padding: 1px 5px; border-radius: 3px; font-weight: 600; letter-spacing: .3px; }
 </style>
@@ -199,8 +204,8 @@
   <input type="file" id="replay-file" accept=".html" style="display:none" onchange="loadReplay(event)">
   <button class="btn" onclick="document.getElementById('replay-file').click()">📂 Load replay</button>
   <button class="btn" onclick="importJSON()">Import JSON</button>
-  <button class="btn suc" style="background:var(--blue);border-color:var(--blue)" onclick="exportVOD()">⬇ Export VOD</button>
-  <button class="btn pri" onclick="exportKnownTeams()">💾 Save known_teams.json</button>
+  <button class="btn" id="run-parser-btn" onclick="runParser()">🔍 Run Parser</button>
+  <button class="btn suc" onclick="exportTraining()">⬇ Export Training Data</button>
 </div>
 
 <div id="app">
@@ -213,6 +218,10 @@
     <div class="sec" style="margin-top:auto">
       <h3>Data</h3>
       <div id="data-status" style="font-size:11px;color:var(--text3)">Loading…</div>
+      <div style="margin-top:8px;display:flex;align-items:center;gap:5px">
+        <span id="srv-dot" style="width:8px;height:8px;border-radius:50%;background:var(--text3);flex-shrink:0;display:inline-block"></span>
+        <span id="srv-status" style="font-size:11px;color:var(--text3)">Server: checking…</span>
+      </div>
     </div>
   </div>
 
@@ -412,6 +421,7 @@ function init() {
   if (!battles.length) battles = [mkBattle("New Battle")];
   renderList();
   loadBattle(0);
+  checkServer();
 }
 
 function migrateOldTeams(teams) {
@@ -556,8 +566,11 @@ function buildCard(mon, side, i) {
     const badge = mtype
       ? `<span class="mbdg t-${mtype.toLowerCase()}">${mtype}</span>`
       : `<span class="mbdg t-unknown">—</span>`;
+    const beliefSet = new Set(mon._beliefMoves || []);
     const seenDot = mv && revealedSet.has(mv)
       ? `<span title="Seen in replay" style="color:var(--green);font-size:11px;flex-shrink:0">●</span>`
+      : mv && beliefSet.has(mv)
+      ? `<span title="From Pikalytics" style="color:var(--yellow);font-size:11px;flex-shrink:0">◆</span>`
       : `<span title="Unknown" style="color:var(--bdr2);font-size:11px;flex-shrink:0">○</span>`;
     return `<div class="mrow">${badge}
       <div class="acwrap">
@@ -599,11 +612,12 @@ function buildCard(mon, side, i) {
     <div class="frow"><label>Item</label>
       <input type="text" value="${esc(mon.item||"")}" placeholder="${itemRevealed ? '✓ from log' : 'e.g. Life Orb'}"
         onchange="setField('${side}',${i},'item',this.value)"
+        class="${mon._beliefFields?.item ? 'belief-val' : ''}" 
         style="${itemRevealed ? 'border-color:var(--green)' : ''}"></div>
     <div class="frow"><label>Ability</label>
-      <select onchange="setField('${side}',${i},'ability',this.value)">${abOpts}</select></div>
+      <select onchange="setField('${side}',${i},'ability',this.value)" class="${mon._beliefFields?.ability ? 'belief-val' : ''}">${abOpts}</select></div>
     <div class="frow"><label>Nature</label>
-      <select onchange="setField('${side}',${i},'nature',this.value)">${natOpts}</select></div>
+      <select onchange="setField('${side}',${i},'nature',this.value)" class="${mon._beliefFields?.nature ? 'belief-val' : ''}">${natOpts}</select></div>
     <div class="stats">
       <div class="stat-hdr">Stats
         <span class="${evCls}" id="evt-${side}-${i}">(${evTotal}/66 EVs)</span>
@@ -611,7 +625,7 @@ function buildCard(mon, side, i) {
       ${statsHtml}
     </div>
     <div class="moves">
-      <h4>Moves <span style="font-size:9px;font-weight:400;color:var(--text3)">● seen in log &nbsp; ○ unknown</span></h4>
+      <h4>Moves <span style="font-size:9px;font-weight:400;color:var(--text3)">● seen in log &nbsp; <span style="color:var(--yellow)">◆</span> from Pikalytics &nbsp; ○ unknown</span></h4>
       ${movesHtml}
     </div>
   </div>`;
@@ -1082,6 +1096,7 @@ function loadReplay(e) {
   const r = new FileReader();
   r.onload = ev => {
     const html = ev.target.result;
+    battles[ai]._rawHtml = html;  // stored for server /parse and /export
     const parsed = parseReplayHTML(html);
 
     if (parsed.error) { showNotif("⚠ " + parsed.error, true); return; }
@@ -1134,75 +1149,175 @@ function buildMonEntry(mon) {
   return entry;
 }
 
-function exportVOD() {
-  const b = battles[ai];
-  if (!b.bid) { showNotif("⚠ No Battle ID — load a replay or enter one", true); return; }
+/* ═══════════════════════════════════════════════════════════════════
+   SERVER — Run Parser
+═══════════════════════════════════════════════════════════════════ */
+const SERVER = 'http://localhost:5174';
 
-  const p1filled = b.p1.mons.filter(m=>m.species);
-  const p2filled = b.p2.mons.filter(m=>m.species);
-  if (!p1filled.length && !p2filled.length) {
-    showNotif("⚠ No Pokémon in either side", true); return;
+async function checkServer() {
+  const dot = document.getElementById('srv-dot');
+  const lbl = document.getElementById('srv-status');
+  try {
+    const r = await fetch(SERVER + '/', { method: 'HEAD', signal: AbortSignal.timeout(2000) });
+    dot.style.background = 'var(--green)';
+    lbl.style.color      = 'var(--green)';
+    lbl.textContent      = 'Server: online';
+  } catch {
+    dot.style.background = 'var(--red)';
+    lbl.style.color      = 'var(--red)';
+    lbl.textContent      = 'Server: offline';
   }
+}
 
+async function runParser() {
+  const b   = battles[ai];
+  const btn = document.getElementById('run-parser-btn');
+  if (!b._rawHtml) { showNotif('⚠ Load a replay first (📂 Load replay)', true); return; }
+  if (!b.bid)      { showNotif('⚠ No Battle ID found', true); return; }
+
+  btn.textContent = '⏳ Running…';
+  btn.disabled    = true;
+
+  // Build the current known-teams entry so the server can merge it
+  const knownEntry = buildKnownEntry(b);
+
+  const fd = new FormData();
+  fd.append('replay_html', new Blob([b._rawHtml], { type: 'text/html' }), b.bid + '.html');
+  fd.append('known_teams', JSON.stringify(knownEntry));
+
+  try {
+    const resp = await fetch(SERVER + '/parse', { method: 'POST', body: fd });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({ error: resp.statusText }));
+      showNotif('⚠ Server error: ' + (err.error || resp.statusText), true);
+      return;
+    }
+    const data = await resp.json();
+    if (data.error) { showNotif('⚠ ' + data.error, true); return; }
+    applyServerPreview(data);
+    showNotif('✓ Parser ran — belief fills shown in [brackets]');
+  } catch (e) {
+    showNotif('⚠ Could not reach server — is server.py running?', true);
+  } finally {
+    btn.textContent = '🔍 Run Parser';
+    btn.disabled    = false;
+  }
+}
+
+function applyServerPreview(data) {
+  // data shape: { battle_id, p1name, p2name, winner, your_side, roster }
+  const b = battles[ai];
+
+  if (data.winner   && !b.winner)   { b.winner   = data.winner;   document.getElementById('winner-sel').value = data.winner; updateWinnerTags(); }
+  if (data.your_side && !b.yourSide){ b.yourSide = data.your_side; document.getElementById('your-side').value  = data.your_side; updateYourSideTags(); }
+
+  ['p1','p2'].forEach(side => {
+    const serverSide = data.roster?.[side] || {};
+    b[side].mons.forEach(mon => {
+      if (!mon.species) return;
+      // Match by display name or dex key
+      const dispN = dispName(mon.species);
+      const entry = serverSide[dispN] || serverSide[mon.species] || null;
+      if (!entry) return;
+
+      // Moves: fill empty slots with server suggestions, tag source
+      if (!mon._beliefMoves) mon._beliefMoves = new Set();
+      (entry.moves || []).forEach((mv, idx) => {
+        if (idx >= 4) return;
+        const k = moveKey(mv.name);
+        if (!mon.moves[idx]) {
+          mon.moves[idx] = k;
+          if (mv.source === 'belief') mon._beliefMoves.add(k);
+        }
+      });
+
+      // Item / ability / nature / EVs: only fill if blank, tag belief source
+      if (!mon._beliefFields) mon._beliefFields = {};
+      if (!mon.item && entry.item?.value) {
+        mon.item = entry.item.value;
+        if (entry.item.source === 'belief') mon._beliefFields.item = true;
+      }
+      if (!mon.ability && entry.ability?.value) {
+        mon.ability = entry.ability.value;
+        if (entry.ability.source === 'belief') mon._beliefFields.ability = true;
+      }
+      if ((!mon.nature || mon.nature === 'Hardy') && entry.nature?.value) {
+        mon.nature = entry.nature.value;
+        if (entry.nature.source === 'belief') mon._beliefFields.nature = true;
+      }
+      if (!mon.evs.some(v=>v>0) && entry.evs?.value) {
+        mon.evs = entry.evs.value;
+        if (entry.evs.source === 'belief') mon._beliefFields.evs = true;
+      }
+    });
+  });
+
+  save();
+  renderGrid('p1'); renderGrid('p2');
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   EXPORT — Training data (.jsonl via server)
+═══════════════════════════════════════════════════════════════════ */
+function buildKnownEntry(b) {
   const sideObj = (mons) => {
     const obj = {};
-    mons.forEach(mon => {
-      const key = dispName(mon.species) || mon.species;
-      obj[key] = buildMonEntry(mon);
+    mons.filter(m=>m.species).forEach(mon => {
+      obj[dispName(mon.species) || mon.species] = buildMonEntry(mon);
     });
     return obj;
   };
-
-  const out = {
-    [b.bid]: {
-      p1: sideObj(p1filled),
-      p2: sideObj(p2filled),
-      _meta: {
-        yourSide: b.yourSide || "p1",
-        winner:   b.winner   || "",
-        p1name:   b.p1name   || "",
-        p2name:   b.p2name   || "",
-      }
+  return {
+    p1: sideObj(b.p1.mons),
+    p2: sideObj(b.p2.mons),
+    _meta: {
+      yourSide: b.yourSide || 'p1',
+      winner:   b.winner   || '',
+      p1name:   b.p1name   || '',
+      p2name:   b.p2name   || '',
     }
   };
-
-  const fname = b.bid.replace(/[^a-z0-9_-]/gi,"_") + "_known.json";
-  dl(JSON.stringify(out, null, 2), fname);
-
-  const totalMoves  = (p1filled.length + p2filled.length) * 4;
-  const knownMoves  = [...p1filled,...p2filled].reduce((n,m)=>n+m.moves.filter(x=>x).length,0);
-  const knownItems  = [...p1filled,...p2filled].filter(m=>m.item).length;
-  showNotif(`Exported both sides — moves: ${knownMoves}/${totalMoves}, items: ${knownItems}/${p1filled.length+p2filled.length}`);
 }
 
-function exportKnownTeams() {
-  const out = {};
-  let count = 0;
-  battles.forEach(b => {
-    if (!b.bid) return;
-    const p1f = b.p1.mons.filter(m=>m.species);
-    const p2f = b.p2.mons.filter(m=>m.species);
-    if (!p1f.length && !p2f.length) return;
+async function exportTraining() {
+  const b = battles[ai];
+  if (!b.bid)      { showNotif('⚠ No Battle ID — load a replay first', true); return; }
+  if (!b._rawHtml) { showNotif('⚠ Load a replay first (📂 Load replay)', true); return; }
 
-    const sideObj = (mons) => {
-      const obj = {};
-      mons.forEach(mon => {
-        obj[dispName(mon.species)||mon.species] = buildMonEntry(mon);
-      });
-      return obj;
-    };
+  const p1filled = b.p1.mons.filter(m=>m.species);
+  const p2filled = b.p2.mons.filter(m=>m.species);
+  if (!p1filled.length && !p2filled.length) { showNotif('⚠ No Pokémon in either side', true); return; }
 
-    out[b.bid] = {
-      p1: sideObj(p1f),
-      p2: sideObj(p2f),
-      _meta: { yourSide: b.yourSide||"p1", winner: b.winner||"", p1name: b.p1name||"", p2name: b.p2name||"" }
-    };
-    count++;
-  });
+  showNotif('⏳ Generating training data…');
 
-  if (!count) { showNotif("⚠ No battles have a Battle ID set", true); return; }
-  dl(JSON.stringify(out, null, 2), "known_teams.json");
-  showNotif(`known_teams.json saved — ${count} battle${count>1?"s":""}`);
+  try {
+    const resp = await fetch(SERVER + '/export', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        battle_id:        b.bid,
+        known_teams_entry: buildKnownEntry(b),
+        replay_html:      b._rawHtml,
+      })
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({ error: resp.statusText }));
+      showNotif('⚠ Server error: ' + (err.error || resp.statusText), true);
+      return;
+    }
+
+    const blob  = await resp.blob();
+    const count = resp.headers.get('X-Transition-Count') || '?';
+    const fname = b.bid.replace(/[^a-z0-9_-]/gi, '_') + '.jsonl';
+    const a = document.createElement('a');
+    a.href     = URL.createObjectURL(blob);
+    a.download = fname;
+    a.click();
+    showNotif(`✓ Exported ${count} transitions → ${fname}`);
+  } catch (e) {
+    showNotif('⚠ Could not reach server — is server.py running?', true);
+  }
 }
 
 /* ═══════════════════════════════════════════════════════════════════

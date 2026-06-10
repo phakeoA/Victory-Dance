@@ -82,13 +82,24 @@ from typing import Optional
 import numpy as np
 
 # ── Project imports ────────────────────────────────────────────────────────────
+import sys
+# All scripts live together at data/scripts/.
+# Add that directory to sys.path so state_encoder and belief_state are
+# importable regardless of the working directory.
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+# Project root (two levels up) is still needed for locating data/ files.
+_PROJECT_ROOT = _SCRIPTS_DIR.parents[1]
+
 try:
     from state_encoder import StateEncoder, STATE_DIM, ACTIONS_PER_SLOT
     from belief_state import BeliefState
 except ImportError:
     raise ImportError(
-        "vod_parser.py must be run from the Victory-Dance project root "
-        "alongside state_encoder.py and belief_state.py."
+        f"Could not import state_encoder / belief_state from {_SCRIPTS_DIR}. "
+        "Make sure those files exist at data/scripts/."
     )
 
 from poke_env.battle import PokemonType, Status, MoveCategory
@@ -264,6 +275,7 @@ class ParsedBattle:
     })
     turn: int = 0
     winner: Optional[str] = None
+    your_side: Optional[str] = None  # set from _meta.yourSide
     fields: dict = field(default_factory=dict)
     p1_side: dict = field(default_factory=dict)
     p2_side: dict = field(default_factory=dict)
@@ -455,7 +467,22 @@ def parse_html_replay(
 
     # ── Apply known-team overrides ────────────────────────────────────────────
     if known_teams and battle_id in known_teams:
-        for side, mon_overrides in known_teams[battle_id].items():
+        battle_entry = known_teams[battle_id]
+
+        # _meta is authoritative — override anything re-derived from the log
+        meta = battle_entry.get("_meta", {})
+        if meta.get("winner"):
+            battle.winner = meta["winner"]
+        if meta.get("p1name"):
+            battle.p1_name = meta["p1name"]
+        if meta.get("p2name"):
+            battle.p2_name = meta["p2name"]
+        # yourSide stored on the battle so replay_to_transitions can read it
+        battle.your_side = meta.get("yourSide")
+
+        for side, mon_overrides in battle_entry.items():
+            if side == "_meta":
+                continue
             for species, set_data in mon_overrides.items():
                 # Match by species (case-insensitive)
                 for roster_species, mon in battle.roster[side].items():
@@ -482,6 +509,13 @@ def replay_to_transitions(
         return []
 
     battle, lines = parsed
+
+    # _meta.yourSide takes priority over the CLI --player flag
+    if battle.your_side:
+        effective_players = [battle.your_side]
+    else:
+        effective_players = players
+
     outcome_map = (
         {"p1": 1,  "p2": -1} if battle.winner == "p1" else
         {"p1": -1, "p2": 1}  if battle.winner == "p2" else
@@ -493,7 +527,7 @@ def replay_to_transitions(
     in_turn = False
 
     def _flush_turn(turn_num: int) -> None:
-        for player in players:
+        for player in effective_players:
             fake = FakeDoubleBattle(battle, player, belief)
             try:
                 state_vec = encoder.encode(fake)
@@ -639,6 +673,155 @@ def replay_to_transitions(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Server entry point (called by server.py / Flask, not the CLI)
+# ══════════════════════════════════════════════════════════════════════════════
+def parse_replay_for_preview(
+    html_content: str,
+    belief: BeliefState,
+    known_teams_entry: Optional[dict] = None,
+) -> dict:
+    """
+    Parse a replay HTML string and return a JSON-serializable preview dict
+    for the team_builder UI.
+
+    Parameters
+    ----------
+    html_content     : raw HTML of the replay file (uploaded via browser)
+    belief           : loaded BeliefState instance
+    known_teams_entry: the single-battle dict the UI has so far, e.g.
+                       {
+                         "p1": { "Kingambit": { "moves": [...], ... } },
+                         "p2": { ... },
+                         "_meta": { "yourSide": "p1", "winner": "p1", ... }
+                       }
+                       Pass None or {} if nothing is known yet.
+
+    Returns
+    -------
+    {
+      "battle_id": "...",
+      "p1name": "...",
+      "p2name": "...",
+      "winner": "p1" | "p2" | null,
+      "your_side": "p1" | "p2" | null,
+      "roster": {
+        "p1": {
+          "Kingambit": {
+            "moves": [
+              { "name": "Sucker Punch", "source": "log" },
+              { "name": "Kowtow Cleave", "source": "belief" },
+              ...
+            ],
+            "item":    { "value": "Chople Berry", "source": "known" },
+            "ability": { "value": "Defiant",      "source": "known" },
+            "nature":  { "value": "Adamant",       "source": "known" },
+            "evs":     { "value": [252,252,0,0,4,0], "source": "known" },
+          },
+          ...
+        },
+        "p2": { ... }
+      }
+    }
+
+    "source" values:
+      "log"    — seen in the replay log
+      "known"  — supplied by the user in team_builder
+      "belief" — inferred from Pikalytics (shown as [value] in the UI)
+    """
+    import tempfile, os
+
+    # Write HTML to a temp file so parse_html_replay can use Path.read_text
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".html", encoding="utf-8", delete=False
+    ) as tmp:
+        tmp.write(html_content)
+        tmp_path = tmp.name
+
+    try:
+        wrapped = None
+        if known_teams_entry:
+            # parse_html_replay expects known_teams keyed by battle_id,
+            # but we don't know the id yet — use a placeholder and patch after
+            wrapped = {"__preview__": known_teams_entry}
+
+        result = parse_html_replay(Path(tmp_path), belief, wrapped)
+        if result is None:
+            return {"error": "Could not extract battle log from HTML."}
+
+        battle, _ = result
+
+        # Re-key if we used placeholder
+        if wrapped and "__preview__" in wrapped:
+            wrapped[battle.battle_id] = wrapped.pop("__preview__")
+            # Re-parse with correct key so overrides apply
+            result = parse_html_replay(Path(tmp_path), belief, wrapped)
+            if result is None:
+                return {"error": "Re-parse failed."}
+            battle, _ = result
+
+    finally:
+        os.unlink(tmp_path)
+
+    # ── Build annotated roster ────────────────────────────────────────────────
+    known_entry = known_teams_entry or {}
+    roster_out: dict = {"p1": {}, "p2": {}}
+
+    for side in ("p1", "p2"):
+        known_side = known_entry.get(side, {})
+        for species, mon in battle.roster[side].items():
+            # Moves: tag each with its source
+            known_moves = set()
+            if species in known_side:
+                known_moves = set(known_side[species].get("moves", []))
+
+            move_list = []
+            log_moves = set()
+            for move_name in mon.moves:
+                if move_name in known_moves:
+                    move_list.append({"name": move_name, "source": "known"})
+                else:
+                    # Determine if it was revealed in the log or inferred
+                    # FakePokemon.reveal_move() sets current_pp -= 1;
+                    # belief-filled moves keep full pp
+                    fm = mon.moves[move_name]
+                    if fm.current_pp < fm.max_pp:
+                        move_list.append({"name": move_name, "source": "log"})
+                        log_moves.add(move_name)
+                    else:
+                        move_list.append({"name": move_name, "source": "belief"})
+
+            # Item / ability / nature / evs
+            def _sourced(attr, belief_fn):
+                if species in known_side and attr in known_side[species]:
+                    return {"value": known_side[species][attr], "source": "known"}
+                val = belief_fn()
+                return {"value": val, "source": "belief"} if val else None
+
+            top_item    = lambda: belief.top_item(species)
+            top_ability = lambda: belief.top_ability(species)
+            top_nature  = lambda: belief.top_spread(species)[0]
+            top_evs     = lambda: belief.top_spread(species)[1]
+
+            roster_out[side][species] = {
+                "moves":   move_list,
+                "item":    _sourced("item",    top_item),
+                "ability": _sourced("ability", top_ability),
+                "nature":  _sourced("nature",  top_nature),
+                "evs":     _sourced("evs",     top_evs),
+            }
+
+    meta = known_entry.get("_meta", {})
+    return {
+        "battle_id": battle.battle_id,
+        "p1name":    battle.p1_name,
+        "p2name":    battle.p2_name,
+        "winner":    battle.winner,
+        "your_side": battle.your_side or meta.get("yourSide"),
+        "roster":    roster_out,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # CLI
 # ══════════════════════════════════════════════════════════════════════════════
 def main() -> None:
@@ -659,8 +842,11 @@ def main() -> None:
         help="Which player perspective(s) to encode. Default: both",
     )
     parser.add_argument(
-        "--belief", default="pikalytics_regma.json",
-        help="Path to pikalytics_regma.json belief-state database.",
+        "--belief", default=None,
+        help=(
+            "Path to pikalytics_regma.json. "
+            "Defaults to <project_root>/data/regulations/pikalytics_regma.json"
+        ),
     )
     parser.add_argument(
         "--known-teams", default=None, dest="known_teams",
@@ -672,7 +858,10 @@ def main() -> None:
     args = parser.parse_args()
 
     # ── Load supporting data ──────────────────────────────────────────────────
-    belief  = BeliefState(args.belief)
+    belief_path = Path(args.belief) if args.belief else (
+        _PROJECT_ROOT / "data" / "regulations" / "pikalytics_regma.json"
+    )
+    belief  = BeliefState(belief_path)
     encoder = StateEncoder()
 
     known_teams: Optional[dict] = None

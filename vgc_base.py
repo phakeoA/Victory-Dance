@@ -48,6 +48,13 @@ from poke_env.player import Player
 from poke_env.player.battle_order import DoubleBattleOrder, PassBattleOrder, SingleBattleOrder
 from poke_env.battle import DoubleBattle, Move, Pokemon
 
+# state_encoder lives at data/scripts/ — add that directory to sys.path
+import sys as _sys
+from pathlib import Path as _Path
+_SCRIPTS_DIR = _Path(__file__).resolve().parent / 'data' / 'scripts'
+if str(_SCRIPTS_DIR) not in _sys.path:
+    _sys.path.insert(0, str(_SCRIPTS_DIR))
+
 from state_encoder import (
     StateEncoder,
     MOVE_TARGET_PAIRS,
