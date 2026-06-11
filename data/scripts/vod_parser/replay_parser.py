@@ -162,7 +162,10 @@ class ShowdownReplayParser:
             self._last_move_action = None
             self._execution_index = 0
             # Capture state BEFORE any actions mutate it
-            self._state_before = self._snapshot_state()
+            self._state_before = {
+                "p1": self._snapshot_state("p1"),
+                "p2": self._snapshot_state("p2"),
+            }
 
         # ---- field events ----
         elif cmd == "switch" or cmd == "drag":
@@ -208,8 +211,17 @@ class ShowdownReplayParser:
 
         elif cmd == "-curestatus":
             slot_key = self._slot_key_from_ident(parts[2])
+            cured = parts[3] if len(parts) > 3 else None
             if slot_key in self.active_slots:
                 self.active_slots[slot_key].status = None
+            # Bug 3 fix: record the event so status changes between
+            # state_before and state_after are explained in the action log.
+            self._current_turn_actions.append({
+                "event": "curestatus",
+                "slot": slot_key,
+                "species": self._species_from_ident(parts[2]),
+                "status": cured,
+            })
 
         elif cmd == "-sidestart":
             self._handle_sidestart(parts)
@@ -226,7 +238,9 @@ class ShowdownReplayParser:
             if "Trick Room" in raw:
                 self.field_conditions.trick_room = 5
             elif "terrain" in raw.lower():
-                self.field_conditions.terrain = raw
+                # Bug 4 fix: store a normalised token ("electric", "grassy",
+                # "misty", "psychic"), not the raw effect string.
+                self.field_conditions.terrain = self._normalize_terrain(raw)
 
         elif cmd == "-fieldend":
             raw = parts[2] if len(parts) > 2 else ""
@@ -300,10 +314,21 @@ class ShowdownReplayParser:
                 slot=slot_key[2],
                 hp_current=hp_current,
                 hp_max=hp_max,
+                base_species=species,   # Bug 7: frozen pre-mega/forme name
             )
             self.seen_mons[seen_key] = mon
 
+        # Bug 1 fix: stat boosts do not persist through a switch.  Clear the
+        # outgoing mon's boosts before it leaves the field so they don't
+        # silently accumulate across the whole match (and so they're already
+        # clean if it later switches back in).
+        if slot_key in self.active_slots and self.active_slots[slot_key] is not mon:
+            self.active_slots[slot_key].boosts = {}
+
         self.active_slots[slot_key] = mon
+        # Incoming mon always starts with neutral boosts (covers |drag| too,
+        # and guards against any stale state on the reused PokemonSlot).
+        mon.boosts = {}
 
         # Track evolving known team
         if species not in self.known_team[player]:
@@ -378,6 +403,10 @@ class ShowdownReplayParser:
 
         user_slot = self._slot_key_from_ident(user_ident)
         target_slot = self._slot_key_from_ident(target_ident) if target_ident else None
+        # Bug 5 fix: self-targeting / no-target moves must always serialise as
+        # null, never as "" — the encoder treats them as the same situation.
+        if target_slot == "":
+            target_slot = None
 
         # Record the move on the Pokémon's revealed_moves list
         if user_slot in self.active_slots:
@@ -421,11 +450,15 @@ class ShowdownReplayParser:
         if prev_hp is not None and hp_current is not None:
             delta_pct = round(hp_current - prev_hp, 2)
 
-        # Attribute source from the most recent move action
+        # Attribute source from the most recent move action.
+        # Bug 2 fix: indirect damage (burn, poison, Rocky Helmet, recoil,
+        # Leech Seed, weather, ...) carries a [from] tag on the protocol line.
+        # Those must NOT be attributed to whatever move happened to fire last.
+        has_from_tag = any("[from]" in (p or "") for p in parts[3:])
         source_slot = None
         source_species = None
         source_move = None
-        if self._last_move_action and cmd == "-damage":
+        if self._last_move_action and cmd == "-damage" and not has_from_tag:
             source_slot = self._last_move_action.get("user_slot")
             source_species = self._last_move_action.get("user_species")
             source_move = self._last_move_action.get("move")
@@ -553,8 +586,8 @@ class ShowdownReplayParser:
     # State snapshot (deep copy so mutations don't bleed through)
     # ------------------------------------------------------------------
 
-    def _snapshot_state(self) -> dict:
-        our = self.our_player
+    def _snapshot_state(self, perspective: Optional[str] = None) -> dict:
+        our = perspective or self.our_player
         opp = "p2" if our == "p1" else "p1"
 
         # ── Active slots split by side ────────────────────────────────────
@@ -565,36 +598,56 @@ class ShowdownReplayParser:
                 continue
             d = copy.deepcopy(mon.to_dict())
             if slot_key.startswith(our):
-                our_active[slot_key] = d
+                # Store under perspective-relative key: p1a -> our_a, p1b -> our_b
+                rel_key = "our_" + slot_key[2:]
+                our_active[rel_key] = d
             else:
-                opp_active[slot_key] = d
+                rel_key = "opp_" + slot_key[2:]
+                opp_active[rel_key] = d
 
-        # ── Our bench (all non-active, non-fainted own mons) ──────────────
-        our_active_species = {m.species for m in self.active_slots.values()
+        # ── Bench policy (Bug 6) ──────────────────────────────────────────
+        # DESIGN DECISION: fainted mons are KEPT in the bench, on both sides,
+        # with is_fainted=True / hp_pct=0.  The model needs them to know which
+        # switch-ins are legal and how many team members remain.  The rule is
+        # applied identically to our_bench and opp_bench:
+        #   bench = every revealed mon that is not currently active-and-alive.
+        # (A mon that fainted on the field appears in the bench until/after
+        # its replacement switches in — it is filtered out of *_active either
+        # way, so it is never represented twice.)
+
+        # Bug 7: |detailschange| mutates `species` (Meganium -> Meganium-Mega)
+        # but rosters and seen_mons keys use the teampreview name.  All bench
+        # vs. active reconciliation below therefore compares BASE species.
+        def _base(mon: PokemonSlot) -> str:
+            return mon.base_species or mon.species
+
+        # ── Our bench ─────────────────────────────────────────────────────
+        our_active_species = {_base(m) for m in self.active_slots.values()
                               if m.player == our and not m.is_fainted}
         our_bench: list[dict] = []
         for seen_key, mon in self.seen_mons.items():
             if not seen_key.startswith(our + ":"):
                 continue
-            if mon.species in our_active_species:
+            if _base(mon) in our_active_species:
                 continue
             d = copy.deepcopy(mon.to_dict())
             d["seen"] = True   # own bench is always fully known
             our_bench.append(d)
 
         # ── Opponent bench ────────────────────────────────────────────────
-        # Revealed mons from seen_mons; unseen roster slots filled with stubs.
-        opp_active_species = {m.species for m in self.active_slots.values()
+        # Same rule as our_bench (see Bug 6 note above): revealed mons —
+        # fainted ones included — plus unseen roster slots as stubs.
+        opp_active_species = {_base(m) for m in self.active_slots.values()
                               if m.player == opp and not m.is_fainted}
         opp_seen: dict[str, dict] = {}
         for seen_key, mon in self.seen_mons.items():
             if not seen_key.startswith(opp + ":"):
                 continue
-            if mon.species in opp_active_species:
+            if _base(mon) in opp_active_species:
                 continue
             d = copy.deepcopy(mon.to_dict())
             d["seen"] = True
-            opp_seen[mon.species] = d
+            opp_seen[_base(mon)] = d
 
         # Fill remaining roster slots as unseen stubs
         opp_bench: list[dict] = []
@@ -620,9 +673,11 @@ class ShowdownReplayParser:
 
         return {
             "field": copy.deepcopy(self.field_conditions.to_dict()),
+            # Keyed by "our_side" / "opp_side" so the consumer never needs to
+            # know which physical player the perspective corresponds to.
             "side_conditions": {
-                pid: copy.deepcopy(sc.to_dict())
-                for pid, sc in self.side_conditions.items()
+                "our_side": copy.deepcopy(self.side_conditions[our].to_dict()),
+                "opp_side": copy.deepcopy(self.side_conditions[opp].to_dict()),
             },
             "our_active": our_active,
             "opp_active": opp_active,
@@ -672,13 +727,22 @@ class ShowdownReplayParser:
 
         turn_snapshot = {
             "turn": self.current_turn,
-            # State captured at the START of the turn (no future leakage)
-            "state_before_actions": self._state_before or self._snapshot_state(),
+            # Both-perspective snapshots captured at the START of the turn.
+            # transitions.py indexes by perspective; the parser's own our_player
+            # is stored so callers can resolve which side is "ours" without
+            # having to thread our_player through every layer.
+            "state_before_actions": self._state_before or {
+                "p1": self._snapshot_state("p1"),
+                "p2": self._snapshot_state("p2"),
+            },
             # Flat event log (moves, damage, boosts, faints, etc.) — for replays
             "actions": list(self._current_turn_actions),
             "damage_events": list(self._current_turn_damage_events),
-            # State captured AFTER all actions have resolved
-            "state_after_actions": self._snapshot_state(),
+            # Both-perspective snapshots captured AFTER all actions have resolved.
+            "state_after_actions": {
+                "p1": self._snapshot_state("p1"),
+                "p2": self._snapshot_state("p2"),
+            },
             # ── Training-schema decision fields ──────────────────────────
             "our_actions": _extract_actions(our),
             "opp_actions_actual": _extract_actions(opp),
@@ -741,8 +805,82 @@ class ShowdownReplayParser:
         }
 
     # ------------------------------------------------------------------
+    # Slot normalisation
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def normalize_slots(
+        events: list[dict],
+        perspective: str,
+        slot_fields: tuple[str, ...] = ("slot", "target_slot", "source_slot", "user_slot"),
+    ) -> list[dict]:
+        """
+        Rewrite absolute slot strings (``p1a``, ``p2b``, …) to perspective-
+        relative ones (``our_a``, ``our_b``, ``opp_a``, ``opp_b``) in a list
+        of event dicts.
+
+        This is applied at transition-write time in transitions.py so the
+        state encoder always sees the same slot schema regardless of which
+        physical player a transition was generated for.
+
+        The parser itself always stores absolute notation internally; this
+        function is the boundary where we switch to relative notation.
+        """
+        opp = "p2" if perspective == "p1" else "p1"
+
+        def _remap(val: Optional[str]) -> Optional[str]:
+            if not val:
+                return val
+            if val.startswith(perspective):
+                return "our_" + val[2:]   # e.g. p1a -> our_a
+            if val.startswith(opp):
+                return "opp_" + val[2:]   # e.g. p2b -> opp_b
+            return val                     # non-slot strings pass through
+
+        out = []
+        for ev in events:
+            ev2 = dict(ev)
+            for field in slot_fields:
+                if field in ev2:
+                    ev2[field] = _remap(ev2[field])
+            out.append(ev2)
+        return out
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    # Bug 4: canonical terrain tokens the encoder can rely on.
+    _TERRAIN_MAP = {
+        "electric terrain": "electric",
+        "grassy terrain":   "grassy",
+        "misty terrain":    "misty",
+        "psychic terrain":  "psychic",
+    }
+
+    @classmethod
+    def _normalize_terrain(cls, raw: Optional[str]) -> Optional[str]:
+        """
+        Map a raw -fieldstart effect string to a canonical terrain token.
+
+        Handles all the formats Showdown emits, e.g.::
+
+            "move: Electric Terrain"
+            "Electric Terrain"
+            "move: Grassy Terrain|[from] ability: Grassy Surge"
+
+        Returns "electric" / "grassy" / "misty" / "psychic", or None if the
+        string doesn't contain a recognised terrain.
+        """
+        if not raw:
+            return None
+        text = raw.lower()
+        if text.startswith("move:"):
+            text = text.split(":", 1)[1].strip()
+        for key, token in cls._TERRAIN_MAP.items():
+            if key in text:
+                return token
+        return None
 
     @staticmethod
     def _slot_key_from_ident(ident: Optional[str]) -> str:

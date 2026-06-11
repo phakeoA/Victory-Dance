@@ -72,6 +72,16 @@ def parse_replay_for_preview(
     result["replay_id"] = replay_id
     result["known_team_overrides"] = {}
 
+    # The parser now stores state_before_actions / state_after_actions as
+    # {"p1": <snap>, "p2": <snap>} to support both-perspective transitions.
+    # The preview UI expects a single flat state object (our_player's view),
+    # so flatten each turn's snapshots here before handing off to the UI.
+    for turn in result.get("turns", []):
+        if isinstance(turn.get("state_before_actions"), dict) and our_player in turn["state_before_actions"]:
+            turn["state_before_actions"] = turn["state_before_actions"][our_player]
+        if isinstance(turn.get("state_after_actions"), dict) and our_player in turn["state_after_actions"]:
+            turn["state_after_actions"] = turn["state_after_actions"][our_player]
+
     # Merge known_entry into the result
     if known_entry:
         meta = known_entry.get("_meta", {})
@@ -114,22 +124,22 @@ def replay_to_transitions(
       "winner": str | null,              # username of winning player
       "state_before_actions": {
         "field": {...},
-        "side_conditions": {"p1": {...}, "p2": {...}},
-        "our_active":  {"p1a": {...}, "p1b": {...}},   # or p2a/p2b
-        "opp_active":  {"p2a": {...}, "p2b": {...}},
+        "side_conditions": {"our_side": {...}, "opp_side": {...}},
+        "our_active":  {"our_a": {...}, "our_b": {...}},   # perspective-relative keys
+        "opp_active":  {"opp_a": {...}, "opp_b": {...}},   # same for both perspectives
         "our_bench":   [{...seen:true}, ...],
-        "opp_bench":   [{...seen:bool}, ...],          # seen=false = unrevealed
+        "opp_bench":   [{...seen:bool}, ...],              # seen=false = unrevealed
         "known_team":  {"p1": [...], "p2": [...]},
       },
       "state_after_actions": { ...same shape... },
       "our_actions": [
-        {"slot": "p1a", "action": "move",   "move": "Calm Mind", "target_slot": null,  ...},
-        {"slot": "p1b", "action": "move",   "move": "Sucker Punch", "target_slot": "p2b", ...},
-        {"slot": "p1b", "action": "switch", "species": "Incineroar"},
+        {"slot": "our_a", "action": "move",   "move": "Calm Mind", "target_slot": null,  ...},
+        {"slot": "our_b", "action": "move",   "move": "Sucker Punch", "target_slot": "opp_b", ...},
+        {"slot": "our_b", "action": "switch", "species": "Incineroar"},
       ],
       "opp_actions_predicted": null,     # null in VOD data; filled at inference time
       "opp_actions_actual": [
-        {"slot": "p2a", "action": "move", "move": "Rock Slide", "target_slot": null, ...},
+        {"slot": "opp_a", "action": "move", "move": "Rock Slide", "target_slot": null, ...},
       ],
       "reward": {
         "hp_delta_ours":   float | null,  # sum of hp_pct_delta for our active mons
@@ -138,9 +148,9 @@ def replay_to_transitions(
         "prediction_correct": null,       # null in VOD data; computed at inference time
         "win":             1 | -1 | null, # +1 on final turn if we win, -1 if we lose
       },
-      "damage_events": [...],            # full event log for back-calculation
-      "actions":       [...],            # full flat event log (moves, boosts, faints…)
-      "players": {"our_side": "p1", "p1": {...}, "p2": {...}},
+      "damage_events": [...],            # full event log; slots normalised to our_*/opp_*
+      "actions":       [...],            # full flat event log; slots normalised to our_*/opp_*
+      "players": {"our_side": "p1"|"p2", "p1": {...}, "p2": {...}},
       "state_vector":  null,             # reserved for StateEncoder output
       "action_mask":   null,             # reserved for legal-action masking
     }
@@ -179,8 +189,14 @@ def replay_to_transitions(
         for perspective in players:
             opp_perspective = "p2" if perspective == "p1" else "p1"
 
+            # ── Pull the perspective-correct state snapshots ──────────────
+            # state_before_actions and state_after_actions are now dicts keyed
+            # by "p1"/"p2" — always index by perspective here so both sides
+            # get the right our_active/opp_active/bench split.
+            state_before = turn["state_before_actions"][perspective]
+            after = copy.deepcopy(turn["state_after_actions"][perspective])
+
             # ── Inject known stats into state_after for our side ──────────
-            after = copy.deepcopy(turn["state_after_actions"])
             for active_dict in (after.get("our_active") or {}).values():
                 species = active_dict.get("species", "")
                 inj = (known_entry.get(perspective) or {}).get(species, {})
@@ -203,6 +219,10 @@ def replay_to_transitions(
             # ── Reward computation ────────────────────────────────────────
             # hp_delta_{ours,theirs}: sum of hp_pct_delta events for each side.
             # Damage events use negative deltas; heals use positive.
+            # NOTE: damage_events still use absolute slot notation (p1a, p2a)
+            # because they come straight from the parser log.  We resolve them
+            # against perspective here for the reward calc, then normalise the
+            # slots before writing into the transition below.
             hp_delta_ours   = 0.0
             hp_delta_theirs = 0.0
             has_damage      = False
@@ -234,13 +254,24 @@ def replay_to_transitions(
 
             # ── Perspective-aware action lists ────────────────────────────
             # our_actions / opp_actions_actual were extracted relative to the
-            # parser's our_player.  We may need to swap if perspective != our_player.
+            # parser's our_player.  Swap if perspective differs from our_player.
             if perspective == our_player:
-                our_actions        = turn.get("our_actions", [])
-                opp_actions_actual = turn.get("opp_actions_actual", [])
+                our_actions_raw        = turn.get("our_actions", [])
+                opp_actions_actual_raw = turn.get("opp_actions_actual", [])
             else:
-                our_actions        = turn.get("opp_actions_actual", [])
-                opp_actions_actual = turn.get("our_actions", [])
+                our_actions_raw        = turn.get("opp_actions_actual", [])
+                opp_actions_actual_raw = turn.get("our_actions", [])
+
+            # ── Normalise all absolute slot strings to perspective-relative ─
+            # After this point every "slot"/"target_slot"/"source_slot" field
+            # reads "our_a", "our_b", "opp_a", "opp_b" regardless of which
+            # physical player the transition was generated for.
+            normalize = lambda evs: ShowdownReplayParser.normalize_slots(evs, perspective)
+
+            our_actions        = normalize(our_actions_raw)
+            opp_actions_actual = normalize(opp_actions_actual_raw)
+            damage_events      = normalize(turn.get("damage_events", []))
+            actions            = normalize(turn.get("actions", []))
 
             t = {
                 "source_type": battle.get("source_type", "ranked_player_vod"),
@@ -248,8 +279,9 @@ def replay_to_transitions(
                 "format":      battle.get("format"),
                 "perspective": perspective,
                 "turn":        turn["turn"],
+                "total_turns": total_turns,
                 "winner":      battle.get("winner"),
-                "state_before_actions": turn["state_before_actions"],
+                "state_before_actions": state_before,
                 "state_after_actions":  after,
                 "our_actions":           our_actions,
                 "opp_actions_predicted": None,
@@ -261,13 +293,13 @@ def replay_to_transitions(
                     "prediction_correct": None,   # filled at inference time
                     "win":                win_signal,
                 },
-                "damage_events": turn.get("damage_events", []),
-                "actions":       turn.get("actions", []),
+                "damage_events": damage_events,
+                "actions":       actions,
                 # Placeholders for future encoder output
                 "state_vector": None,
                 "action_mask":  None,
                 "players": {
-                    "our_side": our_player,
+                    "our_side": perspective,
                     "p1": battle["players"]["p1"],
                     "p2": battle["players"]["p2"],
                 },

@@ -34,6 +34,10 @@ class PokemonSlot:
     known_tera_type: Optional[str] = None                # tera type if revealed
     is_terastallized: bool = False
     known_ability: Optional[str] = None                  # ability if revealed via |-ability|
+    # Bug 7: teampreview/roster species name, frozen at first switch-in.
+    # `species` mutates on mega evolution (|detailschange|), so bench/roster
+    # reconciliation must compare against this instead.
+    base_species: Optional[str] = None
 
     def key(self) -> str:
         return f"{self.player}{self.slot}"
