@@ -3,8 +3,7 @@ server.py
 =========
 Local Flask backend for the Victory-Dance team builder UI.
 
-Lives alongside team_builder.html and vod_parser.py in:
-  data/scripts/
+Lives at data/scripts/; front-end files live in data/scripts/team_builder/
 
 Run from anywhere:
   python data/scripts/server.py
@@ -58,9 +57,11 @@ import os
 from pathlib import Path
 
 # ── Resolve directories from this file's location ───────────────────────────
-# server.py lives at data/scripts/ alongside all other scripts.
+# server.py lives at data/scripts/
+# Front-end files live at data/scripts/team_builder/
 _SCRIPTS_DIR  = Path(__file__).resolve().parent
-_PROJECT_ROOT = _SCRIPTS_DIR.parents[1]  # used for data/ file paths
+_UI_DIR       = _SCRIPTS_DIR / "team_builder"   # HTML + CSS + JS modules
+_PROJECT_ROOT = _SCRIPTS_DIR.parents[1]           # used for data/ file paths
 
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
@@ -114,7 +115,7 @@ else:
     print("[warn] state_encoder.py not found — encoding will be skipped.")
 
 # ── Flask app ─────────────────────────────────────────────────────────────────
-app = Flask(__name__, static_folder=str(_SCRIPTS_DIR), static_url_path="")
+app = Flask(__name__, static_folder=str(_UI_DIR), static_url_path="")
 CORS(app)  # allow requests from file:// during local dev
 
 
@@ -122,8 +123,8 @@ CORS(app)  # allow requests from file:// during local dev
 
 @app.get("/")
 def index():
-    """Serve team_builder.html."""
-    return send_file(_SCRIPTS_DIR / "team_builder.html")
+    """Serve the UI entry point from data/scripts/team_builder/."""
+    return send_file(_UI_DIR / "team_builder.html")
 
 
 @app.get("/data/<path:filename>")
@@ -244,5 +245,21 @@ def export():
 if __name__ == "__main__":
     print(f"[server] Project root : {_PROJECT_ROOT}")
     print(f"[server] Scripts dir  : {_SCRIPTS_DIR}")
+    print(f"[server] UI dir       : {_UI_DIR}")
     print(f"[server] Serving      : http://localhost:5174/")
+
+    # Warn about any missing front-end files
+    _REQUIRED_FILES = [
+        "team_builder.html",
+        "team_builder.css",
+        "tb_constants.js",
+        "tb_parser.js",
+        "tb_api.js",
+        "tb_render.js",
+        "tb_actions.js",
+    ]
+    for _f in _REQUIRED_FILES:
+        if not (_UI_DIR / _f).exists():
+            print(f"[warn]   missing front-end file: team_builder/{_f}")
+
     app.run(host="127.0.0.1", port=5174, debug=True)

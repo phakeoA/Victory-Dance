@@ -17,7 +17,6 @@
     </div>
     <div class="sp"></div>
     <button class="btn">+ New battle</button>
-    <input accept=".html" id="replay-file" style="display:none" type="file" />
     <button class="btn">📂 Load replay</button>
     <button class="btn">Import JSON</button>
     <button class="btn" id="run-parser-btn">🔍 Run Parser</button>
@@ -43,7 +42,7 @@
       </div>
     </div>
 
-    <!-- Main content — rendered by team_builder.js -->
+    <!-- Main content — rendered by tb_render.js -->
     <div id="main"></div>
   </div>
 
@@ -68,6 +67,18 @@
   <input accept=".html" id="replay-file" style="display:none" type="file" />
   <input accept=".json" id="imp-file"    style="display:none" type="file" />
 
-  <script src="team_builder.js"></script>
+  <!--
+    Script load order matters — each file depends on the ones above it:
+      1. tb_constants.js  — NATURES, STAT_NAMES, shared state (battles, activeBattle, …)
+      2. tb_parser.js     — extractLog / parseShowdownLog  (uses nothing from the others)
+      3. tb_api.js        — checkServer / exportViaServer  (uses SERVER, showNotif)
+      4. tb_render.js     — all renderXxx functions        (uses state + helpers)
+      5. tb_actions.js    — user actions + DOMContentLoaded boot (uses everything above)
+  -->
+  <script src="tb_constants.js"></script>
+  <script src="tb_parser.js"></script>
+  <script src="tb_api.js"></script>
+  <script src="tb_render.js"></script>
+  <script src="tb_actions.js"></script>
 </body>
 </html>
