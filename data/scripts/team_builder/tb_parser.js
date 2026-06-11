@@ -106,6 +106,51 @@ function parseShowdownLog(rawLog, ourPlayer = 'p1') {
     }
   }
 
+  /** Write a revealed ability into the holder's slot + seenMons state. */
+  function recordAbility(slotKey, ability, species) {
+    const mon = activeSlots[slotKey];
+    if (mon && ability) {
+      // Bug 8: route the reveal into the correct ability context — a
+      // mega'd mon's ability line IS its (fixed) mega ability; a base
+      // forme's line is its chosen base ability.
+      if (mon.is_mega) mon.mega_ability     = ability;
+      else             mon.pre_mega_ability = ability;
+      mon.known_ability = ability;
+      // active_slots and seenMons share the same object, but keep the
+      // explicit base-species-keyed write for refactor safety (Bug 7).
+      const pid     = slotKey.slice(0, 2);
+      const seenKey = `${pid}:${mon.base_species || mon.species}`;
+      if (seenMons[seenKey]) seenMons[seenKey].known_ability = ability;
+    }
+    turnActions.push({
+      event: 'ability_revealed', slot: slotKey,
+      species, ability,
+      is_mega_ability: !!mon?.is_mega,
+    });
+  }
+
+  /**
+   * Bug 9: many abilities never get a standalone |-ability| line — the
+   * reveal rides as a "[from] ability:" tag on some other line, e.g.
+   *   |-weather|RainDance|[from] ability: Drizzle|[of] p2a: Pelipper
+   *   |-heal|p2a: X|100/100|[from] ability: Water Absorb
+   * The holder is the [of] mon when present, else the line's subject.
+   * (Showdown points [of] at a different mon for Pickpocket/Magician —
+   * accepted as a known limitation; mirrors replay_parser.py.)
+   */
+  function learnAbilityFromTags(parts) {
+    let ability = null, ofIdent = null;
+    for (const p of parts.slice(2)) {
+      if (p.startsWith('[from] ability:')) ability = p.slice('[from] ability:'.length).trim();
+      else if (p.startsWith('[of]'))       ofIdent = p.slice('[of]'.length).trim();
+    }
+    if (!ability) return;
+    const holder  = ofIdent || parts[2] || '';
+    const slotKey = slotKeyFromIdent(holder);
+    if (!/^p[12][ab]$/.test(slotKey)) return;
+    recordAbility(slotKey, ability, speciesFromIdent(holder));
+  }
+
   /**
    * Bug 8 (mega ability split): a mega forme has exactly ONE ability,
    * fully determined by the species.  The instant a mega is observed:
@@ -134,6 +179,11 @@ function parseShowdownLog(rawLog, ourPlayer = 'p1') {
     if (!line.startsWith('|')) continue;
     const parts = line.split('|');
     const cmd = parts[1];
+
+    // Bug 9: scan every line for inline "[from] ability:" reveals.
+    // |-ability| is excluded: it has its own handler, and a [from] tag
+    // there (e.g. Trace) names a DIFFERENT ability than the active one.
+    if (cmd !== '-ability') learnAbilityFromTags(parts);
 
     if (cmd === 'player') {
       const pid = parts[2];
@@ -343,27 +393,7 @@ function parseShowdownLog(rawLog, ourPlayer = 'p1') {
 
     } else if (cmd === '-ability') {
       // |-ability|p1a: Aerodactyl|Unnerve
-      const slotKey = slotKeyFromIdent(parts[2]);
-      const ability = parts[3] || null;
-      const mon     = activeSlots[slotKey];
-      if (mon && ability) {
-        // Bug 8: route the reveal into the correct ability context — a
-        // mega'd mon's ability line IS its (fixed) mega ability; a base
-        // forme's line is its chosen base ability.
-        if (mon.is_mega) mon.mega_ability     = ability;
-        else             mon.pre_mega_ability = ability;
-        mon.known_ability = ability;
-        // active_slots and seenMons share the same object, but keep the
-        // explicit base-species-keyed write for refactor safety (Bug 7).
-        const pid     = slotKey.slice(0, 2);
-        const seenKey = `${pid}:${mon.base_species || mon.species}`;
-        if (seenMons[seenKey]) seenMons[seenKey].known_ability = ability;
-      }
-      turnActions.push({
-        event: 'ability_revealed', slot: slotKey,
-        species: speciesFromIdent(parts[2]), ability,
-        is_mega_ability: !!mon?.is_mega,
-      });
+      recordAbility(slotKeyFromIdent(parts[2]), parts[3] || null, speciesFromIdent(parts[2]));
 
     } else if (cmd === '-sidestart') {
       const pid = (parts[2] || '').split(':')[0].trim(), eff = parts[3] || '';

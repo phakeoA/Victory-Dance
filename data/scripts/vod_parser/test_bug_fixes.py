@@ -466,6 +466,80 @@ class TestBug7MegaRosterReconciliation:
 
 
 # ---------------------------------------------------------------------------
+# Bug 9 — abilities revealed via inline [from] ability: tags
+# ---------------------------------------------------------------------------
+
+class TestBug9InlineAbilityReveal:
+    def test_weather_setter_ability_recorded_from_of_tag(self):
+        """Drizzle/Drought never emit a |-ability| line — the reveal rides on
+        the |-weather| line as [from] ability: ...|[of] <holder>."""
+        body = """\
+|-weather|RainDance|[from] ability: Drizzle|[of] p2a: Kingambit
+|turn|1
+|move|p1a: Floette|Protect|p1a: Floette
+|upkeep
+|win|alice
+"""
+        result = parse_log(body)
+        info = result["revealed_info"]["p2:Kingambit"]
+        assert info["known_ability"] == "Drizzle"
+        # Weather itself must still be applied.
+        state = get_turn(result, 1)["state_before_actions"]["p1"]
+        assert state["field"]["weather"] == "RainDance"
+
+    def test_heal_from_ability_without_of_uses_line_subject(self):
+        body = """\
+|turn|1
+|-heal|p1a: Floette|100/100|[from] ability: Water Absorb
+|upkeep
+|win|alice
+"""
+        result = parse_log(body)
+        info = result["revealed_info"]["p1:Floette-Eternal"]
+        assert info["known_ability"] == "Water Absorb"
+
+    def test_inline_reveal_emits_ability_revealed_event(self):
+        body = """\
+|turn|1
+|-weather|SunnyDay|[from] ability: Drought|[of] p2b: Aerodactyl
+|upkeep
+|win|alice
+"""
+        result = parse_log(body)
+        events = [a for a in get_turn(result, 1)["actions"]
+                  if a["event"] == "ability_revealed"]
+        assert events == [{
+            "event": "ability_revealed",
+            "slot": "p2b",
+            "species": "Aerodactyl",
+            "ability": "Drought",
+            "is_mega_ability": False,
+        }]
+
+    def test_non_ability_from_tags_ignored(self):
+        body = """\
+|turn|1
+|-damage|p1a: Floette|88/100|[from] item: Rocky Helmet|[of] p2a: Kingambit
+|upkeep
+|win|alice
+"""
+        result = parse_log(body)
+        assert result["revealed_info"]["p2:Kingambit"]["known_ability"] is None
+        assert result["revealed_info"]["p1:Floette-Eternal"]["known_ability"] is None
+
+    def test_dash_ability_line_still_works(self):
+        body = """\
+|turn|1
+|-ability|p2a: Kingambit|Defiant|boost
+|-boost|p2a: Kingambit|atk|2
+|upkeep
+|win|alice
+"""
+        result = parse_log(body)
+        assert result["revealed_info"]["p2:Kingambit"]["known_ability"] == "Defiant"
+
+
+# ---------------------------------------------------------------------------
 # Schema — total_turns
 # ---------------------------------------------------------------------------
 

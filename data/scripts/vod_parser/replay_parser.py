@@ -117,6 +117,15 @@ class ShowdownReplayParser:
             return
         cmd = parts[1]
 
+        # Bug 9: many abilities never get a standalone |-ability| line — the
+        # reveal rides as a "[from] ability:" tag on some other line, e.g.
+        #   |-weather|RainDance|[from] ability: Drizzle|[of] p2a: Pelipper
+        # Scan every line for that pattern.  |-ability| is excluded: it has
+        # its own handler, and a [from] tag there (e.g. Trace) names a
+        # DIFFERENT ability than the one being activated.
+        if cmd != "-ability":
+            self._learn_ability_from_tags(parts)
+
         # ---- metadata ----
         if cmd == "player":
             # |player|p1|steven he vgc|101|1733
@@ -633,8 +642,49 @@ class ShowdownReplayParser:
         # |-ability|p2b: Incineroar|Intimidate|[from] ability: Trace
         ident = parts[2] if len(parts) > 2 else ""
         ability = parts[3] if len(parts) > 3 else None
-        slot_key = self._slot_key_from_ident(ident)
+        self._record_ability(
+            self._slot_key_from_ident(ident),
+            ability,
+            self._species_from_ident(ident),
+        )
 
+    def _learn_ability_from_tags(self, parts: list[str]) -> None:
+        """Learn an ability revealed via a [from] ability: tag (Bug 9).
+
+        Weather/terrain setters and many passive effects announce the
+        ability inline on another protocol line instead of |-ability|::
+
+            |-weather|RainDance|[from] ability: Drizzle|[of] p2a: Pelipper
+            |-damage|p1a: X|90/100|[from] ability: Rough Skin|[of] p2b: Y
+            |-heal|p2a: X|100/100|[from] ability: Water Absorb
+
+        The ability holder is the [of] mon when present, otherwise the
+        subject of the line.  (Showdown points [of] at a different mon for
+        a couple of rare item-theft abilities — Pickpocket/Magician — which
+        we accept as a known limitation.)
+        """
+        ability = None
+        of_ident = None
+        for p in parts[2:]:
+            if p.startswith("[from] ability:"):
+                ability = p.split(":", 1)[1].strip()
+            elif p.startswith("[of]"):
+                of_ident = p[len("[of]"):].strip()
+        if not ability:
+            return
+        holder = of_ident or (parts[2] if len(parts) > 2 else "")
+        slot_key = self._slot_key_from_ident(holder)
+        if not re.fullmatch(r"p[12][ab]", slot_key):
+            return
+        self._record_ability(slot_key, ability, self._species_from_ident(holder))
+
+    def _record_ability(
+        self,
+        slot_key: str,
+        ability: Optional[str],
+        species: Optional[str],
+    ) -> None:
+        """Write a revealed ability into the holder's slot + seen_mons state."""
         if slot_key in self.active_slots and ability:
             mon = self.active_slots[slot_key]
             # Bug 8: route the reveal into the correct ability context.
@@ -658,7 +708,7 @@ class ShowdownReplayParser:
         self._current_turn_actions.append({
             "event": "ability_revealed",
             "slot": slot_key,
-            "species": self._species_from_ident(ident),
+            "species": species,
             "ability": ability,
             "is_mega_ability": (
                 self.active_slots[slot_key].is_mega
