@@ -16,7 +16,7 @@ import json
 from pathlib import Path
 from typing import Optional
 
-from replay_parser import (
+from vod_parser.replay_parser import (
     ShowdownReplayParser,
     extract_log_from_html,
     extract_replay_id_from_html,

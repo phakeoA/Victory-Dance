@@ -33,13 +33,13 @@ import sys
 from pathlib import Path
 
 # ── Public re-exports (server.py and other callers import from here) ─────────
-from battle_models import PokemonSlot, SideConditions, FieldConditions
-from replay_parser import (
+from vod_parser.battle_models import PokemonSlot, SideConditions, FieldConditions
+from vod_parser.replay_parser import (
     ShowdownReplayParser,
     extract_log_from_html,
     extract_replay_id_from_html,
 )
-from transitions import parse_replay_for_preview, replay_to_transitions
+from vod_parser.transitions import parse_replay_for_preview, replay_to_transitions
 
 __all__ = [
     # models

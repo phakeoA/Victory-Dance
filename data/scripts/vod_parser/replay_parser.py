@@ -17,7 +17,7 @@ import copy
 import re
 from typing import Optional
 
-from battle_models import (
+from vod_parser.battle_models import (
     FieldConditions,
     PokemonSlot,
     SideConditions,

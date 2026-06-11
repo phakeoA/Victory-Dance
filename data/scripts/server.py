@@ -58,11 +58,15 @@ from pathlib import Path
 
 # ── Resolve directories from this file's location ───────────────────────────
 # server.py lives at data/scripts/
+# Parser package lives at data/scripts/vod_parser/   ← Python package
 # Front-end files live at data/scripts/team_builder/
-_SCRIPTS_DIR  = Path(__file__).resolve().parent
-_UI_DIR       = _SCRIPTS_DIR / "team_builder"   # HTML + CSS + JS modules
-_PROJECT_ROOT = _SCRIPTS_DIR.parents[1]           # used for data/ file paths
+_SCRIPTS_DIR    = Path(__file__).resolve().parent
+_VOD_PARSER_DIR = _SCRIPTS_DIR / "vod_parser"   # for path checks / warnings
+_UI_DIR         = _SCRIPTS_DIR / "team_builder"  # HTML + CSS + JS modules
+_PROJECT_ROOT   = _SCRIPTS_DIR.parents[1]         # used for data/ file paths
 
+# Add scripts/ to sys.path so `import vod_parser` resolves to the package,
+# and sibling modules (belief_state, state_encoder, …) are also importable.
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
@@ -76,11 +80,11 @@ except ImportError:
         "Install with:  pip install flask flask-cors --break-system-packages"
     )
 
-# ── Project imports (siblings in data/scripts/) ──────────────────────────────
-# vod_parser is always required
+# ── Project imports ───────────────────────────────────────────────────────────
+# vod_parser is a package at data/scripts/vod_parser/__init__.py
 from vod_parser import parse_replay_for_preview, replay_to_transitions
 
-# belief_state and state_encoder are optional — they may not exist yet
+# belief_state and state_encoder are optional siblings in data/scripts/
 try:
     from belief_state import BeliefState as _BeliefState
 except ImportError:
@@ -243,10 +247,11 @@ def export():
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    print(f"[server] Project root : {_PROJECT_ROOT}")
-    print(f"[server] Scripts dir  : {_SCRIPTS_DIR}")
-    print(f"[server] UI dir       : {_UI_DIR}")
-    print(f"[server] Serving      : http://localhost:5174/")
+    print(f"[server] Project root   : {_PROJECT_ROOT}")
+    print(f"[server] Scripts dir    : {_SCRIPTS_DIR}")
+    print(f"[server] VOD parser pkg : {_VOD_PARSER_DIR}")
+    print(f"[server] UI dir         : {_UI_DIR}")
+    print(f"[server] Serving        : http://localhost:5174/")
 
     # Warn about any missing front-end files
     _REQUIRED_FILES = [
