@@ -737,17 +737,80 @@ class ShowdownReplayParser:
     # ------------------------------------------------------------------
 
     def _snapshot_state(self) -> dict:
+        our = self.our_player
+        opp = "p2" if our == "p1" else "p1"
+
+        # ── Active slots split by side ────────────────────────────────────
+        our_active: dict[str, dict] = {}
+        opp_active: dict[str, dict] = {}
+        for slot_key, mon in self.active_slots.items():
+            if mon.is_fainted:
+                continue
+            d = copy.deepcopy(mon.to_dict())
+            if slot_key.startswith(our):
+                our_active[slot_key] = d
+            else:
+                opp_active[slot_key] = d
+
+        # ── Our bench (all non-active, non-fainted own mons) ──────────────
+        our_active_species = {m.species for m in self.active_slots.values()
+                              if m.player == our and not m.is_fainted}
+        our_bench: list[dict] = []
+        for seen_key, mon in self.seen_mons.items():
+            if not seen_key.startswith(our + ":"):
+                continue
+            if mon.species in our_active_species:
+                continue
+            d = copy.deepcopy(mon.to_dict())
+            d["seen"] = True   # own bench is always fully known
+            our_bench.append(d)
+
+        # ── Opponent bench ────────────────────────────────────────────────
+        # Revealed mons from seen_mons; unseen roster slots filled with stubs.
+        opp_active_species = {m.species for m in self.active_slots.values()
+                              if m.player == opp and not m.is_fainted}
+        opp_seen: dict[str, dict] = {}
+        for seen_key, mon in self.seen_mons.items():
+            if not seen_key.startswith(opp + ":"):
+                continue
+            if mon.species in opp_active_species:
+                continue
+            d = copy.deepcopy(mon.to_dict())
+            d["seen"] = True
+            opp_seen[mon.species] = d
+
+        # Fill remaining roster slots as unseen stubs
+        opp_bench: list[dict] = []
+        for species in self.rosters.get(opp, []):
+            if species in opp_active_species:
+                continue
+            if species in opp_seen:
+                opp_bench.append(opp_seen[species])
+            else:
+                opp_bench.append({
+                    "species": species,
+                    "hp_pct": None,
+                    "status": None,
+                    "boosts": {},
+                    "is_mega": False,
+                    "is_fainted": False,
+                    "revealed_moves": [],
+                    "known_item": None,
+                    "known_tera_type": None,
+                    "is_terastallized": False,
+                    "seen": False,
+                })
+
         return {
             "field": copy.deepcopy(self.field_conditions.to_dict()),
             "side_conditions": {
                 pid: copy.deepcopy(sc.to_dict())
                 for pid, sc in self.side_conditions.items()
             },
-            "active_pokemon": {
-                slot: copy.deepcopy(mon.to_dict())
-                for slot, mon in self.active_slots.items()
-                if not mon.is_fainted
-            },
+            "our_active": our_active,
+            "opp_active": opp_active,
+            "our_bench": our_bench,
+            "opp_bench": opp_bench,
             "known_team": {
                 pid: list(team) for pid, team in self.known_team.items()
             },
@@ -759,16 +822,52 @@ class ShowdownReplayParser:
 
     def _flush_turn(self) -> None:
         """Snapshot the board state before + after and record all actions."""
+        our = self.our_player
+        opp = "p2" if our == "p1" else "p1"
+
+        # Extract decision-level actions (move / switch) per side.
+        # These are what the model needs to learn from — distinct from all the
+        # passive events (damage, boosts, faints) that also live in actions[].
+        def _extract_actions(player: str) -> list[dict]:
+            out = []
+            for ev in self._current_turn_actions:
+                if ev.get("event") not in ("move", "switch"):
+                    continue
+                slot = ev.get("user_slot") or ev.get("slot") or ""
+                if not slot.startswith(player):
+                    continue
+                if ev["event"] == "move":
+                    out.append({
+                        "slot": slot,
+                        "action": "move",
+                        "move": ev.get("move"),
+                        "target_slot": ev.get("target_slot"),
+                        "is_protect": ev.get("is_protect", False),
+                        "execution_index": ev.get("execution_index"),
+                    })
+                else:  # switch
+                    out.append({
+                        "slot": slot,
+                        "action": "switch",
+                        "species": ev.get("species"),
+                    })
+            return out
+
         turn_snapshot = {
             "turn": self.current_turn,
             # State captured at the START of the turn (no future leakage)
             "state_before_actions": self._state_before or self._snapshot_state(),
+            # Flat event log (moves, damage, boosts, faints, etc.) — for replays
             "actions": list(self._current_turn_actions),
             "damage_events": list(self._current_turn_damage_events),
             # State captured AFTER all actions have resolved
             "state_after_actions": self._snapshot_state(),
+            # ── Training-schema decision fields ──────────────────────────
+            "our_actions": _extract_actions(our),
+            "opp_actions_actual": _extract_actions(opp),
             # ---- Type B: prediction fields always null ----
             "predicted_action_by_bot": None,
+            "opp_actions_predicted": None,
         }
         self.turns.append(turn_snapshot)
 
@@ -964,33 +1063,62 @@ def replay_to_transitions(
     Parse a replay and convert every turn into a JSONL-ready transition dict.
 
     Each transition records the state visible to one player at decision time,
-    the actions taken that turn, and the resulting state.  Fields that require
-    a trained encoder (numeric feature vectors) are left as null for now.
+    the actions taken that turn, the resulting state, and a decomposed reward
+    block ready for RL training.
+
+    Schema per transition
+    ---------------------
+    {
+      "source_type": "ranked_player_vod",
+      "replay_id": str,
+      "format": str | null,
+      "perspective": "p1" | "p2",
+      "turn": int,
+      "winner": str | null,              # username of winning player
+      "state_before_actions": {
+        "field": {...},
+        "side_conditions": {"p1": {...}, "p2": {...}},
+        "our_active":  {"p1a": {...}, "p1b": {...}},   # or p2a/p2b
+        "opp_active":  {"p2a": {...}, "p2b": {...}},
+        "our_bench":   [{...seen:true}, ...],
+        "opp_bench":   [{...seen:bool}, ...],          # seen=false = unrevealed
+        "known_team":  {"p1": [...], "p2": [...]},
+      },
+      "state_after_actions": { ...same shape... },
+      "our_actions": [
+        {"slot": "p1a", "action": "move",   "move": "Calm Mind", "target_slot": null,  ...},
+        {"slot": "p1b", "action": "move",   "move": "Sucker Punch", "target_slot": "p2b", ...},
+        {"slot": "p1b", "action": "switch", "species": "Incineroar"},
+      ],
+      "opp_actions_predicted": null,     # null in VOD data; filled at inference time
+      "opp_actions_actual": [
+        {"slot": "p2a", "action": "move", "move": "Rock Slide", "target_slot": null, ...},
+      ],
+      "reward": {
+        "hp_delta_ours":   float | null,  # sum of hp_pct_delta for our active mons
+        "hp_delta_theirs": float | null,  # sum of hp_pct_delta for opp active mons
+        "tempo":           float | null,  # (hp_delta_ours - hp_delta_theirs) / 100
+        "prediction_correct": null,       # null in VOD data; computed at inference time
+        "win":             1 | -1 | null, # +1 on final turn if we win, -1 if we lose
+      },
+      "damage_events": [...],            # full event log for back-calculation
+      "actions":       [...],            # full flat event log (moves, boosts, faints…)
+      "players": {"our_side": "p1", "p1": {...}, "p2": {...}},
+      "state_vector":  null,             # reserved for StateEncoder output
+      "action_mask":   null,             # reserved for legal-action masking
+    }
 
     Parameters
     ----------
     replay_path : path-like
-        Path to the .html replay file.
     belief : BeliefState, optional
-        Reserved for Pikalytics-based hidden-info inference.
     encoder : StateEncoder, optional
-        Reserved for converting state dicts to float tensors.
-    players : list of str, optional
-        Which player perspectives to emit (e.g. ["p1"]).
-        Defaults to ["p1", "p2"].
+    players : list of str, optional   e.g. ["p1"]  — defaults to ["p1", "p2"]
     known_teams : dict, optional
-        Map of battle_id -> known_teams_entry.  Used to inject exact stats
-        when available.
-
-    Returns
-    -------
-    list of dict
-        One dict per (turn, player) combination, ready for json.dumps.
     """
     html_content = Path(replay_path).read_text(encoding="utf-8")
     replay_id = extract_replay_id_from_html(html_content) or Path(replay_path).stem
 
-    # Look up any injected team data for this battle
     known_entry: dict = {}
     if known_teams:
         known_entry = known_teams.get(replay_id, {})
@@ -1006,37 +1134,101 @@ def replay_to_transitions(
         players = ["p1", "p2"]
 
     transitions = []
+    total_turns = len(battle["turns"])
 
-    for turn in battle["turns"]:
+    for turn_idx, turn in enumerate(battle["turns"]):
+        is_final_turn = (turn_idx == total_turns - 1)
+
         for perspective in players:
-            # Inject known stats into active_pokemon for our side
+            opp_perspective = "p2" if perspective == "p1" else "p1"
+
+            # ── Inject known stats into state_after for our side ──────────
             after = copy.deepcopy(turn["state_after_actions"])
-            for slot_key, mon_dict in after.get("active_pokemon", {}).items():
-                pid = slot_key[:2]
-                species = mon_dict.get("species", "")
-                inj = (known_entry.get(pid) or {}).get(species, {})
+            for active_dict in (after.get("our_active") or {}).values():
+                species = active_dict.get("species", "")
+                inj = (known_entry.get(perspective) or {}).get(species, {})
                 if inj:
-                    mon_dict["ev_spread"] = inj.get("ev_spread")
-                    mon_dict["nature"] = inj.get("nature")
-                    mon_dict["known_item"] = mon_dict.get("known_item") or inj.get("item")
+                    active_dict["ev_spread"]  = inj.get("ev_spread")
+                    active_dict["nature"]     = inj.get("nature")
+                    active_dict["known_item"] = active_dict.get("known_item") or inj.get("item")
                     if inj.get("moves"):
-                        mon_dict["known_moves"] = inj["moves"]
+                        active_dict["known_moves"] = inj["moves"]
+            for bench_mon in (after.get("our_bench") or []):
+                species = bench_mon.get("species", "")
+                inj = (known_entry.get(perspective) or {}).get(species, {})
+                if inj:
+                    bench_mon["ev_spread"]  = inj.get("ev_spread")
+                    bench_mon["nature"]     = inj.get("nature")
+                    bench_mon["known_item"] = bench_mon.get("known_item") or inj.get("item")
+                    if inj.get("moves"):
+                        bench_mon["known_moves"] = inj["moves"]
+
+            # ── Reward computation ────────────────────────────────────────
+            # hp_delta_{ours,theirs}: sum of hp_pct_delta events for each side.
+            # Damage events use negative deltas; heals use positive.
+            hp_delta_ours   = 0.0
+            hp_delta_theirs = 0.0
+            has_damage      = False
+            for ev in turn.get("damage_events", []):
+                delta = ev.get("hp_pct_delta")
+                if delta is None:
+                    continue
+                has_damage = True
+                slot = ev.get("slot", "")
+                if slot.startswith(perspective):
+                    hp_delta_ours   += delta
+                elif slot.startswith(opp_perspective):
+                    hp_delta_theirs += delta
+
+            # Tempo = net HP swing in our favour, normalised to [-1, 1]
+            tempo = None
+            if has_damage:
+                tempo = round((hp_delta_ours - hp_delta_theirs) / 100.0, 4)
+                hp_delta_ours   = round(hp_delta_ours, 2)
+                hp_delta_theirs = round(hp_delta_theirs, 2)
+            else:
+                hp_delta_ours = hp_delta_theirs = None
+
+            # Win/loss signal on the final turn only
+            win_signal = None
+            if is_final_turn and battle.get("winner"):
+                our_username = battle["players"][perspective]["username"]
+                win_signal   = 1 if battle["winner"] == our_username else -1
+
+            # ── Perspective-aware action lists ────────────────────────────
+            # our_actions / opp_actions_actual were extracted relative to the
+            # parser's our_player.  We may need to swap if perspective != our_player.
+            if perspective == our_player:
+                our_actions        = turn.get("our_actions", [])
+                opp_actions_actual = turn.get("opp_actions_actual", [])
+            else:
+                our_actions        = turn.get("opp_actions_actual", [])
+                opp_actions_actual = turn.get("our_actions", [])
 
             t = {
                 "source_type": battle.get("source_type", "ranked_player_vod"),
-                "replay_id": replay_id,
-                "format": battle.get("format"),
+                "replay_id":   replay_id,
+                "format":      battle.get("format"),
                 "perspective": perspective,
-                "turn": turn["turn"],
-                "winner": battle.get("winner"),
+                "turn":        turn["turn"],
+                "winner":      battle.get("winner"),
                 "state_before_actions": turn["state_before_actions"],
-                "state_after_actions": after,
-                "actions": turn["actions"],
-                "damage_events": turn["damage_events"],
+                "state_after_actions":  after,
+                "our_actions":           our_actions,
+                "opp_actions_predicted": None,
+                "opp_actions_actual":    opp_actions_actual,
+                "reward": {
+                    "hp_delta_ours":      hp_delta_ours,
+                    "hp_delta_theirs":    hp_delta_theirs,
+                    "tempo":              tempo,
+                    "prediction_correct": None,   # filled at inference time
+                    "win":                win_signal,
+                },
+                "damage_events": turn.get("damage_events", []),
+                "actions":       turn.get("actions", []),
                 # Placeholders for future encoder output
                 "state_vector": None,
-                "action_mask": None,
-                "predicted_action_by_bot": turn.get("predicted_action_by_bot"),
+                "action_mask":  None,
                 "players": {
                     "our_side": our_player,
                     "p1": battle["players"]["p1"],
