@@ -32,6 +32,13 @@ import json
 import sys
 from pathlib import Path
 
+# Bootstrap: allow running this file directly (python vod_parser/vod_parser.py)
+# by putting data/scripts on sys.path so `import vod_parser` resolves to the
+# package.  When imported normally this is a no-op.
+_SCRIPTS_DIR = str(Path(__file__).resolve().parents[1])
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+
 # ── Public re-exports (server.py and other callers import from here) ─────────
 from vod_parser.battle_models import PokemonSlot, SideConditions, FieldConditions
 from vod_parser.replay_parser import (

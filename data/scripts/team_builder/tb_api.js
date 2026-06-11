@@ -17,12 +17,34 @@ async function checkServer() {
     if (r.ok) {
       dot.style.background = 'var(--green)';
       lbl.textContent = 'Server: connected';
+      // Late pokedex load — server may have come online after boot
+      if (!POKEDEX) loadPokedex();
       return true;
     }
   } catch (_) { }
   dot.style.background = 'var(--red)';
   lbl.textContent = 'Server: offline';
   return false;
+}
+
+/**
+ * Fetch data/pokedex.json (served by server.py at /data/pokedex.json) into
+ * the global POKEDEX.  Enables ability dropdowns + deterministic mega-ability
+ * resolution in the client-side parser.  Silently no-ops when offline —
+ * everything degrades to free-text inputs and reveal-based abilities.
+ */
+async function loadPokedex() {
+  if (POKEDEX) return true;
+  try {
+    const r = await fetch(`${SERVER}/data/pokedex.json`, { signal: AbortSignal.timeout(10000) });
+    if (!r.ok) return false;
+    POKEDEX = await r.json();
+    // Re-render so ability dropdowns appear once the dex is available
+    if (typeof renderMain === 'function' && activeBattle) renderMain();
+    return true;
+  } catch (_) {
+    return false;
+  }
 }
 
 /**
@@ -80,6 +102,10 @@ async function exportViaServer(battle) {
  *   p1: { SpeciesName: { nature, item, ability, ev_spread, moves }, ... },
  *   p2: { ... }
  * }
+ * NOTE (Bug 8): `ability` is always the BASE forme's ability — the only one
+ * a player chooses.  A mega forme's ability is fixed by the forme and is
+ * derived from the pokedex on the Python side (transitions._inject_known_stats),
+ * so it is never stored here.
  */
 function buildKnownTeamsEntry(b) {
   const entry = {

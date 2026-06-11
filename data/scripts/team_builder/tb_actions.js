@@ -91,9 +91,28 @@ function buildExportJson() {
     const ap  = {};
     const src = t.state_after_actions?.active_pokemon || t.active_pokemon || {};
     for (const [k, mon] of Object.entries(src)) {
-      const injKey = `${mon.player}:${mon.species.replace(/-Mega$/, '')}`;
+      // Bug 8: inj entries are keyed by BASE species ("Floette-Eternal"),
+      // never the mega forme name — suffix-stripping "Floette-Mega" would
+      // wrongly give "Floette".  base_species is frozen at first switch-in.
+      const baseSpecies = mon.base_species || mon.species.replace(/-Mega(-[XY])?$/, '');
+      const injKey = `${mon.player}:${baseSpecies}`;
       const inj    = b.known_team_overrides?.[injKey] || {};
-      ap[k] = { ...mon, ev_spread: inj.ev_spread || null, nature: inj.nature || null, item: inj.item || null, ability: inj.ability || null, moves: inj.moves || null };
+
+      // A mega forme has exactly ONE ability, fixed by the forme — the
+      // user-injected ability is always the base forme's and must never be
+      // exported as the active ability of a mega'd mon.
+      const isMega = !!mon.is_mega;
+      const megaAb = isMega ? (mon.mega_ability || dexMegaAbility(mon.species) || null) : (mon.mega_ability || null);
+      ap[k] = {
+        ...mon,
+        ev_spread: inj.ev_spread || null,
+        nature:    inj.nature    || null,
+        item:      inj.item      || null,
+        ability:   isMega ? megaAb : (inj.ability || mon.known_ability || null),
+        pre_mega_ability: mon.pre_mega_ability || inj.ability || null,
+        mega_ability:     megaAb,
+        moves:     inj.moves     || null,
+      };
     }
     return { ...t, active_pokemon: ap };
   });
@@ -256,7 +275,8 @@ document.addEventListener('DOMContentLoaded', () => {
     document.querySelectorAll('#hdr button')[0].click();
   });
 
-  // Server health check on boot + every 15 s
+  // Server health check on boot + every 15 s; pokedex loads alongside
+  loadPokedex();
   checkServer();
   setInterval(checkServer, 15000);
 });

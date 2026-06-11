@@ -22,6 +22,7 @@ from vod_parser.battle_models import (
     PokemonSlot,
     SideConditions,
 )
+from vod_parser.pokedex import get_pokedex, is_mega_species_name
 
 
 # ---------------------------------------------------------------------------
@@ -301,8 +302,18 @@ class ShowdownReplayParser:
 
         # Reuse existing PokemonSlot if already seen (preserves revealed_moves, known_item, etc.)
         seen_key = f"{player}:{species}"
-        if seen_key in self.seen_mons:
-            mon = self.seen_mons[seen_key]
+        mon = self.seen_mons.get(seen_key)
+        if mon is None:
+            # Bug 8 continuity: a mega'd mon switching back in shows its MEGA
+            # forme on the |switch| line ("Floette-Mega"), but seen_mons is
+            # keyed by base species.  Match on current (mutated) species so
+            # we don't fork a duplicate mon and lose its ability state.
+            mon = next(
+                (m for k, m in self.seen_mons.items()
+                 if k.startswith(player + ":") and m.species == species),
+                None,
+            )
+        if mon is not None:
             mon.slot = slot_key[2]
             mon.hp_current = hp_current
             mon.is_fainted = False
@@ -330,9 +341,11 @@ class ShowdownReplayParser:
         # and guards against any stale state on the reused PokemonSlot).
         mon.boosts = {}
 
-        # Track evolving known team
-        if species not in self.known_team[player]:
-            self.known_team[player].append(species)
+        # Track evolving known team (by BASE species — a mega'd mon switching
+        # back in must not appear as a second team member)
+        known_species = mon.base_species or species
+        if known_species not in self.known_team[player]:
+            self.known_team[player].append(known_species)
 
         self._current_turn_actions.append({
             "event": "switch",
@@ -346,23 +359,73 @@ class ShowdownReplayParser:
         # Mutates species + sets is_mega.  The |-mega| line that fires immediately
         # after carries the explicit stone name and calls _handle_mega_stone().
         # The suffix check is only a fallback for replays that lack |-mega|.
+        #
+        # Bug 8 (mega ability split): |detailschange| also fires for NON-mega
+        # forme changes (Palafin → Palafin-Hero, Terapagos, etc.), so we must
+        # not blindly set is_mega.  For genuine megas, the new forme has
+        # exactly ONE possible ability, fully determined by the pokedex — so
+        # the moment we see the mega we:
+        #   1. demote any previously revealed ability to pre_mega_ability
+        #      (it can no longer be the active ability), and
+        #   2. set known_ability/mega_ability from the pokedex (or None if
+        #      the dex doesn't cover this species — a later |-ability| line
+        #      will fill it in).
         ident = parts[2]
         new_species = parts[3].split(",")[0].strip() if len(parts) > 3 else None
         slot_key = self._slot_key_from_ident(ident)
 
-        if slot_key in self.active_slots and new_species:
-            self.active_slots[slot_key].species = new_species
-            self.active_slots[slot_key].is_mega = True
-            # Fallback only — |-mega| will overwrite with the explicit stone name
-            # We don't know the stone name here, so leave known_item unchanged
-            # unless it's already set.
+        dex = get_pokedex()
+        is_mega = bool(new_species) and (
+            dex.is_mega_forme(new_species) if dex else is_mega_species_name(new_species)
+        )
 
-        self._current_turn_actions.append({
-            "event": "mega_evolution",
-            "slot": slot_key,
-            "new_species": new_species,
-            "mega_stone": self.active_slots[slot_key].known_item if slot_key in self.active_slots else None,
-        })
+        if slot_key in self.active_slots and new_species:
+            mon = self.active_slots[slot_key]
+            mon.species = new_species
+            if is_mega:
+                mon.is_mega = True
+                self._apply_mega_ability(mon, new_species)
+            # Non-mega forme change: species updated, ability state untouched.
+
+        if is_mega:
+            self._current_turn_actions.append({
+                "event": "mega_evolution",
+                "slot": slot_key,
+                "new_species": new_species,
+                "mega_stone": self.active_slots[slot_key].known_item if slot_key in self.active_slots else None,
+                "pre_mega_ability": self.active_slots[slot_key].pre_mega_ability if slot_key in self.active_slots else None,
+                "mega_ability": self.active_slots[slot_key].mega_ability if slot_key in self.active_slots else None,
+            })
+        else:
+            self._current_turn_actions.append({
+                "event": "forme_change",
+                "slot": slot_key,
+                "new_species": new_species,
+            })
+
+    def _apply_mega_ability(self, mon: PokemonSlot, mega_species: str) -> None:
+        """Swap a mon's ability state over to its (single, fixed) mega ability.
+
+        Idempotent — safe to call from both |detailschange| and |-mega|.
+        """
+        # Demote whatever was known before the mega: it is now definitively
+        # NOT the active ability.  Never overwrite an already-recorded
+        # pre-mega ability (e.g. on a second, redundant call).
+        if mon.pre_mega_ability is None and mon.known_ability and mon.known_ability != mon.mega_ability:
+            mon.pre_mega_ability = mon.known_ability
+
+        dex = get_pokedex()
+        mega_ability = dex.mega_ability_for(mega_species) if dex else None
+        if mega_ability:
+            mon.mega_ability = mega_ability
+            mon.known_ability = mega_ability
+        elif mon.mega_ability:
+            # Already learned via |-ability| — keep it current.
+            mon.known_ability = mon.mega_ability
+        else:
+            # Dex can't resolve it and nothing revealed yet: the pre-mega
+            # ability is stale, so the current ability is simply unknown.
+            mon.known_ability = None
 
     def _handle_mega_stone(self, parts: list[str]) -> None:
         # |-mega|p1a: Floette|Floette|Floettite
@@ -372,9 +435,15 @@ class ShowdownReplayParser:
         slot_key = self._slot_key_from_ident(ident)
 
         if stone and slot_key in self.active_slots:
-            mega_species  = self.active_slots[slot_key].species   # already the Mega form
+            mon = self.active_slots[slot_key]
+            mega_species  = mon.species   # already the Mega form
             pre_mega      = parts[3] if len(parts) > 3 else mega_species
             self._set_known_item(slot_key, mega_species, pre_mega, stone)
+            # Bug 8 safety net: if |detailschange| was missing/odd, make sure
+            # the mega flag and ability swap still happened (idempotent).
+            if not mon.is_mega:
+                mon.is_mega = True
+                self._apply_mega_ability(mon, mega_species)
             # Patch the mega_stone field on the most recent mega_evolution action
             for action in reversed(self._current_turn_actions):
                 if action.get("event") == "mega_evolution" and action.get("slot") == slot_key:
@@ -567,11 +636,22 @@ class ShowdownReplayParser:
         slot_key = self._slot_key_from_ident(ident)
 
         if slot_key in self.active_slots and ability:
-            self.active_slots[slot_key].known_ability = ability
-            # Propagate to seen_mons so it survives switches
+            mon = self.active_slots[slot_key]
+            # Bug 8: route the reveal into the correct ability context.
+            # A mega'd mon's ability line IS its mega ability; a base-forme
+            # mon's line is its (chosen) base ability.  Either way the
+            # currently-active ability is updated.
+            if mon.is_mega:
+                mon.mega_ability = ability
+            else:
+                mon.pre_mega_ability = ability
+            mon.known_ability = ability
+            # active_slots and seen_mons share the same PokemonSlot object
+            # (see _handle_switch), so no extra propagation is needed — but
+            # keep an explicit write keyed by BASE species (Bug 7: `species`
+            # mutates on mega, seen_mons keys don't) for refactor safety.
             player = slot_key[:2]
-            species = self.active_slots[slot_key].species
-            seen_key = f"{player}:{species}"
+            seen_key = f"{player}:{mon.base_species or mon.species}"
             if seen_key in self.seen_mons:
                 self.seen_mons[seen_key].known_ability = ability
 
@@ -580,6 +660,10 @@ class ShowdownReplayParser:
             "slot": slot_key,
             "species": self._species_from_ident(ident),
             "ability": ability,
+            "is_mega_ability": (
+                self.active_slots[slot_key].is_mega
+                if slot_key in self.active_slots else False
+            ),
         })
 
     # ------------------------------------------------------------------
@@ -760,15 +844,28 @@ class ShowdownReplayParser:
         # Aggregate everything the parser learned across the whole match into a
         # flat dict keyed by "pid:species".  This is what the inject panel uses
         # to pre-populate revealed moves, items, tera type, and ability.
+        dex = get_pokedex()
         revealed_info: dict[str, dict] = {}
         for seen_key, mon in self.seen_mons.items():
-            # seen_key is already "pid:species"
+            # seen_key is already "pid:species" (BASE species — Bug 7)
+            base = mon.base_species or mon.species
             revealed_info[seen_key] = {
                 "revealed_moves": list(mon.revealed_moves),
                 "known_item": "mega stone" if mon.is_mega else mon.known_item,
                 "known_tera_type": mon.known_tera_type,
                 "is_terastallized": mon.is_terastallized,
+                # Bug 8: split ability contexts.  known_ability == the ability
+                # active at the END of the match; pre_mega_ability is what the
+                # base forme ran (the only user-editable one for mega mons);
+                # mega_ability is the mega forme's fixed ability.
                 "known_ability": mon.known_ability,
+                "pre_mega_ability": mon.pre_mega_ability,
+                "mega_ability": mon.mega_ability,
+                "is_mega": mon.is_mega,
+                "mega_species": mon.species if mon.is_mega else None,
+                # Pokedex-derived dropdown data for the inject panel.
+                "possible_abilities": dex.abilities_for(base) if dex else [],
+                "mega_formes": dex.mega_formes_for(base) if dex else [],
             }
 
         return {

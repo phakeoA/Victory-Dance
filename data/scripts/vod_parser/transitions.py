@@ -16,11 +16,52 @@ import json
 from pathlib import Path
 from typing import Optional
 
+from vod_parser.pokedex import get_pokedex
 from vod_parser.replay_parser import (
     ShowdownReplayParser,
     extract_log_from_html,
     extract_replay_id_from_html,
 )
+
+
+def _inject_known_stats(mon_dict: dict, inj: dict) -> None:
+    """Merge a user-supplied known_teams entry into one mon's state dict.
+
+    Bug 8 (mega ability split): the user-injected ``ability`` always refers
+    to the BASE forme's ability — that is the only free choice a player makes.
+    A mega forme's ability is fixed and fully determined by the species, so:
+
+      * non-mega mon  → injected ability fills known_ability (if not already
+                        revealed in the replay) and pre_mega_ability.
+      * mega'd mon    → injected ability only fills pre_mega_ability;
+                        known_ability stays/becomes the pokedex mega ability.
+    """
+    if not inj:
+        return
+    mon_dict["ev_spread"]  = inj.get("ev_spread")
+    mon_dict["nature"]     = inj.get("nature")
+    mon_dict["known_item"] = mon_dict.get("known_item") or inj.get("item")
+    if inj.get("moves"):
+        mon_dict["known_moves"] = inj["moves"]
+
+    inj_ability = inj.get("ability")
+    if mon_dict.get("is_mega"):
+        # Base ability is historical context only — never the active one.
+        if inj_ability:
+            mon_dict["pre_mega_ability"] = mon_dict.get("pre_mega_ability") or inj_ability
+        # Guarantee the active ability is the fixed mega ability.
+        if not mon_dict.get("known_ability"):
+            dex = get_pokedex()
+            mega_ab = (
+                mon_dict.get("mega_ability")
+                or (dex.mega_ability_for(mon_dict.get("species")) if dex else None)
+            )
+            if mega_ab:
+                mon_dict["mega_ability"]  = mega_ab
+                mon_dict["known_ability"] = mega_ab
+    elif inj_ability:
+        mon_dict["pre_mega_ability"] = mon_dict.get("pre_mega_ability") or inj_ability
+        mon_dict["known_ability"]    = mon_dict.get("known_ability") or inj_ability
 
 
 def parse_replay_for_preview(
@@ -169,6 +210,13 @@ def replay_to_transitions(
     known_entry: dict = {}
     if known_teams:
         known_entry = known_teams.get(replay_id, {})
+        # server.py wraps a single user-approved entry under the UI's
+        # battle_id, which may differ from the replayid embedded in the HTML
+        # (e.g. manually created battles).  If the id lookup misses and there
+        # is exactly one entry, it is unambiguous — use it rather than
+        # silently dropping every injected stat.
+        if not known_entry and len(known_teams) == 1:
+            known_entry = next(iter(known_teams.values())) or {}
 
     our_player = known_entry.get("_meta", {}).get("yourSide", "p1") or "p1"
 
@@ -197,24 +245,19 @@ def replay_to_transitions(
             after = copy.deepcopy(turn["state_after_actions"][perspective])
 
             # ── Inject known stats into state_after for our side ──────────
+            # Lookup uses BASE species (Bug 7/8): known_teams entries are
+            # keyed by roster names ("Floette-Eternal"), while a mega'd
+            # active's `species` is the mega forme ("Floette-Mega").
+            side_inj = known_entry.get(perspective) or {}
+
+            def _lookup_inj(mon_dict: dict) -> dict:
+                base = mon_dict.get("base_species") or mon_dict.get("species", "")
+                return side_inj.get(base) or side_inj.get(mon_dict.get("species", "")) or {}
+
             for active_dict in (after.get("our_active") or {}).values():
-                species = active_dict.get("species", "")
-                inj = (known_entry.get(perspective) or {}).get(species, {})
-                if inj:
-                    active_dict["ev_spread"]  = inj.get("ev_spread")
-                    active_dict["nature"]     = inj.get("nature")
-                    active_dict["known_item"] = active_dict.get("known_item") or inj.get("item")
-                    if inj.get("moves"):
-                        active_dict["known_moves"] = inj["moves"]
+                _inject_known_stats(active_dict, _lookup_inj(active_dict))
             for bench_mon in (after.get("our_bench") or []):
-                species = bench_mon.get("species", "")
-                inj = (known_entry.get(perspective) or {}).get(species, {})
-                if inj:
-                    bench_mon["ev_spread"]  = inj.get("ev_spread")
-                    bench_mon["nature"]     = inj.get("nature")
-                    bench_mon["known_item"] = bench_mon.get("known_item") or inj.get("item")
-                    if inj.get("moves"):
-                        bench_mon["known_moves"] = inj["moves"]
+                _inject_known_stats(bench_mon, _lookup_inj(bench_mon))
 
             # ── Reward computation ────────────────────────────────────────
             # hp_delta_{ours,theirs}: sum of hp_pct_delta events for each side.

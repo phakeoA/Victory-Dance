@@ -106,6 +106,29 @@ function parseShowdownLog(rawLog, ourPlayer = 'p1') {
     }
   }
 
+  /**
+   * Bug 8 (mega ability split): a mega forme has exactly ONE ability,
+   * fully determined by the species.  The instant a mega is observed:
+   *   1. demote any previously revealed ability to pre_mega_ability
+   *      (it can no longer be active), and
+   *   2. set known_ability/mega_ability from the pokedex — or null if the
+   *      dex isn't loaded; a later |-ability| line will fill it in.
+   * Idempotent: safe to call from both |detailschange| and |-mega|.
+   */
+  function applyMegaAbility(mon, megaSpecies) {
+    if (mon.pre_mega_ability == null && mon.known_ability && mon.known_ability !== mon.mega_ability)
+      mon.pre_mega_ability = mon.known_ability;
+    const megaAb = dexMegaAbility(megaSpecies);
+    if (megaAb) {
+      mon.mega_ability  = megaAb;
+      mon.known_ability = megaAb;
+    } else if (mon.mega_ability) {
+      mon.known_ability = mon.mega_ability;   // already revealed earlier
+    } else {
+      mon.known_ability = null;               // stale pre-mega ability cleared
+    }
+  }
+
   // ── Main parse loop ──────────────────────────────────────
   for (const line of lines) {
     if (!line.startsWith('|')) continue;
@@ -157,46 +180,78 @@ function parseShowdownLog(rawLog, ourPlayer = 'p1') {
       const [hpC, hpM] = parseHp(hpStr);
       const seenKey = `${pid}:${species}`;
 
-      if (seenMons[seenKey]) {
-        seenMons[seenKey].slot = slotKey[2];
-        seenMons[seenKey].hp_current = hpC;
-        seenMons[seenKey].is_fainted = false;
-        activeSlots[slotKey] = seenMons[seenKey];
+      let mon = seenMons[seenKey] || null;
+      if (!mon) {
+        // Bug 8 continuity: a mega'd mon switching back in shows its MEGA
+        // forme name; seenMons is keyed by base species — match on current
+        // species so we don't fork a duplicate and lose ability state.
+        mon = Object.entries(seenMons)
+          .filter(([k]) => k.startsWith(pid + ':'))
+          .map(([, m]) => m)
+          .find(m => m.species === species) || null;
+      }
+      if (mon) {
+        mon.slot = slotKey[2];
+        mon.hp_current = hpC;
+        mon.is_fainted = false;
+        activeSlots[slotKey] = mon;
       } else {
-        const mon = {
-          species, nickname, player: pid, slot: slotKey[2],
+        mon = {
+          species, base_species: species, nickname, player: pid, slot: slotKey[2],
           hp_current: hpC, hp_max: hpM,
           status: null, boosts: {}, is_mega: false, is_fainted: false,
           revealed_moves: [], known_item: null, known_tera_type: null,
           is_terastallized: false,
+          known_ability: null, pre_mega_ability: null, mega_ability: null,
         };
         seenMons[seenKey] = mon;
         activeSlots[slotKey] = mon;
       }
-      if (!knownTeam[pid].includes(species)) knownTeam[pid].push(species);
+      const knownSpecies = mon.base_species || species;
+      if (!knownTeam[pid].includes(knownSpecies)) knownTeam[pid].push(knownSpecies);
       turnActions.push({ event: 'switch', slot: slotKey, species, player: pid });
 
     } else if (cmd === 'detailschange') {
+      // Fires for megas AND non-mega forme changes (Palafin-Hero, …) —
+      // only genuine megas get is_mega + the ability swap (Bug 8).
       const slotKey    = slotKeyFromIdent(parts[2]);
       const newSpecies = parts[3] ? parts[3].split(',')[0].trim() : null;
-      if (activeSlots[slotKey] && newSpecies) {
-        const preMegaSpecies = activeSlots[slotKey].species;
-        activeSlots[slotKey].species = newSpecies;
-        activeSlots[slotKey].is_mega = true;
-        setMegaStoneItem(slotKey, newSpecies, preMegaSpecies);
+      const mon        = activeSlots[slotKey];
+      const isMega     = !!newSpecies && isMegaSpecies(newSpecies);
+
+      if (mon && newSpecies) {
+        const preMegaSpecies = mon.species;
+        mon.species = newSpecies;
+        if (isMega) {
+          mon.is_mega = true;
+          applyMegaAbility(mon, newSpecies);
+          setMegaStoneItem(slotKey, newSpecies, preMegaSpecies);
+        }
       }
-      turnActions.push({
-        event: 'mega_evolution', slot: slotKey, new_species: newSpecies,
-        mega_stone: activeSlots[slotKey]?.known_item || null,
-      });
+      if (isMega) {
+        turnActions.push({
+          event: 'mega_evolution', slot: slotKey, new_species: newSpecies,
+          mega_stone: mon?.known_item || null,
+          pre_mega_ability: mon?.pre_mega_ability || null,
+          mega_ability: mon?.mega_ability || null,
+        });
+      } else {
+        turnActions.push({ event: 'forme_change', slot: slotKey, new_species: newSpecies });
+      }
 
     } else if (cmd === '-mega') {
       // |-mega|p1a: Floette|Floette|Floettite — confirms mega happened
       const slotKey = slotKeyFromIdent(parts[2]);
       const preMega = parts[3] || null;
-      if (activeSlots[slotKey]) {
-        const megaSpecies = activeSlots[slotKey].species; // already mutated by detailschange
+      const mon     = activeSlots[slotKey];
+      if (mon) {
+        const megaSpecies = mon.species; // already mutated by detailschange
         setMegaStoneItem(slotKey, megaSpecies, preMega || megaSpecies);
+        // Safety net for replays missing |detailschange| (Bug 8, idempotent)
+        if (!mon.is_mega) {
+          mon.is_mega = true;
+          applyMegaAbility(mon, megaSpecies);
+        }
         for (let i = turnActions.length - 1; i >= 0; i--) {
           if (turnActions[i].event === 'mega_evolution' && turnActions[i].slot === slotKey) {
             turnActions[i].mega_stone = 'mega stone';
@@ -290,13 +345,25 @@ function parseShowdownLog(rawLog, ourPlayer = 'p1') {
       // |-ability|p1a: Aerodactyl|Unnerve
       const slotKey = slotKeyFromIdent(parts[2]);
       const ability = parts[3] || null;
-      if (activeSlots[slotKey] && ability) {
-        activeSlots[slotKey].known_ability = ability;
+      const mon     = activeSlots[slotKey];
+      if (mon && ability) {
+        // Bug 8: route the reveal into the correct ability context — a
+        // mega'd mon's ability line IS its (fixed) mega ability; a base
+        // forme's line is its chosen base ability.
+        if (mon.is_mega) mon.mega_ability     = ability;
+        else             mon.pre_mega_ability = ability;
+        mon.known_ability = ability;
+        // active_slots and seenMons share the same object, but keep the
+        // explicit base-species-keyed write for refactor safety (Bug 7).
         const pid     = slotKey.slice(0, 2);
-        const seenKey = `${pid}:${activeSlots[slotKey].species}`;
+        const seenKey = `${pid}:${mon.base_species || mon.species}`;
         if (seenMons[seenKey]) seenMons[seenKey].known_ability = ability;
       }
-      turnActions.push({ event: 'ability_revealed', slot: slotKey, species: speciesFromIdent(parts[2]), ability });
+      turnActions.push({
+        event: 'ability_revealed', slot: slotKey,
+        species: speciesFromIdent(parts[2]), ability,
+        is_mega_ability: !!mon?.is_mega,
+      });
 
     } else if (cmd === '-sidestart') {
       const pid = (parts[2] || '').split(':')[0].trim(), eff = parts[3] || '';
@@ -342,12 +409,20 @@ function parseShowdownLog(rawLog, ourPlayer = 'p1') {
   // Build the same revealed_info structure that vod_parser.py emits
   const revealed_info = {};
   for (const [seenKey, mon] of Object.entries(seenMons)) {
+    const base = mon.base_species || mon.species;
     revealed_info[seenKey] = {
       revealed_moves:    [...(mon.revealed_moves || [])],
       known_item:        mon.is_mega ? 'mega stone' : (mon.known_item || null),
       known_tera_type:   mon.known_tera_type || null,
       is_terastallized:  mon.is_terastallized || false,
+      // Bug 8: split ability contexts (see tb_parser applyMegaAbility)
       known_ability:     mon.known_ability || null,
+      pre_mega_ability:  mon.pre_mega_ability || null,
+      mega_ability:      mon.mega_ability || null,
+      is_mega:           mon.is_mega || false,
+      mega_species:      mon.is_mega ? mon.species : null,
+      possible_abilities: dexAbilities(base),
+      mega_formes:        dexMegaFormes(base),
     };
   }
 

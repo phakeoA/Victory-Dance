@@ -171,7 +171,8 @@ function renderSideSlots(turn, pid, b) {
     .map(([k, m]) => ({ ...m, slotKey: k }));
 
   function monData(species) {
-    const active  = activeForPlayer.find(m => m.species === species || m.species.startsWith(species.split('-')[0]));
+    const active  = activeForPlayer.find(m =>
+      m.base_species === species || m.species === species || m.species.startsWith(species.split('-')[0]));
     const inj     = b.known_team_overrides?.[`${pid}:${species}`];
     const hp      = active ? active.hp_current : null;
     const fainted = active ? active.is_fainted : false;
@@ -188,7 +189,8 @@ function renderSideSlots(turn, pid, b) {
 
   const fieldHtml = fieldSlots.length
     ? fieldSlots.map(m => {
-        const inj = b.known_team_overrides?.[`${pid}:${m.species.replace(/-Mega$/, '')}`]
+        const baseSp = m.base_species || m.species.replace(/-Mega(-[XY])?$/, '');
+        const inj = b.known_team_overrides?.[`${pid}:${baseSp}`]
                  || b.known_team_overrides?.[`${pid}:${m.species}`];
         const boosts    = m.boosts || {};
         const boostHtml = Object.entries(boosts)
@@ -200,6 +202,9 @@ function renderSideSlots(turn, pid, b) {
         const megaTag  = m.is_mega          ? `<span class="active-badge mega-badge">MEGA</span>` : '';
         const slotTag  = `<span class="active-slot-letter">${slotLetter}</span>`;
         const itemLine = m.known_item ? `<div class="active-item">🎒 ${m.known_item}</div>` : '';
+        const abilityLine = m.known_ability
+          ? `<div class="active-item">⚡ ${m.known_ability}${m.is_mega ? ' <span style="font-size:8px;color:var(--text3)">(mega — fixed)</span>' : ''}</div>`
+          : '';
         const hp       = m.hp_current ?? 100;
         return `<div class="active-slot-card">
             <div class="active-slot-top">${slotTag}${teraTag}${megaTag}</div>
@@ -207,6 +212,7 @@ function renderSideSlots(turn, pid, b) {
             <div class="active-hp-bar"><div class="slot-hp-fill ${hpColor(hp)}" style="width:${hp}%"></div></div>
             <div class="active-hp-num">${hp.toFixed(0)}% HP</div>
             ${itemLine}
+            ${abilityLine}
             ${boostHtml ? `<div class="slot-boosts">${boostHtml}</div>` : ''}
           </div>`;
       }).join('')
@@ -265,6 +271,14 @@ function renderActionLog(turn) {
     } else if (a.event === 'mega_evolution') {
       badge = `<span class="al-evt al-mega">Mega</span>`;
       text  = `${a.slot} → <b>${a.new_species}</b>`;
+      if (a.mega_ability)     text += ` · ability locked to <b>${a.mega_ability}</b>`;
+      if (a.pre_mega_ability) text += ` <span class="al-delta">(was ${a.pre_mega_ability})</span>`;
+    } else if (a.event === 'forme_change') {
+      badge = `<span class="al-evt al-mega" style="opacity:.7">Forme</span>`;
+      text  = `${a.slot} → <b>${a.new_species}</b>`;
+    } else if (a.event === 'ability_revealed') {
+      badge = `<span class="al-evt" style="background:rgba(125,165,245,.15);color:var(--blue);border:1px solid var(--blue)">Ability</span>`;
+      text  = `<b>${a.slot}</b> ${a.species || ''} revealed <b>${a.ability}</b>${a.is_mega_ability ? ' <span class="al-delta">(mega — fixed)</span>' : ''}`;
     } else if (a.event === 'stat_change') {
       badge = `<span class="al-evt al-stat">Stat</span>`;
       text  = `<b>${a.slot}</b> ${STAT_LABELS[a.stat] || a.stat} ${a.stages > 0 ? '+' : ''}${a.stages}`;
@@ -303,12 +317,16 @@ function renderInjectPanel(el) {
     );
 
     // Confirmed-from-replay chips
-    const revItem    = rev.known_item     || null;
-    const revTera    = rev.known_tera_type || null;
-    const revAbility = rev.known_ability  || null;
-    const itemChip    = revItem    ? `<span class="rev-chip">🎒 ${revItem}</span>`                                        : '';
-    const teraChip    = revTera    ? `<span class="rev-chip rev-tera">◈ Tera ${revTera}${rev.is_terastallized ? ' ✓' : ''}</span>` : '';
-    const abilityChip = revAbility ? `<span class="rev-chip rev-ability">⚡ ${revAbility}</span>`                        : '';
+    // Bug 8: a mega mon has two ability contexts — show them separately.
+    const revItem        = rev.known_item       || null;
+    const revTera        = rev.known_tera_type  || null;
+    const megaInVod      = !!rev.is_mega;
+    const revBaseAbility = rev.pre_mega_ability || (!megaInVod ? rev.known_ability : null) || null;
+    const revMegaAbility = rev.mega_ability     || null;
+    const itemChip    = revItem        ? `<span class="rev-chip">🎒 ${escHtml(revItem)}</span>`                                        : '';
+    const teraChip    = revTera        ? `<span class="rev-chip rev-tera">◈ Tera ${escHtml(revTera)}${rev.is_terastallized ? ' ✓' : ''}</span>` : '';
+    const abilityChip = revBaseAbility ? `<span class="rev-chip rev-ability">⚡ ${escHtml(revBaseAbility)}</span>`                     : '';
+    const megaChip    = revMegaAbility ? `<span class="rev-chip rev-mega-ability">Ⓜ ${escHtml(revMegaAbility)}</span>`                : '';
 
     const revMoves = rev.revealed_moves || [];
 
@@ -336,8 +354,54 @@ function renderInjectPanel(el) {
 
     const itemVal      = inj.item    ?? revItem    ?? '';
     const itemPrefill  = !inj.item    && !!revItem;
-    const abilityVal   = inj.ability  ?? revAbility ?? '';
-    const abilityPrefill = !inj.ability && !!revAbility;
+
+    // ── Ability (BASE forme) ─────────────────────────────────────────────
+    // The base ability is the only one the player chooses; the mega ability
+    // is fixed by the mega forme (rendered read-only below).  Dropdown
+    // options come from the pokedex — via the parse-time revealed_info if
+    // present, else live from the loaded POKEDEX; free-text fallback offline.
+    const abilityOptions = (rev.possible_abilities?.length ? rev.possible_abilities : dexAbilities(species)) || [];
+    const abilityVal     = inj.ability ?? revBaseAbility ?? '';
+    const abilityPrefill = !inj.ability && !!revBaseAbility;
+
+    let abilityField;
+    if (abilityOptions.length) {
+      const opts = [...abilityOptions];
+      if (abilityVal && !opts.includes(abilityVal)) opts.push(abilityVal);  // keep legacy/custom values selectable
+      abilityField = `<select class="${abilityPrefill ? 'rev-prefilled' : ''}"
+          onchange="setInject('${key}','ability',this.value)">
+          <option value="">— unknown —</option>
+          ${opts.map(a => `<option value="${escHtml(a)}"${abilityVal === a ? ' selected' : ''}>${escHtml(a)}</option>`).join('')}
+        </select>`;
+    } else {
+      // Pokedex unavailable (offline) or species unknown to the dex
+      abilityField = `<input type="text" placeholder="e.g. Fairy Aura"
+          value="${escHtml(abilityVal)}"
+          class="${abilityPrefill ? 'rev-prefilled' : ''}"
+          oninput="setInject('${key}','ability',this.value)" />`;
+    }
+
+    // ── Mega ability (read-only — exactly one per mega forme) ────────────
+    const megaFormes = (rev.mega_formes?.length ? rev.mega_formes : dexMegaFormes(species)) || [];
+    let megaRow = '';
+    if (megaInVod || megaFormes.length) {
+      let megaText;
+      if (megaInVod && revMegaAbility) {
+        megaText = `<b>${escHtml(revMegaAbility)}</b>${rev.mega_species ? ` <span class="mega-forme-name">(${escHtml(rev.mega_species)})</span>` : ''}`;
+      } else if (megaFormes.length) {
+        megaText = megaFormes
+          .map(f => `<b>${escHtml(f.ability || '?')}</b> <span class="mega-forme-name">(${escHtml(f.forme)})</span>`)
+          .join(' · ');
+      } else {
+        megaText = '<span class="mega-forme-name">unknown — not in pokedex</span>';
+      }
+      megaRow = `<div class="inj-row mega-ability-row">
+        <label>Mega ability${megaInVod ? ' <span class="rev-label-badge">MEGA’D IN VOD</span>' : ''}</label>
+        <div class="mega-ability-fixed" title="Mega formes have exactly one ability — determined by the forme, not selectable">
+          ${megaText} <span class="mega-lock">🔒 fixed</span>
+        </div>
+      </div>`;
+    }
 
     return `<div class="inj-card">
       <div class="inj-card-hdr">
@@ -347,7 +411,7 @@ function renderInjectPanel(el) {
         <span class="${hasManual ? 'inj-known' : 'inj-unknown'}">${hasManual ? '✓ Stats injected' : 'No stats yet'}</span>
       </div>
 
-      ${(itemChip || teraChip || abilityChip) ? `<div class="rev-chips">${itemChip}${abilityChip}${teraChip}</div>` : ''}
+      ${(itemChip || teraChip || abilityChip || megaChip) ? `<div class="rev-chips">${itemChip}${abilityChip}${megaChip}${teraChip}</div>` : ''}
 
       <div class="inj-body">
         <div class="inj-row">
@@ -365,12 +429,10 @@ function renderInjectPanel(el) {
             oninput="setInject('${key}','item',this.value)" />
         </div>
         <div class="inj-row">
-          <label>Ability${abilityPrefill ? ' <span class="rev-label-badge">VOD</span>' : ''}</label>
-          <input type="text" placeholder="e.g. Fairy Aura"
-            value="${escHtml(abilityVal)}"
-            class="${abilityPrefill ? 'rev-prefilled' : ''}"
-            oninput="setInject('${key}','ability',this.value)" />
+          <label>Ability${megaRow ? ' <span class="ability-ctx-badge">base forme</span>' : ''}${abilityPrefill ? ' <span class="rev-label-badge">VOD</span>' : ''}</label>
+          ${abilityField}
         </div>
+        ${megaRow}
         <div class="inj-section-label">EVs</div>
         <div class="ev-row">${evHtml}</div>
         <div class="inj-section-label">

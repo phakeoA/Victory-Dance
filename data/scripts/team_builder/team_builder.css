@@ -473,6 +473,27 @@ body {
 .rev-chip.rev-ability {
   background: rgba(181,123,238,.12); color: #b57bee; border-color: rgba(181,123,238,.4);
 }
+/* Bug 8: mega-ability chip — the mega forme's single fixed ability */
+.rev-chip.rev-mega-ability {
+  background: rgba(245,200,66,.12); color: var(--yellow); border-color: rgba(245,200,66,.4);
+}
+/* Bug 8: read-only mega ability row in the inject card */
+.mega-ability-row { align-items: flex-start; }
+.mega-ability-row label { width: 60px; }
+.mega-ability-fixed {
+  flex: 1; min-width: 0; font-size: 10px; color: var(--text2);
+  background: rgba(245,200,66,.06); border: 1px dashed rgba(245,200,66,.35);
+  border-radius: var(--rad); padding: 3px 6px; line-height: 1.5;
+}
+.mega-ability-fixed b { color: var(--yellow); }
+.mega-forme-name { color: var(--text3); font-size: 9px; }
+.mega-lock { font-size: 8px; color: var(--text3); margin-left: 3px; white-space: nowrap; }
+/* Tiny "base forme" context badge next to the Ability label */
+.ability-ctx-badge {
+  font-size: 7px; font-weight: 700; padding: 1px 3px; border-radius: 2px; letter-spacing: .3px;
+  background: rgba(74,144,217,.15); color: var(--blue); border: 1px solid rgba(74,144,217,.4);
+  vertical-align: middle; text-transform: none;
+}
 /* Small inline "VOD" badge next to a field label */
 .rev-label-badge {
   font-size: 8px; font-weight: 700; padding: 1px 4px; border-radius: 2px; letter-spacing: .3px;

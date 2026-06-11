@@ -150,10 +150,12 @@ def serve_data(filename):
 @app.get("/health")
 def health():
     """Simple liveness check used by the UI status dot."""
+    from vod_parser import get_pokedex
     return jsonify({
         "ok": True,
         "belief_loaded": _belief is not None,
         "encoder_loaded": _encoder is not None,
+        "pokedex_loaded": get_pokedex() is not None,
     })
 
 
