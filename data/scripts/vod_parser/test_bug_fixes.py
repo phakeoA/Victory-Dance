@@ -1037,9 +1037,13 @@ class TestBeliefFillIntegration:
         )
 
     def test_forme_suffixed_species_get_filled(self):
-        vod = _VODS_DIR / "Gen9ChampionsVGC2026RegMA-2026-06-02-fuzis-megagenger2023.html"
-        if not vod.exists():
-            pytest.skip(f"{vod.name} not found")
+        # data/vods/ is organised into per-type subfolders that get
+        # reshuffled — search recursively instead of hard-coding one.
+        name = "Gen9ChampionsVGC2026RegMA-2026-06-02-fuzis-megagenger2023.html"
+        vod = (_VODS_DIR / name) if (_VODS_DIR / name).exists() \
+            else next(_VODS_DIR.rglob(name), None)
+        if vod is None:
+            pytest.skip(f"{name} not found")
         _, res = self._fill(vod)
         no_data = [s for s in res["skipped"] if "no Pikalytics data" in s]
         assert not no_data, f"unexpected no-data skips: {no_data}"

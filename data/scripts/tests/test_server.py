@@ -109,8 +109,9 @@ def test_export_jsonl(client, vod_html):
     assert len(lines) == count
     transitions = [json.loads(l) for l in lines]
 
-    # yourSide=p1 → only p1-perspective transitions
-    assert {t["perspective"] for t in transitions} == {"p1"}
+    # No source_type → Type B → BOTH perspectives exported (each ranked
+    # player is a behavioural-cloning target; doubles per-replay yield)
+    assert {t["perspective"] for t in transitions} == {"p1", "p2"}
 
     # Bug 8 end-to-end: mega'd Floette in the export carries the fixed mega
     # ability as active and the injected base ability as pre_mega_ability.
@@ -137,6 +138,9 @@ def test_export_source_type_passthrough(client, vod_html):
     transitions = [json.loads(l) for l in
                    r.data.decode("utf-8").strip().split("\n")]
     assert {t["source_type"] for t in transitions} == {"own_vod"}
+    # Non-B types keep the yourSide restriction (the opponent's perspective
+    # would invert the exact/distribution stats-quality semantics)
+    assert {t["perspective"] for t in transitions} == {"p1"}
 
 
 def test_export_defaults_to_type_b(client, vod_html):
@@ -149,6 +153,32 @@ def test_export_defaults_to_type_b(client, vod_html):
     transitions = [json.loads(l) for l in
                    r.data.decode("utf-8").strip().split("\n")]
     assert {t["source_type"] for t in transitions} == {"ranked_player_vod"}
+
+
+def test_export_type_b_doubles_perspectives(client, vod_html):
+    """One Type B replay = two ranked players' decisions: explicit
+    source_type B must export p1 AND p2 perspectives, twice the turns."""
+    r = client.post("/export", json={
+        "battle_id": "test-battle",
+        "known_teams_entry": _entry(),        # yourSide=p1 must NOT restrict
+        "replay_html": vod_html,
+        "source_type": "ranked_player_vod",
+    })
+    assert r.status_code == 200
+    transitions = [json.loads(l) for l in
+                   r.data.decode("utf-8").strip().split("\n")]
+    assert {t["perspective"] for t in transitions} == {"p1", "p2"}
+    by_persp = {}
+    for t in transitions:
+        by_persp[t["perspective"]] = by_persp.get(t["perspective"], 0) + 1
+    assert by_persp["p1"] == by_persp["p2"]
+    # Each perspective's transitions are self-consistent: its own actions
+    # under its own mask
+    for t in transitions:
+        assert t["players"]["our_side"] == t["perspective"]
+        for a in t["our_actions"]:
+            if a["action_index"] is not None:
+                assert t["action_mask"][a["slot"]][a["action_index"]] == 1
 
 
 def test_export_requires_html(client):

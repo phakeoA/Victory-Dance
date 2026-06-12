@@ -43,6 +43,8 @@ POST /export
         "source_type": "own_vod",       ← UI Type A/B/C/D selector (optional,
                                           defaults to Type B ranked_player_vod)
       }
+    Type B exports BOTH perspectives (two ranked players = two BC targets
+    per replay); other types export only _meta.yourSide.
     Runs replay_to_transitions() and returns:
       { "transitions": [ ... ] }        ← list of JSONL-ready dicts
       Content-Disposition: attachment   ← browser triggers download
@@ -258,10 +260,20 @@ def export():
         tmp_path = Path(tmp.name)
 
     try:
-        # Determine which player perspective(s) to encode
+        # Determine which player perspective(s) to encode.  Type B (ranked
+        # player VOD) always exports BOTH perspectives: each side is a ranked
+        # player whose decisions are valid behavioural-cloning targets, so a
+        # single replay yields double the transitions.  Other types keep the
+        # yourSide restriction — e.g. a Type A opponent's perspective would
+        # carry inverted stats quality (their side distribution, ours exact).
+        from belief_state import VodType
+
         meta       = known_entry.get("_meta", {})
         your_side  = meta.get("yourSide")
-        players    = [your_side] if your_side else ["p1", "p2"]
+        if VodType.coerce(source_type or "B") is VodType.B:
+            players = ["p1", "p2"]
+        else:
+            players = [your_side] if your_side else ["p1", "p2"]
 
         transitions = replay_to_transitions(
             tmp_path, _get_belief(), _encoder, players, known_teams,

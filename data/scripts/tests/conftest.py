@@ -17,10 +17,16 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 _PROJECT_DATA = _SCRIPTS_DIR.parent          # data/
-VOD_PATH = (
-    _PROJECT_DATA / "vods" /
-    "Gen9ChampionsVGC2026RegMA-2026-04-20-stevenhevgc-speedyturtle87.html"
-)
+# The example VOD lives under data/vods/, which is organised into per-type
+# subfolders (Type_A … Type_D) that may be reshuffled — search for it.
+_VOD_NAME = "Gen9ChampionsVGC2026RegMA-2026-04-20-stevenhevgc-speedyturtle87.html"
+VOD_PATH = next(
+    (p for p in [_PROJECT_DATA / "vods" / "Type_B" / _VOD_NAME,
+                 _PROJECT_DATA / "vods" / _VOD_NAME]
+     if p.exists()),
+    None,
+) or next((_PROJECT_DATA / "vods").rglob(_VOD_NAME),
+          _PROJECT_DATA / "vods" / _VOD_NAME)
 POKEDEX_PATH = _PROJECT_DATA / "pokedex.json"
 
 
