@@ -47,8 +47,11 @@ USAGE
 
 HOW IT WORKS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-1.  Crawl4AI fetches the index page and extracts all Pokémon slugs via
-    JsonCssExtractionStrategy (zero LLM calls).
+1.  The full roster is enumerated from Smogon's published usage stats
+    (the upstream source of Pikalytics' data). The Pikalytics index page
+    only server-renders the top ~50 mons, so scraping links from it
+    misses everything below that cutoff (e.g. regular Scizor). Index
+    links are still extracted and merged in as a fallback.
 2.  Individual mon pages are fetched one-at-a-time through a Semaphore
     so we never hammer the server with more than --concurrency tabs at once.
 3.  Random jitter (1–4 s) is injected between every request and a longer
@@ -66,6 +69,9 @@ import asyncio
 import json
 import random
 import re
+import sys
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -77,6 +83,12 @@ from crawl4ai import JsonCssExtractionStrategy
 FORMAT_SLUG  = "gen9championsvgc2026regma"
 BASE_URL     = "https://www.pikalytics.com"
 INDEX_URL    = f"{BASE_URL}/pokedex/{FORMAT_SLUG}"
+
+# Smogon publishes the usage stats Pikalytics is built on. The "-0" file
+# (unweighted baseline) lists every Pokémon that appeared in the format,
+# which lets us enumerate the full roster instead of just the top ~50
+# that the Pikalytics index page renders.
+SMOGON_STATS_BASE = "https://www.smogon.com/stats"
 
 # Output goes to  <project_root>/data/pikalytics_regma.json
 # __file__ is     <project_root>/data/scripts/scrape_pikalytics.py
@@ -243,16 +255,6 @@ def _parse_moves(markdown: str) -> list[dict]:
     return results
 
 
-
-    spreads: list[dict] = []
-    for m in _SPREAD_PATTERN.finditer(markdown):
-        spreads.append({
-            "nature": m.group(1).capitalize(),
-            "evs":    [int(m.group(i)) for i in range(2, 8)],  # HP Atk Def SpA SpD Spe
-            "pct":    float(m.group(8)),
-        })
-    return spreads
-
 def _parse_spreads(markdown: str) -> list[dict]:
     spreads: list[dict] = []
     for m in _SPREAD_PATTERN.finditer(markdown):
@@ -272,7 +274,11 @@ def _parse_usage(markdown: str) -> Optional[float]:
 def _parse_teammates(markdown: str) -> list[dict]:
     """
     Teammate links look like:
-      [Sneasler Sneasler fightingpoison 52.142%](url)
+      [ ![Charizard-Mega-Y](https://cdn...png) Mega Charizard Y fireflying 43.893% ](url)
+
+    The image alt text carries the canonical form name (matches the
+    Smogon/JSON-key naming, e.g. "Charizard-Mega-Y"), so we use that
+    rather than the display name.
 
     Heading is "## Best Teammates for <Name>" — use the same slice approach
     as _parse_section.
@@ -290,8 +296,10 @@ def _parse_teammates(markdown: str) -> list[dict]:
     end = start + next_heading.start() if next_heading else len(markdown)
     section_text = markdown[start:end]
 
-    for match in re.finditer(r"\[(\S+)\s+\S+\s+\S+\s+(\d+\.\d+)%\]", section_text):
-        name = match.group(1)
+    for match in re.finditer(
+        r"!\[([^\]]+)\]\([^)]+\)[^\[\]]*?(\d+\.\d+)%", section_text
+    ):
+        name = match.group(1).strip()
         pct  = float(match.group(2))
         if name not in seen:
             seen.add(name)
@@ -343,10 +351,59 @@ def _make_run_config(*, use_extraction: bool = False) -> CrawlerRunConfig:
     return CrawlerRunConfig(**kwargs)
 
 
-# ── Index page ─────────────────────────────────────────────────────────────────
+# ── Roster enumeration ─────────────────────────────────────────────────────────
 
-async def get_pokemon_list(crawler: AsyncWebCrawler) -> list[str]:
-    """Fetch the index and return all Pokémon name slugs in order."""
+def fetch_smogon_roster() -> list[tuple[str, float]]:
+    """
+    Return [(name, usage_pct), ...] for every Pokémon in the format, taken
+    from the most recent Smogon usage-stats month available (walking back
+    up to 6 months). Names use the same convention as Pikalytics URLs and
+    our JSON keys ("Scizor-Mega", "Charizard-Mega-Y", ...).
+
+    Returns [] if Smogon is unreachable — caller falls back to index links.
+    """
+    now = datetime.now(timezone.utc)
+    year, month = now.year, now.month
+    for _ in range(6):
+        url = f"{SMOGON_STATS_BASE}/{year:04d}-{month:02d}/{FORMAT_SLUG}-0.txt"
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                text = resp.read().decode("utf-8", errors="replace")
+        except Exception:
+            text = ""
+
+        roster: list[tuple[str, float]] = []
+        for line in text.splitlines():
+            # | 78   | Scizor             |  1.69063% | 113462 |  1.691% | ...
+            parts = [p.strip() for p in line.split("|")]
+            if len(parts) >= 4 and parts[1].isdigit():
+                try:
+                    usage = float(parts[3].rstrip("%"))
+                except ValueError:
+                    usage = 0.0
+                roster.append((parts[2], usage))
+        if roster:
+            print(f"[roster] {len(roster)} Pokémon from Smogon stats {year:04d}-{month:02d}.")
+            return roster
+
+        # Walk back one month
+        month -= 1
+        if month == 0:
+            month, year = 12, year - 1
+
+    print("[roster] Smogon stats unavailable; falling back to index links only.")
+    return []
+
+
+async def get_pokemon_list(crawler: AsyncWebCrawler, min_usage: float = 0.0) -> list[str]:
+    """
+    Return the full list of Pokémon names to scrape.
+
+    Primary source: Smogon usage stats (complete roster).
+    Merged with: links extracted from the Pikalytics index page, which only
+    server-renders the top ~50 mons but costs us nothing to include.
+    """
     print(f"[index] Fetching {INDEX_URL}")
     result = await crawler.arun(INDEX_URL, config=_make_run_config(use_extraction=True))
 
@@ -361,12 +418,26 @@ async def get_pokemon_list(crawler: AsyncWebCrawler) -> list[str]:
         href = item.get("href", "")
         m = slug_re.search(href)
         if m:
-            slug = m.group(1)
+            slug = urllib.parse.unquote(m.group(1))
             if slug not in seen:
                 seen.add(slug)
                 names.append(slug)
 
-    print(f"[index] Found {len(names)} Pokémon.")
+    print(f"[index] Found {len(names)} Pokémon on the index page.")
+
+    roster = fetch_smogon_roster()
+    if min_usage > 0:
+        skipped = [n for n, u in roster if u < min_usage]
+        roster  = [(n, u) for n, u in roster if u >= min_usage]
+        if skipped:
+            print(f"[roster] Skipping {len(skipped)} mons below {min_usage}% usage.")
+
+    for name, _usage in roster:
+        if name not in seen:
+            seen.add(name)
+            names.append(name)
+
+    print(f"[index] {len(names)} Pokémon total after merging Smogon roster.")
     return names
 
 
@@ -381,7 +452,8 @@ async def _fetch_one(
     Fetch a single mon page, honouring the semaphore and adding jitter.
     Returns (name, parsed_data).
     """
-    url = f"{INDEX_URL}/{name}"
+    # Names like "Mr. Rime" need the space percent-encoded in the URL
+    url = f"{INDEX_URL}/{urllib.parse.quote(name)}"
 
     async with sem:
         # Random jitter before the request — looks human, avoids burst detection
@@ -420,7 +492,7 @@ async def scrape_all(
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
-async def main(limit: int, concurrency: int, resume: bool) -> None:
+async def main(limit: int, concurrency: int, resume: bool, min_usage: float) -> None:
     # ── Load existing data if resuming ────────────────────────────────────────
     existing: dict = {}
     already: set[str] = set()
@@ -433,8 +505,8 @@ async def main(limit: int, concurrency: int, resume: bool) -> None:
     browser_conf = _make_browser_config()
 
     async with AsyncWebCrawler(config=browser_conf) as crawler:
-        # ── Step 1: index ─────────────────────────────────────────────────────
-        names = await get_pokemon_list(crawler)
+        # ── Step 1: roster ────────────────────────────────────────────────────
+        names = await get_pokemon_list(crawler, min_usage)
 
         if limit:
             names = names[:limit]
@@ -497,7 +569,7 @@ async def _debug_markdown(mon_slug: str) -> None:
     Usage:  python scrape_pikalytics.py --debug-markdown kingambit
     Output: debug_<mon_slug>.md  (written next to the script)
     """
-    url = f"{INDEX_URL}/{mon_slug}"
+    url = f"{INDEX_URL}/{urllib.parse.quote(mon_slug)}"
     print(f"[debug] Fetching {url}")
     async with AsyncWebCrawler(config=_make_browser_config()) as crawler:
         result = await crawler.arun(url, config=_make_run_config())
@@ -528,6 +600,13 @@ async def _debug_markdown(mon_slug: str) -> None:
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
 def cli() -> None:
+    # Windows consoles often default to cp1252, which can't print ✓/→/–
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):
+        pass
+
     parser = argparse.ArgumentParser(
         description="Scrape Pikalytics Reg M-A data using Crawl4AI (v0.8.x).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -548,6 +627,11 @@ def cli() -> None:
         help="Skip Pokémon already present in the output file",
     )
     parser.add_argument(
+        "--min-usage",
+        type=float, default=0.0,
+        help="Skip Pokémon below this Smogon usage %% (0 = scrape everything)",
+    )
+    parser.add_argument(
         "--debug-markdown",
         metavar="MON",
         default=None,
@@ -562,7 +646,7 @@ def cli() -> None:
     if args.debug_markdown:
         asyncio.run(_debug_markdown(args.debug_markdown))
     else:
-        asyncio.run(main(args.limit, args.concurrency, args.resume))
+        asyncio.run(main(args.limit, args.concurrency, args.resume, args.min_usage))
 
 
 if __name__ == "__main__":
