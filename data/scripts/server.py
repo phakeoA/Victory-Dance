@@ -110,7 +110,31 @@ except ImportError:
 _BELIEF_PATH = _PROJECT_ROOT / "data" / "pikalytics_regma.json"
 
 _belief = None
+_belief_mtime = None
 _encoder = None
+
+
+def _get_belief():
+    """Return the BeliefState, (re)loading it when the JSON changes on disk.
+
+    A long-running server otherwise keeps serving beliefs scraped before
+    pikalytics_regma.json was regenerated (made worse by Flask's debug
+    reloader leaving orphan children alive across restarts) — mons missing
+    from the stale data silently get no auto-fill suggestions.
+    """
+    global _belief, _belief_mtime
+    if _BeliefState is None or not _BELIEF_PATH.exists():
+        return _belief
+    try:
+        mtime = _BELIEF_PATH.stat().st_mtime
+        if _belief is None or mtime != _belief_mtime:
+            print(f"[belief] loading {_BELIEF_PATH} ...")
+            _belief = _BeliefState(_BELIEF_PATH)
+            _belief_mtime = mtime
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"[warn] belief reload failed ({exc}) — keeping previous data.")
+    return _belief
+
 
 if _BeliefState is None:
     print("[warn] belief_state.py not found — Pikalytics inference unavailable.")
@@ -121,7 +145,7 @@ elif not _BELIEF_PATH.exists():
     )
 else:
     print(f"[startup] Loading belief state from {_BELIEF_PATH} ...")
-    _belief = _BeliefState(_BELIEF_PATH)
+    _get_belief()
     print("[startup] Belief state ready.")
 
 if _StateEncoder is not None:
@@ -164,7 +188,7 @@ def health():
     from vod_parser import get_pokedex
     return jsonify({
         "ok": True,
-        "belief_loaded": _belief is not None,
+        "belief_loaded": _get_belief() is not None,
         "encoder_loaded": _encoder is not None,
         "pokedex_loaded": get_pokedex() is not None,
     })
@@ -195,7 +219,7 @@ def parse():
 
     # ── Run parser ────────────────────────────────────────────────────────────
     try:
-        preview = parse_replay_for_preview(html_content, _belief, known_entry)
+        preview = parse_replay_for_preview(html_content, _get_belief(), known_entry)
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
 
@@ -237,7 +261,7 @@ def export():
         players    = [your_side] if your_side else ["p1", "p2"]
 
         transitions = replay_to_transitions(
-            tmp_path, _belief, _encoder, players, known_teams
+            tmp_path, _get_belief(), _encoder, players, known_teams
         )
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
@@ -267,7 +291,8 @@ def fill_beliefs():
     body = request.get_json(silent=True)
     if not body:
         return jsonify({"error": "Expected JSON body."}), 400
-    if _belief is None:
+    belief = _get_belief()
+    if belief is None:
         return jsonify({
             "error": "Belief data unavailable — belief_state.py or "
                      "data/pikalytics_regma.json missing on the server."
@@ -276,7 +301,7 @@ def fill_beliefs():
     try:
         from belief_state import ui_fill_suggestions
         result = ui_fill_suggestions(
-            _belief,
+            belief,
             vod_type=body.get("vod_type") or body.get("source_type") or "B",
             players=body.get("players") or {},
             revealed_info=body.get("revealed_info") or {},

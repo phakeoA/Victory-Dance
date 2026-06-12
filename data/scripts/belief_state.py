@@ -166,6 +166,18 @@ def ev_bucket_to_evs(buckets: list[int]) -> list[int]:
     return [min(b * 8, 252) for b in buckets]
 
 
+def is_choice_item(item: Optional[str]) -> bool:
+    """True for the Choice item family (Scarf / Band / Specs).
+
+    These items lock the holder into the first move it selects until it
+    leaves the field — so a mon observed using two different moves in one
+    stay on the field cannot be holding one (replay_parser tracks this as
+    ``can_have_choice_item``).  Prefix match on purpose: items added to the
+    format later (e.g. Choice Specs) are covered without a code change.
+    """
+    return bool(item) and item.strip().lower().startswith("choice")
+
+
 def calc_stat(
     base: int,
     ev: int,
@@ -274,6 +286,17 @@ class BeliefState:
         for k_lower, k_orig in self._name_map.items():
             if k_lower.replace("-", "").replace(" ", "") == stripped:
                 return k_orig
+        # Forme-suffix fallback: cosmetic / niche formes often have no
+        # Pikalytics entry of their own ("Vivillon-Garden",
+        # "Sinistcha-Masterpiece", "Scizor-Mega") — strip trailing -Segments
+        # one at a time and use the base forme's usage data as the prior
+        # instead of skipping the mon entirely.  Stat-distinct formes with
+        # real entries ("Rotom-Wash", "Typhlosion-Hisui") resolve exactly
+        # above and never reach this loop.
+        while "-" in key:
+            key = key.rsplit("-", 1)[0]
+            if key in self._name_map:
+                return self._name_map[key]
         return None
 
     def _entry(self, species: str) -> Optional[dict]:
@@ -445,6 +468,7 @@ class BeliefState:
         revealed_item: Optional[str] = None,
         revealed_ability: Optional[str] = None,
         stats_species: Optional[str] = None,
+        can_have_choice_item: Optional[bool] = None,
         level: int = DEFAULT_LEVEL,
     ) -> Optional[dict]:
         """
@@ -453,6 +477,11 @@ class BeliefState:
         Revealed information conditions the distributions: a revealed item or
         ability collapses that distribution to p=1.0; revealed moves are listed
         as known and excluded from the predicted-move marginals.
+
+        can_have_choice_item: replay-derived constraint — False means the mon
+        used two different moves during one stay on the field, which rules out
+        the whole Choice item family; those items are dropped from the item
+        distribution.  None/True leaves the distribution untouched.
 
         stats_species: forme to pull base stats from when it differs from the
         Pikalytics key (e.g. expected stats for "Charizard-Mega-Y" while the
@@ -466,10 +495,18 @@ class BeliefState:
         revealed_moves = revealed_moves or []
         revealed_norm = {norm_species(m) for m in revealed_moves}
 
-        if revealed_item and revealed_item != "mega stone":
+        if revealed_item:
+            # Replay reveal is ground truth — it wins even over the choice
+            # constraint (e.g. a Choice Scarf revealed via Trick).  That
+            # includes the "mega stone" placeholder: a mon that mega evolved
+            # on screen is guaranteed to be holding its stone, and the
+            # usage-based item distribution (which doesn't even list stones
+            # in this format) is wrong by construction.
             items = [{"name": revealed_item, "p": 1.0, "revealed": True}]
         else:
             items = self.item_distribution(key, top_k=top_k)
+            if can_have_choice_item is False:
+                items = [i for i in items if not is_choice_item(i["name"])]
 
         if revealed_ability:
             abilities = [{"name": revealed_ability, "p": 1.0, "revealed": True}]
@@ -816,6 +853,7 @@ def ui_fill_suggestions(
                 revealed_moves=rev.get("revealed_moves") or [],
                 revealed_item=rev.get("known_item"),
                 revealed_ability=rev_ability,
+                can_have_choice_item=rev.get("can_have_choice_item"),
             )
             if block is None:
                 skipped.append(f"{key} (no Pikalytics data)")
@@ -980,6 +1018,7 @@ def _enrich_mon_belief(
         revealed_moves=mon.get("revealed_moves") or [],
         revealed_item=mon.get("known_item"),
         revealed_ability=mon.get("known_ability"),
+        can_have_choice_item=mon.get("can_have_choice_item"),
         # expected stats from the CURRENT forme (mega base stats if mega'd)
         stats_species=mon.get("species"),
         level=level,

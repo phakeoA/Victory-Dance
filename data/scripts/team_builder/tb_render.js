@@ -331,6 +331,11 @@ function renderInjectPanel(el) {
     const teraChip    = revTera        ? `<span class="rev-chip rev-tera">◈ Tera ${escHtml(revTera)}${rev.is_terastallized ? ' ✓' : ''}</span>` : '';
     const abilityChip = revBaseAbility ? `<span class="rev-chip rev-ability">⚡ ${escHtml(revBaseAbility)}</span>`                     : '';
     const megaChip    = revMegaAbility ? `<span class="rev-chip rev-mega-ability">Ⓜ ${escHtml(revMegaAbility)}</span>`                : '';
+    // Replay-derived constraint: 2+ different moves in one stay on the field
+    // rule out Choice Scarf/Band/Specs — belief fill skips those items.
+    const noChoiceChip = (rev.can_have_choice_item === false && !revItem)
+      ? `<span class="rev-chip" title="Used two different moves during one stay on the field — cannot be holding a Choice item (Scarf/Band/Specs). Belief suggestions exclude them.">🚫 no Choice item</span>`
+      : '';
 
     const revMoves = rev.revealed_moves || [];
 
@@ -423,7 +428,7 @@ function renderInjectPanel(el) {
         <span class="${badge.cls}">${badge.txt}</span>
       </div>
 
-      ${(itemChip || teraChip || abilityChip || megaChip) ? `<div class="rev-chips">${itemChip}${abilityChip}${megaChip}${teraChip}</div>` : ''}
+      ${(itemChip || teraChip || abilityChip || megaChip || noChoiceChip) ? `<div class="rev-chips">${itemChip}${noChoiceChip}${abilityChip}${megaChip}${teraChip}</div>` : ''}
 
       <div class="inj-body">
         <div class="inj-row">

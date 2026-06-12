@@ -349,6 +349,9 @@ class ShowdownReplayParser:
         # Incoming mon always starts with neutral boosts (covers |drag| too,
         # and guards against any stale state on the reused PokemonSlot).
         mon.boosts = {}
+        # A switch-in starts a fresh stay on the field — a Choice lock from a
+        # previous stint no longer applies, so the working move set restarts.
+        mon.stint_moves = []
 
         # Track evolving known team (by BASE species — a mega'd mon switching
         # back in must not appear as a second team member)
@@ -491,6 +494,18 @@ class ShowdownReplayParser:
             mon = self.active_slots[user_slot]
             if move_name and move_name not in mon.revealed_moves:
                 mon.revealed_moves.append(move_name)
+            # Choice-item constraint (see PokemonSlot.can_have_choice_item):
+            # a [from]-tagged move was CALLED by another effect (Sleep Talk,
+            # Dancer, Instruct, locked-move continuations) — the player never
+            # selected it, so it proves nothing about a Choice lock.  Struggle
+            # is excluded too: a choice-locked mon Struggles once its locked
+            # move runs out of PP.
+            called = any(p.startswith("[from]") for p in parts[4:] if p)
+            if move_name and not called and move_name.lower() != "struggle":
+                if move_name not in mon.stint_moves:
+                    mon.stint_moves.append(move_name)
+                if len(mon.stint_moves) >= 2:
+                    mon.can_have_choice_item = False
 
         is_protect = move_name.lower() in {
             "protect", "detect", "wide guard", "quick guard",
@@ -610,8 +625,15 @@ class ShowdownReplayParser:
         item = parts[3] if len(parts) > 3 else None
         slot_key = self._slot_key_from_ident(ident)
 
-        if slot_key in self.active_slots and item:
-            self.active_slots[slot_key].known_item = item
+        if slot_key in self.active_slots:
+            mon = self.active_slots[slot_key]
+            if item:
+                mon.known_item = item
+            # The item just changed hands or was consumed/revealed (Trick,
+            # Knock Off, berry, Frisk, …) — moves used from here on prove
+            # nothing about the item the mon BROUGHT, so the choice-constraint
+            # stint restarts.  Conservative: never creates a false positive.
+            mon.stint_moves = []
 
         self._current_turn_actions.append({
             "event": "item_consumed" if consumed else "item_revealed",
@@ -913,6 +935,9 @@ class ShowdownReplayParser:
                 "mega_ability": mon.mega_ability,
                 "is_mega": mon.is_mega,
                 "mega_species": mon.species if mon.is_mega else None,
+                # Choice-item constraint: False = used 2+ different moves in
+                # one stay on the field → cannot hold Choice Scarf/Band/Specs.
+                "can_have_choice_item": mon.can_have_choice_item,
                 # Pokedex-derived dropdown data for the inject panel.
                 "possible_abilities": dex.abilities_for(base) if dex else [],
                 "mega_formes": dex.mega_formes_for(base) if dex else [],

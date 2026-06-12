@@ -46,6 +46,17 @@ class PokemonSlot:
     # `species` mutates on mega evolution (|detailschange|), so bench/roster
     # reconciliation must compare against this instead.
     base_species: Optional[str] = None
+    # Choice-item constraint: Choice items (Scarf/Band/Specs) lock the holder
+    # into the first move it selects until it leaves the field.  A mon
+    # observed using 2+ DIFFERENT self-selected moves during one continuous
+    # stay on the field therefore cannot have brought a Choice item — the
+    # belief fill uses this to drop Choice items from its item distribution.
+    # Flips False permanently once proven; the per-stint working set lives in
+    # stint_moves (internal — never serialised, reset on switch-in and on any
+    # item change because moves after a Trick/Knock Off prove nothing about
+    # the ORIGINAL item).
+    can_have_choice_item: bool = True
+    stint_moves: list = field(default_factory=list)
 
     def key(self) -> str:
         return f"{self.player}{self.slot}"
@@ -69,6 +80,7 @@ class PokemonSlot:
             "known_ability": self.known_ability,
             "pre_mega_ability": self.pre_mega_ability,
             "mega_ability": self.mega_ability,
+            "can_have_choice_item": self.can_have_choice_item,
             # EVs/IVs unknown for Type B — left as distribution placeholder
             "ev_spread": None,
             "iv_spread": None,

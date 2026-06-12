@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "team-builder",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": ["data/scripts/server.py"],
+      "port": 5174
+    }
+  ]
+}

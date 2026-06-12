@@ -11,6 +11,10 @@ Unit + integration tests for the Victory-Dance vod_parser bug fixes:
   Bug 6 — fainted mons kept in bench, identically on both sides
   Bug 7 — mega forms don't create phantom unseen roster stubs in opp_bench
   Schema — total_turns present on every transition
+  Choice — 2+ distinct moves in one stint rule out Choice items
+           (can_have_choice_item; belief fill drops Choice Scarf/Band/Specs)
+  Formes — Pikalytics lookup falls back to the base forme for suffixed
+           species (Vivillon-Garden → Vivillon)
 
 Run with:  python -m pytest tests/ -v
 """
@@ -33,7 +37,9 @@ from vod_parser.replay_parser import (
     extract_log_from_html,
     extract_replay_id_from_html,
 )
-from vod_parser.transitions import replay_to_transitions
+from vod_parser.transitions import parse_replay_for_preview, replay_to_transitions
+
+from belief_state import BeliefState, is_choice_item, ui_fill_suggestions
 
 SAMPLE_REPLAY_NAME = (
     "Gen9ChampionsVGC2026RegMA-2026-04-20-stevenhevgc-speedyturtle87.html"
@@ -637,6 +643,331 @@ class TestIntegrationSampleReplay:
         html = SAMPLE_REPLAY.read_text(encoding="utf-8")
         rid = extract_replay_id_from_html(html)
         assert rid  # present in the sample file
+
+
+# ---------------------------------------------------------------------------
+# Choice-item constraint — 2+ distinct moves in one stint rule out Choice items
+# ---------------------------------------------------------------------------
+
+class TestChoiceItemConstraint:
+    KEY = "p1:Floette-Eternal"
+
+    def _flag(self, body: str) -> bool:
+        return parse_log(body)["revealed_info"][self.KEY]["can_have_choice_item"]
+
+    def test_two_moves_one_stint_rules_out_choice(self):
+        assert self._flag("""\
+|turn|1
+|move|p1a: Floette|Moonblast|p2a: Kingambit
+|upkeep
+|turn|2
+|move|p1a: Floette|Protect|p1a: Floette
+|upkeep
+|win|alice
+""") is False
+
+    def test_same_move_repeatedly_stays_possible(self):
+        assert self._flag("""\
+|turn|1
+|move|p1a: Floette|Moonblast|p2a: Kingambit
+|upkeep
+|turn|2
+|move|p1a: Floette|Moonblast|p2a: Kingambit
+|upkeep
+|win|alice
+""") is True
+
+    def test_different_moves_across_stints_stays_possible(self):
+        # Switching out releases a Choice lock — variety across separate
+        # stays on the field proves nothing.
+        assert self._flag("""\
+|turn|1
+|move|p1a: Floette|Moonblast|p2a: Kingambit
+|upkeep
+|turn|2
+|switch|p1a: Incineroar|Incineroar, L50, F|100/100
+|upkeep
+|turn|3
+|switch|p1a: Floette|Floette-Eternal, L50, F|100/100
+|upkeep
+|turn|4
+|move|p1a: Floette|Protect|p1a: Floette
+|upkeep
+|win|alice
+""") is True
+
+    def test_called_move_does_not_count(self):
+        # [from]-tagged moves (Sleep Talk, Dancer, Instruct, …) were never
+        # selected by the player.
+        assert self._flag("""\
+|turn|1
+|move|p1a: Floette|Moonblast|p2a: Kingambit
+|upkeep
+|turn|2
+|move|p1a: Floette|Dazzling Gleam|p2a: Kingambit|[from]move: Sleep Talk
+|upkeep
+|win|alice
+""") is True
+
+    def test_struggle_does_not_count(self):
+        # A choice-locked mon Struggles once its locked move has no PP.
+        assert self._flag("""\
+|turn|1
+|move|p1a: Floette|Moonblast|p2a: Kingambit
+|upkeep
+|turn|2
+|move|p1a: Floette|Struggle|p2a: Kingambit
+|upkeep
+|win|alice
+""") is True
+
+    def test_item_loss_resets_the_stint(self):
+        # Moves used after the item changed hands prove nothing about the
+        # item the mon brought.
+        assert self._flag("""\
+|turn|1
+|move|p1a: Floette|Moonblast|p2a: Kingambit
+|-enditem|p1a: Floette|Focus Sash
+|upkeep
+|turn|2
+|move|p1a: Floette|Protect|p1a: Floette
+|upkeep
+|win|alice
+""") is True
+
+    def test_violation_before_item_loss_is_permanent(self):
+        assert self._flag("""\
+|turn|1
+|move|p1a: Floette|Moonblast|p2a: Kingambit
+|upkeep
+|turn|2
+|move|p1a: Floette|Protect|p1a: Floette
+|-enditem|p1a: Floette|Focus Sash
+|upkeep
+|win|alice
+""") is False
+
+
+# ---------------------------------------------------------------------------
+# Belief side — choice-item filtering + forme-suffix fallback
+# ---------------------------------------------------------------------------
+
+import json  # noqa: E402
+
+_MINI_PIKA = {
+    "pokemon": {
+        "Basculegion": {
+            "usage_pct": 42.0,
+            "moves": [
+                {"name": "Wave Crash", "pct": 90.0},
+                {"name": "Flip Turn", "pct": 80.0},
+                {"name": "Aqua Jet", "pct": 70.0},
+                {"name": "Last Respects", "pct": 60.0},
+                {"name": "Protect", "pct": 50.0},
+            ],
+            "items": [
+                {"name": "Choice Scarf", "pct": 55.0},
+                {"name": "Choice Band", "pct": 25.0},
+                {"name": "Mystic Water", "pct": 10.0},
+            ],
+            "abilities": [{"name": "Adaptability", "pct": 95.0}],
+            "spreads": [
+                {"nature": "Jolly", "evs": [0, 32, 0, 0, 0, 32], "pct": 40.0},
+            ],
+        },
+        "Floette-Eternal": {
+            "usage_pct": 30.0,
+            "moves": [
+                {"name": "Moonblast", "pct": 95.0},
+                {"name": "Light of Ruin", "pct": 85.0},
+                {"name": "Dazzling Gleam", "pct": 70.0},
+                {"name": "Protect", "pct": 60.0},
+            ],
+            "items": [
+                {"name": "Choice Scarf", "pct": 60.0},
+                {"name": "Fairy Feather", "pct": 20.0},
+            ],
+            "abilities": [{"name": "Flower Veil", "pct": 99.0}],
+            "spreads": [
+                {"nature": "Timid", "evs": [0, 0, 0, 32, 0, 32], "pct": 50.0},
+            ],
+        },
+        "Vivillon": {
+            "usage_pct": 5.0,
+            "moves": [
+                {"name": "Hurricane", "pct": 95.0},
+                {"name": "Sleep Powder", "pct": 90.0},
+                {"name": "Rage Powder", "pct": 80.0},
+                {"name": "Protect", "pct": 70.0},
+                {"name": "Tailwind", "pct": 30.0},
+            ],
+            "items": [{"name": "Focus Sash", "pct": 80.0}],
+            "abilities": [{"name": "Compound Eyes", "pct": 90.0}],
+            "spreads": [
+                {"nature": "Timid", "evs": [0, 0, 0, 32, 0, 32], "pct": 60.0},
+            ],
+        },
+    }
+}
+
+
+@pytest.fixture()
+def mini_belief(tmp_path):
+    p = tmp_path / "pika.json"
+    p.write_text(json.dumps(_MINI_PIKA), encoding="utf-8")
+    return BeliefState(p)
+
+
+class TestChoiceItemBeliefFilter:
+    def test_is_choice_item_family(self):
+        assert is_choice_item("Choice Scarf")
+        assert is_choice_item("Choice Band")
+        assert is_choice_item("Choice Specs")   # future-proof: not in format yet
+        assert not is_choice_item("Leftovers")
+        assert not is_choice_item(None)
+        assert not is_choice_item("")
+
+    def test_choice_items_kept_by_default(self, mini_belief):
+        block = mini_belief.belief_block("Basculegion")
+        assert block["items"][0]["name"] == "Choice Scarf"
+
+    def test_choice_items_dropped_when_impossible(self, mini_belief):
+        block = mini_belief.belief_block("Basculegion", can_have_choice_item=False)
+        names = [i["name"] for i in block["items"]]
+        assert names == ["Mystic Water"]
+
+    def test_revealed_choice_item_beats_constraint(self, mini_belief):
+        # Replay reveal (e.g. via Trick) is ground truth.
+        block = mini_belief.belief_block(
+            "Basculegion", revealed_item="Choice Scarf", can_have_choice_item=False
+        )
+        assert block["items"] == [{"name": "Choice Scarf", "p": 1.0, "revealed": True}]
+
+    def test_mega_stone_reveal_collapses_items(self, mini_belief):
+        # A mon that mega evolved on screen is guaranteed to hold its stone —
+        # the usage distribution (which never lists stones) must not be used.
+        block = mini_belief.belief_block(
+            "Floette-Eternal", revealed_item="mega stone", can_have_choice_item=False
+        )
+        assert block["items"] == [{"name": "mega stone", "p": 1.0, "revealed": True}]
+
+    def test_no_item_suggested_for_megad_mon(self, mini_belief):
+        players = {"our_side": "p1", "p1": {"roster": []},
+                   "p2": {"roster": ["Floette-Eternal"]}}
+        revealed = {"p2:Floette-Eternal": {
+            "revealed_moves": ["Moonblast"],
+            "known_item": "mega stone",
+            "is_mega": True,
+            "can_have_choice_item": False,
+        }}
+        res = ui_fill_suggestions(mini_belief, "B", players, revealed)
+        s = res["suggestions"]["p2:Floette-Eternal"]
+        # Item is revealed (the stone) → no suggestion, the UI's VOD prefill
+        # ("mega stone") must not be overwritten by a belief guess.
+        assert s["item"] is None
+        assert s["meta"]["item_p"] is None
+
+    def test_parser_to_suggestions_pipeline(self, mini_belief):
+        # Floette uses two different moves in one stint → the belief fill
+        # must not suggest its (top) Choice Scarf.
+        result = parse_log("""\
+|turn|1
+|move|p1a: Floette|Moonblast|p2a: Kingambit
+|upkeep
+|turn|2
+|move|p1a: Floette|Protect|p1a: Floette
+|upkeep
+|win|alice
+""")
+        res = ui_fill_suggestions(
+            mini_belief, "B", result["players"], result["revealed_info"]
+        )
+        s = res["suggestions"]["p1:Floette-Eternal"]
+        assert s["item"] == "Fairy Feather"
+
+
+class TestFormeSuffixFallback:
+    def test_resolves_to_base_forme(self, mini_belief):
+        assert mini_belief._resolve("Vivillon-Garden") == "Vivillon"
+        assert mini_belief._resolve("Vivillon") == "Vivillon"
+
+    def test_exact_entries_still_win(self, mini_belief):
+        # Floette-Eternal has its own entry — must NOT fall back to "Floette".
+        assert mini_belief._resolve("Floette-Eternal") == "Floette-Eternal"
+
+    def test_unknown_species_still_none(self, mini_belief):
+        assert mini_belief._resolve("Missingno-Garden") is None
+
+    def test_belief_block_for_suffixed_forme(self, mini_belief):
+        block = mini_belief.belief_block(
+            "Vivillon-Garden",
+            revealed_moves=["Hurricane", "Protect", "Sleep Powder"],
+        )
+        assert block is not None
+        assert block["species_key"] == "Vivillon"
+        # 3 revealed moves → exactly one predicted move for the last slot
+        assert [m["name"] for m in block["moves_predicted"]] == ["Rage Powder"]
+
+
+# ---------------------------------------------------------------------------
+# Integration — belief fill against the repo's real data + test VODs
+# ---------------------------------------------------------------------------
+
+_DATA_DIR = _HERE.parents[1]            # data/scripts/vod_parser → data/
+_PIKA_PATH = _DATA_DIR / "pikalytics_regma.json"
+_VODS_DIR = _DATA_DIR / "vods"
+
+requires_real_data = pytest.mark.skipif(
+    not _PIKA_PATH.exists(),
+    reason="data/pikalytics_regma.json not found",
+)
+
+
+@requires_real_data
+class TestBeliefFillIntegration:
+    def _fill(self, vod_path: Path):
+        belief = BeliefState(_PIKA_PATH)
+        preview = parse_replay_for_preview(
+            vod_path.read_text(encoding="utf-8"), belief, None
+        )
+        return preview, ui_fill_suggestions(
+            belief, "B", preview["players"], preview["revealed_info"]
+        )
+
+    def test_forme_suffixed_species_get_filled(self):
+        vod = _VODS_DIR / "Gen9ChampionsVGC2026RegMA-2026-06-02-fuzis-megagenger2023.html"
+        if not vod.exists():
+            pytest.skip(f"{vod.name} not found")
+        _, res = self._fill(vod)
+        assert not res["skipped"], f"unexpected skips: {res['skipped']}"
+        viv = res["suggestions"]["p1:Vivillon-Garden"]
+        # 3 moves confirmed in the VOD → slots 1-3 left for the VOD prefill,
+        # slot 4 belief-filled (the original Kleavor-style incident).
+        assert viv["moves"][:3] == ["", "", ""]
+        assert viv["moves"][3], "4th move slot must be belief-filled"
+
+    @requires_sample_replay
+    def test_choice_constraint_end_to_end(self):
+        # Floette-Eternal uses several different moves in one stay on the
+        # field in the sample replay → the constraint must be recorded.
+        # Kingambit does the same and never megas → its item suggestion must
+        # not be a Choice item.
+        preview, res = self._fill(SAMPLE_REPLAY)
+        assert preview["revealed_info"]["p1:Floette-Eternal"]["can_have_choice_item"] is False
+        assert preview["revealed_info"]["p1:Kingambit"]["can_have_choice_item"] is False
+        item = res["suggestions"]["p1:Kingambit"]["item"]
+        assert item and not is_choice_item(item)
+
+    @requires_sample_replay
+    def test_megad_mon_keeps_mega_stone(self):
+        # Floette-Eternal mega evolves in the sample replay (|-mega| →
+        # Floettite) — its item is certain, so belief must not suggest one
+        # (the UI keeps its "mega stone" VOD prefill).
+        preview, res = self._fill(SAMPLE_REPLAY)
+        rev = preview["revealed_info"]["p1:Floette-Eternal"]
+        assert rev["is_mega"] is True
+        assert rev["known_item"] == "mega stone"
+        assert res["suggestions"]["p1:Floette-Eternal"]["item"] is None
 
 
 if __name__ == "__main__":

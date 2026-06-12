@@ -30,6 +30,12 @@ function parseShowdownLog(rawLog, ourPlayer = 'p1') {
   const fieldConditions = { weather: null, terrain: null, trick_room: 0 };
   const activeSlots = {};
   const seenMons = {};
+  // Choice-item constraint working state: mon → Set of distinct moves the
+  // player selected during the mon's CURRENT stay on the field.  Two or more
+  // distinct moves in one stint rule out the whole Choice item family
+  // (Scarf/Band/Specs lock the holder into its first move until it switches
+  // out) — mirrors replay_parser.py.
+  const stintMoves = new Map();
 
   let winner = null, format = null;
   let currentTurn = 0;
@@ -253,10 +259,14 @@ function parseShowdownLog(rawLog, ourPlayer = 'p1') {
           revealed_moves: [], known_item: null, known_tera_type: null,
           is_terastallized: false,
           known_ability: null, pre_mega_ability: null, mega_ability: null,
+          can_have_choice_item: true,
         };
         seenMons[seenKey] = mon;
         activeSlots[slotKey] = mon;
       }
+      // A switch-in starts a fresh stay on the field — a Choice lock from a
+      // previous stint no longer applies.
+      stintMoves.set(mon, new Set());
       const knownSpecies = mon.base_species || species;
       if (!knownTeam[pid].includes(knownSpecies)) knownTeam[pid].push(knownSpecies);
       turnActions.push({ event: 'switch', slot: slotKey, species, player: pid });
@@ -318,8 +328,22 @@ function parseShowdownLog(rawLog, ourPlayer = 'p1') {
         'spiky shield', 'silk trap', 'burning bulwark', 'max guard',
       ].includes(moveName.toLowerCase());
 
-      if (activeSlots[userSlot] && moveName && !activeSlots[userSlot].revealed_moves.includes(moveName))
-        activeSlots[userSlot].revealed_moves.push(moveName);
+      const mover = activeSlots[userSlot];
+      if (mover && moveName && !mover.revealed_moves.includes(moveName))
+        mover.revealed_moves.push(moveName);
+
+      // Choice-item constraint (mirrors replay_parser.py): a [from]-tagged
+      // move was CALLED by another effect (Sleep Talk, Dancer, Instruct,
+      // locked-move continuations) — the player never selected it.  Struggle
+      // is excluded too: a choice-locked mon Struggles once its locked move
+      // runs out of PP.
+      const wasCalled = parts.slice(4).some(p => (p || '').startsWith('[from]'));
+      if (mover && moveName && !wasCalled && moveName.toLowerCase() !== 'struggle') {
+        const stint = stintMoves.get(mover) || new Set();
+        stint.add(moveName);
+        stintMoves.set(mover, stint);
+        if (stint.size >= 2) mover.can_have_choice_item = false;
+      }
 
       const action = {
         event: 'move', execution_index: executionIndex++,
@@ -373,13 +397,22 @@ function parseShowdownLog(rawLog, ourPlayer = 'p1') {
     } else if (cmd === '-item') {
       const slotKey = slotKeyFromIdent(parts[2]);
       const item    = parts[3] || null;
-      if (activeSlots[slotKey] && item) activeSlots[slotKey].known_item = item;
+      if (activeSlots[slotKey]) {
+        if (item) activeSlots[slotKey].known_item = item;
+        // Item changed hands / was revealed (Trick, Frisk, …) — later moves
+        // prove nothing about the item the mon BROUGHT; restart the stint.
+        stintMoves.set(activeSlots[slotKey], new Set());
+      }
       turnActions.push({ event: 'item_revealed', slot: slotKey, species: speciesFromIdent(parts[2]), item });
 
     } else if (cmd === '-enditem') {
       const slotKey = slotKeyFromIdent(parts[2]);
       const item    = parts[3] || null;
-      if (activeSlots[slotKey] && item) activeSlots[slotKey].known_item = item;
+      if (activeSlots[slotKey]) {
+        if (item) activeSlots[slotKey].known_item = item;
+        // Item lost/consumed — same stint reset as '-item' above.
+        stintMoves.set(activeSlots[slotKey], new Set());
+      }
       turnActions.push({ event: 'item_consumed', slot: slotKey, species: speciesFromIdent(parts[2]), item });
 
     } else if (cmd === '-terastallize') {
@@ -451,6 +484,9 @@ function parseShowdownLog(rawLog, ourPlayer = 'p1') {
       mega_ability:      mon.mega_ability || null,
       is_mega:           mon.is_mega || false,
       mega_species:      mon.is_mega ? mon.species : null,
+      // False = used 2+ different moves in one stay on the field → cannot
+      // hold Choice Scarf/Band/Specs; the belief fill drops those items.
+      can_have_choice_item: mon.can_have_choice_item !== false,
       possible_abilities: dexAbilities(base),
       mega_formes:        dexMegaFormes(base),
     };
