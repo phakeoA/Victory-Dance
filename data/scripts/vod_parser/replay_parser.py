@@ -949,11 +949,16 @@ class ShowdownReplayParser:
             "format": self.format,
             "players": {
                 "our_side": self.our_player,
+                # roster = the full 6-mon teampreview pool; brought = the
+                # (≤4) mons that actually entered the battle, in first
+                # switch-in order — the first two entries are the leads.
+                # Teampreview-choice models train on roster → brought.
                 "p1": {
                     "username": self.players.get("p1"),
                     "rating_before": self.ratings.get("p1"),
                     "rating_delta": self.rating_deltas.get("p1"),
                     "roster": self.rosters["p1"],
+                    "brought": list(self.known_team["p1"]),
                     "team_size_chosen": self.team_sizes.get("p1"),
                 },
                 "p2": {
@@ -961,6 +966,7 @@ class ShowdownReplayParser:
                     "rating_before": self.ratings.get("p2"),
                     "rating_delta": self.rating_deltas.get("p2"),
                     "roster": self.rosters["p2"],
+                    "brought": list(self.known_team["p2"]),
                     "team_size_chosen": self.team_sizes.get("p2"),
                 },
             },

@@ -807,6 +807,29 @@ _MINI_PIKA = {
                 {"nature": "Timid", "evs": [0, 0, 0, 32, 0, 32], "pct": 60.0},
             ],
         },
+        # Mirrors the real data: the base entry is empty, the mega entry is
+        # rich and its ability list is the FIXED mega ability.
+        "Meganium": {
+            "usage_pct": 3.0,
+            "moves": [],
+            "items": [],
+            "abilities": [{"name": "Overgrow", "pct": 70.0}],
+            "spreads": [],
+        },
+        "Meganium-Mega": {
+            "usage_pct": 2.0,
+            "moves": [
+                {"name": "Solar Beam", "pct": 98.5},
+                {"name": "Weather Ball", "pct": 97.0},
+                {"name": "Dazzling Gleam", "pct": 92.9},
+                {"name": "Protect", "pct": 92.1},
+            ],
+            "items": [{"name": "Meganiumite", "pct": 100.0}],
+            "abilities": [{"name": "Mega Sol", "pct": 100.0}],
+            "spreads": [
+                {"nature": "Modest", "evs": [32, 0, 0, 32, 0, 0], "pct": 55.0},
+            ],
+        },
     }
 }
 
@@ -910,6 +933,85 @@ class TestFormeSuffixFallback:
 
 
 # ---------------------------------------------------------------------------
+# Brought tracking + brought-only auto-fill + mega forme entry preference
+# ---------------------------------------------------------------------------
+
+class TestBroughtTracking:
+    BODY = """\
+|turn|1
+|move|p1a: Floette|Moonblast|p2a: Kingambit
+|upkeep
+|turn|2
+|switch|p1a: Incineroar|Incineroar, L50, F|100/100
+|upkeep
+|win|alice
+"""
+
+    def test_parser_records_brought_in_switch_in_order(self):
+        result = parse_log(self.BODY)
+        p1, p2 = result["players"]["p1"], result["players"]["p2"]
+        # roster keeps the full teampreview pool …
+        assert p1["roster"] == ["Floette-Eternal", "Sneasler", "Incineroar", "Kingambit"]
+        # … brought is only what entered the battle, in switch-in order
+        # (leads first).
+        assert p1["brought"] == ["Floette-Eternal", "Sneasler", "Incineroar"]
+        assert p2["brought"] == ["Kingambit", "Aerodactyl"]
+
+
+class TestBroughtOnlyAutoFill:
+    def test_unbrought_mons_skipped(self, mini_belief):
+        players = {"our_side": "p1", "p1": {"roster": []},
+                   "p2": {"roster": ["Basculegion", "Vivillon"],
+                          "brought": ["Basculegion"]}}
+        revealed = {"p2:Basculegion": {"revealed_moves": ["Wave Crash"]}}
+        res = ui_fill_suggestions(mini_belief, "B", players, revealed)
+        assert "p2:Basculegion" in res["suggestions"]
+        assert "p2:Vivillon" not in res["suggestions"]
+        assert any("not brought" in s for s in res["skipped"])
+
+    def test_brought_falls_back_to_revealed_info(self, mini_belief):
+        # Older payloads without players.pX.brought: presence in
+        # revealed_info (= the mon was seen) is the brought signal.
+        players = {"our_side": "p1", "p1": {"roster": []},
+                   "p2": {"roster": ["Basculegion", "Vivillon"]}}
+        revealed = {"p2:Basculegion": {"revealed_moves": []}}
+        res = ui_fill_suggestions(mini_belief, "B", players, revealed)
+        assert "p2:Basculegion" in res["suggestions"]
+        assert "p2:Vivillon" not in res["suggestions"]
+
+
+class TestMegaFormeEntryPreference:
+    def test_megad_mon_uses_mega_entry_with_base_ability(self, mini_belief):
+        players = {"our_side": "p1", "p1": {"roster": []},
+                   "p2": {"roster": ["Meganium"], "brought": ["Meganium"]}}
+        revealed = {"p2:Meganium": {
+            "revealed_moves": ["Weather Ball"],
+            "known_item": "mega stone",
+            "is_mega": True,
+            "mega_species": "Meganium-Mega",
+        }}
+        res = ui_fill_suggestions(mini_belief, "B", players, revealed)
+        s = res["suggestions"]["p2:Meganium"]
+        assert s["nature"] == "Modest", "spread must come from the mega entry"
+        assert "Solar Beam" in s["moves"], "moves must come from the mega entry"
+        assert s["item"] is None, "mega stone is revealed — no item suggestion"
+        # Bug 8: the suggestable ability is the BASE forme's choice, never
+        # the mega entry's fixed mega ability.
+        assert s["ability"] == "Overgrow"
+
+    def test_non_megad_mon_keeps_base_entry(self, mini_belief):
+        players = {"our_side": "p1", "p1": {"roster": []},
+                   "p2": {"roster": ["Meganium"], "brought": ["Meganium"]}}
+        revealed = {"p2:Meganium": {"revealed_moves": ["Weather Ball"]}}
+        res = ui_fill_suggestions(mini_belief, "B", players, revealed)
+        s = res["suggestions"]["p2:Meganium"]
+        # Base entry has no spreads/moves — nothing is invented from the
+        # mega build the VOD never confirmed.
+        assert s["nature"] is None
+        assert all(not m for m in s["moves"])
+
+
+# ---------------------------------------------------------------------------
 # Integration — belief fill against the repo's real data + test VODs
 # ---------------------------------------------------------------------------
 
@@ -939,7 +1041,8 @@ class TestBeliefFillIntegration:
         if not vod.exists():
             pytest.skip(f"{vod.name} not found")
         _, res = self._fill(vod)
-        assert not res["skipped"], f"unexpected skips: {res['skipped']}"
+        no_data = [s for s in res["skipped"] if "no Pikalytics data" in s]
+        assert not no_data, f"unexpected no-data skips: {no_data}"
         viv = res["suggestions"]["p1:Vivillon-Garden"]
         # 3 moves confirmed in the VOD → slots 1-3 left for the VOD prefill,
         # slot 4 belief-filled (the original Kleavor-style incident).
@@ -968,6 +1071,35 @@ class TestBeliefFillIntegration:
         assert rev["is_mega"] is True
         assert rev["known_item"] == "mega stone"
         assert res["suggestions"]["p1:Floette-Eternal"]["item"] is None
+
+    @requires_sample_replay
+    def test_megad_meganium_uses_mega_entry(self):
+        # Base "Meganium" has an empty Pikalytics entry; the VOD confirms
+        # the mega, so spreads/moves must come from "Meganium-Mega".
+        preview, res = self._fill(SAMPLE_REPLAY)
+        rev = preview["revealed_info"]["p2:Meganium"]
+        assert rev["is_mega"] is True
+        assert rev["mega_species"] == "Meganium-Mega"
+        s = res["suggestions"]["p2:Meganium"]
+        assert s["nature"] is not None
+        filled = {m for m in s["moves"] if m}
+        assert filled, "mega entry moves must fill the empty slots"
+        assert filled <= {"Solar Beam", "Weather Ball", "Dazzling Gleam", "Protect"}
+
+    @requires_sample_replay
+    def test_only_brought_mons_get_suggestions(self):
+        preview, res = self._fill(SAMPLE_REPLAY)
+        players = preview["players"]
+        brought_keys = set()
+        for pid in ("p1", "p2"):
+            brought = players[pid]["brought"]
+            assert 0 < len(brought) <= 4
+            assert set(brought) <= set(players[pid]["roster"])
+            brought_keys |= {f"{pid}:{sp}" for sp in brought}
+        assert set(res["suggestions"]) <= brought_keys
+        # Every roster mon is either suggested or skipped with a reason.
+        assert len(res["suggestions"]) + len(res["skipped"]) == 12
+        assert all("not brought" in s for s in res["skipped"])
 
 
 if __name__ == "__main__":

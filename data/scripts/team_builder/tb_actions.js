@@ -162,7 +162,8 @@ async function useBeliefIntegration() {
   activeTab = 'inject';
   renderMain();
   const sides = (res.filled_sides || []).join(' + ') || 'none';
-  const skip  = res.skipped?.length ? ` · ${res.skipped.length} skipped (no data)` : '';
+  // skipped = bench mons not brought in the VOD + species without usage data
+  const skip  = res.skipped?.length ? ` · ${res.skipped.length} skipped` : '';
   showNotif(nFields
     ? `✨ Auto-filled ${nFields} fields on ${nMons} Pokémon (${sides})${skip}`
     : 'Nothing new to fill — all fields already set');

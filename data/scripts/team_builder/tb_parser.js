@@ -498,8 +498,10 @@ function parseShowdownLog(rawLog, ourPlayer = 'p1') {
     format,
     players: {
       our_side: ourPlayer,
-      p1: { username: players.p1 || null, rating_before: ratings.p1 || null, rating_delta: ratingDeltas.p1 || null, roster: rosters.p1, team_size_chosen: teamSizes.p1 || null },
-      p2: { username: players.p2 || null, rating_before: ratings.p2 || null, rating_delta: ratingDeltas.p2 || null, roster: rosters.p2, team_size_chosen: teamSizes.p2 || null },
+      // roster = full 6-mon teampreview pool; brought = the (≤4) mons that
+      // actually entered the battle, in first switch-in order (leads first).
+      p1: { username: players.p1 || null, rating_before: ratings.p1 || null, rating_delta: ratingDeltas.p1 || null, roster: rosters.p1, brought: [...knownTeam.p1], team_size_chosen: teamSizes.p1 || null },
+      p2: { username: players.p2 || null, rating_before: ratings.p2 || null, rating_delta: ratingDeltas.p2 || null, roster: rosters.p2, brought: [...knownTeam.p2], team_size_chosen: teamSizes.p2 || null },
     },
     winner,
     stats_quality: { our_side: 'distribution', opp_side: 'distribution' },

@@ -468,6 +468,7 @@ class BeliefState:
         revealed_item: Optional[str] = None,
         revealed_ability: Optional[str] = None,
         stats_species: Optional[str] = None,
+        ability_species: Optional[str] = None,
         can_have_choice_item: Optional[bool] = None,
         level: int = DEFAULT_LEVEL,
     ) -> Optional[dict]:
@@ -486,6 +487,12 @@ class BeliefState:
         stats_species: forme to pull base stats from when it differs from the
         Pikalytics key (e.g. expected stats for "Charizard-Mega-Y" while the
         usage entry is "Charizard").
+
+        ability_species: species to pull the ABILITY distribution from when it
+        differs from the usage entry.  Used when ``species`` is a mega forme
+        ("Meganium-Mega"): its Pikalytics ability list is the fixed mega
+        ability, but the user-choosable ability is the BASE forme's (Bug 8) —
+        pass the base species here.
         """
         key = self._resolve(species)
         if key is None:
@@ -511,7 +518,7 @@ class BeliefState:
         if revealed_ability:
             abilities = [{"name": revealed_ability, "p": 1.0, "revealed": True}]
         else:
-            abilities = self.ability_distribution(key)
+            abilities = self.ability_distribution(ability_species or key)
 
         free_slots = max(0, 4 - len(revealed_moves))
         moves_predicted = [
@@ -799,6 +806,19 @@ def ui_fill_suggestions(
       C bot vs ranked  → opponent side only
       D self-play      → nothing (both sides are exact by definition)
 
+    Only mons CONFIRMED BROUGHT in the VOD (the ≤4 that actually appeared)
+    get suggestions — bench mons that never entered the battle have no replay
+    evidence and are listed in ``skipped`` instead.  The brought set comes
+    from ``players[pid]["brought"]`` (parser-stamped final switch-in list),
+    falling back to revealed_info key presence for older payloads.
+
+    A mon that mega evolved in the VOD is looked up under its MEGA forme's
+    Pikalytics entry ("Meganium-Mega") when one exists — the VOD confirms the
+    mega build, whose spreads/moves describe it far better than the base
+    forme's (often empty) entry.  Abilities still come from the base forme:
+    the mega entry lists only the fixed mega ability, which is never the
+    user-choosable one (Bug 8).
+
     Fields the replay already revealed are NOT suggested (item/ability return
     None, revealed move slots are left empty) — the UI shows those with its
     own VOD badges and they outrank any belief.
@@ -837,9 +857,18 @@ def ui_fill_suggestions(
     skipped: list[str] = []
 
     for pid in sides:
-        roster = (players.get(pid) or {}).get("roster") or []
+        info = players.get(pid) or {}
+        roster = info.get("roster") or []
+        # Restrict auto-fill to the mons confirmed brought in the VOD.
+        brought = info.get("brought")
+        if brought is None:
+            brought = [sp for sp in roster if f"{pid}:{sp}" in revealed_info]
+        brought_set = set(brought)
         for species in roster:
             key = f"{pid}:{species}"
+            if species not in brought_set:
+                skipped.append(f"{key} (not brought in this VOD)")
+                continue
             rev = revealed_info.get(key) or {}
             # The base ability is the only one a player chooses; a mega'd
             # mon's known_ability is the (fixed) mega ability — never suggest
@@ -847,12 +876,19 @@ def ui_fill_suggestions(
             rev_ability = rev.get("pre_mega_ability") or (
                 rev.get("known_ability") if not rev.get("is_mega") else None
             )
+            # VOD-confirmed mega → prefer the mega forme's own Pikalytics
+            # entry; base-forme abilities stay the suggestion context (Bug 8).
+            lookup_species, ability_species = species, None
+            mega_species = rev.get("mega_species")
+            if rev.get("is_mega") and mega_species and belief.known(mega_species):
+                lookup_species, ability_species = mega_species, species
             block = belief.belief_block(
-                species,
+                lookup_species,
                 top_k=top_k,
                 revealed_moves=rev.get("revealed_moves") or [],
                 revealed_item=rev.get("known_item"),
                 revealed_ability=rev_ability,
+                ability_species=ability_species,
                 can_have_choice_item=rev.get("can_have_choice_item"),
             )
             if block is None:
@@ -1007,6 +1043,11 @@ def _enrich_mon_belief(
     """Attach a Pikalytics belief block to one (opponent / unknown) mon dict."""
     species = mon.get("base_species") or mon.get("species")
     lookup = species if belief.known(species) else mon.get("species")
+    ability_species = None
+    # VOD-confirmed mega → the mega forme's own Pikalytics entry describes
+    # the brought build best; abilities stay base-forme context (Bug 8).
+    if mon.get("is_mega") and mon.get("species") and belief.known(mon["species"]):
+        lookup, ability_species = mon["species"], species
     if not lookup or not belief.known(lookup):
         if species and species not in warned_species:
             warned_species.add(species)
@@ -1018,6 +1059,7 @@ def _enrich_mon_belief(
         revealed_moves=mon.get("revealed_moves") or [],
         revealed_item=mon.get("known_item"),
         revealed_ability=mon.get("known_ability"),
+        ability_species=ability_species,
         can_have_choice_item=mon.get("can_have_choice_item"),
         # expected stats from the CURRENT forme (mega base stats if mega'd)
         stats_species=mon.get("species"),

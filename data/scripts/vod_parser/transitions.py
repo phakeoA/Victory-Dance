@@ -192,6 +192,12 @@ def replay_to_transitions(
       "damage_events": [...],            # full event log; slots normalised to our_*/opp_*
       "actions":       [...],            # full flat event log; slots normalised to our_*/opp_*
       "players": {"our_side": "p1"|"p2", "p1": {...}, "p2": {...}},
+                                         # each side carries roster (all 6
+                                         # teampreview mons) AND brought (the
+                                         # ≤4 that entered, switch-in order,
+                                         # leads first) — teampreview-choice
+                                         # training target
+
       "state_vector":  null,             # reserved for StateEncoder output
       "action_mask":   null,             # reserved for legal-action masking
     }
