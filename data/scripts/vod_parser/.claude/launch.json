@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "team-builder",
+      "runtimeExecutable": "D:\\ShowdownProject\\Victory-Dance\\.venv\\Scripts\\python.exe",
+      "runtimeArgs": ["D:\\ShowdownProject\\Victory-Dance\\data\\scripts\\server.py"],
+      "port": 5174,
+      "autoPort": false
+    }
+  ]
+}

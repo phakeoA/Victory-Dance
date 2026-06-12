@@ -38,8 +38,12 @@ function setSourceType(t) {
 /**
  * Update a single injected field for one Pokémon and refresh the ✓/✗ badge
  * without re-rendering the whole panel.
+ *
+ * `el` (optional) is the input/select that fired the event — used to strip
+ * belief auto-fill styling live: any manual edit of an auto-filled field
+ * revokes its "auto" status (the value stays, the AUTO badge goes).
  */
-function setInject(key, field, value) {
+function setInject(key, field, value, el) {
   if (!activeBattle) return;
   if (!activeBattle.known_team_overrides)        activeBattle.known_team_overrides = {};
   if (!activeBattle.known_team_overrides[key])   activeBattle.known_team_overrides[key] = {};
@@ -51,19 +55,117 @@ function setInject(key, field, value) {
   else if (field.startsWith('ev_'))  { if (!inj.ev_spread) inj.ev_spread = {}; inj.ev_spread[field.slice(3)] = parseInt(value) || 0; }
   else if (field.startsWith('move_')) { if (!inj.moves) inj.moves = ['', '', '', '']; inj.moves[parseInt(field.slice(5))] = value; }
 
+  // ── Belief auto-fill revocation — manual edit ends the auto status ──────
+  const auto = activeBattle.belief_autofill?.[key];
+  if (auto) {
+    let cleared = false;
+    if (field === 'nature' || field === 'item' || field === 'ability') {
+      if (auto[field]) { auto[field] = false; cleared = true; }
+    } else if (field.startsWith('ev_')) {
+      // EVs are one logical unit (a spread): editing any cell makes the
+      // whole spread manual.
+      if (auto.ev_spread) {
+        auto.ev_spread = false;
+        cleared = true;
+        const card = el?.closest('.inj-card');
+        card?.querySelectorAll('.ev-row .belief-prefilled')
+            .forEach(x => x.classList.remove('belief-prefilled'));
+        card?.querySelector('.ev-auto-badge')?.remove();
+        // Nature rides on the same Pikalytics spread — it stays auto (it has
+        // its own flag and badge, revoked only when the nature itself is edited).
+      }
+    } else if (field.startsWith('move_')) {
+      const idx = parseInt(field.slice(5));
+      if (auto.moves && auto.moves[idx]) { auto.moves[idx] = false; cleared = true; }
+    }
+    if (cleared && el) {
+      el.classList.remove('belief-prefilled');
+      el.closest('.inj-row, .inj-move-slot')?.querySelector('.auto-badge')?.remove();
+    }
+  }
+
   // Live badge refresh — update only the affected card's badge
   document.querySelectorAll('.inj-card-hdr').forEach(hdr => {
-    const badge = hdr.querySelector('.inj-known, .inj-unknown');
+    const badge = hdr.querySelector('.inj-known, .inj-unknown, .inj-auto');
     if (!badge) return;
     const dot = hdr.querySelector('.side-dot');
     const sp  = hdr.querySelector('span:nth-child(2)');
     if (!dot || !sp) return;
     const pid = dot.classList.contains('p1-dot') ? 'p1' : 'p2';
-    const k2  = `${pid}:${sp.textContent.trim()}`;
-    const has = Object.values(activeBattle.known_team_overrides[k2] || {}).some(v => v !== null && v !== undefined);
-    badge.className  = has ? 'inj-known' : 'inj-unknown';
-    badge.textContent = has ? '✓ Stats injected' : 'No stats yet';
+    const st  = injBadge(`${pid}:${sp.textContent.trim()}`);
+    badge.className   = st.cls;
+    badge.textContent = st.txt;
   });
+}
+
+/**
+ * "✨ Use Belief Integration" button.
+ * Fetches Pikalytics suggestions from /fill-beliefs for the current battle's
+ * VOD type (B: both sides; A/C: opponent side; D: nothing) and drops them
+ * into the inject panel.  Never overwrites a field the user already filled
+ * in manually; every filled field is flagged auto (purple AUTO badge) until
+ * the user edits it.
+ */
+async function useBeliefIntegration() {
+  if (!activeBattle) return;
+  showNotif('Fetching belief data…');
+
+  let res;
+  try {
+    res = await fillBeliefsViaServer(activeBattle);
+  } catch (err) {
+    showNotif('Belief fill failed: ' + err.message);
+    return;
+  }
+
+  const sugg = res.suggestions || {};
+  if (!Object.keys(sugg).length) {
+    showNotif(res.note || 'Nothing to auto-fill for this VOD type');
+    return;
+  }
+
+  const b = activeBattle;
+  if (!b.known_team_overrides) b.known_team_overrides = {};
+  if (!b.belief_autofill)      b.belief_autofill = {};
+  if (!b.belief_meta)          b.belief_meta = {};
+
+  let nFields = 0, nMons = 0;
+  for (const [key, s] of Object.entries(sugg)) {
+    if (!b.known_team_overrides[key]) b.known_team_overrides[key] = {};
+    if (!b.belief_autofill[key])      b.belief_autofill[key] = {};
+    const inj  = b.known_team_overrides[key];
+    const auto = b.belief_autofill[key];
+    b.belief_meta[key] = s.meta || {};
+    let touched = false;
+
+    if (s.nature && !inj.nature)   { inj.nature  = s.nature;  auto.nature  = true; nFields++; touched = true; }
+    if (s.item && !inj.item)       { inj.item    = s.item;    auto.item    = true; nFields++; touched = true; }
+    if (s.ability && !inj.ability) { inj.ability = s.ability; auto.ability = true; nFields++; touched = true; }
+
+    const hasManualEvs = inj.ev_spread && Object.values(inj.ev_spread).some(v => v);
+    if (s.ev_spread && !hasManualEvs) {
+      inj.ev_spread = { ...s.ev_spread };
+      auto.ev_spread = true;
+      nFields++; touched = true;
+    }
+
+    if (s.moves && s.moves.some(m => m)) {
+      if (!inj.moves)  inj.moves  = ['', '', '', ''];
+      if (!auto.moves) auto.moves = [false, false, false, false];
+      s.moves.forEach((m, i) => {
+        if (m && !inj.moves[i]) { inj.moves[i] = m; auto.moves[i] = true; nFields++; touched = true; }
+      });
+    }
+    if (touched) nMons++;
+  }
+
+  activeTab = 'inject';
+  renderMain();
+  const sides = (res.filled_sides || []).join(' + ') || 'none';
+  const skip  = res.skipped?.length ? ` · ${res.skipped.length} skipped (no data)` : '';
+  showNotif(nFields
+    ? `✨ Auto-filled ${nFields} fields on ${nMons} Pokémon (${sides})${skip}`
+    : 'Nothing new to fill — all fields already set');
 }
 
 // ── Battle list management ───────────────────────────────

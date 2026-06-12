@@ -66,6 +66,29 @@ async function parseReplayViaServer(file) {
 }
 
 /**
+ * POST the battle's rosters + revealed info to /fill-beliefs and return
+ * per-species inject-panel suggestions from Pikalytics.
+ * Only called from the "✨ Use Belief Integration" button — never automatic.
+ */
+async function fillBeliefsViaServer(battle) {
+  const body = {
+    vod_type:      battle.source_type || 'ranked_player_vod',
+    players:       battle.players,
+    revealed_info: battle.revealed_info || {},
+  };
+  const r = await fetch(`${SERVER}/fill-beliefs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({ error: r.statusText }));
+    throw new Error(err.error || r.statusText);
+  }
+  return r.json();
+}
+
+/**
  * POST the approved battle entry to /export and trigger a JSONL download.
  * Falls back to exportJSON() (client-side) if the server is unreachable.
  */

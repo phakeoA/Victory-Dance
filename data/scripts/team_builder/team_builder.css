@@ -17,6 +17,7 @@
   --yellow: #f5c842;
   --red: #e74c3c;
   --orange: #e67e22;
+  --purple: #a78bfa;
   --p1col: #4a90d9;
   --p2col: #e94560;
   --rad: 8px;
@@ -503,6 +504,27 @@ body {
 /* Input pre-filled from replay log — subtle green tint border */
 .rev-prefilled { border-color: rgba(76,175,125,.5) !important; }
 .rev-prefilled:focus { border-color: var(--green) !important; }
+
+/* ── Belief auto-fill (✨ Use Belief Integration) ── */
+/* Field filled from Pikalytics belief data — purple tint until the user
+   edits it (setInject strips the class + badge on manual change) */
+.belief-prefilled { border-color: rgba(167,139,250,.55) !important; background: rgba(167,139,250,.07) !important; }
+.belief-prefilled:focus { border-color: var(--purple) !important; }
+/* Small inline "✨ AUTO" badge next to a field label / move slot */
+.auto-badge {
+  font-size: 7px; font-weight: 700; padding: 1px 4px; border-radius: 2px; letter-spacing: .3px;
+  background: rgba(167,139,250,.15); color: var(--purple); border: 1px solid rgba(167,139,250,.5);
+  vertical-align: middle; text-transform: none; white-space: nowrap; flex-shrink: 0;
+}
+/* Card-header badge: every injected field on this mon is belief-auto-filled */
+.inj-auto {
+  font-size: 9px; padding: 1px 4px; border-radius: 2px;
+  background: rgba(167,139,250,.15); color: var(--purple); border: 1px solid var(--purple);
+  margin-left: auto;
+}
+/* The trigger button */
+.btn.belief { border-color: rgba(167,139,250,.6); color: var(--purple); }
+.btn.belief:hover { background: rgba(167,139,250,.12); border-color: var(--purple); }
 /* Move slot: input + VOD badge side-by-side */
 .inj-move-slot { position: relative; display: flex; align-items: center; gap: 3px; }
 .inj-move-slot .inj-move-in { flex: 1; }

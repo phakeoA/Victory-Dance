@@ -84,6 +84,39 @@ function dexMegaFormes(species) {
   return out;
 }
 
+// ── Belief auto-fill helpers ─────────────────────────────
+// b.belief_autofill[key] tracks which inject fields were filled by the
+// "Use Belief Integration" button: { nature, item, ability, ev_spread: bool,
+// moves: [bool×4] }.  A manual edit revokes the flag (setInject), so the
+// field stops being "auto" the moment the user touches it.
+
+/**
+ * Card-level badge state for one `pid:species` key, considering both the
+ * injected values and which of them are still belief-auto-filled.
+ * Used by renderInjectPanel and setInject's live badge refresh.
+ */
+function injBadge(key) {
+  const inj  = activeBattle?.known_team_overrides?.[key] || {};
+  const auto = activeBattle?.belief_autofill?.[key] || {};
+  const set  = [];   // one bool per populated field group: is it auto-filled?
+  if (inj.nature)  set.push(!!auto.nature);
+  if (inj.item)    set.push(!!auto.item);
+  if (inj.ability) set.push(!!auto.ability);
+  if (inj.ev_spread && Object.values(inj.ev_spread).some(v => v)) set.push(!!auto.ev_spread);
+  for (let i = 0; i < (inj.moves || []).length; i++)
+    if (inj.moves[i]) set.push(!!(auto.moves && auto.moves[i]));
+  if (!set.length)        return { cls: 'inj-unknown', txt: 'No stats yet' };
+  if (set.every(Boolean)) return { cls: 'inj-auto',    txt: '✨ Auto-filled' };
+  if (set.some(Boolean))  return { cls: 'inj-known',   txt: '✓ Injected · partly ✨' };
+  return { cls: 'inj-known', txt: '✓ Stats injected' };
+}
+
+/** Tooltip text for an AUTO badge, e.g. "Auto-filled from Pikalytics (30%) — edit to override". */
+function autoTitle(p) {
+  const pct = (p !== null && p !== undefined) ? ` (${Math.round(p * 100)}% usage)` : '';
+  return `Auto-filled from Pikalytics${pct} — editing this field makes it manual`;
+}
+
 // ── App state ─────────────────────────────────────────────
 // Mutated by actions; read by render functions.
 let battles      = [];

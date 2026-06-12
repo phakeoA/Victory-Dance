@@ -297,6 +297,12 @@ function renderActionLog(turn) {
 }
 
 // ── Inject Stats Panel ───────────────────────────────────
+
+/** Small purple "✨ AUTO" pill shown next to belief-auto-filled fields. */
+function autoBadge(p, extraCls = '') {
+  return `<span class="auto-badge${extraCls ? ' ' + extraCls : ''}" title="${escHtml(autoTitle(p))}">✨ AUTO</span>`;
+}
+
 function renderInjectPanel(el) {
   const b       = activeBattle;
   const allMons = [];
@@ -308,13 +314,11 @@ function renderInjectPanel(el) {
     const key    = `${pid}:${species}`;
     const inj    = b.known_team_overrides?.[key] || {};
     const rev    = b.revealed_info?.[key] || {};
+    const auto   = b.belief_autofill?.[key] || {};
+    const meta   = b.belief_meta?.[key] || {};
     const isOurs = pid === b.players.our_side;
 
-    const hasManual = Object.values(inj).some(v =>
-      v !== null && v !== undefined && v !== '' &&
-      !(Array.isArray(v) && v.every(x => !x)) &&
-      !(typeof v === 'object' && !Array.isArray(v) && Object.values(v).every(x => !x))
-    );
+    const badge = injBadge(key);
 
     // Confirmed-from-replay chips
     // Bug 8: a mega mon has two ability contexts — show them separately.
@@ -330,12 +334,14 @@ function renderInjectPanel(el) {
 
     const revMoves = rev.revealed_moves || [];
 
-    // EV inputs
+    // EV inputs — belief-prefilled styling when the spread came from the
+    // "Use Belief Integration" button (revoked on any manual EV edit)
     const evHtml = STAT_NAMES.map(s => `
       <div class="ev-cell">
         <label>${STAT_LABELS[s]}</label>
         <input type="number" min="0" max="252" value="${inj.ev_spread?.[s] ?? ''}" placeholder="0"
-          oninput="setInject('${key}','ev_${s}',this.value)" />
+          class="${auto.ev_spread ? 'belief-prefilled' : ''}"
+          oninput="setInject('${key}','ev_${s}',this.value,this)" />
       </div>`).join('');
 
     // Move inputs — manual override wins; fall back to revealed move
@@ -344,11 +350,13 @@ function renderInjectPanel(el) {
       const revVal      = revMoves[i]     ?? '';
       const val         = manualVal || revVal;
       const isConfirmed = !manualVal && !!revVal;
+      const isAuto      = !!manualVal && !!(auto.moves && auto.moves[i]);
       return `<div class="inj-move-slot">
-        <input class="inj-move-in${isConfirmed ? ' rev-prefilled' : ''}" type="text"
+        <input class="inj-move-in${isConfirmed ? ' rev-prefilled' : ''}${isAuto ? ' belief-prefilled' : ''}" type="text"
           placeholder="Move ${i + 1}" value="${escHtml(val)}"
-          oninput="setInject('${key}','move_${i}',this.value)" />
+          oninput="setInject('${key}','move_${i}',this.value,this)" />
         ${isConfirmed ? '<span class="rev-move-badge" title="Confirmed in replay">VOD</span>' : ''}
+        ${isAuto ? autoBadge(meta.moves_p?.[i]) : ''}
       </div>`;
     }).join('');
 
@@ -364,12 +372,13 @@ function renderInjectPanel(el) {
     const abilityVal     = inj.ability ?? revBaseAbility ?? '';
     const abilityPrefill = !inj.ability && !!revBaseAbility;
 
+    const abilityAuto = !!auto.ability && !!inj.ability;
     let abilityField;
     if (abilityOptions.length) {
       const opts = [...abilityOptions];
       if (abilityVal && !opts.includes(abilityVal)) opts.push(abilityVal);  // keep legacy/custom values selectable
-      abilityField = `<select class="${abilityPrefill ? 'rev-prefilled' : ''}"
-          onchange="setInject('${key}','ability',this.value)">
+      abilityField = `<select class="${abilityPrefill ? 'rev-prefilled' : abilityAuto ? 'belief-prefilled' : ''}"
+          onchange="setInject('${key}','ability',this.value,this)">
           <option value="">— unknown —</option>
           ${opts.map(a => `<option value="${escHtml(a)}"${abilityVal === a ? ' selected' : ''}>${escHtml(a)}</option>`).join('')}
         </select>`;
@@ -377,8 +386,8 @@ function renderInjectPanel(el) {
       // Pokedex unavailable (offline) or species unknown to the dex
       abilityField = `<input type="text" placeholder="e.g. Fairy Aura"
           value="${escHtml(abilityVal)}"
-          class="${abilityPrefill ? 'rev-prefilled' : ''}"
-          oninput="setInject('${key}','ability',this.value)" />`;
+          class="${abilityPrefill ? 'rev-prefilled' : abilityAuto ? 'belief-prefilled' : ''}"
+          oninput="setInject('${key}','ability',this.value,this)" />`;
     }
 
     // ── Mega ability (read-only — exactly one per mega forme) ────────────
@@ -403,37 +412,40 @@ function renderInjectPanel(el) {
       </div>`;
     }
 
+    const natureAuto = !!auto.nature && !!inj.nature;
+    const itemAuto   = !!auto.item   && !!inj.item;
+
     return `<div class="inj-card">
       <div class="inj-card-hdr">
         <span class="side-dot ${pid}-dot"></span>
         <span>${species}</span>
         <span style="font-size:9px;color:var(--text3)">${pid.toUpperCase()}${isOurs ? ' · YOUR SIDE' : ''}</span>
-        <span class="${hasManual ? 'inj-known' : 'inj-unknown'}">${hasManual ? '✓ Stats injected' : 'No stats yet'}</span>
+        <span class="${badge.cls}">${badge.txt}</span>
       </div>
 
       ${(itemChip || teraChip || abilityChip || megaChip) ? `<div class="rev-chips">${itemChip}${abilityChip}${megaChip}${teraChip}</div>` : ''}
 
       <div class="inj-body">
         <div class="inj-row">
-          <label>Nature</label>
-          <select onchange="setInject('${key}','nature',this.value)">
+          <label>Nature${natureAuto ? ' ' + autoBadge(meta.spread_p) : ''}</label>
+          <select class="${natureAuto ? 'belief-prefilled' : ''}" onchange="setInject('${key}','nature',this.value,this)">
             <option value="">— unknown —</option>
             ${NATURES.map(n => `<option value="${n}"${inj.nature === n ? ' selected' : ''}>${n}</option>`).join('')}
           </select>
         </div>
         <div class="inj-row">
-          <label>Item${itemPrefill ? ' <span class="rev-label-badge">VOD</span>' : ''}</label>
+          <label>Item${itemPrefill ? ' <span class="rev-label-badge">VOD</span>' : ''}${itemAuto ? ' ' + autoBadge(meta.item_p) : ''}</label>
           <input type="text" placeholder="e.g. Choice Specs"
             value="${escHtml(itemVal)}"
-            class="${itemPrefill ? 'rev-prefilled' : ''}"
-            oninput="setInject('${key}','item',this.value)" />
+            class="${itemPrefill ? 'rev-prefilled' : itemAuto ? 'belief-prefilled' : ''}"
+            oninput="setInject('${key}','item',this.value,this)" />
         </div>
         <div class="inj-row">
-          <label>Ability${megaRow ? ' <span class="ability-ctx-badge">base forme</span>' : ''}${abilityPrefill ? ' <span class="rev-label-badge">VOD</span>' : ''}</label>
+          <label>Ability${megaRow ? ' <span class="ability-ctx-badge">base forme</span>' : ''}${abilityPrefill ? ' <span class="rev-label-badge">VOD</span>' : ''}${abilityAuto ? ' ' + autoBadge(meta.ability_p) : ''}</label>
           ${abilityField}
         </div>
         ${megaRow}
-        <div class="inj-section-label">EVs</div>
+        <div class="inj-section-label">EVs${auto.ev_spread ? ' ' + autoBadge(meta.spread_p, 'ev-auto-badge') : ''}</div>
         <div class="ev-row">${evHtml}</div>
         <div class="inj-section-label">
           Moves
@@ -445,10 +457,15 @@ function renderInjectPanel(el) {
   }).join('');
 
   el.innerHTML = `<div id="inject-wrap">
-    <h3>Manual Stat Injection
+    <h3 style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <span>Manual Stat Injection</span>
+      <button class="btn belief" onclick="useBeliefIntegration()"
+        title="Fill unrevealed stats from Pikalytics usage data (Type B: both sides · A/C: opponent only · D: nothing). Auto-filled fields are marked ✨ AUTO and become manual the moment you edit them.">
+        ✨ Use Belief Integration</button>
       <span style="color:var(--text3);font-size:10px;font-weight:400;text-transform:none;letter-spacing:0">
         Fill in known stats to upgrade Type B → Type A (your side) or Type C (bot side).
-        <span class="rev-chip" style="margin-left:6px">VOD</span> = confirmed from replay log.
+        <span class="rev-chip" style="margin-left:6px">VOD</span> = confirmed from replay log ·
+        <span class="auto-badge" style="margin-left:2px">✨ AUTO</span> = belief-filled, edit to make manual.
       </span>
     </h3>
     <div id="inject-grid">${cards}</div>

@@ -45,6 +45,17 @@ POST /export
       { "transitions": [ ... ] }        ← list of JSONL-ready dicts
       Content-Disposition: attachment   ← browser triggers download
 
+POST /fill-beliefs
+    Body: JSON
+      {
+        "vod_type": "B" | "ranked_player_vod" | "own_vod" | "bot_vod" | "self_play",
+        "players": { "our_side": "p1", "p1": {"roster": [...]}, "p2": {...} },
+        "revealed_info": { "p1:Kingambit": {...}, ... }   ← optional
+      }
+    Returns per-species inject-panel suggestions from Pikalytics
+    (belief_state.ui_fill_suggestions).  Only invoked by the UI's
+    "Use Belief Integration" button — never automatically.
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
@@ -245,6 +256,36 @@ def export():
             "X-Transition-Count":  str(len(transitions)),
         },
     )
+
+
+@app.post("/fill-beliefs")
+def fill_beliefs():
+    """
+    Build Pikalytics auto-fill suggestions for the inject panel.
+    Triggered manually by the UI's "Use Belief Integration" button.
+    """
+    body = request.get_json(silent=True)
+    if not body:
+        return jsonify({"error": "Expected JSON body."}), 400
+    if _belief is None:
+        return jsonify({
+            "error": "Belief data unavailable — belief_state.py or "
+                     "data/pikalytics_regma.json missing on the server."
+        }), 503
+
+    try:
+        from belief_state import ui_fill_suggestions
+        result = ui_fill_suggestions(
+            _belief,
+            vod_type=body.get("vod_type") or body.get("source_type") or "B",
+            players=body.get("players") or {},
+            revealed_info=body.get("revealed_info") or {},
+            top_k=int(body.get("top_k") or 5),
+        )
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    return jsonify(result)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
