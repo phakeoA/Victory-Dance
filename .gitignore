@@ -13,6 +13,7 @@ teams/teams
 data/smogon_stats_cache
 data/pkmn_sets_cache
 data/local_data
+data/vods
 .rust/
 .env
 target/
