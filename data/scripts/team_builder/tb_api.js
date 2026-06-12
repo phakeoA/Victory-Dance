@@ -97,6 +97,9 @@ async function exportViaServer(battle) {
     battle_id:          battle.replay_id || ('battle-' + Date.now()),
     known_teams_entry:  buildKnownTeamsEntry(battle),
     replay_html:        battle._rawHtml || '',
+    // Type A/B/C/D selector — without this the server stamps every
+    // transition as Type B (ranked_player_vod).
+    source_type:        battle.source_type || 'ranked_player_vod',
   };
 
   const r = await fetch(`${SERVER}/export`, {

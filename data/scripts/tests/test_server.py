@@ -124,6 +124,33 @@ def test_export_jsonl(client, vod_html):
         assert m["mega_ability"] == "Fairy Aura"
 
 
+def test_export_source_type_passthrough(client, vod_html):
+    """The UI's Type A/B/C/D selector must reach the exported transitions —
+    without it everything silently trains as Type B."""
+    r = client.post("/export", json={
+        "battle_id": "test-battle",
+        "known_teams_entry": _entry(),
+        "replay_html": vod_html,
+        "source_type": "own_vod",
+    })
+    assert r.status_code == 200
+    transitions = [json.loads(l) for l in
+                   r.data.decode("utf-8").strip().split("\n")]
+    assert {t["source_type"] for t in transitions} == {"own_vod"}
+
+
+def test_export_defaults_to_type_b(client, vod_html):
+    r = client.post("/export", json={
+        "battle_id": "test-battle",
+        "known_teams_entry": _entry(),
+        "replay_html": vod_html,
+    })
+    assert r.status_code == 200
+    transitions = [json.loads(l) for l in
+                   r.data.decode("utf-8").strip().split("\n")]
+    assert {t["source_type"] for t in transitions} == {"ranked_player_vod"}
+
+
 def test_export_requires_html(client):
     r = client.post("/export", json={
         "battle_id": "x", "known_teams_entry": {}, "replay_html": "",

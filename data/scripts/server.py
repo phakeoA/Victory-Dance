@@ -40,6 +40,8 @@ POST /export
         "battle_id": "...",
         "known_teams_entry": { ... },   ← full annotated entry (user-approved)
         "replay_html": "...",           ← raw HTML string
+        "source_type": "own_vod",       ← UI Type A/B/C/D selector (optional,
+                                          defaults to Type B ranked_player_vod)
       }
     Runs replay_to_transitions() and returns:
       { "transitions": [ ... ] }        ← list of JSONL-ready dicts
@@ -240,6 +242,7 @@ def export():
     battle_id        = body.get("battle_id", "unknown")
     known_entry      = body.get("known_teams_entry", {})
     html_content     = body.get("replay_html", "")
+    source_type      = body.get("source_type")  # UI Type A/B/C/D selector
 
     if not html_content:
         return jsonify({"error": "replay_html is empty."}), 400
@@ -261,7 +264,8 @@ def export():
         players    = [your_side] if your_side else ["p1", "p2"]
 
         transitions = replay_to_transitions(
-            tmp_path, _get_belief(), _encoder, players, known_teams
+            tmp_path, _get_belief(), _encoder, players, known_teams,
+            source_type=source_type,
         )
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500

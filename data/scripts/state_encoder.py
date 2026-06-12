@@ -77,9 +77,24 @@ MOVE_FEATURES per move (9 floats):
                                  · 0 empty slot
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ACTION SPACE (per active slot):
-    0-11  → move index (0-3) × target (0=opp0, 1=opp1, 2=ally)
+    0-11  → move index (0-3) × target (0=opp_a, 1=opp_b, 2=ally)
     12-15 → switch to bench slot 0-3
     Total: 16 actions per slot (illegal actions masked during MCTS)
+
+    Conventions (action_to_index / build_action_mask):
+    · move index m = the move's slot in move_slots_for_mon(mon) — the SAME
+      ordering encode_snapshot writes the move features in, so policy
+      logits and move features always line up.
+    · moves without a player-choosable target (self, spread, field, …)
+      canonicalise to target bucket 0; only that index is legal for them.
+    · ally-targeting kinds (adjacentAlly / adjacentAllyOrSelf) live in
+      bucket 2.
+    · switch index 12+i = i-th LIVING mon of our_bench (encoder bench
+      order).  Forced replacements picked mid-turn (pivot chains) may
+      reference a mon that was active at turn start — those encode as
+      None rather than a wrong index.
+    · masks are decision-time legality from state_before_actions; they do
+      not model trapping, Encore, Choice locks, or Taunt.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
@@ -729,16 +744,9 @@ class StateEncoder:
             vec[i + j] = (boosts.get(key) or 0) / 6.0
         i += NUM_BOOSTS
 
-        # Moves: exact (known_moves) > revealed_moves, then pad the remaining
-        # slots with belief moves_predicted carrying p(usage) as is_known.
-        slots: list[tuple[str, float]] = []
-        for mv in (mon.get("known_moves") or mon.get("revealed_moves") or []):
-            slots.append((mv, 1.0))
-        belief = mon.get("belief") or {}
-        for predicted in belief.get("moves_predicted") or []:
-            if len(slots) >= NUM_MOVES:
-                break
-            slots.append((predicted["name"], float(predicted.get("p") or 0.0)))
+        # Moves: canonical slot order shared with the action codec — see
+        # move_slots_for_mon().
+        slots = move_slots_for_mon(mon)
         for m_idx in range(NUM_MOVES):
             if m_idx < len(slots):
                 name, confidence = slots[m_idx]
@@ -801,6 +809,202 @@ class StateEncoder:
         # is_known: 1.0 revealed/exact, p(usage) for belief-padded moves
         vec[i] = confidence
         i += 1
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Action codec — string actions ⇄ fixed indices + legality masks
+# (see ACTION SPACE in the module docstring for the frozen conventions)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def move_slots_for_mon(mon: Optional[dict]) -> list[tuple[str, float]]:
+    """
+    Canonical ≤4-slot move list for one snapshot mon dict, as
+    ``[(move_name, confidence), …]``.
+
+    This is THE single source of truth shared by the feature encoder
+    (_write_pokemon_json) and the action codec (action_to_index /
+    build_action_mask): policy action ``m*3+t`` always refers to the move
+    written into feature slot ``m`` of the same snapshot.
+
+    Order: known_moves (exact/injected) wins over revealed_moves, then the
+    remaining slots are padded with belief moves_predicted carrying p(usage)
+    as confidence.
+    """
+    if not mon:
+        return []
+    slots: list[tuple[str, float]] = []
+    for mv in (mon.get("known_moves") or mon.get("revealed_moves") or []):
+        if mv:
+            slots.append((mv, 1.0))
+    belief = mon.get("belief") or {}
+    for predicted in belief.get("moves_predicted") or []:
+        if len(slots) >= NUM_MOVES:
+            break
+        slots.append((predicted["name"], float(predicted.get("p") or 0.0)))
+    return slots[:NUM_MOVES]
+
+
+# Showdown dex target kinds with a player-choosable single target
+_CHOOSABLE_SINGLE = {"normal", "any", "adjacentFoe"}
+# Kinds that always point at our own side (bucket 2)
+_ALLY_KINDS = {"adjacentAlly", "adjacentAllyOrSelf"}
+
+
+def _move_target_kind(move_name: Optional[str]) -> Optional[str]:
+    """data/moves.json 'target' field for a move ('normal', 'self', …)."""
+    if not move_name:
+        return None
+    data = _get_moves_data().get(norm_species(move_name))
+    return (data or {}).get("target")
+
+
+def _target_bucket(move_name: Optional[str], target_slot: Optional[str]) -> int:
+    """Resolve a logged move action to its target bucket (0/1/2)."""
+    kind = _move_target_kind(move_name)
+    if kind in _ALLY_KINDS:
+        return 2
+    if kind in _CHOOSABLE_SINGLE or kind is None:
+        # kind None = move missing from moves.json → trust the logged slot
+        if target_slot == "opp_a":
+            return 0
+        if target_slot == "opp_b":
+            return 1
+        if target_slot in ("our_a", "our_b"):
+            return 2
+        return 0          # no target logged → canonical bucket
+    return 0              # non-choosable (self / spread / field / …)
+
+
+def _living_bench(snap: dict) -> list[dict]:
+    """Our bench in encoder order: living mons only, capped at BENCH_SLOTS."""
+    return [m for m in (snap.get("our_bench") or [])
+            if not m.get("is_fainted")][:BENCH_SLOTS]
+
+
+def _species_matches(mon: dict, species: Optional[str]) -> bool:
+    if not species:
+        return False
+    want = norm_species(species)
+    return want in (
+        norm_species(mon.get("species") or ""),
+        norm_species(mon.get("base_species") or ""),
+    )
+
+
+def action_to_index(
+    action: dict,
+    mon: Optional[dict],
+    snap: Optional[dict] = None,
+) -> Optional[int]:
+    """
+    Encode one perspective-relative action dict (transitions.py our_actions
+    entry) into the fixed 0–15 index space.
+
+    ``mon``  — the acting mon's dict from snap["our_active"][action["slot"]]
+               (needed for move actions; switches only need ``snap``).
+    ``snap`` — the decision-time snapshot (state_before_actions), used for
+               the bench ordering of switch actions.
+
+    Returns None when the action cannot be expressed: move not among the
+    mon's 4 encoded slots, or switch target not on the living bench (e.g.
+    mid-turn forced replacement by a mon that was active at turn start).
+    """
+    kind = action.get("action")
+    if kind == "switch":
+        for i, bench_mon in enumerate(_living_bench(snap or {})):
+            if _species_matches(bench_mon, action.get("species")):
+                return SWITCH_OFFSET + i
+        return None
+    if kind == "move":
+        want = norm_species(action.get("move") or "")
+        if not want:
+            return None
+        for m_idx, (name, _conf) in enumerate(move_slots_for_mon(mon)):
+            if norm_species(name) == want:
+                return m_idx * 3 + _target_bucket(name, action.get("target_slot"))
+        return None
+    return None
+
+
+def index_to_action(idx: int) -> dict:
+    """Decode a 0–15 action index into its structural meaning."""
+    if 0 <= idx < SWITCH_OFFSET:
+        m_idx, bucket = divmod(idx, 3)
+        return {
+            "kind": "move",
+            "move_slot": m_idx,
+            "target_bucket": bucket,
+            "target": ("opp_a", "opp_b", "ally")[bucket],
+        }
+    if SWITCH_OFFSET <= idx < ACTIONS_PER_SLOT:
+        return {"kind": "switch", "bench_slot": idx - SWITCH_OFFSET}
+    raise ValueError(f"action index out of range: {idx}")
+
+
+def build_action_mask(snap: dict) -> dict[str, list[int]]:
+    """
+    Decision-time legality mask for one state_before_actions snapshot:
+    ``{"our_a": [16×0/1], "our_b": [16×0/1]}``.
+
+    Legal = the agent could have selected it at the START of the turn:
+      · every named move slot, restricted to its reachable target buckets
+        (occupied opposing slots / present ally; non-choosable moves expose
+        only their canonical bucket 0; no legal foe → bucket-0 fallback,
+        mirroring Showdown's auto-targeting),
+      · one switch index per living bench mon.
+    An empty/fainted active slot has an all-zero row.  Trapping, Encore,
+    Choice locks and Taunt are NOT modelled (approximate legality).
+    """
+    our_active = snap.get("our_active") or {}
+    opp_active = snap.get("opp_active") or {}
+    n_bench    = len(_living_bench(snap))
+    opp_present = {0: "opp_a" in opp_active, 1: "opp_b" in opp_active}
+
+    mask: dict[str, list[int]] = {}
+    for slot in ("our_a", "our_b"):
+        row = [0] * ACTIONS_PER_SLOT
+        mon = our_active.get(slot)
+        if mon and not mon.get("is_fainted"):
+            ally_slot = "our_b" if slot == "our_a" else "our_a"
+            ally_present = ally_slot in our_active
+            for m_idx, (name, _conf) in enumerate(move_slots_for_mon(mon)):
+                kind = _move_target_kind(name)
+                if kind in _ALLY_KINDS:
+                    if kind == "adjacentAllyOrSelf" or ally_present:
+                        row[m_idx * 3 + 2] = 1
+                elif kind in _CHOOSABLE_SINGLE:
+                    buckets = [b for b in (0, 1) if opp_present[b]]
+                    if kind != "adjacentFoe" and ally_present:
+                        buckets.append(2)
+                    for b in (buckets or [0]):
+                        row[m_idx * 3 + b] = 1
+                else:
+                    # self / spread / field / unknown → canonical bucket only
+                    row[m_idx * 3] = 1
+            for i in range(n_bench):
+                row[SWITCH_OFFSET + i] = 1
+        mask[slot] = row
+    return mask
+
+
+def annotate_transition_actions(transition: dict) -> dict:
+    """
+    Stamp the action-space view onto one transitions.py dict, in place:
+
+      · each our_actions entry gains ``action_index`` (0–15 or None),
+      · ``action_mask`` becomes the build_action_mask() of
+        state_before_actions (the decision-time state).
+
+    Pure-python and deterministic given the stored snapshot (the belief
+    padding that orders move slots is baked into the same JSON), so exports
+    can carry it without the state_vector being encoded.
+    """
+    snap = transition.get("state_before_actions") or {}
+    our_active = snap.get("our_active") or {}
+    for act in transition.get("our_actions") or []:
+        act["action_index"] = action_to_index(act, our_active.get(act.get("slot")), snap)
+    transition["action_mask"] = build_action_mask(snap)
+    return transition
 
 
 # ── Convenience accessors ──────────────────────────────────────────────────────

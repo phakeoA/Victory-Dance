@@ -16,12 +16,46 @@ import json
 from pathlib import Path
 from typing import Optional
 
-from vod_parser.pokedex import get_pokedex
+from vod_parser.pokedex import get_pokedex, norm_species
 from vod_parser.replay_parser import (
     ShowdownReplayParser,
     extract_log_from_html,
     extract_replay_id_from_html,
 )
+
+
+def _merge_known_moves(injected: Optional[list], revealed: Optional[list]) -> list:
+    """Combine user-injected move slots with replay-revealed moves.
+
+    The UI sends fixed 4-slot arrays where untouched slots are '' — those
+    placeholders must never reach the export (the encoder treats a non-empty
+    ``known_moves`` as the complete authoritative moveset).  Injected order
+    wins (it is stable across turns), revealed moves the user didn't type are
+    appended, duplicates are matched loosely ("Close Combat" == "closecombat"),
+    and the result is capped at the 4 real move slots.
+
+    When the union exceeds 4 the typed data contradicts the log (a mon only
+    has 4 moves) — replay reveals are ground truth and always survive the
+    cap; unconfirmed typed moves are dropped first, last-typed first.
+    """
+    revealed_keys = {norm_species(str(mv)) for mv in (revealed or [])
+                     if mv and str(mv).strip()}
+    merged: list = []
+    seen: set = set()
+    for mv in list(injected or []) + list(revealed or []):
+        if not mv or not str(mv).strip():
+            continue
+        key = norm_species(str(mv))
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(str(mv).strip())
+    i = len(merged) - 1
+    while len(merged) > 4 and i >= 0:
+        if norm_species(merged[i]) not in revealed_keys:
+            merged.pop(i)
+        i -= 1
+    return merged[:4]   # >4 revealed (called-move artifacts) → hard cap
 
 
 def _inject_known_stats(mon_dict: dict, inj: dict) -> None:
@@ -38,11 +72,22 @@ def _inject_known_stats(mon_dict: dict, inj: dict) -> None:
     """
     if not inj:
         return
-    mon_dict["ev_spread"]  = inj.get("ev_spread")
-    mon_dict["nature"]     = inj.get("nature")
+    if inj.get("ev_spread") is not None:
+        mon_dict["ev_spread"] = inj["ev_spread"]
+    if inj.get("nature") is not None:
+        mon_dict["nature"] = inj["nature"]
+    # IVs default to 31 across the board in this format; the UI never asks
+    # for them, so stamp the default whenever the user vouched for the
+    # mon's stats at all (previously iv_spread stayed null forever).
+    if (inj.get("ev_spread") or inj.get("nature")) and not mon_dict.get("iv_spread"):
+        mon_dict["iv_spread"] = [31] * 6
     mon_dict["known_item"] = mon_dict.get("known_item") or inj.get("item")
-    if inj.get("moves"):
-        mon_dict["known_moves"] = inj["moves"]
+    # Only an actual user-typed move makes the moveset "known" — a merge of
+    # revealed moves alone stays in revealed_moves (it may be incomplete).
+    if any(m and str(m).strip() for m in (inj.get("moves") or [])):
+        mon_dict["known_moves"] = _merge_known_moves(
+            inj["moves"], mon_dict.get("revealed_moves")
+        )
 
     inj_ability = inj.get("ability")
     if mon_dict.get("is_mega"):
@@ -62,6 +107,103 @@ def _inject_known_stats(mon_dict: dict, inj: dict) -> None:
     elif inj_ability:
         mon_dict["pre_mega_ability"] = mon_dict.get("pre_mega_ability") or inj_ability
         mon_dict["known_ability"]    = mon_dict.get("known_ability") or inj_ability
+
+
+def _retrofit_own_side_knowledge(battle: dict) -> None:
+    """Rebuild each side's OWN decision-time knowledge into its snapshots.
+
+    The parser is strictly log-faithful: a turn-N snapshot only contains what
+    an observer had seen by turn N.  But the ACTING player always knew their
+    own moveset and which mons they brought — without that, early-game
+    decisions are not expressible in the action space (the first use of every
+    move, and every switch to a not-yet-fielded mon, would encode as None).
+
+    Two retroactive merges per physical side, applied only to that side's own
+    half of its own-perspective snapshots (the opponent half keeps the
+    progressive view — merging there would leak future information):
+
+      · every own mon's revealed_moves becomes the battle-END reveal list
+        (the live list is always a prefix of it, so per-mon move indices are
+        stable across the whole battle);
+      · our_bench gains seen=False stubs for brought mons that have not
+        entered yet — the own-side mirror of opp_bench's unseen roster stubs.
+
+    Mons brought but never fielded stay unknown (the log cannot name them);
+    masks under-approximate switch options in that rare case.
+    """
+    revealed_info = battle.get("revealed_info") or {}
+    players = battle.get("players") or {}
+
+    def _final_moves(pid: str, mon: dict) -> list:
+        base = mon.get("base_species") or mon.get("species")
+        final = (revealed_info.get(f"{pid}:{base}") or {}).get("revealed_moves") or []
+        cur = mon.get("revealed_moves") or []
+        # final is an append-only superset of cur; keep cur if the lookup
+        # misses (forme/nickname edge) rather than dropping live reveals
+        return list(final) if len(final) >= len(cur) else list(cur)
+
+    for turn in battle.get("turns") or []:
+        for key in ("state_before_actions", "state_after_actions"):
+            sides = turn.get(key)
+            if not isinstance(sides, dict) or "our_active" in sides:
+                continue        # flattened preview shape — not this path
+            for pid, snap in sides.items():
+                if not isinstance(snap, dict):
+                    continue
+                own_mons = (list((snap.get("our_active") or {}).values())
+                            + list(snap.get("our_bench") or []))
+                present = set()
+                for mon in own_mons:
+                    mon["revealed_moves"] = _final_moves(pid, mon)
+                    present.add(norm_species(
+                        mon.get("base_species") or mon.get("species") or ""))
+                for sp in (players.get(pid) or {}).get("brought") or []:
+                    if norm_species(sp) in present:
+                        continue
+                    info = revealed_info.get(f"{pid}:{sp}") or {}
+                    snap.setdefault("our_bench", []).append({
+                        "species": sp, "base_species": sp, "nickname": None,
+                        "player": pid, "slot": None,
+                        "hp_pct": None, "status": None, "boosts": {},
+                        "is_mega": False, "is_fainted": False,
+                        "revealed_moves": list(info.get("revealed_moves") or []),
+                        "known_item": None, "known_tera_type": None,
+                        "is_terastallized": False,
+                        "known_ability": None, "pre_mega_ability": None,
+                        "mega_ability": None,
+                        "can_have_choice_item": info.get("can_have_choice_item", True),
+                        "ev_spread": None, "iv_spread": None, "nature": None,
+                        "seen": False,
+                    })
+
+
+def _known_entry_side_to_sheet(side_dict: Optional[dict]) -> list[dict]:
+    """Convert one side of a UI known_teams entry into team-sheet entries
+    (the shape belief_state.fill_blanks expects for its "exact" fill mode).
+
+    Only mons whose stats are actually pinned down — nature AND ev_spread
+    both filled in — are promoted to sheet entries; computing "exact" stats
+    from a half-filled inject card would bake wrong numbers into the export.
+    Partially-filled mons keep the legacy per-field injection path and get a
+    "not found on team sheet" warning from fill_blanks.
+    """
+    sheet: list[dict] = []
+    for species, inj in (side_dict or {}).items():
+        if not inj or not (inj.get("nature") and inj.get("ev_spread")):
+            continue
+        sheet.append({
+            "species": species,
+            "nickname": None,
+            "item": inj.get("item"),
+            "ability": inj.get("ability"),
+            "moves": [m for m in (inj.get("moves") or []) if m and str(m).strip()],
+            "nature": inj.get("nature"),
+            "evs": inj.get("ev_spread") or {},
+            "ivs": {},          # UI never asks for IVs → default 31s
+            "tera_type": None,
+            "level": 50,
+        })
+    return sheet
 
 
 def parse_replay_for_preview(
@@ -146,6 +288,7 @@ def replay_to_transitions(
     encoder=None,
     players: Optional[list] = None,
     known_teams: Optional[dict] = None,
+    source_type: Optional[str] = None,
 ) -> list:
     """
     Parse a replay and convert every turn into a JSONL-ready transition dict.
@@ -157,7 +300,8 @@ def replay_to_transitions(
     Schema per transition
     ---------------------
     {
-      "source_type": "ranked_player_vod",
+      "source_type": "own_vod" | "ranked_player_vod" | "live_bot_battle"
+                     | "self_play",      # canonical Type A/B/C/D token
       "replay_id": str,
       "format": str | null,
       "perspective": "p1" | "p2",
@@ -172,11 +316,21 @@ def replay_to_transitions(
         "opp_bench":   [{...seen:bool}, ...],              # seen=false = unrevealed
         "known_team":  {"p1": [...], "p2": [...]},
       },
+      # Mon dicts in BOTH snapshots are enriched per the vod type's fill
+      # modes (belief_state.fill_blanks): distribution sides carry "belief"
+      # blocks (EV-spread/item/ability/move distributions) + stats_estimate
+      # mode "distribution"; sheet-complete exact sides carry "exact"
+      # (computed stats, bucket EV lists, IVs) + stats_estimate mode "exact".
       "state_after_actions": { ...same shape... },
       "our_actions": [
-        {"slot": "our_a", "action": "move",   "move": "Calm Mind", "target_slot": null,  ...},
-        {"slot": "our_b", "action": "move",   "move": "Sucker Punch", "target_slot": "opp_b", ...},
-        {"slot": "our_b", "action": "switch", "species": "Incineroar"},
+        # action_index = fixed 0–15 policy index (state_encoder action codec):
+        #   move m × target t → m*3+t (t: 0=opp_a 1=opp_b 2=ally;
+        #   un-choosable targets canonicalise to 0), switch → 12+bench_slot.
+        #   None when inexpressible (move outside the 4 encoded slots /
+        #   mid-turn replacement from a mon that was active at turn start).
+        {"slot": "our_a", "action": "move",   "move": "Calm Mind", "target_slot": null,  "action_index": 0, ...},
+        {"slot": "our_b", "action": "move",   "move": "Sucker Punch", "target_slot": "opp_b", "action_index": 4, ...},
+        {"slot": "our_b", "action": "switch", "species": "Incineroar", "action_index": 12},
       ],
       "opp_actions_predicted": null,     # null in VOD data; filled at inference time
       "opp_actions_actual": [
@@ -191,6 +345,9 @@ def replay_to_transitions(
       },
       "damage_events": [...],            # full event log; slots normalised to our_*/opp_*
       "actions":       [...],            # full flat event log; slots normalised to our_*/opp_*
+      "belief_fill":   {...},            # fill_blanks audit metadata: vod_type,
+                                         # fill_modes, warnings, pikalytics source
+                                         # (per-turn validation details trimmed)
       "players": {"our_side": "p1"|"p2", "p1": {...}, "p2": {...}},
                                          # each side carries roster (all 6
                                          # teampreview mons) AND brought (the
@@ -198,8 +355,12 @@ def replay_to_transitions(
                                          # leads first) — teampreview-choice
                                          # training target
 
-      "state_vector":  null,             # reserved for StateEncoder output
-      "action_mask":   null,             # reserved for legal-action masking
+      "state_vector":  null,             # encoded at TRAINING time (raw JSON
+                                         # ages better than baked vectors)
+      "action_mask":   {                 # decision-time legality per slot,
+        "our_a": [0/1 × 16],             # from state_before_actions (see
+        "our_b": [0/1 × 16],             # state_encoder.build_action_mask)
+      },
     }
 
     Parameters
@@ -209,6 +370,11 @@ def replay_to_transitions(
     encoder : StateEncoder, optional
     players : list of str, optional   e.g. ["p1"]  — defaults to ["p1", "p2"]
     known_teams : dict, optional
+    source_type : str, optional
+        The UI's Type A/B/C/D selector value ("own_vod", "ranked_player_vod",
+        "bot_vod", "self_play", or a bare letter).  Canonicalised via
+        belief_state.VodType and stamped on every transition.  Defaults to
+        Type B ("ranked_player_vod") when omitted.
     """
     html_content = Path(replay_path).read_text(encoding="utf-8")
     replay_id = extract_replay_id_from_html(html_content) or Path(replay_path).stem
@@ -231,6 +397,56 @@ def replay_to_transitions(
     battle = parser.parse()
     battle["replay_id"] = replay_id
 
+    # ── Canonicalise the source type (UI selector → spec token) ──────────
+    # Lazy import: belief_state imports _inject_known_stats from this module
+    # at top level, so importing it here avoids a circular import.
+    from belief_state import VodType, fill_blanks
+
+    vt = VodType.coerce(source_type or battle.get("source_type") or "B")
+
+    # Each side's own half of its snapshots gets its full own-team knowledge
+    # (final movesets + brought-but-unentered bench stubs) BEFORE enrichment,
+    # so belief blocks and the action codec see the acting player's view.
+    _retrofit_own_side_knowledge(battle)
+
+    # ── Belief / exact enrichment (the Type A–D fill modes) ──────────────
+    # fill_blanks walks BOTH state_before_actions and state_after_actions of
+    # every turn and, per the vod type, attaches Pikalytics belief blocks +
+    # stats_estimate to distribution sides and computed exact stats to sheet
+    # sides.  Sheets are derived from the user's inject panel; fill_blanks
+    # ignores them on sides whose fill mode is "distribution", so passing
+    # them unconditionally is safe.  This also stamps battle["source_type"]
+    # with the canonical token and battle["belief_fill"] with the audit
+    # metadata (warnings, fill modes, pikalytics source).
+    opp_player = "p2" if our_player == "p1" else "p1"
+    battle = fill_blanks(
+        battle, vt,
+        belief=belief,
+        team_sheet=_known_entry_side_to_sheet(known_entry.get(our_player)) or None,
+        opp_team_sheet=_known_entry_side_to_sheet(known_entry.get(opp_player)) or None,
+        our_side=our_player,
+    )
+
+    # Action codec (optional — state_encoder needs numpy).  Annotates every
+    # transition with action_index per our_actions entry + the decision-time
+    # action_mask.  Lazy for the same circular-import reason as belief_state.
+    try:
+        from state_encoder import annotate_transition_actions
+    except ImportError:
+        annotate_transition_actions = None
+
+    # Per-transition audit copy — drop the bulky per-turn details, keep the
+    # warnings (they are the "this export is underfilled" signal).
+    raw_fill = battle.get("belief_fill") or {}
+    fill_meta = {k: v for k, v in raw_fill.items()
+                 if k not in ("back_calc", "validation")}
+    if "validation" in raw_fill:
+        v = raw_fill["validation"] or {}
+        fill_meta["validation"] = {
+            "complete": bool(v.get("complete")),
+            "turns_with_missing": len(v.get("missing_by_turn") or {}),
+        }
+
     if players is None:
         players = ["p1", "p2"]
 
@@ -247,10 +463,13 @@ def replay_to_transitions(
             # state_before_actions and state_after_actions are now dicts keyed
             # by "p1"/"p2" — always index by perspective here so both sides
             # get the right our_active/opp_active/bench split.
-            state_before = turn["state_before_actions"][perspective]
+            state_before = copy.deepcopy(turn["state_before_actions"][perspective])
             after = copy.deepcopy(turn["state_after_actions"][perspective])
 
-            # ── Inject known stats into state_after for our side ──────────
+            # ── Inject known stats for our side — into BOTH snapshots ─────
+            # state_before_actions is the state the model decides from; only
+            # injecting into state_after (the old behaviour) starved the
+            # model's input of every user-supplied EV/nature/item.
             # Lookup uses BASE species (Bug 7/8): known_teams entries are
             # keyed by roster names ("Floette-Eternal"), while a mega'd
             # active's `species` is the mega forme ("Floette-Mega").
@@ -260,10 +479,16 @@ def replay_to_transitions(
                 base = mon_dict.get("base_species") or mon_dict.get("species", "")
                 return side_inj.get(base) or side_inj.get(mon_dict.get("species", "")) or {}
 
-            for active_dict in (after.get("our_active") or {}).values():
-                _inject_known_stats(active_dict, _lookup_inj(active_dict))
-            for bench_mon in (after.get("our_bench") or []):
-                _inject_known_stats(bench_mon, _lookup_inj(bench_mon))
+            # Mons fill_blanks already enriched as exact (sheet-complete inject
+            # cards) are skipped: they carry computed stats + normalised
+            # bucket spreads that a raw re-inject would clobber.
+            for snap in (state_before, after):
+                for active_dict in (snap.get("our_active") or {}).values():
+                    if not active_dict.get("exact"):
+                        _inject_known_stats(active_dict, _lookup_inj(active_dict))
+                for bench_mon in (snap.get("our_bench") or []):
+                    if not bench_mon.get("exact"):
+                        _inject_known_stats(bench_mon, _lookup_inj(bench_mon))
 
             # ── Reward computation ────────────────────────────────────────
             # hp_delta_{ours,theirs}: sum of hp_pct_delta events for each side.
@@ -344,6 +569,7 @@ def replay_to_transitions(
                 },
                 "damage_events": damage_events,
                 "actions":       actions,
+                "belief_fill":   fill_meta,
                 # Placeholders for future encoder output
                 "state_vector": None,
                 "action_mask":  None,
@@ -353,6 +579,8 @@ def replay_to_transitions(
                     "p2": battle["players"]["p2"],
                 },
             }
+            if annotate_transition_actions is not None:
+                annotate_transition_actions(t)
             transitions.append(t)
 
     return transitions
