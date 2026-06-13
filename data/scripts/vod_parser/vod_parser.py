@@ -68,6 +68,14 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    # Windows consoles often default to cp1252, which can't encode the → arrow
+    # below or accented species names (Flabébé, Nidoran♀, …).
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):
+        pass
+
     ap = argparse.ArgumentParser(description="Parse a Showdown replay HTML into Victory-Dance JSON.")
     ap.add_argument("replay_html", help="Path to the .html replay file")
     ap.add_argument("--out", default=None, help="Output JSON path (default: <replay>.json)")
