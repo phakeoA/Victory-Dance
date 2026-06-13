@@ -88,13 +88,28 @@ class ShowdownReplayParser:
         # ---- team sizes chosen at preview ----
         self.team_sizes: dict[str, int] = {}
 
+        # ---- Illusion (Zoroark) pre-scan state ----
+        # Index of the line currently being handled, so _handle_switch can look
+        # up whether *this* switch is really a disguised Zoroark (resolved by a
+        # later |replace|).  _illusion_truth maps switch-line index -> the TRUE
+        # DETAILS string ("Zoroark-Hisui, L50, M") revealed for it.
+        self._line_idx: int = -1
+        self._illusion_truth: dict[int, str] = {}
+        # Match-level flags surfaced in the output for downstream awareness.
+        self._illusion_seen: bool = False
+        self._transform_seen: bool = False
+
     # ------------------------------------------------------------------
     # Public entry point
     # ------------------------------------------------------------------
 
     def parse(self) -> dict:
         """Parse all lines and return the full structured output."""
-        for line in self.lines:
+        # First pass: resolve Illusion disguises so the main pass can build each
+        # disguised slot as the real Zoroark from its first frame on the field.
+        self._illusion_truth = self._prescan_illusions()
+        for idx, line in enumerate(self.lines):
+            self._line_idx = idx
             self._handle_line(line)
 
         # Flush any last in-progress turn
@@ -180,6 +195,15 @@ class ShowdownReplayParser:
         # ---- field events ----
         elif cmd == "switch" or cmd == "drag":
             self._handle_switch(parts)
+
+        elif cmd == "replace":
+            # |replace|p2a: Zoroark|Zoroark-Hisui, L50, M
+            # Illusion broke — the slot's true identity is revealed.
+            self._handle_replace(parts)
+
+        elif cmd == "-transform":
+            # |-transform|p1a: Ditto|p2b: Whimsicott|[from] ability: Imposter
+            self._handle_transform(parts)
 
         elif cmd == "detailschange":
             self._handle_mega(parts)
@@ -303,6 +327,15 @@ class ShowdownReplayParser:
         hp_str = parts[4] if len(parts) > 4 else "100/100"
 
         slot_key = self._slot_key_from_ident(ident)
+        # Illusion (Zoroark): if the pre-scan flagged this switch as a disguised
+        # Zoroark — resolved by a later |replace| at this slot — swap in the
+        # TRUE details now, so the slot gets its own (correct) seen_mons card,
+        # brought entry, and move history from its first frame on the field
+        # rather than poisoning the disguise species it was masquerading as.
+        disguise_truth = self._illusion_truth.get(self._line_idx)
+        if disguise_truth:
+            details = disguise_truth
+            self._illusion_seen = True
         nickname = ident.split(": ", 1)[1] if ": " in ident else ident
         species = details.split(",")[0].strip()
         player = slot_key[:2]
@@ -343,7 +376,12 @@ class ShowdownReplayParser:
         # silently accumulate across the whole match (and so they're already
         # clean if it later switches back in).
         if slot_key in self.active_slots and self.active_slots[slot_key] is not mon:
-            self.active_slots[slot_key].boosts = {}
+            outgoing = self.active_slots[slot_key]
+            outgoing.boosts = {}
+            # Transform reverts the instant the mon leaves the field, so the
+            # outgoing mon is its real self again on the bench.
+            outgoing.is_transformed = False
+            outgoing.transformed_into = None
 
         self.active_slots[slot_key] = mon
         # Incoming mon always starts with neutral boosts (covers |drag| too,
@@ -352,6 +390,12 @@ class ShowdownReplayParser:
         # A switch-in starts a fresh stay on the field — a Choice lock from a
         # previous stint no longer applies, so the working move set restarts.
         mon.stint_moves = []
+        # Transform reverts on switch-out: a mon coming back in is its real
+        # self again.  (An Imposter Ditto re-fires |-transform| immediately, so
+        # this is correctly re-set right after; a Transform-move user that left
+        # the field returns un-transformed.)
+        mon.is_transformed = False
+        mon.transformed_into = None
 
         # Track evolving known team (by BASE species — a mega'd mon switching
         # back in must not appear as a second team member)
@@ -364,6 +408,118 @@ class ShowdownReplayParser:
             "slot": slot_key,
             "species": species,
             "player": player,
+        })
+
+    def _prescan_illusions(self) -> dict[int, str]:
+        """Resolve Illusion disguises in a cheap first pass over the log.
+
+        Zoroark / Zoroark-Hisui (ability Illusion) enter the field disguised as
+        the last unfainted party member, so the |switch| line names the DISGUISE
+        species.  The mask only drops when a direct damaging hit breaks it, at
+        which point Showdown emits::
+
+            |replace|p2a: Zoroark|Zoroark-Hisui, L50, M
+            |-end|p2a: Zoroark|Illusion
+
+        We walk the log once, remembering the most recent switch-in line per
+        slot, and when a |replace| reveals the truth we tag that originating
+        switch with the real DETAILS string.  The main pass then constructs the
+        slot as the real species from its first frame, so the disguise species
+        is never credited with Zoroark's moves and Zoroark gets its own card.
+
+        Mapping to the *most recent* switch at the slot is what keeps a genuine
+        copy of the disguise species apart from the impostor: in a battle where
+        the real Charizard also switches in later, only the pre-reveal switch is
+        relabeled.
+
+        Returns ``{switch_line_index: true_details_string}``.  An Illusion that
+        is never broken (Zoroark faints disguised, or the log ends first) is
+        genuinely unobservable and is left as the disguise — the same blind
+        spot a human spectator has.
+        """
+        truth: dict[int, str] = {}
+        last_switch: dict[str, int] = {}
+        for idx, line in enumerate(self.lines):
+            if not line.startswith("|"):
+                continue
+            parts = line.split("|")
+            if len(parts) < 2:
+                continue
+            cmd = parts[1]
+            if cmd in ("switch", "drag"):
+                slot = self._slot_key_from_ident(parts[2] if len(parts) > 2 else "")
+                last_switch[slot] = idx
+            elif cmd == "replace":
+                slot = self._slot_key_from_ident(parts[2] if len(parts) > 2 else "")
+                details = parts[3] if len(parts) > 3 else ""
+                origin = last_switch.get(slot)
+                if origin is not None and details:
+                    truth[origin] = details
+        return truth
+
+    def _handle_replace(self, parts: list[str]) -> None:
+        """Handle |replace| — an Illusion has just been unmasked.
+
+        In the normal case the pre-scan already relabeled the originating switch
+        (see _prescan_illusions), so the slot is *already* tracked as the true
+        species and this only emits the reveal event.  The defensive relabel
+        below is a fallback for malformed logs where the pre-scan couldn't pair
+        the |replace| with a switch.
+        """
+        ident = parts[2] if len(parts) > 2 else ""
+        details = parts[3] if len(parts) > 3 else ""
+        slot_key = self._slot_key_from_ident(ident)
+        true_species = details.split(",")[0].strip() if details else None
+        self._illusion_seen = True
+
+        mon = self.active_slots.get(slot_key)
+        if mon is not None and true_species:
+            current_base = mon.base_species or mon.species
+            if current_base != true_species:
+                # Fallback: the pre-scan didn't catch this disguise.  Relabel
+                # the live slot forward so post-reveal state is at least correct.
+                player = slot_key[:2]
+                self.seen_mons.pop(f"{player}:{current_base}", None)
+                mon.species = true_species
+                mon.base_species = true_species
+                mon.nickname = ident.split(": ", 1)[1] if ": " in ident else mon.nickname
+                self.seen_mons[f"{player}:{true_species}"] = mon
+                if true_species not in self.known_team[player]:
+                    self.known_team[player].append(true_species)
+
+        self._current_turn_actions.append({
+            "event": "illusion_revealed",
+            "slot": slot_key,
+            "species": true_species,
+        })
+
+    def _handle_transform(self, parts: list[str]) -> None:
+        """Handle |-transform| — Ditto/Imposter or the Transform move.
+
+        Marks the slot as transformed and records the copied species.  From
+        here until it leaves the field, the mon's move usage is filtered out of
+        revealed_moves and the Choice-item constraint (see _handle_move): those
+        are the target's moves, not this mon's.
+        """
+        ident = parts[2] if len(parts) > 2 else ""
+        target_ident = parts[3] if len(parts) > 3 else ""
+        slot_key = self._slot_key_from_ident(ident)
+        into_species = self._species_from_ident(target_ident)
+        if into_species is None and target_ident:
+            into_species = target_ident.split(",")[0].strip() or None
+        self._transform_seen = True
+
+        if slot_key in self.active_slots:
+            mon = self.active_slots[slot_key]
+            mon.is_transformed = True
+            mon.transformed_into = into_species
+            mon.ever_transformed = True
+
+        self._current_turn_actions.append({
+            "event": "transform",
+            "slot": slot_key,
+            "species": self._species_from_ident(ident),
+            "into_species": into_species,
         })
 
     def _handle_mega(self, parts: list[str]) -> None:
@@ -492,20 +648,29 @@ class ShowdownReplayParser:
         # Record the move on the Pokémon's revealed_moves list
         if user_slot in self.active_slots:
             mon = self.active_slots[user_slot]
-            if move_name and move_name not in mon.revealed_moves:
-                mon.revealed_moves.append(move_name)
-            # Choice-item constraint (see PokemonSlot.can_have_choice_item):
-            # a [from]-tagged move was CALLED by another effect (Sleep Talk,
-            # Dancer, Instruct, locked-move continuations) — the player never
-            # selected it, so it proves nothing about a Choice lock.  Struggle
-            # is excluded too: a choice-locked mon Struggles once its locked
-            # move runs out of PP.
-            called = any(p.startswith("[from]") for p in parts[4:] if p)
-            if move_name and not called and move_name.lower() != "struggle":
-                if move_name not in mon.stint_moves:
-                    mon.stint_moves.append(move_name)
-                if len(mon.stint_moves) >= 2:
-                    mon.can_have_choice_item = False
+            # Transform (Ditto/Imposter, Mew, …): while transformed the mon is
+            # using the COPIED foe's moves with its borrowed stats.  Those moves
+            # belong to the target, not this mon, so they must not enter its
+            # revealed_moves nor count toward the Choice-item constraint.  The
+            # Transform move itself is recorded normally — it fires BEFORE the
+            # |-transform| line that flips this flag.
+            if mon.is_transformed:
+                pass
+            else:
+                if move_name and move_name not in mon.revealed_moves:
+                    mon.revealed_moves.append(move_name)
+                # Choice-item constraint (see PokemonSlot.can_have_choice_item):
+                # a [from]-tagged move was CALLED by another effect (Sleep Talk,
+                # Dancer, Instruct, locked-move continuations) — the player never
+                # selected it, so it proves nothing about a Choice lock.  Struggle
+                # is excluded too: a choice-locked mon Struggles once its locked
+                # move runs out of PP.
+                called = any(p.startswith("[from]") for p in parts[4:] if p)
+                if move_name and not called and move_name.lower() != "struggle":
+                    if move_name not in mon.stint_moves:
+                        mon.stint_moves.append(move_name)
+                    if len(mon.stint_moves) >= 2:
+                        mon.can_have_choice_item = False
 
         is_protect = move_name.lower() in {
             "protect", "detect", "wide guard", "quick guard",
@@ -824,6 +989,8 @@ class ShowdownReplayParser:
                     "known_item": None,
                     "known_tera_type": None,
                     "is_terastallized": False,
+                    "is_transformed": False,
+                    "transformed_into": None,
                     "seen": False,
                 })
 
@@ -938,6 +1105,11 @@ class ShowdownReplayParser:
                 # Choice-item constraint: False = used 2+ different moves in
                 # one stay on the field → cannot hold Choice Scarf/Band/Specs.
                 "can_have_choice_item": mon.can_have_choice_item,
+                # Transform/Imposter: True if this mon transformed at any point
+                # this match (latched — survives the switch-out revert).  Its
+                # revealed_moves are deliberately empty (copied moves filtered
+                # out) so belief fill falls back to its own usage distribution.
+                "is_transformed": mon.ever_transformed,
                 # Pokedex-derived dropdown data for the inject panel.
                 "possible_abilities": dex.abilities_for(base) if dex else [],
                 "mega_formes": dex.mega_formes_for(base) if dex else [],
@@ -975,6 +1147,11 @@ class ShowdownReplayParser:
                 "our_side": "distribution",
                 "opp_side": "distribution",
             },
+            # Match-level edge-case flags (Zoroark Illusion / Ditto-Imposter
+            # Transform).  The parser handles both correctly; these surface that
+            # the replay exercised the handling, for auditing/filtering.
+            "contains_illusion": self._illusion_seen,
+            "contains_transform": self._transform_seen,
             # Everything the parser learned from the replay log — revealed moves,
             # consumed/revealed items, tera type.  Used by the inject panel to
             # pre-populate fields and show "confirmed" badges.

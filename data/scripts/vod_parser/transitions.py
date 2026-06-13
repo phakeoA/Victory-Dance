@@ -172,6 +172,7 @@ def _retrofit_own_side_knowledge(battle: dict) -> None:
                         "known_ability": None, "pre_mega_ability": None,
                         "mega_ability": None,
                         "can_have_choice_item": info.get("can_have_choice_item", True),
+                        "is_transformed": False, "transformed_into": None,
                         "ev_spread": None, "iv_spread": None, "nature": None,
                         "seen": False,
                     })

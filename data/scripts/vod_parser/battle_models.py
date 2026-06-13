@@ -57,6 +57,15 @@ class PokemonSlot:
     # the ORIGINAL item).
     can_have_choice_item: bool = True
     stint_moves: list = field(default_factory=list)
+    # Transform / Imposter (Ditto, Mew, …): once a mon Transforms it borrows
+    # the target's species/moves/stats for the rest of its stay on the field.
+    # Moves used while transformed are the COPIED foe's moves and reveal
+    # nothing about this mon's real set — `is_transformed` gates them out of
+    # revealed_moves and the Choice-item constraint.  Reverts on switch-out.
+    is_transformed: bool = False             # CURRENT state — reverts on switch-out
+    transformed_into: Optional[str] = None   # species currently copied, if any
+    ever_transformed: bool = False           # latched: transformed at any point
+    #   (match-level signal for revealed_info — never reverts)
 
     def key(self) -> str:
         return f"{self.player}{self.slot}"
@@ -81,6 +90,8 @@ class PokemonSlot:
             "pre_mega_ability": self.pre_mega_ability,
             "mega_ability": self.mega_ability,
             "can_have_choice_item": self.can_have_choice_item,
+            "is_transformed": self.is_transformed,
+            "transformed_into": self.transformed_into,
             # EVs/IVs unknown for Type B — left as distribution placeholder
             "ev_spread": None,
             "iv_spread": None,
