@@ -306,6 +306,63 @@ function loadJsonFile(file) {
   reader.readAsText(file);
 }
 
+/**
+ * Import a Showdown team paste and fill the inject panel for YOUR side (Type A).
+ * Auto-detects which side is yours by matching the team against each side's
+ * teampreview roster, writes exact stats into known_team_overrides, and marks
+ * the battle as an own-VOD.  Requires a replay to be loaded first (the inject
+ * cards are keyed by that replay's roster).
+ */
+async function importTeamFile(file) {
+  if (!activeBattle) { alert('Load a replay first, then import your team.'); return; }
+
+  let text;
+  try { text = await file.text(); }
+  catch (err) { alert('Could not read team file: ' + err.message); return; }
+
+  const mons = parseShowdownTeam(text);
+  if (!mons.length) { alert('No Pokémon found in that team file.'); return; }
+
+  const b = activeBattle;
+
+  // ── Auto-detect your side by roster overlap ──────────────────────────────
+  const wanted = new Set(mons.map(m => dexKey(teamBaseSpecies(m.species))));
+  let side = b.players.our_side, best = -1;
+  for (const pid of ['p1', 'p2']) {
+    const overlap = (b.players[pid]?.roster || [])
+      .filter(r => wanted.has(dexKey(r))).length;
+    if (overlap > best) { best = overlap; side = pid; }
+  }
+  if (best > 0) b.players.our_side = side;
+
+  // ── Fill inject cards for that side ───────────────────────────────────────
+  if (!b.known_team_overrides) b.known_team_overrides = {};
+  const roster = b.players[side]?.roster || [];
+  let filled = 0;
+  for (const mon of mons) {
+    const base = teamBaseSpecies(mon.species);
+    // Anchor to an actual roster entry when present so the key matches a card.
+    const rosterSp = roster.find(r => dexKey(r) === dexKey(base)) || base;
+    const ev = {};
+    for (const s of STAT_NAMES) ev[s] = mon.evs[s] || 0;
+    b.known_team_overrides[`${side}:${rosterSp}`] = {
+      nature:    mon.nature  || null,
+      item:      mon.item    || null,
+      ability:   mon.ability || null,
+      ev_spread: ev,
+      moves:     [0, 1, 2, 3].map(i => mon.moves[i] || ''),
+    };
+    filled++;
+  }
+
+  // Importing your own team makes this a Type A own-VOD.
+  activeTab = 'inject';
+  setSourceType('own_vod');   // sets stats_quality + re-renders
+  const matched = roster.filter(r => wanted.has(dexKey(r))).length;
+  showNotif(`📋 Imported ${filled} Pokémon onto ${side.toUpperCase()} (your side) · `
+    + `${matched}/${roster.length || '?'} matched this VOD's roster`);
+}
+
 // ── Drag & drop ──────────────────────────────────────────
 function setupDragDrop() {
   const main = document.getElementById('main');
@@ -329,6 +386,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const replayFileIn = document.getElementById('replay-file');
   const impFileIn    = document.getElementById('imp-file');
+  const teamFileIn   = document.getElementById('team-file');
 
   // Wire header buttons by their text content
   document.querySelectorAll('#hdr button').forEach(btn => {
@@ -372,6 +430,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   replayFileIn.addEventListener('change', e => { if (e.target.files[0]) loadReplayFile(e.target.files[0]); e.target.value = ''; });
   impFileIn.addEventListener('change',    e => { if (e.target.files[0]) loadJsonFile(e.target.files[0]);   e.target.value = ''; });
+  teamFileIn.addEventListener('change',   e => { if (e.target.files[0]) importTeamFile(e.target.files[0]); e.target.value = ''; });
+
+  // "📋 Import team" — wired by id (text-match loop above skips it)
+  document.getElementById('import-team-btn')?.addEventListener('click', () => teamFileIn.click());
 
   // Sidebar "New battle" button delegates to the header button
   document.querySelector('#side .btn')?.addEventListener('click', () => {

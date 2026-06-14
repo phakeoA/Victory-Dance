@@ -510,3 +510,87 @@ function parseShowdownLog(rawLog, ourPlayer = 'p1') {
     turns,
   };
 }
+
+// ═══════════════════════════════════════════════════════════
+// Showdown team-paste parser (Type A "Import team")
+// Mirrors vod_parser/team_sheet.py (parse_showdown_team) so the UI's import
+// button and the headless bulk exporter produce identical inject data.
+// ═══════════════════════════════════════════════════════════
+
+const _TEAM_STAT_LABELS = { hp: 'hp', atk: 'atk', def: 'def', spa: 'spa', spd: 'spd', spe: 'spe' };
+const _NATURE_SET = new Set(NATURES.map(n => n.toLowerCase()));
+
+/** Parse a full team paste into an array of per-Pokémon objects. */
+function parseShowdownTeam(text) {
+  const mons = [];
+  // Normalise CRLF/CR → LF first: a browser File.text() keeps Windows \r\n,
+  // and the blank-line block separator below only matches \n…\n — without this
+  // a CRLF paste collapses into a SINGLE mon.
+  const normalized = (text || '').replace(/\r\n?/g, '\n');
+  for (const block of normalized.trim().split(/\n[ \t]*\n/)) {
+    const lines = block.split('\n').map(l => l.replace(/\s+$/, '')).filter(l => l.trim());
+    if (!lines.length) continue;
+    const mon = _parseTeamMon(lines);
+    if (mon && mon.species) mons.push(mon);
+  }
+  return mons;
+}
+
+/** Split the first line → {species, nickname, item, gender}. */
+function _parseTeamFirstLine(line) {
+  let item = null, namepart = line.trim();
+  const at = namepart.lastIndexOf(' @ ');
+  if (at !== -1) { item = namepart.slice(at + 3).trim() || null; namepart = namepart.slice(0, at).trim(); }
+  let gender = null;
+  const gm = namepart.match(/\(([MFN])\)\s*$/);
+  if (gm) { gender = gm[1]; namepart = namepart.slice(0, gm.index).trim(); }
+  let species = namepart, nickname = null;
+  const nm = namepart.match(/^(.*?)\s*\(([^)]+)\)\s*$/);
+  if (nm) { nickname = nm[1].trim() || null; species = nm[2].trim(); }
+  return { species, nickname, item, gender };
+}
+
+/** Parse "EVs: 2 HP / 32 Atk / 32 Spe" → {hp:2, atk:32, spe:32}. */
+function _parseTeamStatLine(line) {
+  const out = {};
+  const body = line.includes(':') ? line.slice(line.indexOf(':') + 1) : line;
+  for (const part of body.split('/')) {
+    const m = part.match(/\s*(\d+)\s+([A-Za-z]+)/);
+    if (!m) continue;
+    const key = _TEAM_STAT_LABELS[m[2].toLowerCase()];
+    if (key) out[key] = parseInt(m[1], 10);
+  }
+  return out;
+}
+
+function _parseTeamMon(lines) {
+  const first = _parseTeamFirstLine(lines[0]);
+  const mon = {
+    species: first.species, nickname: first.nickname, gender: first.gender,
+    item: first.item, ability: null, level: 50, nature: null,
+    evs: {}, ivs: {}, moves: [], teraType: null,
+  };
+  for (const raw of lines.slice(1)) {
+    const line = raw.trim(), low = line.toLowerCase();
+    if (low.startsWith('ability:'))        mon.ability = line.slice(line.indexOf(':') + 1).trim() || null;
+    else if (low.startsWith('level:'))     { const n = parseInt(line.slice(line.indexOf(':') + 1).trim(), 10); if (!isNaN(n)) mon.level = n; }
+    else if (low.startsWith('tera type:')) mon.teraType = line.slice(line.indexOf(':') + 1).trim() || null;
+    else if (low.startsWith('evs:'))       mon.evs = _parseTeamStatLine(line);
+    else if (low.startsWith('ivs:'))       mon.ivs = _parseTeamStatLine(line);
+    else if (line.startsWith('-'))         { const mv = line.slice(1).trim(); if (mv && mon.moves.length < 4) mon.moves.push(mv); }
+    else if (low.endsWith('nature') && _NATURE_SET.has(line.split(/\s+/)[0].toLowerCase()))
+      mon.nature = line.replace(/\s+Nature$/i, '').trim();
+    // Shiny:/Happiness:/Gigantamax: etc. are ignored.
+  }
+  return mon;
+}
+
+/** Resolve a paste species to its replay-roster name (mega forme → base). */
+function teamBaseSpecies(species) {
+  if (isMegaSpecies(species)) {
+    const e = dexEntry(species);
+    if (e && e.baseSpecies) return e.baseSpecies;
+    return species.replace(/-Mega(-[XY])?$/, '');
+  }
+  return species;
+}

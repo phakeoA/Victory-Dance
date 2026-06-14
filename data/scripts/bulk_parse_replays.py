@@ -36,9 +36,24 @@ Example (the Reg-MA Type B set)::
 Both paths are chosen by you and are not hard-coded — point --input at whatever
 regulation/folder you are processing, and --output wherever you want the JSONL.
 
+Type A (own VODs)
+-----------------
+Pass ``--team <paste file>`` to inject YOUR exact stats.  Each replay's side is
+auto-detected by matching the team against the teampreview rosters, so one
+command does a whole per-team folder::
+
+    python bulk_parse_replays.py \
+        --team   teams/M-A/Kronomono1 \
+        --input  data/vods/Type_A/gen9champions2026regma/Kronomono1 \
+        --output data/vods/Prepared_training_data/Regulation_MA/Jsonl_TypeA_Kronomono1
+
+In GUI mode (no args) a file picker offers the team after the replays folder;
+Cancel it to fall back to Type B.
+
 Options
 -------
-    --type / -t      VOD type (default "B").  B → both perspectives.
+    --type / -t      VOD type (default "B", or "own_vod" when --team is given).
+    --team           Showdown team-paste file for your side (Type A).
     --pikalytics / -p  Pikalytics belief JSON for opponent enrichment
                        (default: data/pikalytics_regma.json).  If absent the
                        run still succeeds; distribution blocks are just empty.
@@ -56,6 +71,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -69,6 +85,10 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 from vod_parser.transitions import replay_to_transitions   # noqa: E402
+from vod_parser.replay_parser import extract_log_from_html  # noqa: E402
+from vod_parser.team_sheet import (                          # noqa: E402
+    parse_showdown_team, team_to_known_side, detect_our_side,
+)
 
 try:
     from belief_state import BeliefState, VodType            # noqa: E402
@@ -77,6 +97,19 @@ except ImportError:                                          # pragma: no cover
     VodType = None            # type: ignore
 
 _DEFAULT_PIKALYTICS = _PROJECT_ROOT / "data" / "pikalytics_regma.json"
+
+
+def _rosters_from_html(html_text: str) -> dict:
+    """Pull the teampreview rosters ({"p1": [...], "p2": [...]}) from a replay.
+
+    Used by the Type A --team flow to auto-detect which side the player is on
+    by matching the team paste against each side's revealed six.
+    """
+    log = extract_log_from_html(html_text)
+    rosters = {"p1": [], "p2": []}
+    for m in re.finditer(r"^\|poke\|(p[12])\|([^,|\n]+)", log, re.MULTILINE):
+        rosters[m.group(1)].append(m.group(2).strip())
+    return rosters
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -159,6 +192,18 @@ def _pick_directory(title: str, initial: Path | None = None) -> Path | None:
     return Path(path).resolve() if path else None
 
 
+def _pick_file(title: str, initial: Path | None = None) -> Path | None:
+    """Open a file-browser dialog; return the chosen Path, or None if cancelled."""
+    from tkinter import filedialog
+    root = _get_root()
+    root.update()
+    path = filedialog.askopenfilename(
+        title=title,
+        initialdir=str(initial) if initial else None,
+    )
+    return Path(path).resolve() if path else None
+
+
 def _gui_done(message: str) -> None:
     """Pop a completion summary so GUI users get visual confirmation."""
     try:
@@ -202,7 +247,13 @@ def main() -> int:
                     help="Directory to write <replay-stem>.jsonl files into. "
                          "Omit to pick it from a folder dialog (VS Code Run).")
     ap.add_argument("--type", "-t", default="B",
-                    help='VOD type / source_type (e.g. "B", "ranked_player_vod").')
+                    help='VOD type / source_type (e.g. "B", "ranked_player_vod"). '
+                         'With --team this defaults to Type A ("own_vod").')
+    ap.add_argument("--team", default=None,
+                    help="Showdown team-paste file for YOUR side (Type A). Each "
+                         "replay's side is auto-detected by matching this team "
+                         "against the teampreview rosters. Omit for Type B. In "
+                         "GUI mode a file picker offers this (Cancel = Type B).")
     ap.add_argument("--pikalytics", "-p", default=str(_DEFAULT_PIKALYTICS),
                     help="Pikalytics belief JSON for opponent enrichment.")
     ap.add_argument("--recursive", "-r", action="store_true",
@@ -233,6 +284,18 @@ def main() -> int:
             print("Cancelled — no replays folder selected.")
             _gui_close()
             return 1
+
+    # Team paste (Type A): from --team, or an optional GUI picker after the
+    # replays folder.  Cancelling the picker means "Type B, no team".
+    team_path = None
+    if args.team:
+        team_path = Path(args.team).resolve()
+    elif gui_mode:
+        print("Opening file picker: choose your TEAM file (Cancel = Type B / no team) ...")
+        team_path = _pick_file(
+            "Select your team paste file for Type A  (Cancel = Type B / no team)",
+            initial=input_dir,
+        )
 
     if args.output:
         output_dir = Path(args.output).resolve()
@@ -269,14 +332,42 @@ def main() -> int:
 
     output_dir.mkdir(parents=True, exist_ok=True)
     belief = _load_belief(Path(args.pikalytics) if args.pikalytics else None)
-    players = _players_for(args.type, args.players)
 
-    print(f"[plan] {len(replays)} replay(s) | type={args.type} | "
-          f"perspectives={players}")
+    # ── Type A team injection setup ──────────────────────────────────────────
+    team_mode = team_path is not None
+    known_side = None
+    team_base: set = set()
+    source_type = args.type
+    if team_mode:
+        if not team_path.is_file():
+            print(f"ERROR: team file not found: {team_path}", file=sys.stderr)
+            _gui_close()
+            return 2
+        mons = parse_showdown_team(team_path.read_text(encoding="utf-8"))
+        if not mons:
+            print(f"ERROR: parsed 0 Pokémon from team file: {team_path}", file=sys.stderr)
+            _gui_close()
+            return 2
+        known_side = team_to_known_side(mons)
+        team_base = set(known_side)
+        # Importing your own team makes this a Type A own-VOD; only fill in for
+        # the default — an explicit --type the user passed still wins.
+        if args.type == "B":
+            source_type = "own_vod"
+
+    players = None if team_mode else _players_for(source_type, args.players)
+
+    print(f"[plan] {len(replays)} replay(s) | type={source_type}"
+          f"{' (Type A — team injected, side auto-detected)' if team_mode else ''}")
+    if team_mode:
+        print(f"[plan] team: {team_path.name}  "
+              f"({len(team_base)} mons: {', '.join(sorted(team_base))})")
+    else:
+        print(f"[plan] perspectives={players}")
     print(f"[plan] in : {input_dir}")
     print(f"[plan] out: {output_dir}\n")
 
-    n_written = n_skipped = n_empty = 0
+    n_written = n_skipped = n_empty = n_no_side = 0
     total_transitions = 0
     errors: list[tuple[str, str]] = []
     t0 = time.time()
@@ -288,10 +379,27 @@ def main() -> int:
             print(f"[{idx}/{len(replays)}] skip (exists)  {html.name}")
             continue
 
+        side = None
         try:
-            transitions = replay_to_transitions(
-                html, belief=belief, players=players, source_type=args.type,
-            )
+            if team_mode:
+                # Auto-detect which side is the player by matching the team
+                # paste against each side's teampreview roster.
+                rosters = _rosters_from_html(html.read_text(encoding="utf-8"))
+                side = detect_our_side(rosters, team_base)
+                if side is None:
+                    n_no_side += 1
+                    print(f"[{idx}/{len(replays)}] no team match — skipped  {html.name}")
+                    continue
+                known_teams = {"team": {side: known_side,
+                                        "_meta": {"yourSide": side}}}
+                transitions = replay_to_transitions(
+                    html, belief=belief, players=[side],
+                    known_teams=known_teams, source_type=source_type,
+                )
+            else:
+                transitions = replay_to_transitions(
+                    html, belief=belief, players=players, source_type=source_type,
+                )
         except Exception as exc:  # one bad replay must not kill the batch
             errors.append((html.name, f"{type(exc).__name__}: {exc}"))
             print(f"[{idx}/{len(replays)}] ERROR        {html.name} — {exc}")
@@ -309,14 +417,16 @@ def main() -> int:
         )
         n_written += 1
         total_transitions += len(transitions)
-        print(f"[{idx}/{len(replays)}] ok  {len(transitions):>4} tr  → {out_path.name}")
+        tag = f" [you={side}]" if team_mode else ""
+        print(f"[{idx}/{len(replays)}] ok  {len(transitions):>4} tr{tag}  → {out_path.name}")
 
     dt = time.time() - t0
     summary = (
         f"Done in {dt:.1f}s\n"
         f"  written   : {n_written} file(s), {total_transitions} transitions\n"
         f"  skipped   : {n_skipped} (already existed; use --overwrite to redo)\n"
-        f"  empty     : {n_empty} (0 turns)\n"
+        + (f"  no team   : {n_no_side} (team matched neither roster)\n" if team_mode else "")
+        + f"  empty     : {n_empty} (0 turns)\n"
         f"  errored   : {len(errors)}"
     )
     print("\n" + "─" * 60)

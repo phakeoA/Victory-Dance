@@ -18,6 +18,7 @@
     <div class="sp"></div>
     <button class="btn">+ New battle</button>
     <button class="btn">📂 Load replay</button>
+    <button class="btn" id="import-team-btn" title="Import your team (Showdown paste) to fill exact stats for your side — Type A">📋 Import team</button>
     <button class="btn">Import JSON</button>
     <button class="btn" id="run-parser-btn">🔍 Run Parser</button>
     <button class="btn suc">⬇ Export Training Data</button>
@@ -66,6 +67,8 @@
   <!-- ── Hidden file inputs ── -->
   <input accept=".html" id="replay-file" style="display:none" type="file" />
   <input accept=".json" id="imp-file"    style="display:none" type="file" />
+  <!-- no accept filter: Showdown team exports are often extension-less files -->
+  <input id="team-file" style="display:none" type="file" />
 
   <!--
     Script load order matters — each file depends on the ones above it:
