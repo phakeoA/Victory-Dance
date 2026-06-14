@@ -44,6 +44,8 @@ function parseShowdownLog(rawLog, ourPlayer = 'p1') {
   let stateBefore = null;
   let lastMoveAction = null;
   let executionIndex = 0;
+  // Edge-case flags surfaced for parity with replay_parser.py.
+  let containsIllusion = false, containsTransform = false;
 
   // ── Internal helpers ────────────────────────────────────
   function slotKeyFromIdent(ident) {
@@ -180,8 +182,30 @@ function parseShowdownLog(rawLog, ourPlayer = 'p1') {
     }
   }
 
+  // ── Illusion (Zoroark) pre-scan ──────────────────────────
+  // Map each disguised |switch| line index → the TRUE details string revealed
+  // by a later |replace| at that slot, so the main pass builds the slot as the
+  // real species (Zoroark-Hisui) from its first frame instead of crediting the
+  // disguise. Maps to the MOST RECENT switch at the slot so a genuine copy of
+  // the disguise species stays separate. Mirrors replay_parser._prescan_illusions.
+  const illusionTruth = {};
+  {
+    const lastSwitch = {};
+    lines.forEach((ln, idx) => {
+      if (!ln.startsWith('|')) return;
+      const p = ln.split('|'), c = p[1];
+      if (c === 'switch' || c === 'drag') {
+        lastSwitch[slotKeyFromIdent(p[2] || '')] = idx;
+      } else if (c === 'replace') {
+        const slot = slotKeyFromIdent(p[2] || ''), det = p[3] || '';
+        if (lastSwitch[slot] !== undefined && det) illusionTruth[lastSwitch[slot]] = det;
+      }
+    });
+  }
+
   // ── Main parse loop ──────────────────────────────────────
-  for (const line of lines) {
+  for (let _i = 0; _i < lines.length; _i++) {
+    const line = lines[_i];
     if (!line.startsWith('|')) continue;
     const parts = line.split('|');
     const cmd = parts[1];
@@ -228,8 +252,14 @@ function parseShowdownLog(rawLog, ourPlayer = 'p1') {
       stateBefore = snapshotState();
 
     } else if (cmd === 'switch' || cmd === 'drag') {
-      const ident   = parts[2], details = parts[3] || '', hpStr = parts[4] || '100/100';
+      const ident   = parts[2];
+      let details   = parts[3] || '';
+      // Illusion: if the pre-scan flagged this switch as a disguised Zoroark,
+      // swap in the TRUE details so the slot is tracked as the real species.
+      if (illusionTruth[_i]) { details = illusionTruth[_i]; containsIllusion = true; }
+      const hpStr   = parts[4] || '100/100';
       const slotKey = slotKeyFromIdent(ident);
+      const outgoing = activeSlots[slotKey];   // transform reverts on switch-out
       const nickname = ident.includes(': ') ? ident.split(': ')[1] : ident;
       const species = details.split(',')[0].trim();
       const pid = slotKey.slice(0, 2);
@@ -260,6 +290,7 @@ function parseShowdownLog(rawLog, ourPlayer = 'p1') {
           is_terastallized: false,
           known_ability: null, pre_mega_ability: null, mega_ability: null,
           can_have_choice_item: true,
+          is_transformed: false, transformed_into: null, ever_transformed: false,
         };
         seenMons[seenKey] = mon;
         activeSlots[slotKey] = mon;
@@ -267,9 +298,48 @@ function parseShowdownLog(rawLog, ourPlayer = 'p1') {
       // A switch-in starts a fresh stay on the field — a Choice lock from a
       // previous stint no longer applies.
       stintMoves.set(mon, new Set());
+      // Transform reverts the instant a mon leaves the field; the incoming mon
+      // is its real self again (an Imposter Ditto re-fires |-transform| right
+      // after, re-setting these).
+      if (outgoing && outgoing !== mon) { outgoing.is_transformed = false; outgoing.transformed_into = null; }
+      mon.is_transformed = false; mon.transformed_into = null;
       const knownSpecies = mon.base_species || species;
       if (!knownTeam[pid].includes(knownSpecies)) knownTeam[pid].push(knownSpecies);
       turnActions.push({ event: 'switch', slot: slotKey, species, player: pid });
+
+    } else if (cmd === 'replace') {
+      // |replace|p2a: Zoroark|Zoroark-Hisui, L50, M — Illusion unmasked.
+      // The pre-scan normally relabeled the originating switch already; the
+      // defensive relabel below covers a malformed log the pre-scan missed.
+      const ident = parts[2] || '', details = parts[3] || '';
+      const slotKey = slotKeyFromIdent(ident);
+      const trueSpecies = details ? details.split(',')[0].trim() : null;
+      containsIllusion = true;
+      const mon = activeSlots[slotKey];
+      if (mon && trueSpecies) {
+        const currentBase = mon.base_species || mon.species;
+        if (currentBase !== trueSpecies) {
+          const pid = slotKey.slice(0, 2);
+          delete seenMons[`${pid}:${currentBase}`];
+          mon.species = trueSpecies;
+          mon.base_species = trueSpecies;
+          mon.nickname = ident.includes(': ') ? ident.split(': ')[1] : mon.nickname;
+          seenMons[`${pid}:${trueSpecies}`] = mon;
+          if (!knownTeam[pid].includes(trueSpecies)) knownTeam[pid].push(trueSpecies);
+        }
+      }
+      turnActions.push({ event: 'illusion_revealed', slot: slotKey, species: trueSpecies });
+
+    } else if (cmd === '-transform') {
+      // |-transform|p1a: Ditto|p2b: Whimsicott|[from] ability: Imposter
+      const ident = parts[2] || '', targetIdent = parts[3] || '';
+      const slotKey = slotKeyFromIdent(ident);
+      let intoSpecies = speciesFromIdent(targetIdent);
+      if (!intoSpecies && targetIdent) intoSpecies = targetIdent.split(',')[0].trim() || null;
+      containsTransform = true;
+      const mon = activeSlots[slotKey];
+      if (mon) { mon.is_transformed = true; mon.transformed_into = intoSpecies; mon.ever_transformed = true; }
+      turnActions.push({ event: 'transform', slot: slotKey, species: speciesFromIdent(ident), into_species: intoSpecies });
 
     } else if (cmd === 'detailschange') {
       // Fires for megas AND non-mega forme changes (Palafin-Hero, …) —
@@ -329,7 +399,10 @@ function parseShowdownLog(rawLog, ourPlayer = 'p1') {
       ].includes(moveName.toLowerCase());
 
       const mover = activeSlots[userSlot];
-      if (mover && moveName && !mover.revealed_moves.includes(moveName))
+      // Transform (Ditto/Imposter): moves used while transformed are the COPIED
+      // foe's moves — they reveal nothing about this mon's real set or item, so
+      // they must not enter revealed_moves or the Choice-item constraint.
+      if (mover && !mover.is_transformed && moveName && !mover.revealed_moves.includes(moveName))
         mover.revealed_moves.push(moveName);
 
       // Choice-item constraint (mirrors replay_parser.py): a [from]-tagged
@@ -338,7 +411,7 @@ function parseShowdownLog(rawLog, ourPlayer = 'p1') {
       // is excluded too: a choice-locked mon Struggles once its locked move
       // runs out of PP.
       const wasCalled = parts.slice(4).some(p => (p || '').startsWith('[from]'));
-      if (mover && moveName && !wasCalled && moveName.toLowerCase() !== 'struggle') {
+      if (mover && !mover.is_transformed && moveName && !wasCalled && moveName.toLowerCase() !== 'struggle') {
         const stint = stintMoves.get(mover) || new Set();
         stint.add(moveName);
         stintMoves.set(mover, stint);
@@ -487,6 +560,10 @@ function parseShowdownLog(rawLog, ourPlayer = 'p1') {
       // False = used 2+ different moves in one stay on the field → cannot
       // hold Choice Scarf/Band/Specs; the belief fill drops those items.
       can_have_choice_item: mon.can_have_choice_item !== false,
+      // Transform/Imposter: latched True if this mon ever transformed; its
+      // revealed_moves stay empty (copied moves filtered) so belief falls back
+      // to the mon's own usage distribution.
+      is_transformed:     mon.ever_transformed || false,
       possible_abilities: dexAbilities(base),
       mega_formes:        dexMegaFormes(base),
     };
@@ -505,6 +582,8 @@ function parseShowdownLog(rawLog, ourPlayer = 'p1') {
     },
     winner,
     stats_quality: { our_side: 'distribution', opp_side: 'distribution' },
+    contains_illusion: containsIllusion,
+    contains_transform: containsTransform,
     known_team_overrides: {},
     revealed_info,
     turns,

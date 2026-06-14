@@ -85,7 +85,9 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 from vod_parser.transitions import replay_to_transitions   # noqa: E402
-from vod_parser.replay_parser import extract_log_from_html  # noqa: E402
+from vod_parser.replay_parser import (                      # noqa: E402
+    extract_log_from_html, extract_replay_id_from_html,
+)
 from vod_parser.team_sheet import (                          # noqa: E402
     parse_showdown_team, team_to_known_side, detect_our_side,
 )
@@ -373,10 +375,27 @@ def main() -> int:
     t0 = time.time()
 
     for idx, html in enumerate(replays, 1):
-        out_path = output_dir / f"{html.stem}.jsonl"
-        if out_path.exists() and not args.overwrite:
+        # Read the replay once: needed for the output filename and, in team
+        # mode, the rosters used to auto-detect the player's side.
+        try:
+            html_text = html.read_text(encoding="utf-8")
+        except OSError as exc:
+            errors.append((html.name, f"read error: {exc}"))
+            print(f"[{idx}/{len(replays)}] ERROR (read)  {html.name} — {exc}")
+            continue
+        # Name by replay_id (the canonical Showdown id, matching the UI's
+        # {replay_id}.jsonl) so bulk output dedups against manual exports of the
+        # same replay; fall back to the source filename when the id is absent.
+        rid = extract_replay_id_from_html(html_text) or html.stem
+        out_path = output_dir / f"{rid}.jsonl"
+        # Skip if already exported under EITHER the replay_id name (current
+        # convention) or the legacy source-filename (stem) name — so re-running
+        # over a folder of older stem-named exports skips them instead of
+        # writing duplicate-content files under the new naming.
+        legacy_path = output_dir / f"{html.stem}.jsonl"
+        if not args.overwrite and (out_path.exists() or legacy_path.exists()):
             n_skipped += 1
-            print(f"[{idx}/{len(replays)}] skip (exists)  {html.name}")
+            print(f"[{idx}/{len(replays)}] skip (exists)  {rid}")
             continue
 
         side = None
@@ -384,7 +403,7 @@ def main() -> int:
             if team_mode:
                 # Auto-detect which side is the player by matching the team
                 # paste against each side's teampreview roster.
-                rosters = _rosters_from_html(html.read_text(encoding="utf-8"))
+                rosters = _rosters_from_html(html_text)
                 side = detect_our_side(rosters, team_base)
                 if side is None:
                     n_no_side += 1
