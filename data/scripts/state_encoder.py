@@ -858,20 +858,41 @@ def _move_target_kind(move_name: Optional[str]) -> Optional[str]:
     return (data or {}).get("target")
 
 
-def _target_bucket(move_name: Optional[str], target_slot: Optional[str]) -> int:
-    """Resolve a logged move action to its target bucket (0/1/2)."""
+def _target_bucket(
+    move_name: Optional[str],
+    target_slot: Optional[str],
+    opp_present: Optional[dict] = None,
+) -> int:
+    """Resolve a logged move action to its target bucket (0/1/2).
+
+    ``opp_present`` ({0: bool, 1: bool} for opp_a / opp_b presence at decision
+    time) lets a single-target move whose target Showdown did not log — it omits
+    the target when auto-targeting the ONLY legal foe — resolve to the foe that
+    is actually on the field, instead of defaulting to a possibly-empty opp_a
+    slot.  Without this the index disagrees with build_action_mask (which marks
+    only the present foe legal), producing an action that is illegal under its
+    own mask.  Passing None preserves the legacy "trust the logged slot" path.
+    """
     kind = _move_target_kind(move_name)
     if kind in _ALLY_KINDS:
         return 2
     if kind in _CHOOSABLE_SINGLE or kind is None:
         # kind None = move missing from moves.json → trust the logged slot
-        if target_slot == "opp_a":
+        if target_slot == "opp_a" and (opp_present is None or opp_present.get(0)):
             return 0
-        if target_slot == "opp_b":
+        if target_slot == "opp_b" and (opp_present is None or opp_present.get(1)):
             return 1
         if target_slot in ("our_a", "our_b"):
             return 2
-        return 0          # no target logged → canonical bucket
+        # No usable foe target logged (auto-targeted), or the logged foe slot is
+        # empty at decision time (redirect) → point at whichever single foe is
+        # actually present, matching Showdown auto-targeting and the mask.
+        if opp_present is not None:
+            if opp_present.get(0) and not opp_present.get(1):
+                return 0
+            if opp_present.get(1) and not opp_present.get(0):
+                return 1
+        return 0          # ambiguous (both/neither present) → canonical bucket
     return 0              # non-choosable (self / spread / field / …)
 
 
@@ -919,9 +940,13 @@ def action_to_index(
         want = norm_species(action.get("move") or "")
         if not want:
             return None
+        opp_active = (snap or {}).get("opp_active") or {}
+        opp_present = {0: "opp_a" in opp_active, 1: "opp_b" in opp_active}
         for m_idx, (name, _conf) in enumerate(move_slots_for_mon(mon)):
             if norm_species(name) == want:
-                return m_idx * 3 + _target_bucket(name, action.get("target_slot"))
+                return m_idx * 3 + _target_bucket(
+                    name, action.get("target_slot"), opp_present
+                )
         return None
     return None
 
@@ -998,12 +1023,25 @@ def annotate_transition_actions(transition: dict) -> dict:
     Pure-python and deterministic given the stored snapshot (the belief
     padding that orders move slots is baked into the same JSON), so exports
     can carry it without the state_vector being encoded.
+
+    Invariant guaranteed here: every non-null ``action_index`` is legal under
+    the same transition's ``action_mask``.  If an action cannot be resolved to a
+    mask-legal index (an unresolved auto-target / redirect edge), it is stamped
+    None — never a wrong index — so a downstream masked policy can never be told
+    the answer was an illegal action.
     """
     snap = transition.get("state_before_actions") or {}
     our_active = snap.get("our_active") or {}
+    mask = build_action_mask(snap)
     for act in transition.get("our_actions") or []:
-        act["action_index"] = action_to_index(act, our_active.get(act.get("slot")), snap)
-    transition["action_mask"] = build_action_mask(snap)
+        slot = act.get("slot")
+        idx = action_to_index(act, our_active.get(slot), snap)
+        if idx is not None:
+            row = mask.get(slot) or []
+            if idx >= len(row) or row[idx] != 1:
+                idx = None  # not expressible in the turn-start frame → unencoded
+        act["action_index"] = idx
+    transition["action_mask"] = mask
     return transition
 
 

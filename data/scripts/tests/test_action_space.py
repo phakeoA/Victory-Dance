@@ -124,6 +124,64 @@ def test_move_outside_encoded_slots_is_none():
                             "target_slot": "opp_a"}, None, snap) is None
 
 
+# ── action_to_index: auto-target / redirect (illegal-under-mask fix) ────────
+
+def test_auto_target_no_logged_target_resolves_to_present_foe():
+    """Real-corpus bug: a single-target move logged with NO target_slot, used
+    when only opp_b is on the field, must resolve to opp_b (bucket 1) — and that
+    index must be legal under the mask (previously defaulted to opp_a/bucket 0,
+    which the mask marks illegal)."""
+    snap = _snap()
+    del snap["opp_active"]["opp_a"]                 # only opp_b present
+    snap["our_active"]["our_a"] = _mon(
+        "Kingambit", ("Sucker Punch", "Kowtow Cleave", "Protect", "Low Kick"))
+    mon = snap["our_active"]["our_a"]
+    idx = action_to_index(
+        {"slot": "our_a", "action": "move", "move": "Sucker Punch",
+         "target_slot": None}, mon, snap)
+    assert idx == 0 * 3 + 1                          # move slot 0 → opp_b bucket
+    assert build_action_mask(snap)["our_a"][idx] == 1
+
+
+def test_auto_target_only_opp_a_present_resolves_to_bucket_zero():
+    snap = _snap()
+    del snap["opp_active"]["opp_b"]                 # only opp_a present
+    snap["our_active"]["our_a"] = _mon("Kingambit", ("Sucker Punch",))
+    mon = snap["our_active"]["our_a"]
+    idx = action_to_index(
+        {"slot": "our_a", "action": "move", "move": "Sucker Punch",
+         "target_slot": None}, mon, snap)
+    assert idx == 0
+    assert build_action_mask(snap)["our_a"][idx] == 1
+
+
+def test_logged_foe_slot_empty_redirects_to_present_foe():
+    """A target logged at a slot that is empty at decision time (redirect)
+    resolves to the foe that is actually present."""
+    snap = _snap()
+    del snap["opp_active"]["opp_a"]                 # opp_a gone, opp_b present
+    snap["our_active"]["our_a"] = _mon("Kingambit", ("Sucker Punch",))
+    mon = snap["our_active"]["our_a"]
+    idx = action_to_index(
+        {"slot": "our_a", "action": "move", "move": "Sucker Punch",
+         "target_slot": "opp_a"}, mon, snap)
+    assert idx == 1
+    assert build_action_mask(snap)["our_a"][idx] == 1
+
+
+def test_both_foes_present_unlogged_target_stays_canonical():
+    """Ambiguous (both foes present, no target logged) keeps the canonical
+    bucket 0 — opp_a is present so the index is still legal."""
+    snap = _snap()                                 # opp_a and opp_b both present
+    snap["our_active"]["our_a"] = _mon("Kingambit", ("Sucker Punch",))
+    mon = snap["our_active"]["our_a"]
+    idx = action_to_index(
+        {"slot": "our_a", "action": "move", "move": "Sucker Punch",
+         "target_slot": None}, mon, snap)
+    assert idx == 0
+    assert build_action_mask(snap)["our_a"][idx] == 1
+
+
 # ── action_to_index: switches ──────────────────────────────────────────────
 
 def test_switch_indexes_living_bench_order():
@@ -250,6 +308,42 @@ def test_annotate_stamps_index_and_mask():
     assert t["our_actions"][1]["action_index"] == SWITCH_OFFSET + 1
     assert t["action_mask"]["our_a"][1] == 1
     assert t["action_mask"]["our_b"][SWITCH_OFFSET + 1] == 1
+
+
+def test_annotate_guarantees_index_legal_under_mask():
+    """Every non-null action_index annotate stamps must be legal under the same
+    transition's mask — the invariant the BC trainer relies on."""
+    snap = _snap()
+    del snap["opp_active"]["opp_a"]                 # only opp_b present
+    snap["our_active"]["our_a"] = _mon("Kingambit", ("Sucker Punch",))
+    t = {
+        "state_before_actions": snap,
+        "our_actions": [
+            {"slot": "our_a", "action": "move", "move": "Sucker Punch",
+             "target_slot": None},                  # the auto-target bug case
+        ],
+    }
+    annotate_transition_actions(t)
+    idx = t["our_actions"][0]["action_index"]
+    assert idx is not None
+    assert t["action_mask"]["our_a"][idx] == 1
+
+
+def test_annotate_guard_stamps_none_for_unresolvable_illegal_index():
+    """Safety net: an action that can only canonicalise to a mask-illegal bucket
+    (single-target move, no foes on the field, ally present → bucket 0 which the
+    ally-only mask forbids) is stamped None, never a wrong index."""
+    snap = _snap(opp_active={})                     # no foes; our_b ally present
+    t = {
+        "state_before_actions": snap,
+        "our_actions": [
+            {"slot": "our_a", "action": "move", "move": "Fake Out",
+             "target_slot": None},
+        ],
+    }
+    annotate_transition_actions(t)
+    assert t["our_actions"][0]["action_index"] is None
+    assert t["action_mask"]["our_a"][0] == 0        # bucket 0 indeed illegal
 
 
 # ── Integration: the real VOD export ──────────────────────────────────────
