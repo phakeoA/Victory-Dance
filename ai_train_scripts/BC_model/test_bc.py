@@ -313,6 +313,51 @@ def test_end_to_end_smoke_train(tmp_path):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Class-imbalance weighting + early stopping
+# ══════════════════════════════════════════════════════════════════════════════
+def test_compute_class_weights_upweights_rare_and_caps():
+    exs = [{"targets": {"our_a": 0}} for _ in range(100)]
+    exs.append({"targets": {"our_a": 5}})            # one rare action
+    w, counts = train_bc.compute_class_weights(exs, ACTIONS_PER_SLOT, cap=10.0)
+    assert w.shape == (ACTIONS_PER_SLOT,)
+    assert counts[0] == 100 and counts[5] == 1
+    assert w[5] > w[0]                                # rare action up-weighted
+    assert w.max() <= 10.0 + 1e-6                     # capped
+    assert w[1] == 1.0                               # absent class -> neutral
+
+
+def test_smoke_train_with_class_weight_and_patience(tmp_path):
+    corpus = tmp_path / "jsonl"
+    _write_synthetic_corpus(corpus)
+    out = tmp_path / "ckpt"
+    args = train_bc.parse_args([
+        "--data", str(corpus), "--epochs", "3", "--batch-size", "16",
+        "--hidden", "64", "32", "--device", "cpu", "--val-frac", "0.25",
+        "--out", str(out), "--class-weight", "balanced", "--patience", "2",
+    ])
+    res = train_bc.train(args)
+    assert (out / "bc_best.pt").exists()
+    assert np.isfinite(res["history"][-1]["val"]["loss"])
+    ck = torch.load(out / "bc_best.pt", map_location="cpu", weights_only=False)
+    assert ck["config"]["class_weight"] == "balanced"
+    assert ck["config"]["patience"] == 2
+
+
+def test_patience_stops_before_max_epochs(tmp_path):
+    # tiny random-label set plateaus fast → patience must cut the run short
+    corpus = tmp_path / "jsonl"
+    _write_synthetic_corpus(corpus, n_replays=6, per_replay=4)
+    out = tmp_path / "ckpt"
+    args = train_bc.parse_args([
+        "--data", str(corpus), "--epochs", "60", "--batch-size", "16",
+        "--hidden", "32", "--device", "cpu", "--val-frac", "0.34",
+        "--out", str(out), "--patience", "3", "--seed", "0",
+    ])
+    res = train_bc.train(args)
+    assert len(res["history"]) < 60                  # early-stopped
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Opt-in: real Type B corpus (skipped if absent)
 # ══════════════════════════════════════════════════════════════════════════════
 _TYPE_B = (

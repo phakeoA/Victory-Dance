@@ -66,6 +66,13 @@ class PokemonSlot:
     transformed_into: Optional[str] = None   # species currently copied, if any
     ever_transformed: bool = False           # latched: transformed at any point
     #   (match-level signal for revealed_info — never reverts)
+    # Illusion (Zoroark): the parser tracks the TRUE identity (so moves credit
+    # correctly), but an OPPONENT is fooled into seeing the disguise until a hit
+    # breaks it (|replace|).  These let _snapshot_state present the disguise on
+    # the opponent's side of a snapshot while the illusion is up — the realistic
+    # "fooled view" the in-battle policy must learn from.
+    illusion_active: bool = False            # disguise currently up (pre-|replace|)
+    disguise_species: Optional[str] = None   # species the disguise appears as
 
     def key(self) -> str:
         return f"{self.player}{self.slot}"
@@ -92,6 +99,8 @@ class PokemonSlot:
             "can_have_choice_item": self.can_have_choice_item,
             "is_transformed": self.is_transformed,
             "transformed_into": self.transformed_into,
+            "illusion_active": self.illusion_active,
+            "disguise_species": self.disguise_species,
             # EVs/IVs unknown for Type B — left as distribution placeholder
             "ev_spread": None,
             "iv_spread": None,

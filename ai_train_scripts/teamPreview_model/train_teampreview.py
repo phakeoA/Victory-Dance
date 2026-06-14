@@ -134,9 +134,12 @@ def train(args: argparse.Namespace) -> dict:
         print("[train_teampreview] WARNING: cuda unavailable -> cpu")
         device = "cpu"
 
-    print(f"[train_teampreview] loading from: {list(args.data)}")
+    folders = list(args.data)
+    if args.type_a:
+        folders.extend(args.type_a)
+    print(f"[train_teampreview] loading from: {folders}")
     t0 = time.time()
-    examples, stats = examples_from_folders(list(args.data), limit_files=args.limit_files)
+    examples, stats = examples_from_folders(folders, limit_files=args.limit_files)
     print_stats(stats)
     print(f"[train_teampreview] {len(examples)} examples in {time.time()-t0:.1f}s")
     if not examples:
@@ -177,10 +180,12 @@ def train(args: argparse.Namespace) -> dict:
         "bring_k": BRING_K,
         "lead_k": LEAD_K,
         "lr": args.lr,
-        "data": list(args.data),
+        "data": folders,
+        "patience": args.patience,
     }
 
     best = -1.0
+    epochs_no_improve = 0
     history: List[dict] = []
     for epoch in range(1, args.epochs + 1):
         tr = run_epoch(model, train_loader, device, optimizer)
@@ -195,9 +200,16 @@ def train(args: argparse.Namespace) -> dict:
         score = 0.5 * (va["lead_exact"] + va["bring_exact"])
         if score > best:
             best = score
+            epochs_no_improve = 0
             torch.save({"model_state": model.state_dict(), "config": config,
                         "vocab": vocab, "epoch": epoch, "val_metrics": va}, ckpt_path)
             print(f"           ↑ new best (mean exact {best:.3f}) -> {ckpt_path}")
+        else:
+            epochs_no_improve += 1
+            if args.patience and epochs_no_improve >= args.patience:
+                print(f"[train_teampreview] early stop at epoch {epoch} "
+                      f"(no val mean-exact gain for {args.patience} epochs)")
+                break
 
     (out_dir / "history.json").write_text(json.dumps(history, indent=2), encoding="utf-8")
     print(f"[train_teampreview] done. best mean-exact = {best:.3f}. ckpt: {ckpt_path}")
@@ -206,8 +218,14 @@ def train(args: argparse.Namespace) -> dict:
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Train the team-preview (bring) model")
-    default_b = Path("data") / "vods" / "Prepared_training_data" / "Regulation_MA" / "Jsonl_TypeB"
-    ap.add_argument("--data", nargs="+", default=[str(default_b)])
+    _prep = Path("data") / "vods" / "Prepared_training_data" / "Regulation_MA"
+    default_data = [str(_prep / f"Jsonl_Type{t}") for t in ("A", "B", "C", "D")]
+    ap.add_argument("--data", nargs="+", default=default_data,
+                    help="folder(s) of per-replay .jsonl (default: all VOD types "
+                         "A-D; missing/empty folders are skipped, files deduped)")
+    ap.add_argument("--type-a", nargs="+", default=None,
+                    help="extra folder(s) to append (deduped). Type A is already in "
+                         "the default --data; use only for ad-hoc extra data.")
     ap.add_argument("--epochs", type=int, default=40)
     ap.add_argument("--batch-size", type=int, default=128)
     ap.add_argument("--lr", type=float, default=1e-3)
@@ -215,6 +233,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap.add_argument("--emb-dim", type=int, default=32)
     ap.add_argument("--hidden", type=int, default=128)
     ap.add_argument("--dropout", type=float, default=0.1)
+    ap.add_argument("--patience", type=int, default=0,
+                    help="early-stop after N epochs with no val mean-exact gain (0=off)")
     ap.add_argument("--val-frac", type=float, default=0.1)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")

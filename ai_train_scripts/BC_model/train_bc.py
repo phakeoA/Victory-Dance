@@ -42,6 +42,7 @@ if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
 from bc_dataset import (  # noqa: E402
+    ACTIONS_PER_SLOT,
     BCDataset,
     HEADS,
     build_examples,
@@ -68,10 +69,14 @@ def head_loss_and_acc(
     mask: torch.Tensor,     # (B, A) 1=legal
     target: torch.Tensor,   # (B,)  action_index, -1 where invalid
     valid: torch.Tensor,    # (B,)  1.0 where this head has a target
+    class_weight: Optional[torch.Tensor] = None,  # (A,) per-action loss weight
 ) -> Tuple[torch.Tensor, int, int, int]:
     """
     Returns (summed_ce_loss, n_valid, n_correct_top1, n_correct_top3) for one
     head over a batch.  Loss/accuracy are computed only over valid rows.
+
+    ``class_weight`` (optional, length A) scales each target class's loss to
+    counter majority-action bias; accuracy is unaffected by it.
     """
     valid_b = valid > 0.5
     n_valid = int(valid_b.sum().item())
@@ -83,7 +88,7 @@ def head_loss_and_acc(
 
     # Summed cross-entropy (reduction='sum' so multiple heads average per
     # decision, not per head).
-    ce = F.cross_entropy(ml, tgt, reduction="sum")
+    ce = F.cross_entropy(ml, tgt, weight=class_weight, reduction="sum")
 
     with torch.no_grad():
         top1 = ml.argmax(dim=1)
@@ -95,11 +100,35 @@ def head_loss_and_acc(
     return ce, n_valid, n_top1, n_top3
 
 
+def compute_class_weights(examples, action_dim: int, cap: float = 10.0):
+    """Balanced (sklearn-style) action weights over the train targets (both
+    heads): ``w_c = total / (n_present_classes * count_c)``.  This keeps the
+    frequency-weighted average weight ≈ 1 (so the overall loss scale is sane —
+    common actions land near ~0.25, not ~0), while rare actions are up-weighted
+    and clamped to ``cap`` so a handful of samples can't dominate the gradient.
+    Absent classes get a neutral weight of 1.
+
+    Returns (weights np.float32 [action_dim], counts np.float64 [action_dim])."""
+    counts = np.zeros(action_dim, dtype=np.float64)
+    for ex in examples:
+        for ai in ex["targets"].values():
+            counts[ai] += 1
+    w = np.ones(action_dim, dtype=np.float32)
+    present = counts > 0
+    if present.any():
+        total = counts[present].sum()
+        n_present = int(present.sum())
+        bal = total / (n_present * counts[present])
+        w[present] = np.clip(bal, 0.0, cap).astype(np.float32)
+    return w, counts
+
+
 def run_epoch(
     model: torch.nn.Module,
     loader: DataLoader,
     device: str,
     optimizer: Optional[torch.optim.Optimizer] = None,
+    class_weight: Optional[torch.Tensor] = None,
 ) -> Dict[str, float]:
     """One pass over ``loader``.  Train if ``optimizer`` given, else eval."""
     train = optimizer is not None
@@ -125,7 +154,8 @@ def run_epoch(
             batch_valid = 0
             for h_idx, head in enumerate(HEADS):
                 ce, n_valid, n1, n3 = head_loss_and_acc(
-                    out[head], mask[:, h_idx], target[:, h_idx], valid[:, h_idx]
+                    out[head], mask[:, h_idx], target[:, h_idx], valid[:, h_idx],
+                    class_weight=class_weight,
                 )
                 batch_loss = batch_loss + ce
                 batch_valid += n_valid
@@ -211,6 +241,16 @@ def train(args: argparse.Namespace) -> dict:
     )
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
+    # ── Class-imbalance weighting (optional) ──────────────────────────────────
+    class_weight = None
+    if args.class_weight == "balanced":
+        w_np, counts = compute_class_weights(train_ex, ACTIONS_PER_SLOT,
+                                             cap=args.class_weight_cap)
+        class_weight = torch.tensor(w_np, device=device)
+        print(f"[train_bc] class weights (balanced, cap {args.class_weight_cap}): "
+              f"min {w_np.min():.2f} max {w_np.max():.2f} "
+              f"(majority action #{int(counts.argmax())}={int(counts.max())} decisions)")
+
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     ckpt_path = out_dir / "bc_best.pt"
@@ -227,13 +267,16 @@ def train(args: argparse.Namespace) -> dict:
         "val_frac": args.val_frac,
         "seed": args.seed,
         "data": folders,
+        "class_weight": args.class_weight,
+        "patience": args.patience,
     }
 
-    # ── Train loop ────────────────────────────────────────────────────────────
+    # ── Train loop (val-weighting OFF so val loss/acc stay true) ───────────────
     best_top1 = -1.0
+    epochs_no_improve = 0
     history: List[dict] = []
     for epoch in range(1, args.epochs + 1):
-        tr = run_epoch(model, train_loader, device, optimizer)
+        tr = run_epoch(model, train_loader, device, optimizer, class_weight=class_weight)
         va = run_epoch(model, val_loader, device, optimizer=None)
         history.append({"epoch": epoch, "train": tr, "val": va})
         print(
@@ -245,6 +288,7 @@ def train(args: argparse.Namespace) -> dict:
 
         if va["top1"] > best_top1:
             best_top1 = va["top1"]
+            epochs_no_improve = 0
             torch.save(
                 {
                     "model_state": model.state_dict(),
@@ -255,6 +299,12 @@ def train(args: argparse.Namespace) -> dict:
                 ckpt_path,
             )
             print(f"           ↑ new best (val top1 {best_top1:.3f}) -> {ckpt_path}")
+        else:
+            epochs_no_improve += 1
+            if args.patience and epochs_no_improve >= args.patience:
+                print(f"[train_bc] early stop at epoch {epoch} "
+                      f"(no val top1 improvement for {args.patience} epochs)")
+                break
 
     (out_dir / "history.json").write_text(json.dumps(history, indent=2), encoding="utf-8")
     print(f"[train_bc] done. best val top1 = {best_top1:.3f}. checkpoint: {ckpt_path}")
@@ -264,19 +314,27 @@ def train(args: argparse.Namespace) -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Train BC v0 policy")
-    default_b = (
-        Path("data") / "vods" / "Prepared_training_data" / "Regulation_MA" / "Jsonl_TypeB"
-    )
-    ap.add_argument("--data", nargs="+", default=[str(default_b)],
-                    help="folder(s) of per-replay .jsonl (default: Type B)")
+    _prep = Path("data") / "vods" / "Prepared_training_data" / "Regulation_MA"
+    default_data = [str(_prep / f"Jsonl_Type{t}") for t in ("A", "B", "C", "D")]
+    ap.add_argument("--data", nargs="+", default=default_data,
+                    help="folder(s) of per-replay .jsonl (default: all VOD types "
+                         "A-D; missing/empty folders are skipped, files deduped)")
     ap.add_argument("--type-a", nargs="+", default=None,
-                    help="optional extra Type A folder(s) to mix in")
+                    help="extra folder(s) to append (deduped). Type A is already in "
+                         "the default --data; use only for ad-hoc extra data.")
     ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--batch-size", type=int, default=256)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--weight-decay", type=float, default=1e-4)
     ap.add_argument("--hidden", type=int, nargs="+", default=[512, 256])
     ap.add_argument("--dropout", type=float, default=0.1)
+    ap.add_argument("--class-weight", choices=["none", "balanced"], default="none",
+                    help="weight the action loss by inverse class frequency to "
+                         "counter majority-action bias (default: none)")
+    ap.add_argument("--class-weight-cap", type=float, default=10.0,
+                    help="cap on any single class weight (default: 10)")
+    ap.add_argument("--patience", type=int, default=0,
+                    help="early-stop after N epochs with no val top-1 gain (0=off)")
     ap.add_argument("--val-frac", type=float, default=0.1)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")

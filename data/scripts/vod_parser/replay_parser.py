@@ -22,7 +22,12 @@ from vod_parser.battle_models import (
     PokemonSlot,
     SideConditions,
 )
-from vod_parser.pokedex import get_pokedex, is_mega_species_name
+from vod_parser.pokedex import get_pokedex, is_mega_species_name, norm_species
+
+
+# Species with the Illusion ability (normalised).  Used to resolve a disguise
+# when Species Clause makes a duplicate-active species provably an Illusion.
+_ILLUSION_SPECIES = {"zoroark", "zoroarkhisui"}
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +80,11 @@ class ShowdownReplayParser:
         self.turns: list[dict] = []
         self._current_turn_actions: list[dict] = []
         self._current_turn_damage_events: list[dict] = []
+        # Post-faint replacement decisions made during this turn.  Each entry is
+        # {player, slot, species, state:{p1,p2}} captured AFTER the faint and
+        # BEFORE the replacement switches in — its own decision state for the
+        # "who to send in after a faint" policy target.
+        self._current_turn_replacements: list[dict] = []
 
         # Snapshot captured at the START of each turn (before any mutation)
         self._state_before: Optional[dict] = None
@@ -113,7 +123,8 @@ class ShowdownReplayParser:
             self._handle_line(line)
 
         # Flush any last in-progress turn
-        if self._current_turn_actions or self._current_turn_damage_events:
+        if (self._current_turn_actions or self._current_turn_damage_events
+                or self._current_turn_replacements):
             self._flush_turn()
 
         return self._build_output()
@@ -184,6 +195,7 @@ class ShowdownReplayParser:
             self.current_turn = int(parts[2])
             self._current_turn_actions = []
             self._current_turn_damage_events = []
+            self._current_turn_replacements = []
             self._last_move_action = None
             self._execution_index = 0
             # Capture state BEFORE any actions mutate it
@@ -220,13 +232,12 @@ class ShowdownReplayParser:
 
         elif cmd == "faint":
             slot_key = self._slot_key_from_ident(parts[2])
-            if slot_key in self.active_slots:
-                self.active_slots[slot_key].is_fainted = True
-                self.active_slots[slot_key].hp_current = 0.0
+            fainted_species = self._species_from_ident(parts[2])
+            self._faint_mon(slot_key, fainted_species)
             self._current_turn_actions.append({
                 "event": "faint",
                 "slot": slot_key,
-                "species": self._species_from_ident(parts[2]),
+                "species": fainted_species,
             })
 
         elif cmd == "-boost" or cmd == "-unboost":
@@ -320,6 +331,41 @@ class ShowdownReplayParser:
     # Sub-handlers
     # ------------------------------------------------------------------
 
+    def _faint_mon(self, slot_key: str, fainted_species: Optional[str]) -> None:
+        """Mark the mon that fainted, by the SPECIES the |faint| line names.
+
+        Trust the named species over the slot pointer: an Illusion that mimicked
+        one of its OWN teammates' species can desync slot tracking (active_slots
+        [slot] ends up pointing at the wrong twin), which would otherwise faint
+        the wrong Pokémon (and leave the real one wrongly alive).  When the
+        slot's occupant doesn't match the named species, faint the mon the log
+        actually names — searching the player's active mons first, then their
+        bench (seen_mons).  Falls back to the slot pointer when nothing matches
+        (e.g. an unbroken disguise the log never resolves)."""
+        mon = self.active_slots.get(slot_key)
+        want = norm_species(fainted_species) if fainted_species else None
+        if want and (mon is None
+                     or norm_species(mon.base_species or mon.species) != want):
+            player = slot_key[:2]
+            match = next(
+                (m for k, m in self.active_slots.items()
+                 if k.startswith(player)
+                 and norm_species(m.base_species or m.species) == want),
+                None,
+            )
+            if match is None:
+                match = next(
+                    (m for k, m in self.seen_mons.items()
+                     if k.startswith(player + ":")
+                     and norm_species(m.base_species or m.species) == want),
+                    None,
+                )
+            if match is not None:
+                mon = match
+        if mon is not None:
+            mon.is_fainted = True
+            mon.hp_current = 0.0
+
     def _handle_switch(self, parts: list[str]) -> None:
         # |switch|p1b: Incineroar|Incineroar, L50, F|100/100
         ident = parts[2]
@@ -333,7 +379,9 @@ class ShowdownReplayParser:
         # brought entry, and move history from its first frame on the field
         # rather than poisoning the disguise species it was masquerading as.
         disguise_truth = self._illusion_truth.get(self._line_idx)
+        disguise_species = None
         if disguise_truth:
+            disguise_species = details.split(",")[0].strip()   # the DISGUISE name
             details = disguise_truth
             self._illusion_seen = True
         nickname = ident.split(": ", 1)[1] if ": " in ident else ident
@@ -341,6 +389,26 @@ class ShowdownReplayParser:
         player = slot_key[:2]
 
         hp_current, hp_max = self._parse_hp(hp_str)
+
+        # Forced replacement detection: this |switch| fills a slot whose mon
+        # fainted earlier THIS turn (its PokemonSlot is still in active_slots,
+        # flagged is_fainted) — as opposed to a voluntary turn-start switch of a
+        # LIVING mon.  Capture the post-faint board (fainted mon excluded from
+        # active, living bench available) as its own decision state BEFORE the
+        # switch mutates anything, so the in-battle policy can learn the
+        # "who to send in after a faint" choice.  ``species`` is already the
+        # true (de-disguised) identity at this point.
+        if (slot_key in self.active_slots
+                and self.active_slots[slot_key].is_fainted):
+            self._current_turn_replacements.append({
+                "player": player,
+                "slot": slot_key,
+                "species": species,
+                "state": {
+                    "p1": self._snapshot_state("p1"),
+                    "p2": self._snapshot_state("p2"),
+                },
+            })
 
         # Reuse existing PokemonSlot if already seen (preserves revealed_moves, known_item, etc.)
         seen_key = f"{player}:{species}"
@@ -396,6 +464,11 @@ class ShowdownReplayParser:
         # the field returns un-transformed.)
         mon.is_transformed = False
         mon.transformed_into = None
+        # Illusion: reset on every switch-in, then flag if THIS switch-in was a
+        # disguised Zoroark (the pre-scan paired it with a later |replace|).
+        # Opponents see `disguise_species` until the disguise breaks.
+        mon.illusion_active = bool(disguise_truth)
+        mon.disguise_species = disguise_species
 
         # Track evolving known team (by BASE species — a mega'd mon switching
         # back in must not appear as a second team member)
@@ -436,9 +509,21 @@ class ShowdownReplayParser:
         is never broken (Zoroark faints disguised, or the log ends first) is
         genuinely unobservable and is left as the disguise — the same blind
         spot a human spectator has.
+
+        SPECIES-CLAUSE RESOLUTION (the hard cross-stint case): a Zoroark can
+        disguise as a teammate that the team ALSO genuinely brings, and switch
+        out before any |replace| breaks that stint.  Because Species Clause
+        forbids two of the same species on a team, seeing the SAME species
+        active in both slots at once is *provably* an Illusion — the disguise is
+        the one already on the field (Illusion mimics a benched teammate, who
+        enters later), so we relabel its switch to the side's roster Illusion
+        mon.  This keeps the disguise's moves credited to Zoroark and frees the
+        real teammate to keep its own card (otherwise it collides and is lost).
         """
         truth: dict[int, str] = {}
         last_switch: dict[str, int] = {}
+        active_base: dict[str, str] = {}   # slot -> base species currently SHOWN
+        rosters: dict[str, list[str]] = {}
         for idx, line in enumerate(self.lines):
             if not line.startswith("|"):
                 continue
@@ -446,15 +531,37 @@ class ShowdownReplayParser:
             if len(parts) < 2:
                 continue
             cmd = parts[1]
-            if cmd in ("switch", "drag"):
+            if cmd == "poke":
+                pid = parts[2] if len(parts) > 2 else ""
+                sp = parts[3].split(",")[0].strip() if len(parts) > 3 else ""
+                if pid and sp:
+                    rosters.setdefault(pid, []).append(sp)
+            elif cmd in ("switch", "drag"):
                 slot = self._slot_key_from_ident(parts[2] if len(parts) > 2 else "")
+                player = slot[:2]
+                species = parts[3].split(",")[0].strip() if len(parts) > 3 else ""
+                base = norm_species(species)
+                if base:
+                    # Duplicate-active species ⇒ provably an Illusion (Species
+                    # Clause).  Relabel the disguise already on the field.
+                    for oslot, obase in active_base.items():
+                        if (oslot != slot and oslot[:2] == player and obase == base
+                                and last_switch.get(oslot) is not None):
+                            illu = next((r for r in rosters.get(player, [])
+                                         if norm_species(r) in _ILLUSION_SPECIES), None)
+                            o_switch = last_switch[oslot]
+                            if illu and o_switch not in truth:
+                                truth[o_switch] = f"{illu}, L50"
+                            break
+                    active_base[slot] = base
                 last_switch[slot] = idx
             elif cmd == "replace":
                 slot = self._slot_key_from_ident(parts[2] if len(parts) > 2 else "")
                 details = parts[3] if len(parts) > 3 else ""
                 origin = last_switch.get(slot)
                 if origin is not None and details:
-                    truth[origin] = details
+                    truth[origin] = details          # a reveal is ground truth
+                    active_base[slot] = norm_species(details.split(",")[0].strip())
         return truth
 
     def _handle_replace(self, parts: list[str]) -> None:
@@ -473,6 +580,9 @@ class ShowdownReplayParser:
         self._illusion_seen = True
 
         mon = self.active_slots.get(slot_key)
+        if mon is not None:
+            # The disguise just broke — from now on opponents see the truth.
+            mon.illusion_active = False
         if mon is not None and true_species:
             current_base = mon.base_species or mon.species
             if current_base != true_species:
@@ -907,6 +1017,20 @@ class ShowdownReplayParser:
     # State snapshot (deep copy so mutations don't bleed through)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _observed_opp(d: dict) -> dict:
+        """Apply an active Illusion to an OPPONENT-side mon dict (Zoroark
+        Solution B / fooled view): the observer sees the disguise species — its
+        typing/stats via the dex — carrying the moves it was seen using (the
+        tells), until a hit breaks the disguise (|replace| → illusion_active
+        False).  The owner's own side keeps the true identity.  Mutates the
+        already-deepcopied dict."""
+        if d.get("illusion_active") and d.get("disguise_species"):
+            d["species"] = d["disguise_species"]
+            d["base_species"] = d["disguise_species"]
+            d["appears_disguised"] = True
+        return d
+
     def _snapshot_state(self, perspective: Optional[str] = None) -> dict:
         our = perspective or self.our_player
         opp = "p2" if our == "p1" else "p1"
@@ -924,7 +1048,7 @@ class ShowdownReplayParser:
                 our_active[rel_key] = d
             else:
                 rel_key = "opp_" + slot_key[2:]
-                opp_active[rel_key] = d
+                opp_active[rel_key] = self._observed_opp(d)
 
         # ── Bench policy (Bug 6) ──────────────────────────────────────────
         # DESIGN DECISION: fainted mons are KEPT in the bench, on both sides,
@@ -1066,6 +1190,10 @@ class ShowdownReplayParser:
                 "p1": self._snapshot_state("p1"),
                 "p2": self._snapshot_state("p2"),
             },
+            # Post-faint replacement decisions made this turn (each carries its
+            # own both-perspective decision state).  transitions.py emits one
+            # extra transition per replacement, from the replacing player's view.
+            "replacements": list(self._current_turn_replacements),
             # ── Training-schema decision fields ──────────────────────────
             "our_actions": _extract_actions(our),
             "opp_actions_actual": _extract_actions(opp),

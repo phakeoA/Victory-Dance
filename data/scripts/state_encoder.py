@@ -36,10 +36,15 @@ TENSOR LAYOUT  (total STATE_DIM floats)
         slot 2 → opp active mon 0 (opp_a)
         slot 3 → opp active mon 1 (opp_b)
 
-  [B] 4 bench slots × POKEMON_FEATURES
-        own bench mons (up to 4, fainted excluded; zeros if fewer)
-        TODO(layout-v2): consider adding opp bench + fainted flags so the
-        net can count remaining team members / legal switch-ins.
+  [B] 4 OWN bench slots × POKEMON_FEATURES
+        own bench mons (living switch-ins, fainted excluded; zeros if fewer).
+        Kept living-only so switch slots line up with the action codec.
+
+  [B2] 4 OPP bench slots × POKEMON_FEATURES   (layout-v2)
+        opponent's non-active roster mons, ordered seen-alive → seen-fainted →
+        unseen teampreview stubs (so the 4 slots keep the known switch-ins).
+        is_revealed / is_fainted distinguish them; lets the net read the
+        opponent's remaining team and likely switch-ins.
 
   [C] GLOBAL_FEATURES
         weather multi-hot (9)
@@ -48,8 +53,9 @@ TENSOR LAYOUT  (total STATE_DIM floats)
         opp side conditions multi-hot (24)
         turn normalised (1)
         trick room flag (1)
+        team counts (4)      ← own/opp living-bench, own/opp fainted (each /4)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-POKEMON_FEATURES per slot (108 floats):
+POKEMON_FEATURES per slot (110 floats):
     hp_frac       (1)
     type1 one-hot (20)
     type2 one-hot (20)   ← zeros if single-type
@@ -63,6 +69,9 @@ POKEMON_FEATURES per slot (108 floats):
     4 × MOVE_FEATURES    ← 4 × 9 = 36
     is_active     (1)
     is_revealed   (1)    ← always 1 for own mons
+    is_fainted    (1)    ← layout-v2; KO flag (opp bench / counting)
+    is_transformed(1)    ← layout-v2; Ditto copied a forme (types/stats above
+                           are the COPY's); reverts on switch-out
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 MOVE_FEATURES per move (9 floats):
     base_power / 150     (1)
@@ -198,11 +207,14 @@ POKEMON_FEATURES = (
     + NUM_MOVES * MOVE_FEATURES  # 4 × 9 = 36
     + 1             # is_active
     + 1             # is_revealed
+    + 1             # is_fainted      (layout-v2: see/count KO'd mons)
+    + 1             # is_transformed  (layout-v2: Ditto copies a forme; reverts)
 )
-# POKEMON_FEATURES = 1+20+20+6+6+1+1+1+7+7+36+1+1 = 108
+# POKEMON_FEATURES = 1+20+20+6+6+1+1+1+7+7+36+1+1+1+1 = 110
 
-ACTIVE_SLOTS = 4   # 2 own + 2 opp
-BENCH_SLOTS  = 4   # own bench (up to 4 in a 6-mon VGC team)
+ACTIVE_SLOTS    = 4   # 2 own + 2 opp
+BENCH_SLOTS     = 4   # own bench (living switch-ins; aligned with the action codec)
+OPP_BENCH_SLOTS = 4   # opp non-active roster mons (seen incl. fainted + stubs)  (layout-v2)
 
 GLOBAL_FEATURES = (
     NUM_WEATHER       # 9
@@ -211,10 +223,11 @@ GLOBAL_FEATURES = (
     + NUM_SIDE_CONDS  # 24  opp
     + 1               # turn
     + 1               # trick room explicit flag
-)  # = 74
+    + 4               # team counts (layout-v2): own/opp living-bench, own/opp fainted
+)  # = 78
 
-STATE_DIM = (ACTIVE_SLOTS + BENCH_SLOTS) * POKEMON_FEATURES + GLOBAL_FEATURES
-# = 8 × 108 + 74 = 938
+STATE_DIM = (ACTIVE_SLOTS + BENCH_SLOTS + OPP_BENCH_SLOTS) * POKEMON_FEATURES + GLOBAL_FEATURES
+# = 12 × 110 + 78 = 1398
 
 # ── Action space ───────────────────────────────────────────────────────────────
 ACTIONS_PER_SLOT = 16    # 12 move-target + 4 switch
@@ -306,13 +319,13 @@ class StateEncoder:
     Example (live, requires poke-env)::
 
         encoder = StateEncoder(belief=BeliefState("pikalytics_regma.json"))
-        vec = encoder.encode(battle)                  # shape (937,)
+        vec = encoder.encode(battle)                  # shape (STATE_DIM,)
 
     Example (offline, parsed/enriched VOD JSON)::
 
         encoder = StateEncoder()
         snap = enriched["turns"][0]["state_before_actions"]["p1"]
-        vec = encoder.encode_snapshot(snap, turn=1)   # shape (937,)
+        vec = encoder.encode_snapshot(snap, turn=1)   # shape (STATE_DIM,)
     """
 
     def __init__(self, belief: Optional[BeliefState] = None, level: int = 50):
@@ -379,6 +392,18 @@ class StateEncoder:
             self._write_pokemon(vec, cursor, mon, is_active=False, is_own=True)
             cursor += POKEMON_FEATURES
 
+        # ── [B2] Opponent bench (layout-v2): revealed opp mons not active.
+        # Living switch-ins first so a truncated 4-slot view keeps the threats.
+        opp_active_set = {p for p in opp_active if p is not None}
+        opp_team = list(getattr(battle, "opponent_team", {}).values())
+        opp_alive = [p for p in opp_team if p not in opp_active_set and not p.fainted]
+        opp_dead  = [p for p in opp_team if p not in opp_active_set and p.fainted]
+        opp_bench = (opp_alive + opp_dead)[:OPP_BENCH_SLOTS]
+        for i in range(OPP_BENCH_SLOTS):
+            mon = opp_bench[i] if i < len(opp_bench) else None
+            self._write_pokemon(vec, cursor, mon, is_active=False, is_own=False)
+            cursor += POKEMON_FEATURES
+
         # ── [C] Global features ──────────────────────────────────────────────
 
         # Weather: Dict[Weather, int] — multi-hot (normally one at a time)
@@ -418,6 +443,16 @@ class StateEncoder:
         # because it flips speed priority — critical strategic signal)
         vec[cursor] = 1.0 if trick_room_active else 0.0
         cursor += 1
+
+        # ── Team counts (layout-v2): living-bench + fainted per side ──────────
+        own_team = list(battle.team.values())
+        own_live = sum(1 for p in own_team if p not in own_active_set and not p.fainted)
+        own_fnt  = sum(1 for p in own_team if p.fainted)
+        opp_fnt  = sum(1 for p in opp_team if p.fainted)
+        vec[cursor] = min(own_live, 4) / 4.0;       cursor += 1
+        vec[cursor] = min(len(opp_alive), 4) / 4.0; cursor += 1
+        vec[cursor] = min(own_fnt, 4) / 4.0;        cursor += 1
+        vec[cursor] = min(opp_fnt, 4) / 4.0;        cursor += 1
 
         assert cursor == STATE_DIM, (
             f"StateEncoder cursor mismatch: wrote {cursor}, expected {STATE_DIM}"
@@ -502,6 +537,16 @@ class StateEncoder:
 
         # is_revealed (own mons always 1; opp mons 1 once sent out / identified)
         vec[i] = 1.0 if mon.revealed else 0.0
+        i += 1
+
+        # is_fainted (layout-v2): explicit KO flag for the opp-bench / counting
+        vec[i] = 1.0 if mon.fainted else 0.0
+        i += 1
+
+        # is_transformed (layout-v2). Best-effort on the live path — poke-env
+        # exposes the flag but not always a copied-forme handle; encoding the
+        # copied forme's typing/stats live is a TODO for the live-player work.
+        vec[i] = 1.0 if getattr(mon, "is_transformed", False) else 0.0
         i += 1
 
     def _live_est_stats(
@@ -612,6 +657,19 @@ class StateEncoder:
             self._write_pokemon_json(vec, cursor, mon, is_active=False)
             cursor += POKEMON_FEATURES
 
+        # ── [B2] Opponent bench (layout-v2): opp non-active roster mons.
+        # Ordered seen-alive → seen-fainted → unseen stubs, so the 4 slots
+        # prioritise known switch-ins; is_revealed/is_fainted distinguish them.
+        opp_bench_all    = snap.get("opp_bench") or []
+        opp_seen_alive   = [m for m in opp_bench_all if m.get("seen", True) and not m.get("is_fainted")]
+        opp_seen_fainted = [m for m in opp_bench_all if m.get("seen", True) and m.get("is_fainted")]
+        opp_unseen       = [m for m in opp_bench_all if not m.get("seen", True)]
+        opp_bench = (opp_seen_alive + opp_seen_fainted + opp_unseen)[:OPP_BENCH_SLOTS]
+        for i in range(OPP_BENCH_SLOTS):
+            mon = opp_bench[i] if i < len(opp_bench) else None
+            self._write_pokemon_json(vec, cursor, mon, is_active=False)
+            cursor += POKEMON_FEATURES
+
         # ── [C] Global features ──────────────────────────────────────────────
         field = snap.get("field") or {}
 
@@ -655,6 +713,17 @@ class StateEncoder:
         vec[cursor] = 1.0 if trick_room else 0.0
         cursor += 1
 
+        # ── Team counts (layout-v2): living-bench + fainted per side ──────────
+        # Own bench keeps brought-but-unentered stubs (all our switch-ins);
+        # opp counts use only SEEN mons (information asymmetry).
+        our_bench_all = snap.get("our_bench") or []
+        own_live = sum(1 for m in our_bench_all if not m.get("is_fainted"))
+        own_fnt  = sum(1 for m in our_bench_all if m.get("is_fainted"))
+        vec[cursor] = min(own_live, 4) / 4.0;               cursor += 1
+        vec[cursor] = min(len(opp_seen_alive), 4) / 4.0;    cursor += 1
+        vec[cursor] = min(own_fnt, 4) / 4.0;                cursor += 1
+        vec[cursor] = min(len(opp_seen_fainted), 4) / 4.0;  cursor += 1
+
         assert cursor == STATE_DIM, (
             f"StateEncoder cursor mismatch: wrote {cursor}, expected {STATE_DIM}"
         )
@@ -696,11 +765,21 @@ class StateEncoder:
             vec[i] = max(0.0, min(hp_pct, 100.0)) / 100.0
         i += 1
 
-        # Types: tera overrides; otherwise dex types of the CURRENT forme
+        # Transform (Ditto / Imposter, Solution A): a transformed mon copies the
+        # target's typing + base stats, so read the dex for the COPIED forme.
+        # (HP stays the mon's own — handled above; reverts on switch-out, which
+        # the parser already clears.)
+        if mon.get("is_transformed") and mon.get("transformed_into"):
+            dex_species = mon["transformed_into"]
+        else:
+            dex_species = mon.get("species")
+        base_fallback = mon.get("base_species")
+
+        # Types: tera overrides; otherwise dex types of the current/copied forme
         if mon.get("is_terastallized") and mon.get("known_tera_type"):
             types = [_canon(mon["known_tera_type"])]
         else:
-            types = _dex_types(mon.get("species")) or _dex_types(mon.get("base_species"))
+            types = _dex_types(dex_species) or _dex_types(base_fallback)
         if types and types[0] in _TYPE_IDX:
             vec[i + _TYPE_IDX[types[0]]] = 1.0
         i += NUM_TYPES
@@ -708,8 +787,9 @@ class StateEncoder:
             vec[i + _TYPE_IDX[types[1]]] = 1.0
         i += NUM_TYPES
 
-        # Base stats from the dex (current forme, falling back to base forme)
-        base = dex_base_stats(mon.get("species")) or dex_base_stats(mon.get("base_species"))
+        # Base stats from the dex (copied forme when transformed, else current,
+        # falling back to base forme)
+        base = dex_base_stats(dex_species) or dex_base_stats(base_fallback)
         for key in STAT_ORDER:
             vec[i] = (base.get(key, 0) / 255.0) if base else 0.0
             i += 1
@@ -753,10 +833,14 @@ class StateEncoder:
                 self._write_move_json(vec, i, name, confidence, types)
             i += MOVE_FEATURES
 
-        # is_active / is_revealed
+        # is_active / is_revealed / is_fainted / is_transformed (layout-v2)
         vec[i] = 1.0 if is_active else 0.0
         i += 1
         vec[i] = 1.0 if mon.get("seen", True) else 0.0
+        i += 1
+        vec[i] = 1.0 if mon.get("is_fainted") else 0.0
+        i += 1
+        vec[i] = 1.0 if mon.get("is_transformed") else 0.0
         i += 1
 
     # ── Move encoder (offline JSON) ───────────────────────────────────────────

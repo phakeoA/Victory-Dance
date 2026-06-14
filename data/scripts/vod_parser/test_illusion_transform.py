@@ -142,6 +142,33 @@ class TestIllusionDisguise:
         _, result = parse(ILLUSION_LOG)
         assert result["contains_illusion"] is True
 
+    def test_opponent_is_fooled_until_reveal(self):
+        # Solution B (fooled view): the OPPONENT (p1) sees the disguise species
+        # on their opponent-side snapshot until the illusion breaks; the OWNER
+        # (p2) always sees the truth.
+        _, result = parse(ILLUSION_LOG)
+        t1, t2 = get_turn(result, 1), get_turn(result, 2)
+
+        # turn 1, decision time: p1 sees a "Charizard" (the disguise)...
+        p1_opp_t1 = t1["state_before_actions"]["p1"]["opp_active"]["opp_a"]
+        assert p1_opp_t1["species"] == "Charizard"
+        assert p1_opp_t1.get("appears_disguised") is True
+        # ...while p2 (the owner) sees its real Zoroark.
+        assert t1["state_before_actions"]["p2"]["our_active"]["our_a"]["species"] == "Zoroark-Hisui"
+
+        # The disguise breaks during turn 1 → p1 sees the truth afterwards.
+        assert t1["state_after_actions"]["p1"]["opp_active"]["opp_a"]["species"] == "Zoroark-Hisui"
+        assert t2["state_before_actions"]["p1"]["opp_active"]["opp_a"]["species"] == "Zoroark-Hisui"
+        assert t2["state_before_actions"]["p1"]["opp_active"]["opp_a"].get("appears_disguised") is not True
+
+    def test_genuine_copy_of_disguise_species_not_flagged(self):
+        # The REAL Charizard switches in DURING turn 4 → it appears in that
+        # turn's state_after, and must never be marked disguised.
+        _, result = parse(ILLUSION_LOG)
+        p1_opp_t4_after = get_turn(result, 4)["state_after_actions"]["p1"]["opp_active"]["opp_a"]
+        assert p1_opp_t4_after["species"] == "Charizard"
+        assert p1_opp_t4_after.get("appears_disguised") is not True
+
     def test_defensive_relabel_without_prescan(self):
         # Directly exercise the |replace| fallback: a slot mislabeled as the
         # disguise gets relabeled forward even if the pre-scan map is empty.
@@ -153,6 +180,83 @@ class TestIllusionDisguise:
         assert "p2:Zoroark-Hisui" in p.seen_mons
         assert "p2:Charizard" not in p.seen_mons
         assert p.active_slots["p2a"].species == "Zoroark-Hisui"
+
+
+# ---------------------------------------------------------------------------
+# Illusion — Zoroark disguised as a teammate's OWN species (Species Clause
+# resolution).  The disguise switches out WITHOUT a |replace| ever breaking it,
+# so only the duplicate-active-species rule can resolve it.
+# ---------------------------------------------------------------------------
+
+DUPLICATE_DISGUISE_LOG = """\
+|player|p1|alice|101|1500
+|player|p2|bob|102|1500
+|gen|9
+|tier|[Gen 9] Test Doubles
+|poke|p1|Dragapult, L50, M|
+|poke|p2|Excadrill, L50, F|
+|poke|p2|Zoroark-Hisui, L50, M|
+|poke|p2|Tyranitar, L50, M|
+|teamsize|p1|1
+|teamsize|p2|3
+|start
+|switch|p1a: Dragapult|Dragapult, L50, M|100/100
+|switch|p2a: Excadrill|Excadrill, L50, F|100/100
+|switch|p2b: Tyranitar|Tyranitar, L50, M|100/100
+|turn|1
+|move|p2a: Excadrill|Shadow Ball|p1a: Dragapult
+|-damage|p1a: Dragapult|50/100
+|move|p1a: Dragapult|Dragon Darts|p2b: Tyranitar
+|-damage|p2b: Tyranitar|0 fnt
+|faint|p2b: Tyranitar
+|switch|p2b: Excadrill|Excadrill, L50, F|100/100
+|turn|2
+|move|p2b: Excadrill|Iron Head|p1a: Dragapult
+|-damage|p1a: Dragapult|0 fnt
+|faint|p1a: Dragapult
+|win|bob
+"""
+
+
+class TestIllusionDuplicateTeammate:
+    def test_disguise_resolved_to_zoroark_real_teammate_kept(self):
+        parser, _ = parse(DUPLICATE_DISGUISE_LOG)
+        seen = parser.seen_mons
+        assert "p2:Zoroark-Hisui" in seen
+        assert "p2:Excadrill" in seen
+        # the disguise's move credits Zoroark; the real Excadrill keeps its own
+        assert "Shadow Ball" in seen["p2:Zoroark-Hisui"].revealed_moves
+        assert "Iron Head" in seen["p2:Excadrill"].revealed_moves
+        assert "Shadow Ball" not in seen["p2:Excadrill"].revealed_moves
+
+    def test_brought_has_both_real_identities(self):
+        _, result = parse(DUPLICATE_DISGUISE_LOG)
+        brought = result["players"]["p2"]["brought"]
+        assert "Zoroark-Hisui" in brought
+        assert "Excadrill" in brought
+
+    def test_opponent_sees_the_disguise(self):
+        _, result = parse(DUPLICATE_DISGUISE_LOG)
+        opp = get_turn(result, 1)["state_before_actions"]["p1"]["opp_active"]
+        assert any(m.get("species") == "Excadrill" and m.get("appears_disguised")
+                   for m in opp.values())
+
+    def test_real_teammate_replacement_is_indexable(self):
+        # the real Excadrill entering as the forced replacement must resolve to a
+        # real switch index (was None before the Species-Clause fix).
+        from vod_parser.transitions import replay_to_transitions
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as d:
+            f = os.path.join(d, "syn.html")
+            with open(f, "w", encoding="utf-8") as fh:
+                fh.write('<input name="replayid" value="dup1"/>'
+                         '<script class="battle-log-data">'
+                         + DUPLICATE_DISGUISE_LOG + '</script>')
+            trs = replay_to_transitions(f, None, None, players=["p1", "p2"])
+        repls = [t for t in trs if t.get("decision_type") == "replacement"
+                 and t["perspective"] == "p2"]
+        assert repls and all(r["our_actions"][0].get("action_index") is not None
+                             for r in repls)
 
 
 # ---------------------------------------------------------------------------

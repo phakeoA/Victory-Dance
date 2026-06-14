@@ -224,8 +224,13 @@ def examples_from_folders(
     limit_files: Optional[int] = None,
 ) -> Tuple[List[dict], Counter]:
     files: List[str] = []
+    seen: set = set()
     for folder in folders:
-        files.extend(iter_jsonl_files(folder, recursive=recursive))
+        for f in iter_jsonl_files(folder, recursive=recursive):
+            key = os.path.abspath(f)
+            if key not in seen:
+                seen.add(key)
+                files.append(f)
     return build_examples(files, limit_files=limit_files)
 
 

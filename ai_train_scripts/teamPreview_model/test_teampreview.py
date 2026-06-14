@@ -191,16 +191,16 @@ def test_one_optim_step_reduces_loss():
 
 
 # ── End-to-end smoke train ──────────────────────────────────────────────────
-def _write_corpus(folder: Path, n=16):
+def _write_corpus(folder: Path, n=16, prefix=""):
     folder.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(0)
     for r in range(n):
         pick1 = list(rng.choice(TEAM_SIZE, BRING_K, replace=False))
         pick2 = list(rng.choice(TEAM_SIZE, BRING_K, replace=False))
-        t = make_tp(f"replay{r}",
+        t = make_tp(f"{prefix}replay{r}",
                     p1_brought=[_R1[i] for i in pick1],
                     p2_brought=[_R2[i] for i in pick2])
-        (folder / f"replay{r}.jsonl").write_text(json.dumps(t), encoding="utf-8")
+        (folder / f"{prefix}replay{r}.jsonl").write_text(json.dumps(t), encoding="utf-8")
 
 
 def test_end_to_end_smoke_train(tmp_path):
@@ -218,6 +218,25 @@ def test_end_to_end_smoke_train(tmp_path):
     ckpt = torch.load(out / "teampreview_best.pt", map_location="cpu", weights_only=False)
     assert ckpt["config"]["bring_k"] == BRING_K
     assert "vocab" in ckpt
+
+
+def test_smoke_train_with_type_a_and_patience(tmp_path):
+    base = tmp_path / "typeB"
+    typea = tmp_path / "typeA"
+    _write_corpus(base, n=12)
+    _write_corpus(typea, n=6, prefix="a_")            # distinct replay ids
+    out = tmp_path / "ckpt"
+    args = trainmod.parse_args([
+        "--data", str(base), "--type-a", str(typea),
+        "--epochs", "2", "--batch-size", "8", "--hidden", "32",
+        "--device", "cpu", "--val-frac", "0.25", "--out", str(out), "--patience", "1",
+    ])
+    res = trainmod.train(args)
+    assert (out / "teampreview_best.pt").exists()
+    ck = torch.load(out / "teampreview_best.pt", map_location="cpu", weights_only=False)
+    assert ck["config"]["patience"] == 1
+    # both folders were ingested (18 replays × 2 perspectives = 36 examples)
+    assert ck["config"]["data"] == [str(base), str(typea)]
 
 
 # ── Opt-in: real Type B corpus ──────────────────────────────────────────────

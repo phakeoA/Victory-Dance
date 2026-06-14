@@ -626,12 +626,29 @@ class TestIntegrationSampleReplay:
 
     def test_transitions_pipeline(self):
         transitions = replay_to_transitions(SAMPLE_REPLAY)
-        # 8 turns x 2 perspectives
-        assert len(transitions) == 16
-        final = [t for t in transitions if t["turn"] == 8]
+        # 8 turns x 2 perspectives of normal turn decisions...
+        turn_t = [t for t in transitions if t.get("decision_type") == "turn"]
+        assert len(turn_t) == 16
+        # ...plus any post-faint replacement decisions (this VOD has some).
+        repl_t = [t for t in transitions if t.get("decision_type") == "replacement"]
+        assert len(transitions) == len(turn_t) + len(repl_t)
+        assert len(repl_t) > 0
+
+        # Win signal lands only on the final turn's normal transitions.
+        final = [t for t in turn_t if t["turn"] == 8]
         for t in final:
             expected = 1 if t["perspective"] == "p1" else -1
             assert t["reward"]["win"] == expected
+
+        # Each replacement is one switch, legal under its own switch-only mask.
+        for t in repl_t:
+            assert len(t["our_actions"]) == 1
+            act = t["our_actions"][0]
+            assert act["action"] == "switch"
+            if act["action_index"] is not None:
+                assert t["action_mask"][act["slot"]][act["action_index"]] == 1
+            assert t["reward"]["win"] is None
+
         # Slot notation fully normalised in emitted transitions
         valid = {"our_a", "our_b", "opp_a", "opp_b", None}
         for t in transitions:

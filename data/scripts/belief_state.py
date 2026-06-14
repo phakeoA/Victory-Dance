@@ -952,8 +952,12 @@ def _iter_snapshots(turn: dict):
     preview/transition shape (snap directly, perspective unknown → None,
     resolved by the caller).
     """
-    for key in ("state_before_actions", "state_after_actions"):
-        container = turn.get(key)
+    containers = [turn.get("state_before_actions"), turn.get("state_after_actions")]
+    # Post-faint replacement decisions carry their own both-perspective state.
+    for repl in turn.get("replacements") or []:
+        if isinstance(repl, dict):
+            containers.append(repl.get("state"))
+    for container in containers:
         if not isinstance(container, dict):
             continue
         if "our_active" in container:          # flattened single-perspective

@@ -109,6 +109,26 @@ def _inject_known_stats(mon_dict: dict, inj: dict) -> None:
         mon_dict["known_ability"]    = mon_dict.get("known_ability") or inj_ability
 
 
+def _apply_known_injection(snaps, side_inj: dict) -> None:
+    """Inject a side's user-supplied known stats into each snapshot's own mons.
+
+    Shared by the normal per-turn path and the post-faint replacement path.
+    Mons already enriched as ``exact`` (sheet-complete inject cards) are left
+    alone — a raw re-inject would clobber their computed stats.
+    """
+    def _lookup(mon_dict: dict) -> dict:
+        base = mon_dict.get("base_species") or mon_dict.get("species", "")
+        return side_inj.get(base) or side_inj.get(mon_dict.get("species", "")) or {}
+
+    for snap in snaps:
+        for active_dict in (snap.get("our_active") or {}).values():
+            if not active_dict.get("exact"):
+                _inject_known_stats(active_dict, _lookup(active_dict))
+        for bench_mon in (snap.get("our_bench") or []):
+            if not bench_mon.get("exact"):
+                _inject_known_stats(bench_mon, _lookup(bench_mon))
+
+
 def _retrofit_own_side_knowledge(battle: dict) -> None:
     """Rebuild each side's OWN decision-time knowledge into its snapshots.
 
@@ -142,40 +162,48 @@ def _retrofit_own_side_knowledge(battle: dict) -> None:
         # misses (forme/nickname edge) rather than dropping live reveals
         return list(final) if len(final) >= len(cur) else list(cur)
 
+    def _process(pid: str, snap: dict) -> None:
+        if not isinstance(snap, dict):
+            return
+        own_mons = (list((snap.get("our_active") or {}).values())
+                    + list(snap.get("our_bench") or []))
+        present = set()
+        for mon in own_mons:
+            mon["revealed_moves"] = _final_moves(pid, mon)
+            present.add(norm_species(
+                mon.get("base_species") or mon.get("species") or ""))
+        for sp in (players.get(pid) or {}).get("brought") or []:
+            if norm_species(sp) in present:
+                continue
+            info = revealed_info.get(f"{pid}:{sp}") or {}
+            snap.setdefault("our_bench", []).append({
+                "species": sp, "base_species": sp, "nickname": None,
+                "player": pid, "slot": None,
+                "hp_pct": None, "status": None, "boosts": {},
+                "is_mega": False, "is_fainted": False,
+                "revealed_moves": list(info.get("revealed_moves") or []),
+                "known_item": None, "known_tera_type": None,
+                "is_terastallized": False,
+                "known_ability": None, "pre_mega_ability": None,
+                "mega_ability": None,
+                "can_have_choice_item": info.get("can_have_choice_item", True),
+                "is_transformed": False, "transformed_into": None,
+                "ev_spread": None, "iv_spread": None, "nature": None,
+                "seen": False,
+            })
+
+    def _process_sides(sides) -> None:
+        if not isinstance(sides, dict) or "our_active" in sides:
+            return              # flattened preview shape — not this path
+        for pid, snap in sides.items():
+            _process(pid, snap)
+
     for turn in battle.get("turns") or []:
         for key in ("state_before_actions", "state_after_actions"):
-            sides = turn.get(key)
-            if not isinstance(sides, dict) or "our_active" in sides:
-                continue        # flattened preview shape — not this path
-            for pid, snap in sides.items():
-                if not isinstance(snap, dict):
-                    continue
-                own_mons = (list((snap.get("our_active") or {}).values())
-                            + list(snap.get("our_bench") or []))
-                present = set()
-                for mon in own_mons:
-                    mon["revealed_moves"] = _final_moves(pid, mon)
-                    present.add(norm_species(
-                        mon.get("base_species") or mon.get("species") or ""))
-                for sp in (players.get(pid) or {}).get("brought") or []:
-                    if norm_species(sp) in present:
-                        continue
-                    info = revealed_info.get(f"{pid}:{sp}") or {}
-                    snap.setdefault("our_bench", []).append({
-                        "species": sp, "base_species": sp, "nickname": None,
-                        "player": pid, "slot": None,
-                        "hp_pct": None, "status": None, "boosts": {},
-                        "is_mega": False, "is_fainted": False,
-                        "revealed_moves": list(info.get("revealed_moves") or []),
-                        "known_item": None, "known_tera_type": None,
-                        "is_terastallized": False,
-                        "known_ability": None, "pre_mega_ability": None,
-                        "mega_ability": None,
-                        "can_have_choice_item": info.get("can_have_choice_item", True),
-                        "is_transformed": False, "transformed_into": None,
-                        "ev_spread": None, "iv_spread": None, "nature": None,
-                        "seen": False,
-                    })
+            _process_sides(turn.get(key))
+        # Post-faint replacement decisions carry their own both-perspective state.
+        for repl in turn.get("replacements") or []:
+            _process_sides(repl.get("state"))
 
 
 def _known_entry_side_to_sheet(side_dict: Optional[dict]) -> list[dict]:
@@ -432,7 +460,10 @@ def replay_to_transitions(
     # transition with action_index per our_actions entry + the decision-time
     # action_mask.  Lazy for the same circular-import reason as belief_state.
     try:
-        from state_encoder import annotate_transition_actions
+        from state_encoder import (
+            annotate_transition_actions, action_to_index, _living_bench,
+            SWITCH_OFFSET, ACTIONS_PER_SLOT,
+        )
     except ImportError:
         annotate_transition_actions = None
 
@@ -475,21 +506,7 @@ def replay_to_transitions(
             # keyed by roster names ("Floette-Eternal"), while a mega'd
             # active's `species` is the mega forme ("Floette-Mega").
             side_inj = known_entry.get(perspective) or {}
-
-            def _lookup_inj(mon_dict: dict) -> dict:
-                base = mon_dict.get("base_species") or mon_dict.get("species", "")
-                return side_inj.get(base) or side_inj.get(mon_dict.get("species", "")) or {}
-
-            # Mons fill_blanks already enriched as exact (sheet-complete inject
-            # cards) are skipped: they carry computed stats + normalised
-            # bucket spreads that a raw re-inject would clobber.
-            for snap in (state_before, after):
-                for active_dict in (snap.get("our_active") or {}).values():
-                    if not active_dict.get("exact"):
-                        _inject_known_stats(active_dict, _lookup_inj(active_dict))
-                for bench_mon in (snap.get("our_bench") or []):
-                    if not bench_mon.get("exact"):
-                        _inject_known_stats(bench_mon, _lookup_inj(bench_mon))
+            _apply_known_injection((state_before, after), side_inj)
 
             # ── Reward computation ────────────────────────────────────────
             # hp_delta_{ours,theirs}: sum of hp_pct_delta events for each side.
@@ -556,6 +573,7 @@ def replay_to_transitions(
                 "turn":        turn["turn"],
                 "total_turns": total_turns,
                 "winner":      battle.get("winner"),
+                "decision_type": "turn",   # vs "replacement" (post-faint switch)
                 "state_before_actions": state_before,
                 "state_after_actions":  after,
                 "our_actions":           our_actions,
@@ -583,5 +601,74 @@ def replay_to_transitions(
             if annotate_transition_actions is not None:
                 annotate_transition_actions(t)
             transitions.append(t)
+
+        # ── Post-faint replacement decisions (the #1 gap) ─────────────────
+        # Each is its own (board-after-faint → which bench mon) example, from
+        # the replacing player's perspective only (the ally is not deciding).
+        # Needs the action codec to build the switch-only mask + index.
+        if annotate_transition_actions is not None:
+            for repl in turn.get("replacements") or []:
+                rp = repl.get("player")
+                if rp not in players:
+                    continue
+                snap_src = (repl.get("state") or {}).get(rp)
+                if not snap_src:
+                    continue
+                state_before = copy.deepcopy(snap_src)
+                after        = copy.deepcopy(snap_src)   # pure switch → reward null
+                _apply_known_injection((state_before, after),
+                                       known_entry.get(rp) or {})
+
+                rel_slot = "our_" + (repl.get("slot") or "")[2:]   # p1a → our_a
+                switch_action = {
+                    "slot": rel_slot, "action": "switch",
+                    "species": repl.get("species"),
+                }
+
+                # Switch-only mask: the fainted slot must pick a living-bench
+                # mon; the ally slot is not deciding (all-zero).  build_action_mask
+                # gives an EMPTY active slot an all-zero row, so we build it here.
+                bench = _living_bench(state_before)
+                row = [0] * ACTIONS_PER_SLOT
+                for i in range(len(bench)):
+                    row[SWITCH_OFFSET + i] = 1
+                idx = action_to_index(switch_action, None, state_before)
+                if idx is None or idx >= ACTIONS_PER_SLOT or row[idx] != 1:
+                    idx = None     # replacement not on the living bench (rare)
+                switch_action["action_index"] = idx
+                mask = {"our_a": [0] * ACTIONS_PER_SLOT,
+                        "our_b": [0] * ACTIONS_PER_SLOT}
+                if rel_slot in mask:
+                    mask[rel_slot] = row
+
+                transitions.append({
+                    "source_type": battle.get("source_type", "ranked_player_vod"),
+                    "replay_id":   replay_id,
+                    "format":      battle.get("format"),
+                    "perspective": rp,
+                    "turn":        turn["turn"],
+                    "total_turns": total_turns,
+                    "winner":      battle.get("winner"),
+                    "decision_type": "replacement",
+                    "state_before_actions": state_before,
+                    "state_after_actions":  after,
+                    "our_actions":           [switch_action],
+                    "opp_actions_predicted": None,
+                    "opp_actions_actual":    [],
+                    "reward": {
+                        "hp_delta_ours": None, "hp_delta_theirs": None,
+                        "tempo": None, "prediction_correct": None, "win": None,
+                    },
+                    "damage_events": [],
+                    "actions":       [],
+                    "belief_fill":   fill_meta,
+                    "state_vector":  None,
+                    "action_mask":   mask,
+                    "players": {
+                        "our_side": rp,
+                        "p1": battle["players"]["p1"],
+                        "p2": battle["players"]["p2"],
+                    },
+                })
 
     return transitions
