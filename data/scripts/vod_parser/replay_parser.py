@@ -30,6 +30,23 @@ from vod_parser.pokedex import get_pokedex, is_mega_species_name, norm_species
 _ILLUSION_SPECIES = {"zoroark", "zoroarkhisui"}
 
 
+def _perceived_roster_name(display: Optional[str]) -> str:
+    """Map a PERCEIVED active species onto the base name the teampreview roster
+    lists it under, so disguise/active exclusion matches the roster.
+
+    The roster (|poke|) lists BASE formes, so a perceived mega forme — e.g. a
+    Zoroark copying a mega-evolved teammate appears as ``"Charizard-Mega-Y"`` —
+    must map back to its base ``"Charizard"`` to consume the right roster slot.
+    Non-mega formes (regional, etc.) are already listed under their own name.
+    Mirrors the non-illusion branch's use of a mon's frozen ``base_species``.
+    """
+    if not display:
+        return ""
+    if is_mega_species_name(display):
+        return display.split("-Mega")[0]
+    return display
+
+
 # ---------------------------------------------------------------------------
 # Parser
 # ---------------------------------------------------------------------------
@@ -1151,6 +1168,15 @@ class ShowdownReplayParser:
         #     two sets are identical, so non-illusion battles are unaffected.
         #     This runs for the opp side only; the owner's own side (our_bench,
         #     this perspective) always tracks the truth.
+        #
+        # The perceived skip key is normalised to the roster's base name
+        # (_perceived_roster_name): the roster lists base formes, so a Zoroark
+        # disguised as a MEGA-evolved teammate (perceived "Charizard-Mega-Y")
+        # must consume the base "Charizard" slot.  Without this the disguise's
+        # roster slot is missed AND a genuinely-on-bench same-species teammate is
+        # also listed → the species shows up BOTH active and benched (a phantom
+        # double-count; gap-#6 re-disguise residual).  Mirrors the non-illusion
+        # branch, which already keys on the mon's base species.
         opp_active_species = {_base(m) for m in self.active_slots.values()
                               if m.player == opp and not m.is_fainted}
         opp_bench_skip: set[str] = set()
@@ -1158,7 +1184,7 @@ class ShowdownReplayParser:
             if m.player != opp or m.is_fainted:
                 continue
             if m.illusion_active and m.disguise_species:
-                opp_bench_skip.add(m.disguise_species)   # perceived identity
+                opp_bench_skip.add(_perceived_roster_name(m.disguise_species))
             else:
                 opp_bench_skip.add(_base(m))
 

@@ -382,3 +382,84 @@ def test_ally_switch_keeps_living_ally_active_through_replacement():
     bench_fainted = {m["species"] for m in snap["opp_bench"]
                      if m.get("is_fainted")}
     assert "Rampardos" in bench_fainted
+
+
+# ── Gap #6 residual: re-disguise Zoroark phantom double-count ────────────────
+
+def test_perceived_roster_name_maps_mega_disguise_to_base():
+    """A perceived MEGA disguise maps to its base roster name; non-mega formes
+    keep their own name."""
+    from vod_parser.replay_parser import _perceived_roster_name
+    assert _perceived_roster_name("Charizard-Mega-Y") == "Charizard"
+    assert _perceived_roster_name("Charizard-Mega-X") == "Charizard"
+    assert _perceived_roster_name("Venusaur-Mega") == "Venusaur"
+    assert _perceived_roster_name("Excadrill") == "Excadrill"        # no mega
+    assert _perceived_roster_name("Arcanine-Hisui") == "Arcanine-Hisui"  # regional
+    assert _perceived_roster_name("Yanmega") == "Yanmega"            # not a mega
+    assert _perceived_roster_name("") == ""
+
+
+def _redisguise_mega_log() -> str:
+    """A Zoroark disguised as a MEGA-evolved teammate (Charizard-Mega-Y) while
+    the REAL Charizard is alive on the bench — the spottedwoot t8 pattern."""
+    return make_log(
+        "|player|p1|alice|101|1500",
+        "|player|p2|bob|102|1500",
+        "|teamsize|p1|4",
+        "|teamsize|p2|4",
+        "|tier|[Gen 9 Champions] VGC 2026 Reg M-A",
+        "|poke|p1|Pikachu, L50, M|",
+        "|poke|p1|Eevee, L50, M|",
+        "|poke|p2|Charizard, L50, M|",
+        "|poke|p2|Zoroark-Hisui, L50, M|",
+        "|poke|p2|Sylveon, L50, M|",
+        "|poke|p2|Farigiraf, L50, M|",
+        "|switch|p1a: Pikachu|Pikachu, L50, M|100/100",
+        "|switch|p1b: Eevee|Eevee, L50, M|100/100",
+        "|switch|p2a: Farigiraf|Farigiraf, L50, M|100/100",
+        "|switch|p2b: Charizard|Charizard, L50, M|100/100",
+        "|turn|1",
+        "|detailschange|p2b: Charizard|Charizard-Mega-Y, L50, M",
+        "|-mega|p2b: Charizard|Charizard|Charizardite Y",
+        "|switch|p2b: Sylveon|Sylveon, L50, M|100/100",   # real Char-Mega-Y → bench
+        "|turn|2",
+        # Zoroark switches into p2a disguised as the mega'd Charizard:
+        "|switch|p2a: Charizard|Charizard-Mega-Y, L50, M|100/100",
+        "|turn|3",                                         # ← disguise-active snapshot
+        "|replace|p2a: Zoroark|Zoroark-Hisui, L50, M",     # unmask (relabels the switch)
+        "|turn|4",
+        "|win|alice",
+    )
+
+
+def test_redisguise_mega_zoroark_no_phantom_double_count():
+    """Gap #6 residual: when a Zoroark is disguised as a MEGA-evolved teammate
+    ('Charizard-Mega-Y') while the real Charizard is alive on the bench, the
+    opponent snapshot must NOT list that species BOTH active and on the bench.
+
+    The disguise (perceived 'Charizard-Mega-Y') must consume the base 'Charizard'
+    roster slot, masking the genuinely-benched same-species teammate from the
+    observer's view — matching what a live bot perceives.  Before the
+    _perceived_roster_name fix the mega forme name failed to match the base
+    roster entry, so the real Charizard was double-listed.
+    """
+    r = ShowdownReplayParser(_redisguise_mega_log(), our_player="p1").parse()
+    # turn 3's start-of-turn snapshot is the disguise-active frame.
+    t3 = next(t for t in r["turns"] if t["turn"] == 3)
+    snap = t3["state_before_actions"]["p1"]
+
+    active = [d["species"] for d in snap["opp_active"].values()]
+    bench = [m["species"] for m in snap["opp_bench"]]
+    assert "Charizard-Mega-Y" in active           # perceived active disguise
+    # No species appears both active and benched (the phantom signature):
+    assert not (set(active) & set(bench)), (
+        f"phantom double-count: active={active} bench={bench}")
+    assert bench.count("Charizard-Mega-Y") == 0 and bench.count("Charizard") == 0
+
+    # After the unmask (state_after of turn 3, post-|replace|), the real
+    # Charizard is no longer masked and reappears on the bench.
+    after = t3["state_after_actions"]["p1"]
+    after_active = [d["species"] for d in after["opp_active"].values()]
+    after_bench = [m["species"] for m in after["opp_bench"]]
+    assert "Zoroark-Hisui" in after_active        # disguise resolved
+    assert any("Charizard" in s for s in after_bench)   # real Charizard restored
