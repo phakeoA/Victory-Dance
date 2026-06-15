@@ -264,3 +264,121 @@ def test_vod_metadata(vod_html, vod_result):
         vod_result["players"]["p1"]["username"],
         vod_result["players"]["p2"]["username"],
     )
+
+
+# ── Gap #5: HP parsing (real-HP scale + malformed tokens) ─────────────────────
+@pytest.mark.parametrize("hp_str,expected", [
+    ("100/100", (100.0, 100.0)),
+    ("74/100", (74.0, 100.0)),
+    ("175/200", (175.0, 200.0)),      # real-HP scale (owner-recorded replay)
+    ("0 fnt", (0.0, 100.0)),          # faint marker stripped
+    ("50/100 brn", (50.0, 100.0)),    # status suffix (space) stripped
+    ("50/100y", (50.0, 100.0)),       # stray no-separator suffix tolerated
+    ("197/197", (197.0, 197.0)),
+    ("", (None, None)),
+    ("garbage", (None, None)),
+])
+def test_parse_hp_handles_real_scale_and_malformed(hp_str, expected):
+    """_parse_hp returns (numerator, denominator), tolerating real-HP scale and
+    stray suffixes (e.g. '50/100y') the same way poke-env's client does — an
+    unparsed token previously left an active mon with hp_pct=None (gap #5)."""
+    assert ShowdownReplayParser._parse_hp(hp_str) == expected
+
+
+def test_real_hp_damage_event_reported_as_percentage():
+    """A damage line in real-HP units (175/200) must yield a true PERCENTAGE in
+    both the snapshot hp_pct AND the damage event's hp_pct_after (gap #5)."""
+    r = parse(
+        "|switch|p1a: Dondozo|Dondozo, L50, M|200/200",
+        "|switch|p2a: Aerodactyl|Aerodactyl, L50, M|100/100",
+        "|turn|1",
+        "|move|p2a: Aerodactyl|Rock Slide|p1a: Dondozo",
+        "|-damage|p1a: Dondozo|150/200",
+        "|turn|2",
+        "|win|alice",
+    )
+    snap = r["turns"][0]["state_after_actions"]["p1"]["our_active"]["our_a"]
+    assert snap["hp_pct"] == 75.0          # 150/200, NOT 150
+    dmg = [e for t in r["turns"] for e in t.get("damage_events", [])
+           if e.get("species") == "Dondozo"]
+    assert dmg and dmg[0]["hp_pct_after"] == 75.0
+
+
+# ── Gap #6 sub-cause 1: |swap| (Ally Switch) position tracking ───────────────
+
+def test_handle_swap_exchanges_active_slot_pointers():
+    """``|swap|POKEMON|POSITION`` must exchange the two active-slot pointers and
+    keep each mon's ``.slot`` letter consistent.  poke-env applies Ally Switch
+    to its DoubleBattle, so the offline parser must too (Gap #6 sub-cause 1)."""
+    p = ShowdownReplayParser(make_log(*HEADER), our_player="p1")
+    p._handle_line("|switch|p2a: Aerodactyl|Aerodactyl, L50, M|100/100")
+    p._handle_line("|switch|p2b: Palafin|Palafin, L50, M|100/100")
+    aero, pala = p.active_slots["p2a"], p.active_slots["p2b"]
+
+    p._handle_line("|swap|p2a: Aerodactyl|1|[from] move: Ally Switch")
+
+    assert p.active_slots["p2a"] is pala   # b's occupant moved to a
+    assert p.active_slots["p2b"] is aero   # a's occupant moved to b (position 1)
+    assert p.active_slots["p2a"].slot == "a"
+    assert p.active_slots["p2b"].slot == "b"
+
+
+def _ally_switch_then_faint_log() -> str:
+    """The orangeomar pattern: Farigiraf Ally-Switches to p2b, then the mon now
+    at p2a (Rampardos) faints and a replacement (Sableye) switches into p2a."""
+    return make_log(
+        "|player|p1|alice|101|1500",
+        "|player|p2|bob|102|1500",
+        "|teamsize|p1|4",
+        "|teamsize|p2|4",
+        "|tier|[Gen 9 Champions] VGC 2026 Reg M-A",
+        "|poke|p1|Pikachu, L50, M|",
+        "|poke|p1|Eevee, L50, M|",
+        "|poke|p2|Farigiraf, L50, F|",
+        "|poke|p2|Rampardos, L50, F|",
+        "|poke|p2|Sableye, L50, F|",
+        "|poke|p2|Drampa, L50, F|",
+        "|switch|p1a: Pikachu|Pikachu, L50, M|100/100",
+        "|switch|p1b: Eevee|Eevee, L50, M|100/100",
+        "|switch|p2a: Farigiraf|Farigiraf, L50, F|100/100",
+        "|switch|p2b: Rampardos|Rampardos, L50, F|100/100",
+        "|turn|1",
+        "|move|p2a: Farigiraf|Ally Switch|p2a: Farigiraf",
+        "|swap|p2a: Farigiraf|1|[from] move: Ally Switch",
+        "|move|p1a: Pikachu|Wave Crash|p2a: Rampardos",
+        "|-damage|p2a: Rampardos|0 fnt",
+        "|faint|p2a: Rampardos",
+        "|upkeep",
+        "|switch|p2a: Sableye|Sableye, L50, F|100/100",
+        "|turn|2",
+        "|win|alice",
+    )
+
+
+def test_ally_switch_keeps_living_ally_active_through_replacement():
+    """End-to-end Gap #6 sub-cause 1: after Ally Switch + a faint + a forced
+    replacement, BOTH opponent slots are still active at the next turn — the
+    replacement fills the fainted slot, NOT the still-living ally's slot.
+
+    Before the |swap| fix the parser ignored the position shift, so the
+    ``|switch|p2a: Sableye`` overwrote the living Farigiraf (which Ally Switch
+    had moved to p2b), dropping it out of opp_active and wrongly into opp_bench.
+    """
+    r = ShowdownReplayParser(_ally_switch_then_faint_log(), our_player="p1").parse()
+    # The replacement switches in at the end of turn 1, so turn 1's
+    # state_after (== the board at the start of turn 2) reflects it.
+    t1 = next(t for t in r["turns"] if t["turn"] == 1)
+    snap = t1["state_after_actions"]["p1"]
+
+    active = {d["species"] for d in snap["opp_active"].values()}
+    assert active == {"Sableye", "Farigiraf"}, active   # both slots filled
+    assert len(snap["opp_active"]) == 2
+
+    # The living Farigiraf must NOT be wrongly benched as a seen-alive mon.
+    bench_alive = {m["species"] for m in snap["opp_bench"]
+                   if m.get("seen") and not m.get("is_fainted")}
+    assert "Farigiraf" not in bench_alive
+    # Rampardos correctly fainted (kept on the bench, KO-flagged).
+    bench_fainted = {m["species"] for m in snap["opp_bench"]
+                     if m.get("is_fainted")}
+    assert "Rampardos" in bench_fainted

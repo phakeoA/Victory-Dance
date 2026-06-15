@@ -22,8 +22,8 @@ class PokemonSlot:
     nickname: str
     player: str          # "p1" or "p2"
     slot: str            # "a" or "b"  (active field position)
-    hp_current: Optional[float] = None   # percentage 0-100
-    hp_max: Optional[float] = 100.0
+    hp_current: Optional[float] = None   # raw numerator from the log (NOT a pct)
+    hp_max: Optional[float] = 100.0      # raw denominator (100 for %-scale logs)
     status: Optional[str] = None
     boosts: dict = field(default_factory=dict)
     is_mega: bool = False
@@ -84,7 +84,17 @@ class PokemonSlot:
             "nickname": self.nickname,
             "player": self.player,
             "slot": self.slot,
-            "hp_pct": self.hp_current,
+            # hp_pct is a true 0-100 PERCENTAGE.  The log expresses HP either as
+            # a percentage (X/100) or, when the replay was recorded from the
+            # owner's client, as REAL HP (e.g. 175/200) — gap #5.  hp_current is
+            # the raw numerator and hp_max the raw denominator, so we must divide
+            # to normalise; storing the bare numerator over-reports a real-HP
+            # mon (175 → clamped to full 1.0 by the encoder) and breaks live
+            # parity (poke-env's current_hp_fraction is always a true fraction).
+            "hp_pct": (
+                None if self.hp_current is None
+                else self.hp_current / (self.hp_max or 100.0) * 100.0
+            ),
             "status": self.status,
             "boosts": dict(self.boosts),
             "is_mega": self.is_mega,

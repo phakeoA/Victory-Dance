@@ -1,31 +1,39 @@
 """
-State encoder for VGC Reg M-A (Pokémon Champions doubles format).
+State encoder for VGC Reg M-A (Pokémon Champions doubles format) — OFFLINE
+(VOD-parsing) path + the FROZEN tensor layout shared by both paths.
 
-Encodes a battle state into a fixed-size float32 numpy array for the
-AlphaZero neural network.  Two input paths produce the SAME tensor layout:
+This module is the canonical owner of the 1398-dim layout: every feature
+ordering, dimension constant, and the action codec live here, and the LIVE
+encoder (``live_state_encoder.LiveStateEncoder``) imports them so the two paths
+can never drift.  It encodes parsed/belief-enriched VOD JSON:
 
-  1. LIVE   — encode(battle)            poke-env DoubleBattle (bot play, Type C/D)
-  2. OFFLINE — encode_snapshot(snap)    a state_before/after_actions snapshot
-               encode_transition(t)     from vod_parser / belief_state JSON
-                                        (Types A/B + training ingestion)
+  OFFLINE — encode_snapshot(snap)    a state_before/after_actions snapshot
+            encode_transition(t)     from vod_parser / belief_state JSON
+                                     (Types A/B + training ingestion)
 
-poke-env is OPTIONAL: the offline path works without it (training machines),
-the live path raises a clear error if it is missing.  All enum orderings are
-FROZEN in this file (not derived from poke-env at import time) so STATE_DIM
-can never silently change with a poke-env upgrade and invalidate a trained net.
+  LIVE    — encode(battle)           lives in live_state_encoder.py (poke-env
+                                     DoubleBattle; bot play, Type C/D).  It is
+                                     kept in a separate module so this one never
+                                     imports poke-env.
+
+This module has NO poke-env dependency: it works on training machines without
+it.  All enum orderings are FROZEN here (not derived from poke-env at import
+time) so STATE_DIM can never silently change with a poke-env upgrade and
+invalidate a trained net.  ``StateEncoder`` remains as a backward-compatible
+alias of ``VodStateEncoder`` (the offline encoder) at the bottom of the file.
 
 BELIEF INTEGRATION (belief_state.py)
 ────────────────────────────────────
 fill_blanks() writes per-mon ``stats_estimate`` ({"mode": "exact"|"distribution",
-"stats": {...}}) and ``belief`` blocks into the parsed JSON.  The encoder
-consumes them:
+"stats": {...}}) and ``belief`` blocks into the parsed JSON.  The offline
+encoder consumes them:
   * est_stats (6 floats)  — exact L50 stats (own side / self-play) or the
     Pikalytics probability-weighted expected stats (opponent side)
   * stats_known (1 float) — 1.0 exact, 0.5 distribution estimate, 0.0 unknown
   * unknown move slots are padded with belief moves_predicted, with the
     is_known feature carrying the usage probability instead of 1.0
-Live path: own mons use poke-env's real stats; opponent mons use the
-BeliefState passed to the constructor (StateEncoder(belief=...)).
+(The live path's equivalent belief handling — own mons from poke-env's real
+stats, opponent mons from the BeliefState — lives in live_state_encoder.py.)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 TENSOR LAYOUT  (total STATE_DIM floats)
@@ -124,26 +132,6 @@ if _SCRIPTS_DIR not in sys.path:
 
 from vod_parser.pokedex import get_pokedex, norm_species
 from belief_state import BeliefState, dex_base_stats, STAT_ORDER
-
-# ── poke-env is optional (offline training machines don't need it) ────────────
-try:  # poke-env ≥ 0.8 layout
-    from poke_env.battle import (
-        DoubleBattle, Pokemon, Move, PokemonType, Status, Weather, Field,
-        SideCondition, MoveCategory,
-    )
-    _HAS_POKE_ENV = True
-except ImportError:
-    try:  # older poke-env layout
-        from poke_env.environment import (
-            DoubleBattle, Pokemon, Move, PokemonType, Status, Weather, Field,
-            SideCondition, MoveCategory,
-        )
-        _HAS_POKE_ENV = True
-    except ImportError:
-        DoubleBattle = Pokemon = Move = None  # type: ignore
-        PokemonType = Status = Weather = Field = SideCondition = MoveCategory = None  # type: ignore
-        _HAS_POKE_ENV = False
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # FROZEN feature orderings — single source of truth for tensor indices.
@@ -296,332 +284,24 @@ def _dex_types(species: Optional[str]) -> list[str]:
     return [_canon(t) for t in (entry.get("types") or [])]
 
 
-# poke-env member names that differ from the frozen canonical names
-_LIVE_NAME_ALIASES = {"SNOWSCAPE": "SNOW", "MATBLOCK": "MAT_BLOCK"}
-
-
-def _enum_to_idx(enum_cls, idx_map: dict[str, int]) -> dict:
-    """Map live poke-env enum members onto frozen indices by member name."""
-    out = {}
-    for member in enum_cls:
-        name = _LIVE_NAME_ALIASES.get(member.name, member.name)
-        i = idx_map.get(name)
-        if i is not None:
-            out[member] = i
-    return out
-
-
 # ══════════════════════════════════════════════════════════════════════════════
-class StateEncoder:
+class VodStateEncoder:
     """
-    Encodes a battle state into a 1D float32 numpy array of shape (STATE_DIM,).
+    Offline VOD-parsing encoder: parsed / belief-enriched replay JSON →
+    a (STATE_DIM,) float32 vector.  Shares the FROZEN tensor layout with the
+    live encoder (live_state_encoder.LiveStateEncoder); that module imports
+    the constants defined here, so both paths are guaranteed identical.
 
-    Example (live, requires poke-env)::
-
-        encoder = StateEncoder(belief=BeliefState("pikalytics_regma.json"))
-        vec = encoder.encode(battle)                  # shape (STATE_DIM,)
-
-    Example (offline, parsed/enriched VOD JSON)::
-
-        encoder = StateEncoder()
+        enc = VodStateEncoder()
         snap = enriched["turns"][0]["state_before_actions"]["p1"]
-        vec = encoder.encode_snapshot(snap, turn=1)   # shape (STATE_DIM,)
+        vec = enc.encode_snapshot(snap, turn=1)   # shape (STATE_DIM,)
     """
 
     def __init__(self, belief: Optional[BeliefState] = None, level: int = 50):
         self.state_dim  = STATE_DIM
         self.action_dim = ACTION_DIM
-        self.belief     = belief   # opponent stat estimates on the live path
+        self.belief     = belief   # accepted for signature compatibility
         self.level      = level
-
-        # Live-path enum→index lookups (poke-env members mapped by name onto
-        # the frozen orderings; only built when poke-env is importable)
-        if _HAS_POKE_ENV:
-            self._type_idx    = _enum_to_idx(PokemonType, _TYPE_IDX)
-            self._status_idx  = _enum_to_idx(Status, _STATUS_IDX)
-            self._weather_idx = _enum_to_idx(Weather, _WEATHER_IDX)
-            self._field_idx   = _enum_to_idx(Field, _FIELD_IDX)
-            self._sc_idx      = _enum_to_idx(SideCondition, _SC_IDX)
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # LIVE PATH — poke-env DoubleBattle
-    # ══════════════════════════════════════════════════════════════════════════
-    def encode(self, battle: "DoubleBattle") -> np.ndarray:
-        """
-        Return a float32 vector of shape (STATE_DIM,) for the given battle.
-        Safe to call at any point during a battle, including teampreview.
-        """
-        if not _HAS_POKE_ENV:
-            raise RuntimeError(
-                "poke-env is not installed — the live encode(battle) path is "
-                "unavailable. Use encode_snapshot()/encode_transition() for "
-                "parsed VOD JSON instead."
-            )
-        vec = np.zeros(STATE_DIM, dtype=np.float32)
-        cursor = 0
-
-        # ── [A] Active slots ─────────────────────────────────────────────────
-        # active_pokemon / opponent_active_pokemon are List[Optional[Pokemon]]
-        # of length 2; None means that slot is empty (fainted / not yet sent).
-        try:
-            own_active = battle.active_pokemon          # List[Optional[Pokemon]]
-        except ValueError:
-            own_active = [None, None]
-        try:
-            opp_active = battle.opponent_active_pokemon
-        except ValueError:
-            opp_active = [None, None]
-
-        own_active_set = {p for p in own_active if p is not None}
-
-        for mon in list(own_active):
-            self._write_pokemon(vec, cursor, mon, is_active=True, is_own=True)
-            cursor += POKEMON_FEATURES
-        for mon in list(opp_active):
-            self._write_pokemon(vec, cursor, mon, is_active=True, is_own=False)
-            cursor += POKEMON_FEATURES
-
-        # ── [B] Bench slots ──────────────────────────────────────────────────
-        bench = [
-            p for p in battle.team.values()
-            if p not in own_active_set and not p.fainted
-        ][:BENCH_SLOTS]
-
-        for i in range(BENCH_SLOTS):
-            mon = bench[i] if i < len(bench) else None
-            self._write_pokemon(vec, cursor, mon, is_active=False, is_own=True)
-            cursor += POKEMON_FEATURES
-
-        # ── [B2] Opponent bench (layout-v2): revealed opp mons not active.
-        # Living switch-ins first so a truncated 4-slot view keeps the threats.
-        opp_active_set = {p for p in opp_active if p is not None}
-        opp_team = list(getattr(battle, "opponent_team", {}).values())
-        opp_alive = [p for p in opp_team if p not in opp_active_set and not p.fainted]
-        opp_dead  = [p for p in opp_team if p not in opp_active_set and p.fainted]
-        opp_bench = (opp_alive + opp_dead)[:OPP_BENCH_SLOTS]
-        for i in range(OPP_BENCH_SLOTS):
-            mon = opp_bench[i] if i < len(opp_bench) else None
-            self._write_pokemon(vec, cursor, mon, is_active=False, is_own=False)
-            cursor += POKEMON_FEATURES
-
-        # ── [C] Global features ──────────────────────────────────────────────
-
-        # Weather: Dict[Weather, int] — multi-hot (normally one at a time)
-        for w in battle.weather:
-            if w in self._weather_idx:
-                vec[cursor + self._weather_idx[w]] = 1.0
-        cursor += NUM_WEATHER
-
-        # Fields: Dict[Field, int]
-        trick_room_active = False
-        for f in battle.fields:
-            if f.name == "TRICK_ROOM":
-                trick_room_active = True
-            if f in self._field_idx:
-                vec[cursor + self._field_idx[f]] = 1.0
-        cursor += NUM_FIELDS
-
-        # Own side conditions: Dict[SideCondition, int]
-        # value = layer count (stackable) or turn activated (non-stackable)
-        # Normalise to [0,1] using max 3 layers
-        for sc, val in battle.side_conditions.items():
-            if sc in self._sc_idx:
-                vec[cursor + self._sc_idx[sc]] = min(val, 3) / 3.0
-        cursor += NUM_SIDE_CONDS
-
-        # Opponent side conditions
-        for sc, val in battle.opponent_side_conditions.items():
-            if sc in self._sc_idx:
-                vec[cursor + self._sc_idx[sc]] = min(val, 3) / 3.0
-        cursor += NUM_SIDE_CONDS
-
-        # Turn (cap at 60 for normalisation)
-        vec[cursor] = min(battle.turn, 60) / 60.0
-        cursor += 1
-
-        # Trick Room explicit flag (already in fields but surfaced separately
-        # because it flips speed priority — critical strategic signal)
-        vec[cursor] = 1.0 if trick_room_active else 0.0
-        cursor += 1
-
-        # ── Team counts (layout-v2): living-bench + fainted per side ──────────
-        own_team = list(battle.team.values())
-        own_live = sum(1 for p in own_team if p not in own_active_set and not p.fainted)
-        own_fnt  = sum(1 for p in own_team if p.fainted)
-        opp_fnt  = sum(1 for p in opp_team if p.fainted)
-        vec[cursor] = min(own_live, 4) / 4.0;       cursor += 1
-        vec[cursor] = min(len(opp_alive), 4) / 4.0; cursor += 1
-        vec[cursor] = min(own_fnt, 4) / 4.0;        cursor += 1
-        vec[cursor] = min(opp_fnt, 4) / 4.0;        cursor += 1
-
-        assert cursor == STATE_DIM, (
-            f"StateEncoder cursor mismatch: wrote {cursor}, expected {STATE_DIM}"
-        )
-        return vec
-
-    # ── Pokémon encoder (live) ────────────────────────────────────────────────
-    def _write_pokemon(
-        self,
-        vec: np.ndarray,
-        start: int,
-        mon: Optional["Pokemon"],
-        is_active: bool,
-        is_own: bool,
-    ) -> None:
-        """Write POKEMON_FEATURES floats into vec starting at `start`."""
-        # Empty / unrevealed slot → all zeros (already zeroed by np.zeros)
-        if mon is None:
-            return
-
-        i = start
-
-        # hp_frac — current_hp_fraction returns 0 if current_hp is falsy
-        vec[i] = mon.current_hp_fraction
-        i += 1
-
-        # type1 one-hot
-        if mon.type_1 in self._type_idx:
-            vec[i + self._type_idx[mon.type_1]] = 1.0
-        i += NUM_TYPES
-
-        # type2 one-hot (None if single-type)
-        if mon.type_2 is not None and mon.type_2 in self._type_idx:
-            vec[i + self._type_idx[mon.type_2]] = 1.0
-        i += NUM_TYPES
-
-        # Base stats: hp atk def spa spd spe (normalised by 255)
-        base_stats = mon.base_stats
-        for key in STAT_ORDER:
-            vec[i] = base_stats.get(key, 0) / 255.0
-            i += 1
-
-        # Est in-battle stats + confidence flag (belief integration):
-        #   own mon  → exact stats from the request (stats_known = 1.0)
-        #   opp mon  → Pikalytics-weighted expectation   (stats_known = 0.5)
-        est, known = self._live_est_stats(mon, is_own)
-        for key in STAT_ORDER:
-            vec[i] = (est.get(key) or 0) / _EST_STAT_NORM if est else 0.0
-            i += 1
-        vec[i] = known
-        i += 1
-
-        # Mega: species string contains 'mega' after mega_evolve() updates it
-        vec[i] = 1.0 if "mega" in mon.species.lower() else 0.0
-        i += 1
-
-        # Terastallized
-        vec[i] = 1.0 if mon.is_terastallized else 0.0
-        i += 1
-
-        # Status one-hot (None = healthy)
-        if mon.status is not None and mon.status in self._status_idx:
-            vec[i + self._status_idx[mon.status]] = 1.0
-        i += NUM_STATUS
-
-        # Boosts (Dict[str, int], values in [-6, +6])
-        boosts = mon.boosts
-        for j, key in enumerate(_BOOST_KEYS):
-            vec[i + j] = boosts.get(key, 0) / 6.0
-        i += NUM_BOOSTS
-
-        # Moves (up to 4; remaining slots stay zero = unknown)
-        move_list = list(mon.moves.values())[:NUM_MOVES]
-        for m_idx in range(NUM_MOVES):
-            if m_idx < len(move_list):
-                self._write_move(vec, i, move_list[m_idx], mon)
-            i += MOVE_FEATURES
-
-        # is_active slot flag
-        vec[i] = 1.0 if is_active else 0.0
-        i += 1
-
-        # is_revealed (own mons always 1; opp mons 1 once sent out / identified)
-        vec[i] = 1.0 if mon.revealed else 0.0
-        i += 1
-
-        # is_fainted (layout-v2): explicit KO flag for the opp-bench / counting
-        vec[i] = 1.0 if mon.fainted else 0.0
-        i += 1
-
-        # is_transformed (layout-v2). Best-effort on the live path — poke-env
-        # exposes the flag but not always a copied-forme handle; encoding the
-        # copied forme's typing/stats live is a TODO for the live-player work.
-        vec[i] = 1.0 if getattr(mon, "is_transformed", False) else 0.0
-        i += 1
-
-    def _live_est_stats(
-        self, mon: "Pokemon", is_own: bool
-    ) -> tuple[Optional[dict], float]:
-        """(stats dict | None, stats_known flag) for the live path."""
-        if is_own:
-            stats = getattr(mon, "stats", None) or {}
-            if all(stats.get(k) for k in ("atk", "def", "spa", "spd", "spe")):
-                est = dict(stats)
-                if not est.get("hp"):
-                    est["hp"] = mon.max_hp
-                return est, 1.0
-        if self.belief is not None:
-            est = self.belief.expected_stats_weighted(
-                mon.species, mon.base_stats, level=self.level
-            )
-            if est:
-                return est, 0.5
-        return None, 0.0
-
-    # ── Move encoder (live) ───────────────────────────────────────────────────
-    def _write_move(
-        self,
-        vec: np.ndarray,
-        start: int,
-        move: "Move",
-        user: "Pokemon",
-    ) -> None:
-        """Write MOVE_FEATURES floats into vec starting at `start`."""
-        i = start
-
-        # Base power (cap at 250 since a few moves are absurdly high)
-        vec[i] = min(move.base_power, 250) / 150.0
-        i += 1
-
-        # Move type as ordinal index (compact; type embeddings learned by net)
-        if move.type in self._type_idx:
-            vec[i] = self._type_idx[move.type] / (NUM_TYPES - 1)
-        i += 1
-
-        # Category: 0.0=physical, 0.5=special, 1.0=status
-        cat = move.category
-        if cat == MoveCategory.PHYSICAL:
-            vec[i] = 0.0
-        elif cat == MoveCategory.SPECIAL:
-            vec[i] = 0.5
-        else:
-            vec[i] = 1.0
-        i += 1
-
-        # Priority (range roughly -7 to +5 in practice)
-        vec[i] = move.priority / 7.0
-        i += 1
-
-        # Accuracy (already 0–1 float; always-hit moves return 1.0)
-        vec[i] = move.accuracy
-        i += 1
-
-        # PP fraction remaining
-        max_pp = move.max_pp or 1
-        vec[i] = move.current_pp / max_pp
-        i += 1
-
-        # Protect-family move flag (high strategic value in doubles)
-        vec[i] = 1.0 if move.is_protect_move else 0.0
-        i += 1
-
-        # STAB: move type in user's current types (accounts for tera)
-        vec[i] = 1.0 if move.type in user.types else 0.0
-        i += 1
-
-        # Known flag (always 1 here — zero-slot means unknown)
-        vec[i] = 1.0
-        i += 1
 
     # ══════════════════════════════════════════════════════════════════════════
     # OFFLINE PATH — parsed / belief-enriched VOD JSON
@@ -689,20 +369,20 @@ class StateEncoder:
             vec[cursor + _FIELD_IDX["TRICK_ROOM"]] = 1.0
         cursor += NUM_FIELDS
 
-        # Side conditions.  Live path stores layer-count/turn-activated and
-        # normalises min(val,3)/3; offline we have TURNS REMAINING, which is
-        # strictly more informative — same normalisation, value semantics
-        # differ slightly (documented divergence).
+        # Side conditions — BINARY presence (1.0 = active), gap #5.  The two paths
+        # cannot agree on a magnitude: offline has true turns-remaining (from the
+        # protocol) while poke-env exposes only the TURN a condition STARTED, and
+        # a live bot cannot know an opponent's screen duration anyway (Light Clay).
+        # A presence bit is the one representation both paths reproduce identically.
         side_conds = snap.get("side_conditions") or {}
         for side_key in ("our_side", "opp_side"):
             sc = side_conds.get(side_key) or {}
-            tw = sc.get("tailwind_turns_remaining") or 0
-            if tw > 0:
-                vec[cursor + _SC_IDX["TAILWIND"]] = min(tw, 3) / 3.0
+            if (sc.get("tailwind_turns_remaining") or 0) > 0:
+                vec[cursor + _SC_IDX["TAILWIND"]] = 1.0
             for screen, turns_left in (sc.get("screens") or {}).items():
                 name = _SCREEN_TO_SC.get(screen)
                 if name and turns_left:
-                    vec[cursor + _SC_IDX[name]] = min(turns_left, 3) / 3.0
+                    vec[cursor + _SC_IDX[name]] = 1.0
             cursor += NUM_SIDE_CONDS
 
         # Turn (cap at 60 for normalisation)
@@ -725,7 +405,7 @@ class StateEncoder:
         vec[cursor] = min(len(opp_seen_fainted), 4) / 4.0;  cursor += 1
 
         assert cursor == STATE_DIM, (
-            f"StateEncoder cursor mismatch: wrote {cursor}, expected {STATE_DIM}"
+            f"VodStateEncoder cursor mismatch: wrote {cursor}, expected {STATE_DIM}"
         )
         return vec
 
@@ -1135,3 +815,9 @@ def get_state_dim() -> int:
 
 def get_action_dim() -> int:
     return ACTION_DIM
+
+
+# Backward-compatibility alias: the offline encoder kept the name
+# StateEncoder before the live/vod split (live encode() now lives in
+# live_state_encoder.LiveStateEncoder).
+StateEncoder = VodStateEncoder

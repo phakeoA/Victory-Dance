@@ -18,12 +18,30 @@ Design notes:
 """
 
 from __future__ import annotations
+import sys
+from pathlib import Path
+from typing import Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Tuple
 
-from envs.state_encoder import get_state_dim, get_action_dim
+
+# state_encoder lives at data/scripts/ — add it to sys.path (same pattern as the
+# sibling BC_model/teamPreview_model scripts).  The old `envs.state_encoder`
+# import path never existed in this project.
+def _find_scripts_dir() -> Path:
+    for parent in Path(__file__).resolve().parents:
+        cand = parent / "data" / "scripts"
+        if cand.is_dir():
+            return cand
+    raise RuntimeError(f"could not locate data/scripts above {__file__}")
+
+_SCRIPTS_DIR = _find_scripts_dir()
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from state_encoder import get_state_dim, get_action_dim  # noqa: E402
 
 
 STATE_DIM = get_state_dim()

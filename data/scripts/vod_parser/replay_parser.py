@@ -213,6 +213,13 @@ class ShowdownReplayParser:
             # Illusion broke — the slot's true identity is revealed.
             self._handle_replace(parts)
 
+        elif cmd == "swap":
+            # |swap|p2a: Farigiraf|1|[from] move: Ally Switch
+            # A position-shifting move (Ally Switch) moved an active mon to a
+            # different field slot — swap the slot pointers so later faints /
+            # replacements target the right slot (Gap #6 sub-cause 1).
+            self._handle_swap(parts)
+
         elif cmd == "-transform":
             # |-transform|p1a: Ditto|p2b: Whimsicott|[from] ability: Imposter
             self._handle_transform(parts)
@@ -365,6 +372,46 @@ class ShowdownReplayParser:
         if mon is not None:
             mon.is_fainted = True
             mon.hp_current = 0.0
+
+    def _handle_swap(self, parts: list[str]) -> None:
+        """Handle ``|swap|POKEMON|POSITION`` — a position-shifting move.
+
+        Ally Switch (and a few field-control moves) relocate an already-active
+        mon to a different field slot: the named mon moves to active-field
+        ``POSITION`` (0 = slot a, 1 = slot b, …) and whatever was there moves to
+        its old slot.  poke-env applies this to its DoubleBattle, so the offline
+        parser must too — otherwise the two slot pointers stay desynced and a
+        later ``|faint|``/forced ``|switch|`` on a relabeled slot overwrites the
+        WRONG (still-living) mon, dropping it out of the active set entirely
+        (Gap #6 sub-cause 1: Ally Switch before a faint+replacement).
+        """
+        ident = parts[2] if len(parts) > 2 else ""
+        src_slot = self._slot_key_from_ident(ident)
+        if not src_slot or len(src_slot) < 3:
+            return
+        player = src_slot[:2]
+        try:
+            pos = int(parts[3]) if len(parts) > 3 else -1
+        except (ValueError, TypeError):
+            return
+        dst_letter = chr(ord("a") + pos)
+        dst_slot = player + dst_letter
+        if pos < 0 or dst_slot == src_slot:
+            return
+        # Pop both, then reassign swapped (an empty slot simply stays empty).
+        src_mon = self.active_slots.pop(src_slot, None)
+        dst_mon = self.active_slots.pop(dst_slot, None)
+        if dst_mon is not None:
+            self.active_slots[src_slot] = dst_mon
+            dst_mon.slot = src_slot[2]
+        if src_mon is not None:
+            self.active_slots[dst_slot] = src_mon
+            src_mon.slot = dst_letter
+        self._current_turn_actions.append({
+            "event": "swap",
+            "slot": src_slot,
+            "to_slot": dst_slot,
+        })
 
     def _handle_switch(self, parts: list[str]) -> None:
         # |switch|p1b: Incineroar|Incineroar, L50, F|100/100
@@ -813,10 +860,19 @@ class ShowdownReplayParser:
         if slot_key in self.active_slots:
             prev_hp = self.active_slots[slot_key].hp_current
             self.active_slots[slot_key].hp_current = hp_current
+            # Keep the denominator current so to_dict()'s hp_pct stays a true
+            # percentage even for real-HP (X/Y, Y!=100) replays (gap #5).
+            if hp_max:
+                self.active_slots[slot_key].hp_max = hp_max
 
+        # hp_pct_after / delta are reported as true 0-100 PERCENTAGES, normalising
+        # the raw numerator by the denominator so real-HP logs (e.g. 175/200) are
+        # not over-reported (gap #5).
+        denom = hp_max or 100.0
+        hp_pct_after = None if hp_current is None else round(hp_current / denom * 100.0, 2)
         delta_pct = None
         if prev_hp is not None and hp_current is not None:
-            delta_pct = round(hp_current - prev_hp, 2)
+            delta_pct = round((hp_current - prev_hp) / denom * 100.0, 2)
 
         # Attribute source from the most recent move action.
         # Bug 2 fix: indirect damage (burn, poison, Rocky Helmet, recoil,
@@ -835,7 +891,7 @@ class ShowdownReplayParser:
             "event": cmd.lstrip("-"),   # "damage" or "heal"
             "slot": slot_key,
             "species": self._species_from_ident(ident),
-            "hp_pct_after": hp_current,
+            "hp_pct_after": hp_pct_after,
             "hp_pct_delta": delta_pct,
             "source_slot": source_slot,
             "source_species": source_species,
@@ -1082,8 +1138,30 @@ class ShowdownReplayParser:
         # ── Opponent bench ────────────────────────────────────────────────
         # Same rule as our_bench (see Bug 6 note above): revealed mons —
         # fainted ones included — plus unseen roster slots as stubs.
+        #
+        # Two distinct exclusion sets keep this consistent with the LIVE bot:
+        #   • opp_active_species (TRUE identities) keeps the genuinely-active
+        #     mons out of opp_seen.
+        #   • opp_bench_skip (PERCEIVED identities) decides which roster slots
+        #     the observer treats as already on the field.  A disguised opponent
+        #     Zoroark is perceived as its DISGUISE species, so THAT roster slot
+        #     is consumed by the illusion while the TRUE Zoroark surfaces as an
+        #     unseen roster stub — exactly what a live bot sees (it cannot
+        #     un-see the disguise until |replace|).  With no active illusion the
+        #     two sets are identical, so non-illusion battles are unaffected.
+        #     This runs for the opp side only; the owner's own side (our_bench,
+        #     this perspective) always tracks the truth.
         opp_active_species = {_base(m) for m in self.active_slots.values()
                               if m.player == opp and not m.is_fainted}
+        opp_bench_skip: set[str] = set()
+        for m in self.active_slots.values():
+            if m.player != opp or m.is_fainted:
+                continue
+            if m.illusion_active and m.disguise_species:
+                opp_bench_skip.add(m.disguise_species)   # perceived identity
+            else:
+                opp_bench_skip.add(_base(m))
+
         opp_seen: dict[str, dict] = {}
         for seen_key, mon in self.seen_mons.items():
             if not seen_key.startswith(opp + ":"):
@@ -1097,7 +1175,7 @@ class ShowdownReplayParser:
         # Fill remaining roster slots as unseen stubs
         opp_bench: list[dict] = []
         for species in self.rosters.get(opp, []):
-            if species in opp_active_species:
+            if species in opp_bench_skip:
                 continue
             if species in opp_seen:
                 opp_bench.append(opp_seen[species])
@@ -1382,17 +1460,19 @@ class ShowdownReplayParser:
 
     @staticmethod
     def _parse_hp(hp_str: str) -> tuple[Optional[float], Optional[float]]:
-        hp_str = hp_str.split(" ")[0]  # strip " fnt"
-        if "/" in hp_str:
-            parts = hp_str.split("/")
-            try:
-                return float(parts[0]), float(parts[1])
-            except ValueError:
-                pass
-        try:
-            return float(hp_str), 100.0
-        except ValueError:
-            return None, None
+        # HP is "num/den", optionally followed by a status ("50/100 brn") or, in
+        # some replays, a stray suffix with no separator ("50/100y").  Extract the
+        # LEADING digits of each side so malformed tokens still parse the way
+        # poke-env's client does (gap #5: an unparsed token previously left an
+        # active mon with hp_pct=None / encoded 0 while the live path saw 0.5).
+        hp_str = hp_str.split(" ")[0]  # strip " fnt" / " brn" etc.
+        m = re.match(r"\s*(\d+)\s*/\s*(\d+)", hp_str)
+        if m:
+            return float(m.group(1)), float(m.group(2))
+        m = re.match(r"\s*(\d+)", hp_str)   # bare number (rare) → assume /100
+        if m:
+            return float(m.group(1)), 100.0
+        return None, None
 
 
 # ---------------------------------------------------------------------------

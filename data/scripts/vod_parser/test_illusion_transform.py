@@ -169,6 +169,35 @@ class TestIllusionDisguise:
         assert p1_opp_t4_after["species"] == "Charizard"
         assert p1_opp_t4_after.get("appears_disguised") is not True
 
+    def test_active_disguise_bench_matches_live_perception(self):
+        # While the opponent's disguise is ACTIVE (turn-1, pre-reveal), the
+        # observer (p1) perceives the disguise species as the active mon, so the
+        # opp bench must NOT carry a phantom Charizard stub; the TRUE Zoroark,
+        # which the observer has not really seen, surfaces as an UNSEEN stub.
+        # This mirrors exactly what the live bot sees (poke-env cannot un-see a
+        # disguise until |replace|).
+        _, result = parse(ILLUSION_LOG)
+        bench = get_turn(result, 1)["state_before_actions"]["p1"]["opp_bench"]
+        by_species = {m["species"]: m for m in bench}
+        # disguise species is "occupied" by the active illusion → not on bench
+        assert "Charizard" not in by_species
+        # true Zoroark present, but as an UNSEEN roster stub
+        assert "Zoroark-Hisui" in by_species
+        assert by_species["Zoroark-Hisui"].get("seen") is False
+        # the other never-fielded roster mon is also an unseen stub
+        assert by_species.get("Basculegion", {}).get("seen") is False
+
+    def test_post_reveal_bench_has_disguise_species_as_unseen(self):
+        # After the disguise breaks (turn 2+), the apparent species the observer
+        # was fooled by (Charizard) is back to being an UNSEEN roster mon — it
+        # was never really seen — while the now-revealed Zoroark is active.
+        _, result = parse(ILLUSION_LOG)
+        bench = get_turn(result, 2)["state_before_actions"]["p1"]["opp_bench"]
+        by_species = {m["species"]: m for m in bench}
+        assert by_species.get("Charizard", {}).get("seen") is False
+        # Zoroark is active now → not on the bench
+        assert "Zoroark-Hisui" not in by_species
+
     def test_defensive_relabel_without_prescan(self):
         # Directly exercise the |replace| fallback: a slot mislabeled as the
         # disguise gets relabeled forward even if the pre-scan map is empty.

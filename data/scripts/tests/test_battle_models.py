@@ -40,6 +40,28 @@ def test_to_dict_base_species_defaults_to_species():
     assert mon.to_dict()["base_species"] == "Incineroar"
 
 
+# ── Gap #5: hp_pct is a true percentage regardless of the log's HP scale ───────
+def test_to_dict_hp_pct_percent_scale():
+    """A %-scale mon (X/100) stores its numerator unchanged as the percentage."""
+    mon = PokemonSlot(species="Incineroar", nickname="Inc", player="p1", slot="a",
+                      hp_current=74.0, hp_max=100.0)
+    assert mon.to_dict()["hp_pct"] == 74.0
+
+
+def test_to_dict_hp_pct_real_scale_is_normalised():
+    """A real-HP mon (175/200, owner-recorded replay) must serialise hp_pct as a
+    true PERCENTAGE (87.5), not the bare numerator 175 (gap #5)."""
+    mon = PokemonSlot(species="Dondozo", nickname="Don", player="p1", slot="a",
+                      hp_current=175.0, hp_max=200.0)
+    assert mon.to_dict()["hp_pct"] == 87.5
+
+
+def test_to_dict_hp_pct_none_when_unknown():
+    mon = PokemonSlot(species="Ditto", nickname="D", player="p2", slot="a",
+                      hp_current=None, hp_max=200.0)
+    assert mon.to_dict()["hp_pct"] is None
+
+
 def test_to_dict_mega_item_placeholder():
     mon = PokemonSlot(species="X-Mega", nickname="X", player="p1", slot="a",
                       is_mega=True, known_item=None)

@@ -56,12 +56,12 @@ if str(_SCRIPTS_DIR) not in _sys.path:
     _sys.path.insert(0, str(_SCRIPTS_DIR))
 
 from state_encoder import (
-    StateEncoder,
     MOVE_TARGET_PAIRS,
     SWITCH_OFFSET,
     ACTIONS_PER_SLOT,
     STATE_DIM,
 )
+from live_state_encoder import LiveStateEncoder
 
 log = logging.getLogger(__name__)
 
@@ -297,7 +297,7 @@ class VGCPlayerBase(Player):
 
     def __init__(self, replay_path: Optional[Path] = None, **kwargs):
         super().__init__(**kwargs)
-        self._encoder = StateEncoder()
+        self._encoder = LiveStateEncoder()
         _rp = replay_path or Path("replay_buffer/replay.jsonl")
         self._replay  = ReplayBuffer(_rp)
 
