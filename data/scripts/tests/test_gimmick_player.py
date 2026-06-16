@@ -74,16 +74,16 @@ def test_select_actions_dedups_cross_slot_switch(monkeypatch):
             row[0] = True                     # slot 1 also has move-0 available
         return row
 
-    def fake_indices(model, heads, sv, m0, m1, device):
+    def fake_indices(model, heads, sv, m0, m1, device, **kwargs):
         # both heads want the same switch; once it's masked for slot 1, slot 1
-        # falls to move 0.
+        # falls to move 0.  (**kwargs absorbs temperature/top_p/rng — defaults.)
         return (SWITCH_OFFSET, SWITCH_OFFSET) if m1[SWITCH_OFFSET] else (SWITCH_OFFSET, 0)
 
     monkeypatch.setattr(P, "build_legal_action_mask", fake_mask)
     monkeypatch.setattr(P._M, "bc_action_indices", fake_indices)
 
     fake = types.SimpleNamespace(_model=object(), _model_heads=("our_a", "our_b"),
-                                 _device="cpu")
+                                 _device="cpu", _temperature=0.0, _top_p=1.0, _rng=None)
     a0, a1, src = P.VGCPlayer._select_actions(fake, object(), np.zeros(4, np.float32))
     assert a0 == SWITCH_OFFSET
     assert a1 == 0 and a1 != a0               # deduped to a non-colliding action

@@ -105,6 +105,37 @@ def _first_action_per_slot(our_actions: Sequence[dict]) -> Dict[str, dict]:
     return first
 
 
+def _our_player_meta(t: dict) -> Tuple[Optional[float], float, Optional[bool]]:
+    """Per-transition demonstrator metadata for OUR side (the side we imitate).
+
+    Returns ``(rating_before, rating_delta, won)`` where:
+      * ``rating_before`` is our player's pre-game ladder rating (float, or None
+        if absent/malformed),
+      * ``rating_delta``  is our rating change for the game (float, 0.0 if absent),
+      * ``won``           is True/False if the game ``winner`` can be matched to our
+        username, else None (tie / unknown).
+
+    The "our" side is identified by ``players.our_side`` (a 'p1'/'p2' key into
+    ``players``).  These fields are already present in every JSONL transition; the
+    BC loader simply never read them before (TIER-1 #1 — imitate STRONGER players).
+    """
+    players = t.get("players") or {}
+    our_side = players.get("our_side")
+    me = players.get(our_side) if isinstance(our_side, str) else None
+    if not isinstance(me, dict):
+        return None, 0.0, None
+    raw_rating = me.get("rating_before")
+    rating = float(raw_rating) if isinstance(raw_rating, (int, float)) else None
+    raw_delta = me.get("rating_delta")
+    delta = float(raw_delta) if isinstance(raw_delta, (int, float)) else 0.0
+    winner = t.get("winner")
+    uname = me.get("username")
+    won: Optional[bool] = None
+    if winner is not None and uname is not None:
+        won = bool(winner == uname)
+    return rating, delta, won
+
+
 def transition_to_example(
     t: dict,
     encoder: StateEncoder,
@@ -178,6 +209,7 @@ def transition_to_example(
     x = encoder.encode_snapshot(
         t.get("state_before_actions") or {}, turn=t.get("turn") or 0
     )
+    rating, rating_delta, won = _our_player_meta(t)
     ex = {
         "x": x,
         "targets": targets,
@@ -185,6 +217,13 @@ def transition_to_example(
         "gimmick_targets": gimmick_targets,
         "gimmick_masks": gimmick_masks,
         "replay_id": t.get("replay_id"),
+        # Demonstrator metadata (TIER-1 #1): used to filter/weight by skill.
+        "rating": rating,
+        "rating_delta": rating_delta,
+        "won": won,
+        # Game-phase metadata (per-situation eval / calibration diagnostic).
+        "turn": t.get("turn"),
+        "decision_type": t.get("decision_type"),
     }
 
     # Auxiliary opponent-head labels (task #9): the opponent's action index +
@@ -314,6 +353,76 @@ def split_by_replay(
     return train, val
 
 
+# ── Demonstrator skill filtering / weighting (TIER-1 #1) ──────────────────────
+def filter_by_rating(examples: Sequence[dict], rating_min: Optional[float]) -> List[dict]:
+    """Drop examples whose OUR-side ``rating`` is below ``rating_min``.
+
+    ``rating_min`` None → no filtering (returns a list copy).  Examples with an
+    UNKNOWN rating (None) are KEPT (never silently dropped) — the threshold can
+    only exclude a demonstrator it can actually score.  Intended for TRAIN only
+    (val stays a true, unfiltered metric)."""
+    if rating_min is None:
+        return list(examples)
+    return [e for e in examples
+            if e.get("rating") is None or e.get("rating") >= rating_min]
+
+
+def compute_sample_weights(
+    examples: Sequence[dict],
+    rating_weight: bool = False,
+    outcome_weight: bool = False,
+    rating_weight_floor: float = 0.25,
+    loss_weight: float = 0.5,
+) -> np.ndarray:
+    """Per-example loss weight (np.float32, length len(examples)) for the action
+    head, MEAN-NORMALISED to 1.0 so the overall loss scale (which divides by the
+    valid-decision COUNT) is preserved — the weights only re-distribute emphasis.
+
+    Components (multiplicative, each optional, all OFF → all-ones):
+      * ``rating_weight``  — weight ∝ the demonstrator's rating PERCENTILE among
+        the supplied examples, mapped to ``[rating_weight_floor, 1.0]`` (top
+        players ~1.0, bottom ~floor; unknown rating → median 0.5).  Imitates
+        STRONGER players without hard-dropping the rest.
+      * ``outcome_weight`` — won game → 1.0, lost → ``loss_weight``, unknown → 1.0.
+        Up-weights decisions from games our side actually WON.
+
+    With both OFF the returned vector is exactly ones (the default training path
+    is then byte-identical to the unweighted loss)."""
+    n = len(examples)
+    w = np.ones(n, dtype=np.float64)
+    if n == 0:
+        return w.astype(np.float32)
+
+    if rating_weight:
+        ratings = np.array(
+            [e.get("rating") if e.get("rating") is not None else np.nan for e in examples],
+            dtype=np.float64,
+        )
+        known = ~np.isnan(ratings)
+        pct = np.full(n, 0.5, dtype=np.float64)   # unknown rating → median
+        if int(known.sum()) > 1:
+            idx = np.where(known)[0]
+            order = idx[np.argsort(ratings[idx], kind="mergesort")]
+            ranks = np.linspace(0.0, 1.0, order.size)
+            pct[order] = ranks
+        rw = rating_weight_floor + (1.0 - rating_weight_floor) * pct
+        w *= rw
+
+    if outcome_weight:
+        ow = np.array(
+            [1.0 if e.get("won") is True
+             else (loss_weight if e.get("won") is False else 1.0)
+             for e in examples],
+            dtype=np.float64,
+        )
+        w *= ow
+
+    mean = w.mean()
+    if mean > 0:
+        w = w / mean
+    return w.astype(np.float32)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Torch Dataset wrapper
 # ══════════════════════════════════════════════════════════════════════════════
@@ -333,7 +442,8 @@ class BCDataset(Dataset):
     """
 
     def __init__(self, examples: Sequence[dict], augment_move_order: bool = False,
-                 aug_seed: int = 0, with_opp: bool = False):
+                 aug_seed: int = 0, with_opp: bool = False,
+                 weights: Optional[Sequence[float]] = None):
         if not _HAS_TORCH:  # pragma: no cover
             raise RuntimeError("torch is required for BCDataset")
         # Train-only move-slot permutation augmentation (task #22): when True,
@@ -355,6 +465,15 @@ class BCDataset(Dataset):
         self.gimmick_target = np.full((n, len(HEADS)), -1, dtype=np.int64)
         self.gimmick_mask = np.zeros((n, len(HEADS), GIMMICK_DIM), dtype=np.float32)
         self.gimmick_valid = np.zeros((n, len(HEADS)), dtype=np.float32)
+        # Per-example action-loss weight (TIER-1 #1).  Default all-ones → no effect
+        # (the trainer only applies it when a weighting flag is set).
+        self.weight = np.ones((n,), dtype=np.float32)
+        if weights is not None:
+            wv = np.asarray(weights, dtype=np.float32).ravel()
+            if wv.shape[0] != n:
+                raise ValueError(
+                    f"weights length {wv.shape[0]} != number of examples {n}")
+            self.weight = wv
         if self.with_opp:
             self.opp_target = np.full((n, len(OPP_HEADS)), -1, dtype=np.int64)
             self.opp_mask = np.zeros((n, len(OPP_HEADS), ACTIONS_PER_SLOT), dtype=np.float32)
@@ -392,6 +511,7 @@ class BCDataset(Dataset):
         self.gimmick_target_t = torch.from_numpy(self.gimmick_target)
         self.gimmick_mask_t = torch.from_numpy(self.gimmick_mask)
         self.gimmick_valid_t = torch.from_numpy(self.gimmick_valid)
+        self.weight_t = torch.from_numpy(self.weight)
         if self.with_opp:
             self.opp_target_t = torch.from_numpy(self.opp_target)
             self.opp_mask_t = torch.from_numpy(self.opp_mask)
@@ -422,6 +542,7 @@ class BCDataset(Dataset):
                 "gimmick_target": self.gimmick_target_t[idx],
                 "gimmick_mask": self.gimmick_mask_t[idx],
                 "gimmick_valid": self.gimmick_valid_t[idx],
+                "weight": self.weight_t[idx],
                 **self._opp_fields(idx),
             }
 
@@ -446,6 +567,7 @@ class BCDataset(Dataset):
             "gimmick_target": self.gimmick_target_t[idx],
             "gimmick_mask": self.gimmick_mask_t[idx],
             "gimmick_valid": self.gimmick_valid_t[idx],
+            "weight": self.weight_t[idx],
             **self._opp_fields(idx),
         }
 

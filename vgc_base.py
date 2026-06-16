@@ -45,7 +45,16 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 from poke_env.player import Player
-from poke_env.player.battle_order import DoubleBattleOrder, PassBattleOrder, SingleBattleOrder
+from poke_env.player.battle_order import (
+    DefaultBattleOrder, DoubleBattleOrder, ForfeitBattleOrder,
+    PassBattleOrder, SingleBattleOrder,
+)
+
+# A single battle should never need more than a handful of forced-switch
+# handlings; far beyond that means Showdown is rejecting every order we send and
+# re-requesting forever (a hang).  After this many, FORFEIT to break the loop so
+# the battle ends cleanly (a loss) and the caller/gauntlet can continue.
+_FS_FORFEIT_AT = 20
 from poke_env.battle import DoubleBattle, Move, Pokemon
 
 # state_encoder lives at data/scripts/ — add that directory to sys.path
@@ -537,6 +546,13 @@ class VGCPlayerBase(Player):
         self._encoder = LiveStateEncoder(belief=_default_belief())
         _rp = replay_path or Path("replay_buffer/replay.jsonl")
         self._replay  = ReplayBuffer(_rp)
+        # Per-(battle,turn,force_switch) handling count — used to detect a forced-
+        # switch request poke-env re-sends because Showdown REJECTED our last order
+        # (an infinite-loop / battle-hang risk).  See _force_switch_escape.
+        self._fs_attempts: dict = {}
+        # Per-battle TOTAL forced-switch handlings (catches a loop even when the
+        # turn/force_switch shifts each iteration, which the per-key counter misses).
+        self._fs_battle_count: dict = {}
 
     # ── Subclass contract ─────────────────────────────────────────────────────
 
@@ -646,16 +662,90 @@ class VGCPlayerBase(Player):
         """
         return _heuristic_team_order(battle)[:n]
 
-    def _handle_force_switch(self, battle: DoubleBattle) -> DoubleBattleOrder:
-        """
-        Handle a forceSwitch request.
+    def _force_switch_escape(self, battle: DoubleBattle):
+        """Break a forced-switch loop, or None to handle the request normally.
+
+        poke-env re-calls the forceSwitch handler with the same request when
+        Showdown REJECTED our last order; a deterministic handler then rebuilds the
+        same rejected order forever (the warning flood that hangs a battle).  Two
+        layered escapes guarantee termination regardless of why it loops:
+
+          * FORFEIT once a single battle has needed > ``_FS_FORFEIT_AT`` forced-
+            switch handlings — a per-BATTLE counter, so it trips even if the turn /
+            force_switch shifts each iteration (which a per-request counter misses).
+            The battle ends as a loss and the run continues.
+          * Before that, on the 3rd IDENTICAL (battle,turn,force_switch) handling,
+            hand the request to Showdown's ``/choose default`` (server-resolved,
+            always accepted) in case that alone clears it.
+
+        A normal game needs only a few forced-switch handlings, so neither
+        false-positives on real play."""
+        tag = getattr(battle, "battle_tag", "?")
+        c = self._fs_battle_count.get(tag, 0) + 1
+        self._fs_battle_count[tag] = c
+        if len(self._fs_battle_count) > 256:        # bound over a long run
+            self._fs_battle_count = {tag: c}
+        if c > _FS_FORFEIT_AT:
+            log.error("forceSwitch [%s] handled %d× this battle — FORFEITING to "
+                      "break a hang (run with -v / --spectate to diagnose).", tag, c)
+            return ForfeitBattleOrder()
+        try:
+            key = (tag, getattr(battle, "turn", None),
+                   tuple(bool(x) for x in (battle.force_switch or [])))
+        except Exception:  # pragma: no cover - defensive
+            return None
+        n = self._fs_attempts.get(key, 0)
+        self._fs_attempts[key] = n + 1
+        if len(self._fs_attempts) > 512:
+            self._fs_attempts = {key: n + 1}
+        if n >= 2:                                   # 3rd identical attempt → rejected
+            log.warning("forceSwitch [%s] re-requested %d× (order rejected) — sending "
+                        "/choose default.", tag, n + 1)
+            return DefaultBattleOrder()
+        return None
+
+    def _log_force_switch_state(self, battle: DoubleBattle, slot: int) -> None:
+        """Dump the forced-switch board state so a 'no available switch' stall can
+        be diagnosed: the request, poke-env's per-slot available switches, and the
+        whole team with active/fainted/HP flags (an empty available list with a
+        clearly-switchable bench mon ⇒ a poke-env desync, e.g. Ditto/Zoroark)."""
+        try:
+            avail = getattr(battle, "available_switches", []) or []
+            avail_s = [[getattr(m, "species", "?") for m in (avail[s] if s < len(avail) else [])]
+                       for s in range(2)]
+            roster = []
+            for mon in (getattr(battle, "team", {}) or {}).values():
+                roster.append(
+                    f"{getattr(mon, 'species', '?')}"
+                    f"(act={getattr(mon, 'active', None)},"
+                    f"fnt={getattr(mon, 'fainted', None)},"
+                    f"hp={getattr(mon, 'current_hp_fraction', None)})")
+            log.debug("forceSwitch DIAG [%s] turn=%s slot=%s force=%s "
+                      "available_switches=%s team=[%s]",
+                      getattr(battle, "battle_tag", "?"), getattr(battle, "turn", None),
+                      slot, list(getattr(battle, "force_switch", []) or []),
+                      avail_s, ", ".join(roster))
+        except Exception:  # pragma: no cover - diagnostics must never throw
+            log.debug("force-switch diag failed", exc_info=True)
+
+    def _handle_force_switch(self, battle: DoubleBattle):
+        """Handle a forceSwitch request (loop-guarded — see _force_switch_escape)."""
+        escape = self._force_switch_escape(battle)
+        if escape is not None:
+            return escape
+        return self._build_force_switch_order(battle)
+
+    def _build_force_switch_order(self, battle: DoubleBattle):
+        """Build the actual forceSwitch order (no loop guard — the caller guards).
 
         force_switch[i] == True  → slot fainted; pick a bench replacement.
         force_switch[i] == False → slot still alive; send PassBattleOrder.
 
         battle.available_switches is List[List[Pokemon]], one list per slot,
         already filtered by poke-env to exclude fainted / already-active mons.
-        """
+        If a slot that MUST switch has NO available replacement, a hand-built Pass
+        is exactly what Showdown rejects (→ it re-requests → loop); hand the whole
+        request to Showdown's ``/choose default`` instead (always accepted)."""
         force    = battle.force_switch
         switches = battle.available_switches
 
@@ -675,8 +765,13 @@ class VGCPlayerBase(Player):
                     used_switches.add(id(chosen))
                     orders.append(Player.create_order(chosen))
                 else:
-                    log.warning("forceSwitch slot %d: no available switches — sending Pass.", slot)
-                    orders.append(PassBattleOrder())
+                    # A KNOWN, HANDLED poke-env desync (stale available_switches at an
+                    # endgame double-faint): /choose default lets Showdown pick the real
+                    # mon.  Quiet by default now that it's diagnosed — run -v to see it.
+                    log.debug("forceSwitch slot %d: no available switch — '/choose "
+                              "default' (handled poke-env desync).", slot)
+                    self._log_force_switch_state(battle, slot)
+                    return DefaultBattleOrder()
 
         order_s0 = orders[0] if len(orders) > 0 else PassBattleOrder()
         order_s1 = orders[1] if len(orders) > 1 else PassBattleOrder()

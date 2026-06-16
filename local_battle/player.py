@@ -71,6 +71,9 @@ class VGCPlayer(VGCPlayerBase):
         team_chooser_path: Optional[Path] = None,
         replay_path: Optional[Path] = None,
         device: str = "cpu",
+        temperature: float = 0.0,
+        top_p: float = 1.0,
+        sample_seed: Optional[int] = None,
         **kwargs,
     ):
         super().__init__(replay_path=replay_path, **kwargs)
@@ -81,6 +84,15 @@ class VGCPlayer(VGCPlayerBase):
         self._team_chooser = None
         self._tc_vocab     = None
         self._tc_cfg       = None
+
+        # Serve-side action sampling (TIER-4).  temperature<=0 → deterministic
+        # masked argmax (the default, unchanged behaviour); >0 → temperature /
+        # top-p nucleus sampling over the legal actions.  Gimmick + forced
+        # replacement stay deterministic (argmax).
+        self._temperature = float(temperature)
+        self._top_p       = float(top_p)
+        self._rng = (np.random.default_rng(sample_seed)
+                     if self._temperature > 0.0 else None)
 
         # ── Load battle model (dict checkpoint → reconstruct + load_state_dict) ─
         if model_path is not None and _TORCH_AVAILABLE:
@@ -154,7 +166,8 @@ class VGCPlayer(VGCPlayerBase):
             mask0 = build_legal_action_mask(battle, 0)
             mask1 = build_legal_action_mask(battle, 1)
             a0, a1 = _M.bc_action_indices(
-                self._model, self._model_heads, state_vec, mask0, mask1, self._device
+                self._model, self._model_heads, state_vec, mask0, mask1, self._device,
+                temperature=self._temperature, top_p=self._top_p, rng=self._rng,
             )
             # ── Cross-slot SWITCH dedup (doubles "can only switch in once") ──────
             # The two heads pick independently, so both active slots can choose the
@@ -166,7 +179,8 @@ class VGCPlayer(VGCPlayerBase):
                 mask1 = list(mask1)
                 mask1[a0] = False
                 _, a1 = _M.bc_action_indices(
-                    self._model, self._model_heads, state_vec, mask0, mask1, self._device
+                    self._model, self._model_heads, state_vec, mask0, mask1, self._device,
+                    temperature=self._temperature, top_p=self._top_p, rng=self._rng,
                 )
             # None ⟺ all-zero mask ⟺ empty/fainted slot → 0 (passes via _safe_order).
             return (a0 if a0 is not None else 0,

@@ -1,0 +1,66 @@
+[
+  {
+    "run": "run-20260616-101746",
+    "timestamp": "2026-06-16T10:17:46",
+    "ckpt": "D:\\ShowdownProject\\Victory-Dance\\ai_train_scripts\\BC_model\\checkpoints\\bc_best.pt",
+    "per_opponent": {
+      "random": {
+        "wins": 13,
+        "n": 20,
+        "win_rate": 0.65,
+        "anchor": 1000.0
+      },
+      "max_damage": {
+        "wins": 7,
+        "n": 20,
+        "win_rate": 0.35,
+        "anchor": 1300.0
+      },
+      "heuristic": {
+        "wins": 2,
+        "n": 20,
+        "win_rate": 0.1,
+        "anchor": 1500.0
+      }
+    },
+    "scripted_win_rate": 0.36666666666666664,
+    "model_elo": 1139.4343320747566,
+    "sources": {
+      "model": 637,
+      "forced_switch_model": 105,
+      "forced_switch": 4
+    }
+  },
+  {
+    "run": "run-20260616-102225",
+    "timestamp": "2026-06-16T10:22:25",
+    "ckpt": "D:\\ShowdownProject\\Victory-Dance\\ai_train_scripts\\BC_model\\checkpoints\\bc_best.pt",
+    "per_opponent": {
+      "random": {
+        "wins": 14,
+        "n": 20,
+        "win_rate": 0.7,
+        "anchor": 1000.0
+      },
+      "max_damage": {
+        "wins": 6,
+        "n": 20,
+        "win_rate": 0.3,
+        "anchor": 1300.0
+      },
+      "heuristic": {
+        "wins": 2,
+        "n": 20,
+        "win_rate": 0.1,
+        "anchor": 1500.0
+      }
+    },
+    "scripted_win_rate": 0.36666666666666664,
+    "model_elo": 1139.4343320747566,
+    "sources": {
+      "model": 545,
+      "forced_switch_model": 97,
+      "forced_switch": 4
+    }
+  }
+]

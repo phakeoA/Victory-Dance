@@ -41,6 +41,60 @@ def test_masked_argmax_single_legal():
     assert M.masked_argmax([0.0, 0.0, 0.0, 9.0], [False, False, False, True]) == 3
 
 
+# ── masked_sample (serve-side temperature / top-p, pure, no checkpoint) ───────
+def test_masked_sample_temp0_equals_argmax():
+    logits = [10.0, 5.0, 8.0, 1.0]
+    mask = [False, True, True, True]
+    # T=0 must reproduce masked_argmax exactly (highest LEGAL, ties→first)
+    assert M.masked_sample(logits, mask, temperature=0.0) == M.masked_argmax(logits, mask)
+    assert M.masked_sample(logits, mask, temperature=0.0) == 2
+
+
+def test_masked_sample_never_picks_illegal():
+    import numpy as np
+    rng = np.random.default_rng(0)
+    logits = [100.0, 0.0, 0.0]          # the huge logit is ILLEGAL
+    mask = [False, True, True]
+    for _ in range(200):
+        assert M.masked_sample(logits, mask, temperature=1.0, rng=rng) in (1, 2)
+
+
+def test_masked_sample_all_illegal_returns_none():
+    assert M.masked_sample([1.0, 2.0], [False, False], temperature=1.0) is None
+
+
+def test_masked_sample_is_deterministic_with_seed():
+    import numpy as np
+    logits = [2.0, 1.5, 1.0, 0.5]
+    mask = [True, True, True, True]
+    a = [M.masked_sample(logits, mask, temperature=1.0, rng=np.random.default_rng(7))
+         for _ in range(5)]
+    b = [M.masked_sample(logits, mask, temperature=1.0, rng=np.random.default_rng(7))
+         for _ in range(5)]
+    assert a == b                        # same seed → same draws
+
+
+def test_masked_sample_topp_restricts_to_nucleus():
+    import numpy as np
+    rng = np.random.default_rng(1)
+    # index 0 dominates; a tight top_p must collapse to argmax-only
+    logits = [10.0, 0.0, 0.0, 0.0]
+    mask = [True, True, True, True]
+    picks = {M.masked_sample(logits, mask, temperature=1.0, top_p=0.5, rng=rng)
+             for _ in range(100)}
+    assert picks == {0}                  # nucleus is just the top action
+
+
+def test_masked_sample_low_temp_concentrates_on_top():
+    import numpy as np
+    rng = np.random.default_rng(2)
+    logits = [1.0, 0.9, 0.8, 0.7]        # close logits
+    mask = [True, True, True, True]
+    # T=0.02 → top-action prob ~0.985 (exp(-5) tail); expected ~197/200
+    cold = [M.masked_sample(logits, mask, temperature=0.02, rng=rng) for _ in range(200)]
+    assert cold.count(0) > 185           # near-deterministic when cold
+
+
 # ── BC policy load + decode (needs torch + trained checkpoint) ────────────────
 @pytest.fixture(scope="module")
 def bc_loaded():

@@ -187,6 +187,127 @@ def test_split_by_replay_is_disjoint_and_deterministic():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Demonstrator skill filtering / weighting (TIER-1 #1)
+# ══════════════════════════════════════════════════════════════════════════════
+def _rated_transition(rid, rating, delta, won, our_side="p1"):
+    """A transition carrying our-side rating + a winner consistent with ``won``."""
+    t = make_transition(
+        rid,
+        our_actions=[{"slot": "our_a", "action": "move", "move": "Fake Out",
+                      "action_index": 3}],
+        mask_a=_row(3, 12), mask_b=_row(0),
+    )
+    me, opp = ("Me", "Them")
+    t["perspective"] = our_side
+    t["players"] = {
+        "our_side": our_side,
+        our_side: {"username": me, "rating_before": rating, "rating_delta": delta},
+        ("p2" if our_side == "p1" else "p1"): {"username": opp},
+    }
+    t["winner"] = me if won else opp
+    return t
+
+
+def test_our_player_meta_extracts_rating_delta_won():
+    t = _rated_transition("r1", rating=1850, delta=20, won=True)
+    rating, delta, won = ds._our_player_meta(t)
+    assert rating == 1850.0 and delta == 20.0 and won is True
+    # and it threads onto the example
+    ex = transition_to_example(t, ds.StateEncoder(), None)
+    assert ex["rating"] == 1850.0 and ex["won"] is True
+
+    lost = _rated_transition("r2", rating=1600, delta=-22, won=False)
+    assert ds._our_player_meta(lost) == (1600.0, -22.0, False)
+
+
+def test_our_player_meta_missing_is_safe():
+    t = make_transition("r1",
+        our_actions=[{"slot": "our_a", "action": "move", "move": "x", "action_index": 3}],
+        mask_a=_row(3), mask_b=_row(0))
+    assert ds._our_player_meta(t) == (None, 0.0, None)
+    ex = transition_to_example(t, ds.StateEncoder(), None)
+    assert ex["rating"] is None and ex["won"] is None
+
+
+def test_filter_by_rating_keeps_unknown_and_drops_low():
+    exs = [
+        {"rating": 1900}, {"rating": 1700}, {"rating": None}, {"rating": 1500},
+    ]
+    kept = ds.filter_by_rating(exs, 1750)
+    assert {e.get("rating") for e in kept} == {1900, None}   # 1700/1500 dropped, None kept
+    assert ds.filter_by_rating(exs, None) == exs             # None threshold = no-op
+
+
+def test_compute_sample_weights_off_is_ones():
+    exs = [{"rating": 1800, "won": True}, {"rating": 1500, "won": False}]
+    w = ds.compute_sample_weights(exs)                       # both flags off
+    assert np.allclose(w, [1.0, 1.0])
+
+
+def test_compute_sample_weights_rating_orders_and_normalises():
+    exs = [{"rating": r} for r in (1500, 1700, 1900, 2100)]
+    w = ds.compute_sample_weights(exs, rating_weight=True, rating_weight_floor=0.25)
+    assert np.isclose(w.mean(), 1.0, atol=1e-5)              # mean-normalised
+    assert w[0] < w[1] < w[2] < w[3]                         # monotone in rating
+    assert w.min() > 0.0
+
+
+def test_compute_sample_weights_outcome_downweights_losses():
+    exs = [{"won": True}, {"won": False}, {"won": None}]
+    w = ds.compute_sample_weights(exs, outcome_weight=True, loss_weight=0.5)
+    # pre-normalisation ratio is 1.0 : 0.5 : 1.0 — the loss is relatively lighter
+    assert w[1] < w[0]
+    assert np.isclose(w[0], w[2])                            # unknown treated like a win (neutral)
+    assert np.isclose(w.mean(), 1.0, atol=1e-5)
+
+
+def test_head_loss_sample_weight_ones_matches_unweighted():
+    torch.manual_seed(0)
+    logits = torch.randn(8, ACTIONS_PER_SLOT)
+    mask = torch.ones(8, ACTIONS_PER_SLOT)
+    target = torch.randint(0, ACTIONS_PER_SLOT, (8,))
+    valid = torch.ones(8)
+    ce0, *_ = train_bc.head_loss_and_acc(logits, mask, target, valid)
+    ce1, *_ = train_bc.head_loss_and_acc(logits, mask, target, valid,
+                                         sample_weight=torch.ones(8))
+    assert torch.allclose(ce0, ce1, atol=1e-5)
+
+
+def test_bcdataset_weight_propagates():
+    ex = transition_to_example(_rated_transition("r1", 1800, 10, True), ds.StateEncoder(), None)
+    item = BCDataset([ex], weights=[2.5])[0]
+    assert float(item["weight"]) == 2.5
+    # default (no weights) → 1.0
+    assert float(BCDataset([ex])[0]["weight"]) == 1.0
+    with pytest.raises(ValueError):
+        BCDataset([ex], weights=[1.0, 2.0])                 # length mismatch
+
+
+def test_run_epoch_sample_weight_emphasises_high_weight_examples():
+    """Two contradictory labels at the SAME input; the weight-1 group's label wins
+    over the weight-0 group when sample weighting is on (the mechanism behind
+    imitating stronger demonstrators)."""
+    from torch.utils.data import DataLoader
+    x = np.zeros(get_state_dim(), np.float32)
+    mask = np.ones(ACTIONS_PER_SLOT, np.float32)
+    good = [{"x": x.copy(), "replay_id": "r", "targets": {"our_a": 0},
+             "masks": {"our_a": mask}, "gimmick_targets": {}, "gimmick_masks": {}}
+            for _ in range(64)]
+    bad = [{"x": x.copy(), "replay_id": "r", "targets": {"our_a": 5},
+            "masks": {"our_a": mask}, "gimmick_targets": {}, "gimmick_masks": {}}
+           for _ in range(64)]
+    weights = [1.0] * 64 + [0.0] * 64                       # ignore the 'bad' group
+    loader = DataLoader(BCDataset(good + bad, weights=weights), batch_size=32, shuffle=True)
+    torch.manual_seed(0)
+    model = BCPolicy(hidden_dims=(16,), dropout=0.0, heads=HEADS)
+    opt = torch.optim.Adam(model.parameters(), lr=5e-2)
+    for _ in range(40):
+        train_bc.run_epoch(model, loader, "cpu", opt, sample_weighted=True)
+    actions, _ = model(torch.as_tensor(x))
+    assert int(actions["our_a"].argmax().item()) == 0      # high-weight label won
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Torch Dataset
 # ══════════════════════════════════════════════════════════════════════════════
 def test_bcdataset_tensor_shapes_and_invalid_marking():
@@ -716,6 +837,45 @@ def test_smoke_train_with_class_weight_and_patience(tmp_path):
     assert ck["config"]["patience"] == 2
 
 
+def test_smoke_train_with_rating_and_outcome_weighting(tmp_path):
+    """End-to-end train with --rating-min + --rating-weight + --outcome-weight on a
+    rated synthetic corpus: runs, filters, persists the config knobs."""
+    corpus = tmp_path / "jsonl"
+    corpus.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(0)
+    for r in range(12):
+        rating = 1500 + 50 * r            # spread 1500..2050; >=1700 keeps 8 replays
+        won = (r % 2 == 0)
+        lines = []
+        for k in range(6):
+            t = _rated_transition(f"replay{r}", rating, 20 if won else -20, won)
+            t["turn"] = k + 1
+            t["our_actions"] = [
+                {"slot": "our_a", "action": "move", "move": "Fake Out",
+                 "action_index": int(rng.integers(0, ACTIONS_PER_SLOT))},
+                {"slot": "our_b", "action": "move", "move": "Protect",
+                 "action_index": int(rng.integers(0, ACTIONS_PER_SLOT))},
+            ]
+            t["action_mask"] = {"our_a": _row(*range(ACTIONS_PER_SLOT)),
+                                "our_b": _row(*range(ACTIONS_PER_SLOT))}
+            lines.append(json.dumps(t))
+        (corpus / f"replay{r}.jsonl").write_text("\n".join(lines), encoding="utf-8")
+    out = tmp_path / "ckpt"
+    args = train_bc.parse_args([
+        "--data", str(corpus), "--epochs", "2", "--batch-size", "16",
+        "--hidden", "32", "--device", "cpu", "--val-frac", "0.25", "--out", str(out),
+        "--rating-min", "1700", "--rating-weight", "--outcome-weight",
+        "--loss-weight", "0.5", "--seed", "0",
+    ])
+    res = train_bc.train(args)
+    assert (out / "bc_best.pt").exists()
+    assert np.isfinite(res["history"][-1]["val"]["loss"])
+    ck = torch.load(out / "bc_best.pt", map_location="cpu", weights_only=False)
+    cfg = ck["config"]
+    assert cfg["rating_min"] == 1700 and cfg["rating_weight"] is True
+    assert cfg["outcome_weight"] is True and cfg["loss_weight"] == 0.5
+
+
 def test_patience_stops_before_max_epochs(tmp_path):
     # tiny random-label set plateaus fast → patience must cut the run short
     corpus = tmp_path / "jsonl"
@@ -728,6 +888,66 @@ def test_patience_stops_before_max_epochs(tmp_path):
     ])
     res = train_bc.train(args)
     assert len(res["history"]) < 60                  # early-stopped
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Per-situation eval + calibration diagnostic (eval_buckets.py)
+# ══════════════════════════════════════════════════════════════════════════════
+import eval_buckets as ev  # noqa: E402
+
+
+def test_phase_of_buckets():
+    assert ev.phase_of(1, "turn") == "lead"
+    assert ev.phase_of(2, "turn") == "lead"
+    assert ev.phase_of(4, "turn") == "mid"
+    assert ev.phase_of(9, "turn") == "endgame"
+    assert ev.phase_of(9, "replacement") == "replacement"   # decision_type wins
+    assert ev.phase_of(None, "turn") == "lead"
+
+
+def test_rating_band_buckets():
+    assert ev.rating_band(1650) == "<1700"
+    assert ev.rating_band(1750) == "1700-1800"
+    assert ev.rating_band(1850) == "1800-1900"
+    assert ev.rating_band(2010) == "1900+"
+    assert ev.rating_band(None) == "unknown"
+
+
+def test_masked_softmax_zeros_illegal_and_normalises():
+    logits = np.array([5.0, 1.0, 9.0, 2.0], np.float32)   # idx2 huge but illegal
+    mask = np.array([1, 1, 0, 1], np.float32)
+    p = ev.masked_softmax(logits, mask)
+    assert p[2] == 0.0
+    assert abs(p.sum() - 1.0) < 1e-6
+    assert int(np.argmax(p)) == 0                          # best LEGAL
+
+
+def test_ece_zero_when_perfectly_calibrated_and_max_when_wrong():
+    # all confident-0.9 and all correct → acc 0.9 == conf 0.9 → ECE 0
+    ece, _ = ev.expected_calibration_error([0.9] * 100, [True] * 90 + [False] * 10)
+    assert ece < 0.05
+    # all confident-0.9 but all WRONG → |0 - 0.9| = 0.9
+    ece2, _ = ev.expected_calibration_error([0.9] * 50, [False] * 50)
+    assert abs(ece2 - 0.9) < 1e-6
+
+
+def test_evaluate_end_to_end_on_synthetic_model():
+    model = BCPolicy(hidden_dims=(16,), dropout=0.0, heads=HEADS)
+    mask = np.ones(ACTIONS_PER_SLOT, np.float32)
+    examples = []
+    for i in range(20):
+        examples.append({
+            "x": np.zeros(get_state_dim(), np.float32), "replay_id": f"r{i}",
+            "targets": {"our_a": i % ACTIONS_PER_SLOT}, "masks": {"our_a": mask},
+            "turn": (i % 8) + 1, "decision_type": "turn" if i % 4 else "replacement",
+            "rating": 1750 + i,
+        })
+    rep = ev.evaluate(model, examples)
+    assert rep["n_decisions"] == 20
+    assert 0.0 <= rep["top1"] <= 1.0 and rep["top3"] >= rep["top1"]
+    assert 0.0 <= rep["ece"] <= 1.0
+    assert set(rep["by_phase"]) <= {"lead", "mid", "endgame", "replacement"}
+    assert sum(b["n"] for b in rep["by_phase"].values()) == 20
 
 
 # ══════════════════════════════════════════════════════════════════════════════

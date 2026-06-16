@@ -52,6 +52,49 @@ def masked_argmax(logits: Sequence[float], mask: Sequence[bool]) -> Optional[int
     return best_i
 
 
+def masked_sample(
+    logits: Sequence[float], mask: Sequence[bool],
+    temperature: float = 0.0, top_p: float = 1.0, rng=None,
+) -> Optional[int]:
+    """Pick a LEGAL action index from ``logits`` under ``mask``.
+
+    ``temperature <= 0`` → deterministic argmax (byte-identical to
+    ``masked_argmax``, including first-wins tie-breaking).  ``temperature > 0`` →
+    softmax-sample over the legal logits at that temperature, optionally
+    restricted to the top-``p`` nucleus (the smallest set of highest-probability
+    actions whose cumulative mass ≥ top_p; the top-1 is always kept).  Returns
+    None when no action is legal.
+
+    ``rng`` may be a numpy Generator / RandomState (or None → module default).
+    Pure-argmax serving is brittle on OOD boards; a small temperature trades a
+    little top-1 fidelity for exploration / less exploitability (TIER-4)."""
+    legal = [i for i, ok in enumerate(mask) if ok and i < len(logits)]
+    if not legal:
+        return None
+    if temperature is None or temperature <= 0.0:
+        return max(legal, key=lambda i: float(logits[i]))
+
+    z = np.array([float(logits[i]) for i in legal], dtype=np.float64) / float(temperature)
+    z -= z.max()                                   # stabilise before exp
+    p = np.exp(z)
+    p /= p.sum()
+
+    if top_p < 1.0:
+        order = np.argsort(-p)                      # high→low probability
+        csum = np.cumsum(p[order])
+        # keep the smallest prefix whose cumulative mass reaches top_p (inclusive
+        # of the crossing action); always keep at least the most likely one.
+        cut = min(max(int(np.searchsorted(csum, top_p)) + 1, 1), len(order))
+        masked = np.zeros_like(p)
+        masked[order[:cut]] = p[order[:cut]]
+        total = masked.sum()
+        if total > 0:
+            p = masked / total
+
+    draw = (rng if rng is not None else np.random).choice(len(legal), p=p)
+    return legal[int(draw)]
+
+
 # ── Battle policy (two-head BC) ───────────────────────────────────────────────
 def load_bc_policy(path, device: str = "cpu"):
     """Rebuild the BCPolicy from a dict checkpoint and load its weights.
@@ -113,11 +156,17 @@ def _head_logits(out, head_names) -> Tuple[np.ndarray, np.ndarray]:
 def bc_action_indices(
     model, head_names, state_vec: np.ndarray,
     mask0: Sequence[bool], mask1: Sequence[bool], device: str = "cpu",
+    temperature: float = 0.0, top_p: float = 1.0, rng=None,
 ) -> Tuple[Optional[int], Optional[int]]:
-    """Run the policy on one state vector and return the masked-argmax action
-    index for each active slot (None where no legal action exists)."""
+    """Run the policy on one state vector and return a LEGAL action index for each
+    active slot (None where no legal action exists).
+
+    Defaults (``temperature=0``) → masked argmax, byte-identical to the original.
+    Pass ``temperature > 0`` (and optionally ``top_p`` < 1) for serve-side
+    temperature / nucleus sampling (TIER-4)."""
     l0, l1 = head_logits(model, head_names, state_vec, device)
-    return masked_argmax(l0, mask0), masked_argmax(l1, mask1)
+    return (masked_sample(l0, mask0, temperature, top_p, rng),
+            masked_sample(l1, mask1, temperature, top_p, rng))
 
 
 def head_logits(

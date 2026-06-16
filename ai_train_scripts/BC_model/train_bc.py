@@ -46,7 +46,9 @@ from bc_dataset import (  # noqa: E402
     BCDataset,
     HEADS,
     build_examples,
+    compute_sample_weights,
     examples_from_folders,
+    filter_by_rating,
     print_stats,
     split_by_replay,
 )
@@ -70,6 +72,7 @@ def head_loss_and_acc(
     target: torch.Tensor,   # (B,)  action_index, -1 where invalid
     valid: torch.Tensor,    # (B,)  1.0 where this head has a target
     class_weight: Optional[torch.Tensor] = None,  # (A,) per-action loss weight
+    sample_weight: Optional[torch.Tensor] = None,  # (B,) per-example loss weight
 ) -> Tuple[torch.Tensor, int, int, int]:
     """
     Returns (summed_ce_loss, n_valid, n_correct_top1, n_correct_top3) for one
@@ -77,6 +80,11 @@ def head_loss_and_acc(
 
     ``class_weight`` (optional, length A) scales each target class's loss to
     counter majority-action bias; accuracy is unaffected by it.
+
+    ``sample_weight`` (optional, length B) scales each EXAMPLE's loss — used to
+    imitate stronger / winning demonstrators (TIER-1 #1).  When None the path is
+    byte-identical to the original ``reduction='sum'`` cross-entropy; the trainer
+    only passes it when a weighting flag is actually enabled.
     """
     valid_b = valid > 0.5
     n_valid = int(valid_b.sum().item())
@@ -87,8 +95,13 @@ def head_loss_and_acc(
     tgt = target[valid_b]
 
     # Summed cross-entropy (reduction='sum' so multiple heads average per
-    # decision, not per head).
-    ce = F.cross_entropy(ml, tgt, weight=class_weight, reduction="sum")
+    # decision, not per head).  With a per-example weight, sum the per-row losses
+    # scaled by that weight (class_weight still composes via the 'none' path).
+    if sample_weight is None:
+        ce = F.cross_entropy(ml, tgt, weight=class_weight, reduction="sum")
+    else:
+        per = F.cross_entropy(ml, tgt, weight=class_weight, reduction="none")
+        ce = (per * sample_weight[valid_b]).sum()
 
     with torch.no_grad():
         top1 = ml.argmax(dim=1)
@@ -184,6 +197,7 @@ def run_epoch(
     gimmick_loss_weight: float = 1.0,
     opp_loss_weight: float = 0.0,
     opp_class_weight: Optional[torch.Tensor] = None,
+    sample_weighted: bool = False,
 ) -> Dict[str, float]:
     """One pass over ``loader``.  Train if ``optimizer`` given, else eval.
 
@@ -215,6 +229,10 @@ def run_epoch(
             g_target = batch["gimmick_target"].to(device)  # (B, 2)
             g_mask = batch["gimmick_mask"].to(device)      # (B, 2, G)
             g_valid = batch["gimmick_valid"].to(device)    # (B, 2)
+            # Per-example action-loss weight (TIER-1 #1).  Only applied when the
+            # trainer enabled a weighting flag; otherwise None → original loss.
+            sample_weight = (batch["weight"].to(device)
+                             if sample_weighted and "weight" in batch else None)
 
             actions, gimmicks = model(x)
 
@@ -225,7 +243,7 @@ def run_epoch(
             for h_idx, head in enumerate(HEADS):
                 ce, n_valid, n1, n3 = head_loss_and_acc(
                     actions[head], mask[:, h_idx], target[:, h_idx], valid[:, h_idx],
-                    class_weight=class_weight,
+                    class_weight=class_weight, sample_weight=sample_weight,
                 )
                 batch_loss = batch_loss + ce
                 batch_valid += n_valid
@@ -342,10 +360,41 @@ def train(args: argparse.Namespace) -> dict:
         f"{len({e['replay_id'] for e in val_ex})} replays)"
     )
 
+    # ── Demonstrator skill filtering / weighting (TIER-1 #1, TRAIN ONLY) ───────
+    # Imitate STRONGER / winning players.  Val is never filtered or weighted so
+    # its top1/top3 stay a true, comparable metric.  All knobs default OFF, in
+    # which case the training path is byte-identical to the unweighted baseline.
+    if args.rating_min is not None:
+        before = len(train_ex)
+        train_ex = filter_by_rating(train_ex, args.rating_min)
+        print(f"[train_bc] rating filter >= {args.rating_min}: "
+              f"{before} -> {len(train_ex)} train examples "
+              f"({before - len(train_ex)} dropped; unknown-rating kept)")
+        if not train_ex:
+            raise SystemExit("[train_bc] rating filter removed all train examples")
+    sample_weighted = bool(args.rating_weight or args.outcome_weight)
+    train_weights = None
+    if sample_weighted:
+        train_weights = compute_sample_weights(
+            train_ex,
+            rating_weight=args.rating_weight,
+            outcome_weight=args.outcome_weight,
+            rating_weight_floor=args.rating_weight_floor,
+            loss_weight=args.loss_weight,
+        )
+        n_won = sum(1 for e in train_ex if e.get("won") is True)
+        n_rated = sum(1 for e in train_ex if e.get("rating") is not None)
+        print(f"[train_bc] sample weighting: rating={args.rating_weight} "
+              f"(floor {args.rating_weight_floor}, {n_rated}/{len(train_ex)} rated) "
+              f"outcome={args.outcome_weight} (loss_weight {args.loss_weight}, "
+              f"{n_won}/{len(train_ex)} won) -> weight min {train_weights.min():.3f} "
+              f"max {train_weights.max():.3f} mean {train_weights.mean():.3f}")
+
     # Move-slot permutation augmentation is TRAIN-ONLY (val stays raw so its
     # metrics are true).  It makes the policy order-invariant — see task #22.
     train_ds = BCDataset(train_ex, augment_move_order=args.augment_move_order,
-                         aug_seed=args.seed, with_opp=args.aux_opp_head)
+                         aug_seed=args.seed, with_opp=args.aux_opp_head,
+                         weights=train_weights)
     val_ds = BCDataset(val_ex, with_opp=args.aux_opp_head)
     print(f"[train_bc] move-slot permutation augmentation: "
           f"{'ON' if args.augment_move_order else 'OFF'} (train only)")
@@ -418,6 +467,12 @@ def train(args: argparse.Namespace) -> dict:
         "data": folders,
         "class_weight": args.class_weight,
         "patience": args.patience,
+        # Demonstrator skill filtering / weighting (TIER-1 #1).
+        "rating_min": args.rating_min,
+        "rating_weight": bool(args.rating_weight),
+        "rating_weight_floor": args.rating_weight_floor,
+        "outcome_weight": bool(args.outcome_weight),
+        "loss_weight": args.loss_weight,
     }
 
     # ── Train loop (val-weighting OFF so val loss/acc stay true) ───────────────
@@ -428,7 +483,8 @@ def train(args: argparse.Namespace) -> dict:
         tr = run_epoch(model, train_loader, device, optimizer, class_weight=class_weight,
                        gimmick_class_weight=gimmick_class_weight,
                        gimmick_loss_weight=args.gimmick_loss_weight,
-                       opp_loss_weight=args.aux_opp_weight if args.aux_opp_head else 0.0)
+                       opp_loss_weight=args.aux_opp_weight if args.aux_opp_head else 0.0,
+                       sample_weighted=sample_weighted)
         va = run_epoch(model, val_loader, device, optimizer=None)
         history.append({"epoch": epoch, "train": tr, "val": va})
         opp_str = f" | opp top1 {va['opp_top1']:.3f}" if args.aux_opp_head else ""
@@ -503,6 +559,25 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                          "aux signal (task #9). Default OFF (the A/B baseline).")
     ap.add_argument("--aux-opp-weight", type=float, default=0.3,
                     help="weight on the auxiliary opponent CE term (default 0.3).")
+    # ── Demonstrator skill filtering / weighting (TIER-1 #1) ──────────────────
+    ap.add_argument("--rating-min", type=float, default=None,
+                    help="drop TRAIN examples whose our-side ladder rating_before "
+                         "is below this (val unfiltered; unknown-rating kept). "
+                         "Default off — imitate stronger demonstrators.")
+    ap.add_argument("--rating-weight", action=argparse.BooleanOptionalAction,
+                    default=False,
+                    help="weight the action loss by the demonstrator's rating "
+                         "PERCENTILE (mapped to [floor,1]); default off.")
+    ap.add_argument("--rating-weight-floor", type=float, default=0.25,
+                    help="lowest multiplier for --rating-weight (bottom-rated "
+                         "demonstrator); top-rated maps to 1.0 (default 0.25).")
+    ap.add_argument("--outcome-weight", action=argparse.BooleanOptionalAction,
+                    default=False,
+                    help="weight the action loss by game outcome: won=1.0, "
+                         "lost=--loss-weight, unknown=1.0; default off.")
+    ap.add_argument("--loss-weight", type=float, default=0.5,
+                    help="weight on decisions from games our side LOST when "
+                         "--outcome-weight is on (default 0.5).")
     ap.add_argument("--patience", type=int, default=0,
                     help="early-stop after N epochs with no val top-1 gain (0=off)")
     ap.add_argument("--val-frac", type=float, default=0.1)

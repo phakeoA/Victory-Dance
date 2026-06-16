@@ -58,7 +58,14 @@ for _p in (str(_REPO_ROOT / "data" / "scripts"), str(_REPO_ROOT), str(_HERE)):
 
 from poke_env.battle import DoubleBattle
 from poke_env.player import Player
-from poke_env.player.battle_order import DoubleBattleOrder, PassBattleOrder
+from poke_env.player.battle_order import (
+    DefaultBattleOrder, DoubleBattleOrder, PassBattleOrder,
+)
+
+# After this many perturbations on one turn (all rejected by Showdown), our legal
+# mask is out of sync with the real board (an illusion/transform desync) — stop the
+# 'retry storm' and let Showdown resolve the turn legally via /choose default.
+_MAX_TURN_RETRIES = 10
 
 # Reuse the tested root base + its pure helpers unchanged.
 from vgc_base import (  # noqa: E402
@@ -179,9 +186,23 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
         # fresh legal action — exactly how the random player escapes the loop.
         key = (battle.battle_tag, battle.turn)
         if key not in self._tried_actions:           # new turn → forget old keys
-            self._tried_actions = {key: {0: set(), 1: set()}}
+            self._tried_actions = {key: {0: set(), 1: set(), "n": 0}}
         tried = self._tried_actions[key]
         if action_s0 in tried[0] and action_s1 in tried[1] and (tried[0] or tried[1]):
+            tried["n"] += 1
+            # If every legal action for BOTH slots has already been tried + rejected,
+            # or we've perturbed too many times, our mask is out of sync with the real
+            # board (an illusion/transform desync) — STOP thrashing (the 'retry storm'
+            # that floods the log + burns the watchdog) and let Showdown resolve the
+            # turn legally via /choose default.  The model did NOT drive this turn.
+            exhausted = (not self._has_fresh_legal(battle, 0, tried[0])
+                         and not self._has_fresh_legal(battle, 1, tried[1]))
+            if tried["n"] > _MAX_TURN_RETRIES or exhausted:
+                log.warning("Turn %d [%s] order rejected %d× / legal actions exhausted "
+                            "— '/choose default' (mask desync; model not driving).",
+                            battle.turn, battle.battle_tag, tried["n"])
+                self._source_counts["retry_default"] += 1
+                return DefaultBattleOrder()
             action_s0 = self._fresh_legal(battle, 0, tried[0], action_s0)
             action_s1 = self._fresh_legal(battle, 1, tried[1], action_s1)
             source = "retry"
@@ -237,6 +258,14 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
         # all legal actions tried already → let poke-env's default break the tie
         return random_legal_action(battle, slot)
 
+    @staticmethod
+    def _has_fresh_legal(battle: DoubleBattle, slot: int, tried: set) -> bool:
+        """Whether ``slot`` has any legal action NOT yet tried this turn.  When both
+        slots have none, every legal action has been rejected → escape to default
+        instead of re-trying rejected actions forever (the retry storm)."""
+        mask = build_legal_action_mask(battle, slot)
+        return any(ok and i not in tried for i, ok in enumerate(mask))
+
     # ── Opponent reconstruction (gap #6) ────────────────────────────────────────
     def _assemble_log(self, battle: DoubleBattle):
         """Return ``(log_str, own_role)`` for the captured protocol of this
@@ -290,6 +319,15 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
         returns None → the inherited RANDOM picker; ``VGCPlayer`` overrides it with
         the model (masked-argmax of the fainted slot's head over a switch-only
         replacement mask).  Degrades to random on any failure."""
+        # Loop guard FIRST: if Showdown rejected our last forced-switch order it
+        # re-sends the identical request; the model would re-pick the same rejected
+        # switch forever.  Shared escape (root): /choose default, then FORFEIT after
+        # too many handlings — guarantees the battle can't hang.
+        escape = self._force_switch_escape(battle)
+        if escape is not None:
+            self._source_counts["forced_switch_escape"] += 1
+            return escape
+
         state_vec = None
         opp_snapshot = None
         try:
@@ -336,7 +374,9 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
                 )
             except Exception:
                 log.debug("forceSwitch record failed (non-fatal)", exc_info=True)
-        return super()._handle_force_switch(battle)
+        # Use the BUILDER (not _handle_force_switch) so the loop guard isn't
+        # double-counted — we already called it at the top of this method.
+        return super()._build_force_switch_order(battle)
 
     def _select_replacement_actions(self, battle: DoubleBattle, state_vec):
         """Hook: return ``(a0, a1, source)`` — switch action indices (12..15) for the
