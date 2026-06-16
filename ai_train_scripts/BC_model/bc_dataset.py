@@ -62,7 +62,14 @@ from state_encoder import (  # noqa: E402  (import after sys.path bootstrap)
     StateEncoder,
     ACTIONS_PER_SLOT,
     get_state_dim,
+    get_gimmick_dim,
+    NUM_MOVES,
+    permute_move_slots,
+    permute_action_index,
+    permute_action_mask_row,
 )
+
+GIMMICK_DIM = get_gimmick_dim()
 
 # The two active slots we output policies for; index in this tuple == head index
 HEADS: Tuple[str, str] = ("our_a", "our_b")
@@ -109,6 +116,7 @@ def transition_to_example(
     valid head name → action_index and ``masks`` maps it → np.float32 (16,).
     """
     mask_all = t.get("action_mask") or {}
+    gimmick_mask_all = t.get("gimmick_mask") or {}
     first = _first_action_per_slot(t.get("our_actions") or [])
 
     # Count the dropped same-slot (forced-replacement) entries for visibility.
@@ -119,6 +127,12 @@ def transition_to_example(
 
     targets: Dict[str, int] = {}
     masks: Dict[str, np.ndarray] = {}
+    # Gimmick (mega) labels, paired per head with the action label.  A head gets
+    # a gimmick target only when its action is valid AND the transition carries a
+    # legal gimmick label for it — older JSONL (pre-gimmick export) has neither,
+    # so the gimmick head simply receives no signal until a re-export.
+    gimmick_targets: Dict[str, int] = {}
+    gimmick_masks: Dict[str, np.ndarray] = {}
     for head in HEADS:
         act = first.get(head)
         if act is None:
@@ -144,6 +158,18 @@ def transition_to_example(
         if stats is not None:
             stats["usable_examples"] += 1
 
+        # Paired gimmick label: only when present, in range, and mask-legal.
+        gi = act.get("gimmick_index")
+        grow = gimmick_mask_all.get(head)
+        if (gi is not None and grow and len(grow) == GIMMICK_DIM
+                and 0 <= gi < GIMMICK_DIM and grow[gi] == 1):
+            gimmick_targets[head] = int(gi)
+            gimmick_masks[head] = np.asarray(grow, dtype=np.float32)
+            if stats is not None:
+                stats["usable_gimmick_examples"] += 1
+                if gi == 1:
+                    stats["gimmick_positives"] += 1
+
     if not targets:
         return None
 
@@ -154,6 +180,8 @@ def transition_to_example(
         "x": x,
         "targets": targets,
         "masks": masks,
+        "gimmick_targets": gimmick_targets,
+        "gimmick_masks": gimmick_masks,
         "replay_id": t.get("replay_id"),
     }
 
@@ -261,47 +289,96 @@ class BCDataset(Dataset):
 
     Each item is a dict of fixed-shape tensors (default collate stacks them):
 
-        x       : float32 (STATE_DIM,)
-        target  : int64   (2,)        action_index per head, -1 where invalid
-        mask    : float32 (2, 16)     legality per head (zeros where invalid)
-        valid   : float32 (2,)        1.0 where the head has a target
+        x             : float32 (STATE_DIM,)
+        target        : int64   (2,)        action_index per head, -1 invalid
+        mask          : float32 (2, 16)     action legality per head
+        valid         : float32 (2,)        1.0 where the head has an action target
+        gimmick_target: int64   (2,)        gimmick index per head, -1 invalid
+        gimmick_mask  : float32 (2, G)      gimmick legality per head
+        gimmick_valid : float32 (2,)        1.0 where the head has a gimmick target
     """
 
-    def __init__(self, examples: Sequence[dict]):
+    def __init__(self, examples: Sequence[dict], augment_move_order: bool = False,
+                 aug_seed: int = 0):
         if not _HAS_TORCH:  # pragma: no cover
             raise RuntimeError("torch is required for BCDataset")
+        # Train-only move-slot permutation augmentation (task #22): when True,
+        # each fetch independently permutes every own active mon's 4 move blocks
+        # AND remaps that head's action target + mask, so the net learns move
+        # FEATURES rather than slot POSITION.  Leave False for val (true metrics).
+        self.augment_move_order = bool(augment_move_order)
+        self._rng = np.random.RandomState(aug_seed)
         n = len(examples)
         state_dim = get_state_dim()
         self.X = np.zeros((n, state_dim), dtype=np.float32)
         self.target = np.full((n, len(HEADS)), -1, dtype=np.int64)
         self.mask = np.zeros((n, len(HEADS), ACTIONS_PER_SLOT), dtype=np.float32)
         self.valid = np.zeros((n, len(HEADS)), dtype=np.float32)
+        self.gimmick_target = np.full((n, len(HEADS)), -1, dtype=np.int64)
+        self.gimmick_mask = np.zeros((n, len(HEADS), GIMMICK_DIM), dtype=np.float32)
+        self.gimmick_valid = np.zeros((n, len(HEADS)), dtype=np.float32)
         self.replay_ids: List[str] = []
 
         for i, ex in enumerate(examples):
             self.X[i] = ex["x"]
             self.replay_ids.append(ex["replay_id"])
+            g_targets = ex.get("gimmick_targets") or {}
+            g_masks = ex.get("gimmick_masks") or {}
             for h_idx, head in enumerate(HEADS):
                 if head in ex["targets"]:
                     self.target[i, h_idx] = ex["targets"][head]
                     self.mask[i, h_idx] = ex["masks"][head]
                     self.valid[i, h_idx] = 1.0
+                if head in g_targets:
+                    self.gimmick_target[i, h_idx] = g_targets[head]
+                    self.gimmick_mask[i, h_idx] = g_masks[head]
+                    self.gimmick_valid[i, h_idx] = 1.0
 
         # Pre-convert to tensors once (dataset fits comfortably in RAM).
         self.X_t = torch.from_numpy(self.X)
         self.target_t = torch.from_numpy(self.target)
         self.mask_t = torch.from_numpy(self.mask)
         self.valid_t = torch.from_numpy(self.valid)
+        self.gimmick_target_t = torch.from_numpy(self.gimmick_target)
+        self.gimmick_mask_t = torch.from_numpy(self.gimmick_mask)
+        self.gimmick_valid_t = torch.from_numpy(self.gimmick_valid)
 
     def __len__(self) -> int:
         return self.X_t.shape[0]
 
     def __getitem__(self, idx: int) -> dict:
+        if not self.augment_move_order:
+            return {
+                "x": self.X_t[idx],
+                "target": self.target_t[idx],
+                "mask": self.mask_t[idx],
+                "valid": self.valid_t[idx],
+                "gimmick_target": self.gimmick_target_t[idx],
+                "gimmick_mask": self.gimmick_mask_t[idx],
+                "gimmick_valid": self.gimmick_valid_t[idx],
+            }
+
+        # Augmented fetch: permute each own active slot's move blocks + remap the
+        # matching action label/mask.  Work on numpy copies so the stored tensors
+        # stay pristine.  Gimmick (per-slot, not per-move) is unaffected.
+        x = self.X[idx].copy()
+        target = self.target[idx].copy()
+        mask = self.mask[idx].copy()
+        for h_idx in range(len(HEADS)):
+            perm = self._rng.permutation(NUM_MOVES).tolist()
+            permute_move_slots(x, h_idx, perm)
+            if self.valid[idx, h_idx] > 0.5:
+                target[h_idx] = permute_action_index(int(target[h_idx]), perm)
+                mask[h_idx] = np.asarray(
+                    permute_action_mask_row(mask[h_idx].tolist(), perm), dtype=np.float32)
         return {
-            "x": self.X_t[idx],
-            "target": self.target_t[idx],
-            "mask": self.mask_t[idx],
+            "x": torch.from_numpy(x),
+            "target": torch.from_numpy(target),
+            "mask": torch.from_numpy(mask),
             "valid": self.valid_t[idx],
+            "gimmick_target": self.gimmick_target_t[idx],
+            "gimmick_mask": self.gimmick_mask_t[idx],
+            "gimmick_valid": self.gimmick_valid_t[idx],
         }
 
 

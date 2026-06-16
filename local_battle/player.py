@@ -37,10 +37,11 @@ from vgc_base import (
     _heuristic_team_order,
     build_legal_action_mask,
     build_replacement_mask,
+    build_gimmick_legal_mask,
     random_legal_action,
     VGC_TEAM_SIZE,
 )
-from state_encoder import ACTIONS_PER_SLOT, STATE_DIM, SWITCH_OFFSET
+from state_encoder import ACTIONS_PER_SLOT, STATE_DIM, SWITCH_OFFSET, GIMMICK_NONE
 import model_io as _M   # dict-checkpoint load + mask-aware logit decode (#13)
 
 log = logging.getLogger(__name__)
@@ -167,6 +168,36 @@ class VGCPlayer(VGCPlayerBase):
                       "action (NOT random) so the failure stays visible.",
                       exc, exc_info=True)
             return self._first_legal(battle, 0), self._first_legal(battle, 1), "model_error"
+
+    def _select_gimmicks(self, battle, state_vec, a0, a1):
+        """Per-slot mega decision from the model's gimmick head.
+
+        GIMMICK_NONE unless ALL of: the gimmick head is actually trained (a
+        pre-gimmick checkpoint loaded non-strictly has an untrained head we must
+        not act on), the slot's chosen action is a MOVE (switches/replacements
+        never gimmick), and the masked-argmax over the slot's gimmick legal mask
+        (byte-parity with training) picks mega.  ``action_to_order`` then applies
+        the item-aware ``battle.can_mega_evolve`` gate, so an illegal mega is never
+        sent — this only decides WHETHER the model wants to mega."""
+        if (self._model is None or not _TORCH_AVAILABLE
+                or not _M.gimmick_trained(self._model)):
+            return GIMMICK_NONE, GIMMICK_NONE
+        try:
+            glog = _M.gimmick_logits(self._model, self._model_heads, state_vec, self._device)
+            if glog is None:
+                return GIMMICK_NONE, GIMMICK_NONE
+            out = []
+            for slot, action in ((0, a0), (1, a1)):
+                if action is None or action >= SWITCH_OFFSET:
+                    out.append(GIMMICK_NONE)        # switch / no action never megas
+                    continue
+                gmask = build_gimmick_legal_mask(battle, slot)
+                g = _M.masked_argmax(glog[slot], gmask)
+                out.append(g if g is not None else GIMMICK_NONE)
+            return out[0], out[1]
+        except Exception as exc:
+            log.warning("gimmick selection failed (%s) — no gimmick.", exc)
+            return GIMMICK_NONE, GIMMICK_NONE
 
     # ── Forced replacement (post-faint) — model-driven ─────────────────────────
 

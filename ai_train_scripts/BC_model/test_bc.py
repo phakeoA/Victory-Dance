@@ -209,15 +209,202 @@ def test_bcdataset_tensor_shapes_and_invalid_marking():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Gimmick (mega) labels — extraction + dataset tensors (Task #5b)
+# ══════════════════════════════════════════════════════════════════════════════
+def _gim_transition(our_actions, mask_a, mask_b, gmask_a=None, gmask_b=None, rid="r1"):
+    t = make_transition(rid, our_actions, mask_a, mask_b)
+    gm = {}
+    if gmask_a is not None:
+        gm["our_a"] = gmask_a
+    if gmask_b is not None:
+        gm["our_b"] = gmask_b
+    if gm:
+        t["gimmick_mask"] = gm
+    return t
+
+
+def test_gimmick_targets_extracted():
+    t = _gim_transition(
+        our_actions=[
+            {"slot": "our_a", "action": "move", "move": "Fake Out",
+             "action_index": 3, "gimmick_index": 1},   # mega'd
+            {"slot": "our_b", "action": "move", "move": "Sucker Punch",
+             "action_index": 0, "gimmick_index": 0},   # plain
+        ],
+        mask_a=_row(0, 3, 12), mask_b=_row(0, 1, 12),
+        gmask_a=[1, 1], gmask_b=[1, 0],
+    )
+    stats = Counter()
+    ex = transition_to_example(t, ds.StateEncoder(), stats)
+    assert ex["gimmick_targets"] == {"our_a": 1, "our_b": 0}
+    assert ex["gimmick_masks"]["our_a"].tolist() == [1.0, 1.0]
+    assert stats["usable_gimmick_examples"] == 2
+    assert stats["gimmick_positives"] == 1
+
+
+def test_bcdataset_gimmick_tensors():
+    t = _gim_transition(
+        our_actions=[
+            {"slot": "our_a", "action": "move", "move": "Fake Out",
+             "action_index": 3, "gimmick_index": 1},
+            {"slot": "our_b", "action": "move", "move": "Sucker Punch",
+             "action_index": 0, "gimmick_index": 0},
+        ],
+        mask_a=_row(0, 3, 12), mask_b=_row(0, 1, 12),
+        gmask_a=[1, 1], gmask_b=[1, 0],
+    )
+    ex = transition_to_example(t, ds.StateEncoder(), None)
+    item = BCDataset([ex])[0]
+    assert item["gimmick_target"].tolist() == [1, 0]
+    assert item["gimmick_valid"].tolist() == [1.0, 1.0]
+    assert item["gimmick_mask"].shape == (len(HEADS), 2)
+    assert item["gimmick_mask"][0].tolist() == [1.0, 1.0]
+
+
+def test_gimmick_absent_is_back_compatible():
+    """Pre-gimmick JSONL (no gimmick_mask / gimmick_index) yields no gimmick
+    target — the gimmick head simply gets no signal until a re-export."""
+    t = make_transition(
+        "r1",
+        our_actions=[{"slot": "our_a", "action": "move", "move": "Fake Out",
+                      "action_index": 3}],
+        mask_a=_row(3, 12), mask_b=_row(0),
+    )
+    ex = transition_to_example(t, ds.StateEncoder(), None)
+    assert ex["gimmick_targets"] == {}
+    item = BCDataset([ex])[0]
+    assert item["gimmick_valid"].tolist() == [0.0, 0.0]
+    assert item["gimmick_target"].tolist() == [-1, -1]
+
+
+def test_gimmick_dropped_when_illegal_under_mask():
+    """A mega label whose gimmick mask forbids mega is dropped (never a wrong
+    label) while the action label is kept."""
+    t = _gim_transition(
+        our_actions=[{"slot": "our_a", "action": "move", "move": "Fake Out",
+                      "action_index": 3, "gimmick_index": 1}],
+        mask_a=_row(3, 12), mask_b=_row(0),
+        gmask_a=[1, 0],     # mega NOT legal here
+    )
+    ex = transition_to_example(t, ds.StateEncoder(), None)
+    assert "our_a" in ex["targets"]            # action kept
+    assert ex["gimmick_targets"] == {}          # gimmick dropped
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Move-slot permutation augmentation — dataset (Task #7b)
+# ══════════════════════════════════════════════════════════════════════════════
+def _marked_example(target_move: int = 1):
+    """An example whose 4 our_a move blocks are marked (feature 0 = move idx+1),
+    target = ``target_move`` at bucket 0, all 4 moves legal."""
+    from state_encoder import own_active_move_base, MOVE_FEATURES, NUM_MOVES
+    x = np.zeros(get_state_dim(), np.float32)
+    base = own_active_move_base(0)
+    for m in range(NUM_MOVES):
+        x[base + m * MOVE_FEATURES] = m + 1
+    mask = np.zeros(ACTIONS_PER_SLOT, np.float32)
+    for m in range(NUM_MOVES):
+        mask[m * 3] = 1.0
+    return {
+        "x": x, "replay_id": "r",
+        "targets": {"our_a": target_move * 3},
+        "masks": {"our_a": mask},
+        "gimmick_targets": {"our_a": 1},
+        "gimmick_masks": {"our_a": np.array([1, 1], np.float32)},
+    }
+
+
+def test_augment_off_is_identity():
+    ex = _marked_example(target_move=1)
+    item = BCDataset([ex], augment_move_order=False)[0]
+    assert item["target"].tolist() == [3, -1]
+    assert np.allclose(item["x"].numpy(), ex["x"])
+
+
+def test_augment_tracks_target_move_features_and_legality():
+    """Over many fetches the target moves around (position-invariant) but always
+    points at the SAME move's features and stays legal under the returned mask;
+    the gimmick label is never touched."""
+    from state_encoder import own_active_move_base, MOVE_FEATURES
+    ds = BCDataset([_marked_example(target_move=1)], augment_move_order=True, aug_seed=0)
+    base = own_active_move_base(0)
+    seen = set()
+    for _ in range(40):
+        item = ds[0]
+        t = int(item["target"][0])
+        pos = t // 3
+        seen.add(pos)
+        assert item["x"][base + pos * MOVE_FEATURES].item() == 2.0   # old move 1 marker
+        assert item["mask"][0][t].item() == 1.0                       # still legal
+        assert item["gimmick_target"].tolist() == [1, -1]            # gimmick untouched
+    assert len(seen) > 1                                              # target really moved
+
+
+def _pos_example(marked_pos: int, target_pos: int):
+    """4 legal moves; the move at ``marked_pos`` carries a strong marker; target =
+    ``target_pos``.  In training marker==target==pos 0 (a position bias); at test
+    the marker (and target) sit at varied positions."""
+    from state_encoder import own_active_move_base, MOVE_FEATURES, NUM_MOVES
+    x = np.zeros(get_state_dim(), np.float32)
+    base = own_active_move_base(0)
+    x[base + marked_pos * MOVE_FEATURES] = 5.0
+    mask = np.zeros(ACTIONS_PER_SLOT, np.float32)
+    for m in range(NUM_MOVES):
+        mask[m * 3] = 1.0
+    return {"x": x, "replay_id": "r", "targets": {"our_a": target_pos * 3},
+            "masks": {"our_a": mask}, "gimmick_targets": {}, "gimmick_masks": {}}
+
+
+def _train_tiny(examples, augment, epochs=40, seed=0):
+    from torch.utils.data import DataLoader
+    torch.manual_seed(seed)
+    loader = DataLoader(BCDataset(examples, augment_move_order=augment, aug_seed=seed),
+                        batch_size=64, shuffle=True)
+    model = BCPolicy(hidden_dims=(32,), dropout=0.0, heads=HEADS)
+    opt = torch.optim.Adam(model.parameters(), lr=1e-2)
+    for _ in range(epochs):
+        train_bc.run_epoch(model, loader, "cpu", opt)
+    return model
+
+
+def _move_acc(model, examples):
+    correct = 0
+    for ex in examples:
+        actions, _ = model(torch.as_tensor(ex["x"]))
+        logits = actions["our_a"].detach().numpy().ravel()
+        mask = ex["masks"]["our_a"]
+        best = max((i for i in range(ACTIONS_PER_SLOT) if mask[i] > 0.5),
+                   key=lambda i: logits[i])
+        correct += int(best == ex["targets"]["our_a"])
+    return correct / len(examples)
+
+
+def test_augmentation_makes_policy_move_order_invariant():
+    """The fix's PURPOSE: trained WITH augmentation the policy picks the move by
+    FEATURE regardless of slot position (generalises to a shifted test order);
+    trained WITHOUT it on position-biased data it latches onto position 0 and
+    fails the shifted test."""
+    train_ex = [_pos_example(0, 0) for _ in range(256)]          # marker+target at pos 0
+    test_ex = [_pos_example(p, p) for p in ([0, 1, 2, 3] * 16)]  # marker+target shifted
+    acc_aug = _move_acc(_train_tiny(train_ex, augment=True), test_ex)
+    acc_noaug = _move_acc(_train_tiny(train_ex, augment=False), test_ex)
+    assert acc_aug >= 0.8, f"augmented policy not order-invariant: {acc_aug}"
+    assert acc_aug > acc_noaug + 0.2, f"aug {acc_aug} vs no-aug {acc_noaug}"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Model
 # ══════════════════════════════════════════════════════════════════════════════
 def test_model_forward_shapes():
     model = BCPolicy(hidden_dims=(64, 32), heads=HEADS)
     x = torch.randn(5, get_state_dim())
-    out = model(x)
-    assert set(out.keys()) == set(HEADS)
+    actions, gimmicks = model(x)
+    assert set(actions.keys()) == set(HEADS)
+    assert set(gimmicks.keys()) == set(HEADS)
     for h in HEADS:
-        assert out[h].shape == (5, ACTIONS_PER_SLOT)
+        assert actions[h].shape == (5, ACTIONS_PER_SLOT)
+        assert gimmicks[h].shape == (5, model.gimmick_dim)
+    assert model.gimmick_dim == 2
     assert model.count_parameters() > 0
 
 
@@ -240,12 +427,12 @@ def test_one_optim_step_reduces_loss():
     opt = torch.optim.Adam(model.parameters(), lr=1e-2)
 
     def step():
-        out = model(x)
+        actions, _gimmicks = model(x)
         loss = x.new_zeros(())
         nv = 0
         for hi, h in enumerate(HEADS):
             ce, n, _, _ = train_bc.head_loss_and_acc(
-                out[h], mask[:, hi], target[:, hi], valid[:, hi]
+                actions[h], mask[:, hi], target[:, hi], valid[:, hi]
             )
             loss = loss + ce
             nv += n
@@ -261,6 +448,84 @@ def test_one_optim_step_reduces_loss():
     last = float(step().item())
     assert last < first
     assert np.isfinite(last)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Gimmick head loss / recall / training (Task #5c)
+# ══════════════════════════════════════════════════════════════════════════════
+def test_gimmick_loss_and_recall_counts():
+    logits = torch.tensor([[0.0, 5.0],    # predicts mega
+                           [5.0, 0.0],    # predicts none
+                           [0.0, 5.0]])   # predicts mega
+    mask = torch.ones(3, 2)
+    target = torch.tensor([1, 1, 0])      # mega(TP), mega(FN), none(FP-ignored)
+    valid = torch.ones(3)
+    ce, nv, tp, fn = train_bc.gimmick_loss_and_recall(logits, mask, target, valid)
+    assert nv == 3 and tp == 1 and fn == 1     # recall = 1/2
+
+
+def test_compute_gimmick_class_weights_upweights_rare_mega():
+    examples = [{"gimmick_targets": {"our_a": 0}} for _ in range(90)]
+    examples += [{"gimmick_targets": {"our_a": 1}} for _ in range(10)]
+    w, counts = train_bc.compute_gimmick_class_weights(examples, 2, cap=10.0)
+    assert counts.tolist() == [90.0, 10.0]
+    assert w[1] > w[0]                          # mega up-weighted
+
+
+def _gim_example(g: int, rng):
+    """A learnable example: the gimmick label is encoded in x[0]."""
+    x = np.zeros(get_state_dim(), np.float32)
+    x[0] = float(g)
+    return {
+        "x": x, "replay_id": "r",
+        "targets": {"our_a": int(rng.integers(0, ACTIONS_PER_SLOT))},
+        "masks": {"our_a": np.ones(ACTIONS_PER_SLOT, np.float32)},
+        "gimmick_targets": {"our_a": g},
+        "gimmick_masks": {"our_a": np.ones(2, np.float32)},
+    }
+
+
+def test_run_epoch_trains_gimmick_head_and_reports_recall():
+    from torch.utils.data import DataLoader
+    rng = np.random.default_rng(0)
+    examples = [_gim_example(i % 2, rng) for i in range(256)]   # x[0] ⇒ gimmick
+    loader = DataLoader(BCDataset(examples), batch_size=64, shuffle=True)
+
+    torch.manual_seed(0)
+    model = BCPolicy(hidden_dims=(32,), dropout=0.0, heads=HEADS)
+    opt = torch.optim.Adam(model.parameters(), lr=1e-2)
+
+    m0 = train_bc.run_epoch(model, loader, "cpu", opt)
+    for _ in range(15):
+        m = train_bc.run_epoch(model, loader, "cpu", opt)
+
+    assert "gimmick_recall" in m and "gimmick_loss" in m and "gimmick_pos" in m
+    assert m["gimmick_pos"] > 0
+    assert m["gimmick_loss"] < m0["gimmick_loss"]
+    assert m["gimmick_recall"] >= 0.9          # learned mega-from-x[0]
+
+
+def test_run_epoch_handles_no_gimmick_labels():
+    """Pre-gimmick data (gimmick_valid all 0) must not crash; the gimmick term is
+    zero and the action head still trains."""
+    from torch.utils.data import DataLoader
+    rng = np.random.default_rng(1)
+    examples = []
+    for _ in range(64):
+        x = np.zeros(get_state_dim(), np.float32)
+        examples.append({
+            "x": x, "replay_id": "r",
+            "targets": {"our_a": int(rng.integers(0, ACTIONS_PER_SLOT))},
+            "masks": {"our_a": np.ones(ACTIONS_PER_SLOT, np.float32)},
+            # no gimmick_targets / gimmick_masks
+        })
+    loader = DataLoader(BCDataset(examples), batch_size=32, shuffle=True)
+    model = BCPolicy(hidden_dims=(16,), dropout=0.0, heads=HEADS)
+    opt = torch.optim.Adam(model.parameters(), lr=1e-2)
+    m = train_bc.run_epoch(model, loader, "cpu", opt)
+    assert m["gimmick_pos"] == 0
+    assert m["gimmick_recall"] == 0.0
+    assert m["n"] > 0                          # action head still trained
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -35,22 +35,28 @@ _SCRIPTS_DIR = _find_scripts_dir()
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from state_encoder import get_state_dim, get_action_dim  # noqa: E402
+from state_encoder import get_state_dim, get_action_dim, get_gimmick_dim  # noqa: E402
 
 DEFAULT_HEADS: Tuple[str, str] = ("our_a", "our_b")
 
 
 class BCPolicy(nn.Module):
     """
-    MLP trunk -> one independent linear head per slot.
+    MLP trunk -> one independent action head per slot + one independent gimmick
+    (mega) head per slot.
 
     Args:
-        state_dim:   input width (default: frozen STATE_DIM == 938)
-        action_dim:  logits per head (default: frozen ACTION_DIM == 16)
+        state_dim:   input width (default: frozen STATE_DIM == 1398)
+        action_dim:  move/switch logits per head (default: frozen ACTION_DIM == 16)
+        gimmick_dim: gimmick logits per head (default: GIMMICK_DIM == 2, {none, mega})
         hidden_dims: trunk layer widths (default: (512, 256))
         dropout:     dropout after each hidden layer (default: 0.1)
         heads:       head names (default: our_a, our_b). Pass a longer tuple to
                      add the auxiliary opponent heads for the A/B experiment.
+
+    The gimmick heads are SEPARATE from the action heads (orthogonal decision: a
+    mega is a checkbox on the chosen move, not a competing action), sharing the
+    same trunk.  forward returns (actions, gimmicks).
     """
 
     def __init__(
@@ -60,10 +66,12 @@ class BCPolicy(nn.Module):
         hidden_dims: Sequence[int] = (512, 256),
         dropout: float = 0.1,
         heads: Sequence[str] = DEFAULT_HEADS,
+        gimmick_dim: int = get_gimmick_dim(),
     ):
         super().__init__()
         self.state_dim = state_dim
         self.action_dim = action_dim
+        self.gimmick_dim = gimmick_dim
         self.head_names: Tuple[str, ...] = tuple(heads)
 
         layers: list[nn.Module] = []
@@ -80,13 +88,25 @@ class BCPolicy(nn.Module):
         self.heads = nn.ModuleDict(
             {name: nn.Linear(prev, action_dim) for name in self.head_names}
         )
+        # Parallel per-slot gimmick (mega) heads — same trunk, separate logits.
+        self.gimmick_heads = nn.ModuleDict(
+            {name: nn.Linear(prev, gimmick_dim) for name in self.head_names}
+        )
 
         self._init_weights()
 
-    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
-        """x: (B, state_dim) -> {head_name: (B, action_dim) raw logits}."""
+    def forward(
+        self, x: torch.Tensor
+    ) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
+        """x: (B, state_dim) -> (actions, gimmicks).
+
+        ``actions``  = {head_name: (B, action_dim)} raw move/switch logits.
+        ``gimmicks`` = {head_name: (B, gimmick_dim)} raw gimmick logits.
+        """
         z = self.trunk(x)
-        return {name: head(z) for name, head in self.heads.items()}
+        actions = {name: head(z) for name, head in self.heads.items()}
+        gimmicks = {name: head(z) for name, head in self.gimmick_heads.items()}
+        return actions, gimmicks
 
     def _init_weights(self) -> None:
         for module in self.modules():
@@ -116,6 +136,7 @@ def build_model(
     print(
         f"[BCPolicy] {model.count_parameters():,} params | "
         f"state_dim={model.state_dim} action_dim={model.action_dim} "
+        f"gimmick_dim={model.gimmick_dim} "
         f"hidden={tuple(hidden_dims)} heads={model.head_names} device={device}"
     )
     return model

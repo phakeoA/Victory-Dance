@@ -88,6 +88,61 @@ _MEGA_SUFFIXES = ("mega", "megax", "megay")
 _LIVE_NAME_ALIASES = {"SNOWSCAPE": "SNOW", "MATBLOCK": "MAT_BLOCK"}
 
 
+# ── Reusable live mega-forme detection (gap #5) ──────────────────────────────
+# Shared by the encoder (LiveStateEncoder._is_mega_forme) AND the serve codec
+# (vgc_base.build_gimmick_legal_mask / action_to_order) so train and serve use
+# ONE detection.  poke-env keeps ``mon.species`` at the base forme after a mega
+# but rewrites ``base_stats`` from the mega dex entry on ``|detailschange|``, so
+# a mon is mega iff its current base stats equal a ``<base>mega/megax/megay`` dex
+# entry.  A transformed Ditto copies a mega's stats but is NOT itself mega.
+_LIVE_POKEDEX_CACHE = None
+
+
+def _default_live_pokedex() -> dict:
+    """Cached poke-env raw gen-9 pokedex ({} when poke-env is unavailable)."""
+    global _LIVE_POKEDEX_CACHE
+    if _LIVE_POKEDEX_CACHE is None and GenData is not None:
+        _LIVE_POKEDEX_CACHE = GenData.from_gen(9).pokedex
+    return _LIVE_POKEDEX_CACHE or {}
+
+
+def _base_species_of(mon) -> str:
+    """Base-forme species id for forme/teampreview matching."""
+    return (getattr(mon, "base_species", None) or getattr(mon, "species", "") or "")
+
+
+def is_mega_forme_live(mon, dex=None) -> bool:
+    """Whether ``mon`` is CURRENTLY mega-evolved (gap #5), as a free function so
+    the encoder and the serve codec share one detection."""
+    if dex is None:
+        dex = _default_live_pokedex()
+    if not dex or to_id_str is None:
+        return False
+    if getattr(mon, "transformed", False):
+        return False
+    base = to_id_str(_base_species_of(mon))
+    if not base:
+        return False
+    cur = getattr(mon, "base_stats", None)
+    if not cur:
+        return False
+    for suf in _MEGA_SUFFIXES:
+        entry = dex.get(base + suf)
+        stats = entry.get("baseStats") if entry else None
+        if stats and dict(stats) == dict(cur):
+            return True
+    return False
+
+
+def team_has_megaed_live(battle) -> bool:
+    """True iff any own mon has already mega-evolved this game (a team megas at
+    most once per game).  Live analogue of state_encoder._own_team_has_megaed,
+    which reads the offline ``is_mega`` flag."""
+    team = getattr(battle, "team", None) or {}
+    dex = _default_live_pokedex()
+    return any(is_mega_forme_live(m, dex) for m in team.values())
+
+
 def _enum_to_idx(enum_cls, idx_map: dict[str, int]) -> dict:
     """Map live poke-env enum members onto frozen indices by member name."""
     out = {}
@@ -416,28 +471,11 @@ class LiveStateEncoder:
         stats equal those of a ``<base>mega``/``megax``/``megay`` dex entry — a
         precise, deterministic test that catches real megas (Charizard-Mega-Y,
         Aerodactyl-Mega, …) yet never trips on a non-mega whose NAME contains the
-        substring 'mega' (Meganium, Yanmega).  Mirrors the offline is_mega flag."""
-        dex = getattr(self, "_pokedex", None)
-        if not dex or to_id_str is None:
-            return False
-        # A transformed mon (Ditto/Imposter) copies its target's forme — incl. a
-        # mega target's stats — but is NOT itself mega-evolved.  The offline
-        # parser keeps is_mega=False for it, so skip the stat match here to match
-        # (the copied stats/types are still encoded via base_stats/types).
-        if getattr(mon, "transformed", False):
-            return False
-        base = to_id_str(self._base_species(mon))
-        if not base:
-            return False
-        cur = mon.base_stats
-        if not cur:
-            return False
-        for suf in _MEGA_SUFFIXES:
-            entry = dex.get(base + suf)
-            stats = entry.get("baseStats") if entry else None
-            if stats and dict(stats) == dict(cur):
-                return True
-        return False
+        substring 'mega' (Meganium, Yanmega).  Mirrors the offline is_mega flag.
+
+        Delegates to the module-level ``is_mega_forme_live`` so the encoder and
+        the serve codec (vgc_base) share ONE detection."""
+        return is_mega_forme_live(mon, getattr(self, "_pokedex", None))
 
     @staticmethod
     def _is_real_mon(mon: "Pokemon") -> bool:

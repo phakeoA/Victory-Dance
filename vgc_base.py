@@ -66,8 +66,14 @@ from state_encoder import (
     _move_target_kind,
     _CHOOSABLE_SINGLE,
     _ALLY_KINDS,
+    # Gimmick (mega) codec — the SAME constants + capability check the training
+    # gimmick mask (build_gimmick_mask) uses, so the serve gimmick mask matches.
+    GIMMICK_DIM,
+    GIMMICK_NONE,
+    GIMMICK_MEGA,
+    _species_is_mega_capable,
 )
-from live_state_encoder import LiveStateEncoder, own_bench_mons
+from live_state_encoder import LiveStateEncoder, own_bench_mons, team_has_megaed_live
 
 log = logging.getLogger(__name__)
 
@@ -327,10 +333,62 @@ def build_replacement_mask(battle: DoubleBattle, slot: int) -> list[bool]:
     return mask
 
 
-def action_to_order(action: int, battle: DoubleBattle, slot: int) -> Optional[SingleBattleOrder]:
+def build_gimmick_legal_mask(battle: DoubleBattle, slot: int) -> list[bool]:
+    """Serve-time gimmick legality for ``slot``: ``[none_legal, mega_legal]``.
+
+    BYTE-PARITY with training (state_encoder.build_gimmick_mask): bucket 0 (none)
+    is legal for any present, non-fainted active slot; bucket 1 (mega) is legal
+    iff the active mon is mega-CAPABLE — the SAME ``_species_is_mega_capable`` dex
+    check the exporter used — AND no own mon has used mega this game.  An empty or
+    fainted active slot gets an all-False row, mirroring build_legal_action_mask.
+
+    This mask is capability-based (matching the offline data, where the mega STONE
+    is unknown at decision time, so an item-gated mask would drop ~99% of real
+    mega labels).  The FINAL order in action_to_order is the item-aware gate
+    (battle.can_mega_evolve), so an illegal mega is never sent to Showdown.
+    """
+    row = [False] * GIMMICK_DIM
+    try:
+        active = battle.active_pokemon
+    except ValueError:
+        return row
+    mon: Optional[Pokemon] = active[slot] if slot < len(active) else None
+    if mon is None or mon.fainted:
+        return row
+    row[GIMMICK_NONE] = True
+    base = getattr(mon, "base_species", None) or getattr(mon, "species", "")
+    if _species_is_mega_capable(base) and not team_has_megaed_live(battle):
+        row[GIMMICK_MEGA] = True
+    return row
+
+
+def _live_can_mega(battle: DoubleBattle, slot: int) -> bool:
+    """Authoritative serve-time mega legality for ``slot`` from poke-env's
+    ``battle.can_mega_evolve`` — item- AND team-aware (False once the stone is
+    gone or the team has already mega'd).  This is the FINAL safety gate so an
+    illegal mega order is never sent, independent of the (capability-based)
+    gimmick mask the model chose under.  Robust to the bool vs per-slot-list
+    shapes across poke-env versions; any error → no mega."""
+    try:
+        cme = battle.can_mega_evolve
+    except (ValueError, AttributeError):
+        return False
+    if isinstance(cme, (list, tuple)):
+        return bool(cme[slot]) if slot < len(cme) else False
+    return bool(cme)
+
+
+def action_to_order(action: int, battle: DoubleBattle, slot: int,
+                    gimmick: int = GIMMICK_NONE) -> Optional[SingleBattleOrder]:
     """
     Convert an integer action (0–15) into a SingleBattleOrder for the given slot.
     Returns None if the action cannot be executed (caller should fall back).
+
+    ``gimmick`` (GIMMICK_NONE / GIMMICK_MEGA) is the decoded gimmick decision for
+    this slot.  A move is ordered with ``mega=True`` ONLY when the gimmick is mega
+    AND ``battle.can_mega_evolve[slot]`` confirms it is currently legal — otherwise
+    the plain move is ordered, so a rejected /choose is never emitted.  Switches
+    never gimmick.  Tera / Z-move / Dynamax are never set (not in this format).
 
     Uses Player.create_order (static) with an integer move_target from
     DoubleBattle.to_showdown_target(), as required by poke-env's doubles API.
@@ -347,6 +405,9 @@ def action_to_order(action: int, battle: DoubleBattle, slot: int) -> Optional[Si
     opp_active = battle.opponent_active_pokemon
 
     if action < SWITCH_OFFSET:
+        # Mega is a checkbox on the chosen move — applied only when the model
+        # picked it AND poke-env confirms it is legal right now (item + team).
+        do_mega = (gimmick == GIMMICK_MEGA) and _live_can_mega(battle, slot)
         move_idx, target_code = MOVE_TARGET_PAIRS[action]
         moves = list(mon.moves.values())[:NUM_MOVES]
         if move_idx >= len(moves):
@@ -384,7 +445,7 @@ def action_to_order(action: int, battle: DoubleBattle, slot: int) -> Optional[Si
             # normal/any move aimed at the ally, e.g. a Justified self-hit).
             pos = (battle.POKEMON_1_POSITION if ally_slot == 0
                    else battle.POKEMON_2_POSITION)
-            return Player.create_order(move, move_target=pos)
+            return Player.create_order(move, mega=do_mega, move_target=pos)
 
         if target_mon is None:
             # poke-env shows NO foe — it can lose a foe to a same-species Zoroark
@@ -397,11 +458,12 @@ def action_to_order(action: int, battle: DoubleBattle, slot: int) -> Optional[Si
             # of which slot the (poke-env-invisible) foe actually occupies, and the
             # explicit foe slot removes any foe/ally ambiguity.
             if _move_target_kind(move.id) in _CHOOSABLE_SINGLE:
-                return Player.create_order(move, move_target=battle.OPPONENT_1_POSITION)
-            return Player.create_order(move)   # spread/self/field — no target needed
+                return Player.create_order(move, mega=do_mega,
+                                           move_target=battle.OPPONENT_1_POSITION)
+            return Player.create_order(move, mega=do_mega)   # spread/self/field
 
         showdown_target = battle.to_showdown_target(move, target_mon)
-        return Player.create_order(move, move_target=showdown_target)
+        return Player.create_order(move, mega=do_mega, move_target=showdown_target)
 
     else:
         bench_idx = action - SWITCH_OFFSET
@@ -464,6 +526,21 @@ class VGCPlayerBase(Player):
         Both actions must be in [0, ACTIONS_PER_SLOT).
         """
 
+    def _select_gimmicks(
+        self,
+        battle: DoubleBattle,
+        state_vec: np.ndarray,
+        action_s0: int,
+        action_s1: int,
+    ) -> Tuple[int, int]:
+        """Per-slot gimmick (mega) decision for the chosen actions: a pair of
+        GIMMICK_* buckets passed alongside each action into ``_safe_order``.
+
+        Base behaviour: NEVER gimmick (the random / heuristic players don't mega).
+        The model player overrides this to masked-argmax its gimmick head over the
+        per-slot gimmick legal mask (and forces no-gimmick on a switch)."""
+        return GIMMICK_NONE, GIMMICK_NONE
+
     # ── poke-env entry points ─────────────────────────────────────────────────
 
     def teampreview(self, battle: DoubleBattle) -> str:
@@ -513,10 +590,11 @@ class VGCPlayerBase(Player):
 
         state_vec = self._encoder.encode(battle)
         action_s0, action_s1, source = self._select_actions(battle, state_vec)
+        g0, g1 = self._select_gimmicks(battle, state_vec, action_s0, action_s1)
 
         log.debug(
-            "Turn %d [%s] a0=%d a1=%d src=%s",
-            battle.turn, battle.battle_tag, action_s0, action_s1, source,
+            "Turn %d [%s] a0=%d a1=%d src=%s g0=%d g1=%d",
+            battle.turn, battle.battle_tag, action_s0, action_s1, source, g0, g1,
         )
 
         self._replay.record(
@@ -528,8 +606,8 @@ class VGCPlayerBase(Player):
             source    = source,
         )
 
-        order_s0 = self._safe_order(action_s0, battle, slot=0)
-        order_s1 = self._safe_order(action_s1, battle, slot=1)
+        order_s0 = self._safe_order(action_s0, battle, slot=0, gimmick=g0)
+        order_s1 = self._safe_order(action_s1, battle, slot=1, gimmick=g1)
         return DoubleBattleOrder(order_s0, order_s1)
 
     # ── Internal helpers ──────────────────────────────────────────────────────
@@ -583,15 +661,17 @@ class VGCPlayerBase(Player):
         )
         return DoubleBattleOrder(order_s0, order_s1)
 
-    def _safe_order(self, action: int, battle: DoubleBattle, slot: int) -> SingleBattleOrder:
+    def _safe_order(self, action: int, battle: DoubleBattle, slot: int,
+                    gimmick: int = GIMMICK_NONE) -> SingleBattleOrder:
         """
         Convert action int → SingleBattleOrder, with two fallback levels:
-          1. Try the given action.
-          2. Try a fresh random legal action.
+          1. Try the given action (with the model's ``gimmick`` decision).
+          2. Try a fresh random legal action (no gimmick — an emergency legal
+             order, never speculatively mega'd).
           3. PassBattleOrder (slot has nothing to do this turn).
         DoubleBattleOrder never accepts None, so Pass is the correct no-op.
         """
-        order = action_to_order(action, battle, slot)
+        order = action_to_order(action, battle, slot, gimmick)
         if order is not None:
             return order
         # The chosen action was undecodable (e.g. a single-target move with an ally

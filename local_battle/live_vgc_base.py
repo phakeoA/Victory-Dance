@@ -72,7 +72,7 @@ import random as _random  # noqa: E402  (retry-exploration on rejected choices)
 from live_state_encoder import (  # noqa: E402
     opp_snapshot_from_log_prefix, opp_snapshot_current, own_bench_mons,
 )
-from state_encoder import SWITCH_OFFSET  # noqa: E402
+from state_encoder import SWITCH_OFFSET, GIMMICK_NONE  # noqa: E402
 
 log = logging.getLogger(__name__)
 
@@ -190,6 +190,13 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
         tried[0].add(action_s0)
         tried[1].add(action_s1)
 
+        # Gimmick (mega) decision for the FINAL actions.  A retry order is an
+        # emergency perturbation, not the model's pick, so it never gimmicks.
+        if source == "retry":
+            g0 = g1 = GIMMICK_NONE
+        else:
+            g0, g1 = self._select_gimmicks(battle, state_vec, action_s0, action_s1)
+
         self._source_counts[source] += 1
 
         log.debug(
@@ -207,8 +214,8 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
             source=source,
         )
 
-        order_s0 = self._safe_order(action_s0, battle, slot=0)
-        order_s1 = self._safe_order(action_s1, battle, slot=1)
+        order_s0 = self._safe_order(action_s0, battle, slot=0, gimmick=g0)
+        order_s1 = self._safe_order(action_s1, battle, slot=1, gimmick=g1)
         return DoubleBattleOrder(order_s0, order_s1)
 
     @staticmethod

@@ -57,9 +57,10 @@ def test_load_bc_policy_reconstructs_two_head_module(bc_loaded):
     model, heads = bc_loaded
     assert heads == ("our_a", "our_b")
     assert model.state_dim == STATE_DIM
-    out = model(torch.zeros(STATE_DIM, dtype=torch.float32))
-    assert isinstance(out, dict) and set(out) == {"our_a", "our_b"}
-    assert out["our_a"].numel() == ACTION_DIM
+    actions, gimmicks = model(torch.zeros(STATE_DIM, dtype=torch.float32))
+    assert set(actions) == {"our_a", "our_b"}
+    assert set(gimmicks) == {"our_a", "our_b"}
+    assert actions["our_a"].numel() == ACTION_DIM
 
 
 def test_bc_action_indices_returns_masked_argmax(bc_loaded):
@@ -73,9 +74,9 @@ def test_bc_action_indices_returns_masked_argmax(bc_loaded):
     mask0 = [i in (1, 4, 13) for i in range(16)]
     mask1 = [i in (0, 2, 3, 12, 14) for i in range(16)]
     with torch.no_grad():
-        out = model(torch.as_tensor(sv))
-    exp0 = M.masked_argmax(out["our_a"].numpy().ravel(), mask0)
-    exp1 = M.masked_argmax(out["our_b"].numpy().ravel(), mask1)
+        actions, _gimmicks = model(torch.as_tensor(sv))
+    exp0 = M.masked_argmax(actions["our_a"].numpy().ravel(), mask0)
+    exp1 = M.masked_argmax(actions["our_b"].numpy().ravel(), mask1)
     a0, a1 = M.bc_action_indices(model, heads, sv, mask0, mask1)
     assert (a0, a1) == (exp0, exp1)
     # and the chosen indices are legal
@@ -89,6 +90,63 @@ def test_bc_action_indices_none_when_no_legal(bc_loaded):
     sv = np.zeros(STATE_DIM, dtype="float32")
     a0, a1 = M.bc_action_indices(model, heads, sv, [False] * 16, [True] + [False] * 15)
     assert a0 is None and a1 == 0
+
+
+# ── Gimmick head load + decode (Task #5d) ─────────────────────────────────────
+def _save_bc_ckpt(tmp_path, with_gimmick: bool, gimmick_trained=None, name=None):
+    import torch
+    from bc_model import BCPolicy
+    from state_encoder import STATE_DIM
+    m = BCPolicy(hidden_dims=(16,), dropout=0.0)
+    sd = m.state_dict()
+    if not with_gimmick:
+        sd = {k: v for k, v in sd.items() if not k.startswith("gimmick_heads.")}
+    cfg = {"state_dim": STATE_DIM, "action_dim": 16, "hidden_dims": [16],
+           "dropout": 0.0, "heads": ["our_a", "our_b"]}
+    if with_gimmick:
+        cfg["gimmick_dim"] = 2
+    if gimmick_trained is not None:
+        cfg["gimmick_trained"] = gimmick_trained
+    p = tmp_path / (name or ("g.pt" if with_gimmick else "old.pt"))
+    torch.save({"model_state": sd, "config": cfg}, p)
+    return p
+
+
+def test_gimmick_checkpoint_sets_trained_flag_and_logits(tmp_path):
+    pytest.importorskip("torch")
+    import numpy as np
+    from state_encoder import STATE_DIM
+    model, heads = M.load_bc_policy(_save_bc_ckpt(tmp_path, with_gimmick=True))
+    assert M.gimmick_trained(model) is True
+    g0, g1 = M.gimmick_logits(model, heads, np.zeros(STATE_DIM, "float32"))
+    assert g0.shape == (2,) and g1.shape == (2,)
+    assert M.masked_argmax(g0, [True, False]) == 0          # only 'none' legal
+    assert M.masked_argmax(g0, [True, True]) in (0, 1)
+
+
+def test_gimmick_head_present_but_config_untrained_is_flagged_untrained(tmp_path):
+    """A checkpoint with gimmick weights but trained on pre-gimmick data (config
+    gimmick_trained=False) must be flagged untrained — the head is at init."""
+    pytest.importorskip("torch")
+    model, _ = M.load_bc_policy(
+        _save_bc_ckpt(tmp_path, with_gimmick=True, gimmick_trained=False, name="untrained.pt"))
+    assert M.gimmick_trained(model) is False
+
+
+def test_pre_gimmick_checkpoint_loads_nonstrict_and_flags_untrained(tmp_path):
+    """An OLD checkpoint (no gimmick_heads) loads with the gimmick head at init,
+    flagged untrained, and its action head still decodes — so the live bot never
+    acts on an untrained gimmick head."""
+    pytest.importorskip("torch")
+    import numpy as np
+    from state_encoder import STATE_DIM
+    model, heads = M.load_bc_policy(_save_bc_ckpt(tmp_path, with_gimmick=False))
+    assert M.gimmick_trained(model) is False
+    a0, a1 = M.bc_action_indices(
+        model, heads, np.zeros(STATE_DIM, "float32"),
+        [True] + [False] * 15, [True] + [False] * 15,
+    )
+    assert a0 == 0 and a1 == 0
 
 
 # ── Team-chooser load + order (needs torch + trained checkpoint) ──────────────

@@ -1274,6 +1274,29 @@ class ShowdownReplayParser:
                         "action": "switch",
                         "species": ev.get("species"),
                     })
+
+            # ── Gimmick (mega-evolution) label join ──────────────────────────
+            # A mega is a CHECKBOX on the chosen move, not a competing action, so
+            # we stamp it onto the SAME-turn, SAME-slot move action.  Join by SLOT,
+            # not execution_index: mega_evolution events carry no execution_index,
+            # and a slot megas at most once per game, so the slot key is an
+            # unambiguous join key.  forme_change events (Palafin/Terapagos auto-
+            # formes) are involuntary, not a player decision, and are deliberately
+            # NOT joined.  The flag is added ONLY when a mega actually occurred, so
+            # non-mega move actions serialise byte-identically to before.
+            # TODO(tera): when the format adds Terastallization, join the
+            # (currently inert) -terastallize events here the same way to feed a
+            # future 3-way gimmick head {none, mega, tera}.
+            megaed_slots = {
+                ev.get("slot")
+                for ev in self._current_turn_actions
+                if ev.get("event") == "mega_evolution"
+                and (ev.get("slot") or "").startswith(player)
+            }
+            if megaed_slots:
+                for act in out:
+                    if act["action"] == "move" and act["slot"] in megaed_slots:
+                        act["mega"] = True
             return out
 
         turn_snapshot = {

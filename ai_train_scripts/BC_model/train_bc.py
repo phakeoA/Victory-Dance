@@ -100,6 +100,57 @@ def head_loss_and_acc(
     return ce, n_valid, n_top1, n_top3
 
 
+def gimmick_loss_and_recall(
+    logits: torch.Tensor,   # (B, G) raw gimmick logits
+    mask: torch.Tensor,     # (B, G) 1=legal
+    target: torch.Tensor,   # (B,)  gimmick index, -1 where invalid
+    valid: torch.Tensor,    # (B,)  1.0 where this head has a gimmick target
+    class_weight: Optional[torch.Tensor] = None,  # (G,) per-class loss weight
+) -> Tuple[torch.Tensor, int, int, int]:
+    """Returns (summed_ce_loss, n_valid, n_true_pos, n_false_neg) for the gimmick
+    head over a batch.  Positives are the RARE mega class (index 1); we track
+    recall = TP/(TP+FN) because plain accuracy is dominated by the 'none' class
+    and would hide a head that never megas.  ``class_weight`` up-weights the rare
+    positive so the gradient does not collapse to always-predict-none."""
+    valid_b = valid > 0.5
+    n_valid = int(valid_b.sum().item())
+    if n_valid == 0:
+        return logits.sum() * 0.0, 0, 0, 0
+
+    ml = masked_logits(logits, mask)[valid_b]
+    tgt = target[valid_b]
+    ce = F.cross_entropy(ml, tgt, weight=class_weight, reduction="sum")
+
+    with torch.no_grad():
+        pred = ml.argmax(dim=1)
+        pos = tgt == 1
+        n_tp = int(((pred == 1) & pos).sum().item())
+        n_fn = int(((pred != 1) & pos).sum().item())
+
+    return ce, n_valid, n_tp, n_fn
+
+
+def compute_gimmick_class_weights(examples, gimmick_dim: int, cap: float = 10.0):
+    """Balanced gimmick-class weights over the train gimmick targets (both heads).
+    The mega positive is a small minority (≤1 mega per team per game), so without
+    this the head learns to always predict 'none' (perfect accuracy, zero recall).
+    Same balanced formula as compute_class_weights.
+
+    Returns (weights np.float32 [gimmick_dim], counts np.float64 [gimmick_dim])."""
+    counts = np.zeros(gimmick_dim, dtype=np.float64)
+    for ex in examples:
+        for gi in (ex.get("gimmick_targets") or {}).values():
+            counts[gi] += 1
+    w = np.ones(gimmick_dim, dtype=np.float32)
+    present = counts > 0
+    if present.any():
+        total = counts[present].sum()
+        n_present = int(present.sum())
+        bal = total / (n_present * counts[present])
+        w[present] = np.clip(bal, 0.0, cap).astype(np.float32)
+    return w, counts
+
+
 def compute_class_weights(examples, action_dim: int, cap: float = 10.0):
     """Balanced (sklearn-style) action weights over the train targets (both
     heads): ``w_c = total / (n_present_classes * count_c)``.  This keeps the
@@ -129,16 +180,22 @@ def run_epoch(
     device: str,
     optimizer: Optional[torch.optim.Optimizer] = None,
     class_weight: Optional[torch.Tensor] = None,
+    gimmick_class_weight: Optional[torch.Tensor] = None,
+    gimmick_loss_weight: float = 1.0,
 ) -> Dict[str, float]:
-    """One pass over ``loader``.  Train if ``optimizer`` given, else eval."""
+    """One pass over ``loader``.  Train if ``optimizer`` given, else eval.
+
+    Trains BOTH the action heads and the parallel gimmick (mega) heads.  The
+    total loss is ``action_mean + gimmick_loss_weight * gimmick_mean``; each term
+    is meaned over its own valid-decision count so the two heads stay balanced
+    regardless of how many gimmick labels a batch carries (pre-gimmick JSONL has
+    none → the gimmick term is 0 and the gimmick heads simply don't update)."""
     train = optimizer is not None
     model.train(train)
 
-    totals = {
-        "loss": 0.0,
-        "n": 0,  # total valid decisions (for loss mean)
-    }
+    totals = {"loss": 0.0, "n": 0, "g_loss": 0.0, "g_n": 0}
     per_head = {h: {"n": 0, "top1": 0, "top3": 0} for h in HEADS}
+    gim = {"tp": 0, "fn": 0}
 
     ctx = torch.enable_grad() if train else torch.no_grad()
     with ctx:
@@ -147,14 +204,19 @@ def run_epoch(
             target = batch["target"].to(device)   # (B, 2)
             mask = batch["mask"].to(device)        # (B, 2, A)
             valid = batch["valid"].to(device)      # (B, 2)
+            g_target = batch["gimmick_target"].to(device)  # (B, 2)
+            g_mask = batch["gimmick_mask"].to(device)      # (B, 2, G)
+            g_valid = batch["gimmick_valid"].to(device)    # (B, 2)
 
-            out = model(x)  # {head: (B, A)}
+            actions, gimmicks = model(x)
 
             batch_loss = x.new_zeros(())
             batch_valid = 0
+            g_batch_loss = x.new_zeros(())
+            g_batch_valid = 0
             for h_idx, head in enumerate(HEADS):
                 ce, n_valid, n1, n3 = head_loss_and_acc(
-                    out[head], mask[:, h_idx], target[:, h_idx], valid[:, h_idx],
+                    actions[head], mask[:, h_idx], target[:, h_idx], valid[:, h_idx],
                     class_weight=class_weight,
                 )
                 batch_loss = batch_loss + ce
@@ -163,28 +225,46 @@ def run_epoch(
                 per_head[head]["top1"] += n1
                 per_head[head]["top3"] += n3
 
+                g_ce, g_nv, g_tp, g_fn = gimmick_loss_and_recall(
+                    gimmicks[head], g_mask[:, h_idx], g_target[:, h_idx],
+                    g_valid[:, h_idx], class_weight=gimmick_class_weight,
+                )
+                g_batch_loss = g_batch_loss + g_ce
+                g_batch_valid += g_nv
+                gim["tp"] += g_tp
+                gim["fn"] += g_fn
+
             if batch_valid == 0:
                 continue
             mean_loss = batch_loss / batch_valid
+            mean_gimmick = g_batch_loss / max(g_batch_valid, 1)
+            total = mean_loss + gimmick_loss_weight * mean_gimmick
 
             if train:
                 optimizer.zero_grad()
-                mean_loss.backward()
+                total.backward()
                 optimizer.step()
 
             totals["loss"] += float(batch_loss.item())
             totals["n"] += batch_valid
+            totals["g_loss"] += float(g_batch_loss.item())
+            totals["g_n"] += g_batch_valid
 
     n = max(totals["n"], 1)
     pooled_top1 = sum(per_head[h]["top1"] for h in HEADS)
     pooled_top3 = sum(per_head[h]["top3"] for h in HEADS)
     pooled_n = sum(per_head[h]["n"] for h in HEADS) or 1
+    g_pos = gim["tp"] + gim["fn"]
 
     metrics = {
         "loss": totals["loss"] / n,
         "top1": pooled_top1 / pooled_n,
         "top3": pooled_top3 / pooled_n,
         "n": totals["n"],
+        "gimmick_loss": totals["g_loss"] / max(totals["g_n"], 1),
+        "gimmick_recall": gim["tp"] / g_pos if g_pos else 0.0,
+        "gimmick_pos": g_pos,
+        "gimmick_n": totals["g_n"],
     }
     for head in HEADS:
         hn = max(per_head[head]["n"], 1)
@@ -227,8 +307,13 @@ def train(args: argparse.Namespace) -> dict:
         f"{len({e['replay_id'] for e in val_ex})} replays)"
     )
 
-    train_ds = BCDataset(train_ex)
+    # Move-slot permutation augmentation is TRAIN-ONLY (val stays raw so its
+    # metrics are true).  It makes the policy order-invariant — see task #22.
+    train_ds = BCDataset(train_ex, augment_move_order=args.augment_move_order,
+                         aug_seed=args.seed)
     val_ds = BCDataset(val_ex)
+    print(f"[train_bc] move-slot permutation augmentation: "
+          f"{'ON' if args.augment_move_order else 'OFF'} (train only)")
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
 
@@ -251,6 +336,16 @@ def train(args: argparse.Namespace) -> dict:
               f"min {w_np.min():.2f} max {w_np.max():.2f} "
               f"(majority action #{int(counts.argmax())}={int(counts.max())} decisions)")
 
+    # Gimmick head is ALWAYS class-balanced — the mega positive is intrinsically
+    # rare (≤1 per team per game), so an unweighted head collapses to all-none.
+    from bc_dataset import GIMMICK_DIM  # noqa: E402
+    gw_np, gcounts = compute_gimmick_class_weights(train_ex, GIMMICK_DIM,
+                                                   cap=args.class_weight_cap)
+    gimmick_class_weight = torch.tensor(gw_np, device=device)
+    print(f"[train_bc] gimmick class weights (balanced, cap {args.class_weight_cap}): "
+          f"{[round(float(v), 2) for v in gw_np]} "
+          f"(counts none={int(gcounts[0])} mega={int(gcounts[1])})")
+
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     ckpt_path = out_dir / "bc_best.pt"
@@ -258,6 +353,11 @@ def train(args: argparse.Namespace) -> dict:
     config = {
         "state_dim": model.state_dim,
         "action_dim": model.action_dim,
+        "gimmick_dim": model.gimmick_dim,
+        # True only when the train data actually carried gimmick labels — a
+        # gimmick head trained on pre-gimmick JSONL is at init and must NOT drive
+        # live mega decisions (the serve player honours this flag).
+        "gimmick_trained": bool(gcounts.sum() > 0),
         "hidden_dims": list(args.hidden),
         "dropout": args.dropout,
         "heads": list(HEADS),
@@ -276,14 +376,17 @@ def train(args: argparse.Namespace) -> dict:
     epochs_no_improve = 0
     history: List[dict] = []
     for epoch in range(1, args.epochs + 1):
-        tr = run_epoch(model, train_loader, device, optimizer, class_weight=class_weight)
+        tr = run_epoch(model, train_loader, device, optimizer, class_weight=class_weight,
+                       gimmick_class_weight=gimmick_class_weight,
+                       gimmick_loss_weight=args.gimmick_loss_weight)
         va = run_epoch(model, val_loader, device, optimizer=None)
         history.append({"epoch": epoch, "train": tr, "val": va})
         print(
             f"epoch {epoch:3d} | "
             f"train loss {tr['loss']:.4f} top1 {tr['top1']:.3f} | "
             f"val loss {va['loss']:.4f} top1 {va['top1']:.3f} top3 {va['top3']:.3f} "
-            f"(a {va['our_a_top1']:.3f} / b {va['our_b_top1']:.3f})"
+            f"(a {va['our_a_top1']:.3f} / b {va['our_b_top1']:.3f}) "
+            f"| gim recall {va['gimmick_recall']:.3f} pos {va['gimmick_pos']}"
         )
 
         if va["top1"] > best_top1:
@@ -333,6 +436,15 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                          "counter majority-action bias (default: none)")
     ap.add_argument("--class-weight-cap", type=float, default=10.0,
                     help="cap on any single class weight (default: 10)")
+    ap.add_argument("--gimmick-loss-weight", type=float, default=1.0,
+                    help="weight on the gimmick (mega) CE term in the total loss "
+                         "(default: 1.0). The gimmick head is always class-balanced.")
+    ap.add_argument("--augment-move-order", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="train-only: randomly permute each mon's 4 move slots + "
+                         "remap the action label so the policy is move-ORDER "
+                         "invariant (task #22). Default ON; --no-augment-move-order "
+                         "to disable.")
     ap.add_argument("--patience", type=int, default=0,
                     help="early-stop after N epochs with no val top-1 gain (0=off)")
     ap.add_argument("--val-frac", type=float, default=0.1)

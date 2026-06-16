@@ -33,8 +33,10 @@ def masked_argmax(logits, mask):
     return bi
 
 
-def main(n_files):
-    model, heads = M.load_bc_policy(ROOT / "ai_train_scripts/BC_model/checkpoints/bc_best.pt")
+def main(n_files, ckpt=None):
+    ckpt = ckpt or (ROOT / "ai_train_scripts/BC_model/checkpoints/bc_best.pt")
+    print(f"[probe] checkpoint: {ckpt}")
+    model, heads = M.load_bc_policy(ckpt)
     enc = VodStateEncoder()
     files = sorted(glob.glob(str(ROOT / "data/vods/Prepared_training_data/Regulation_MA/Jsonl_TypeB/**/*.jsonl"), recursive=True))
     import random as _r; _r.seed(0); _r.shuffle(files)
@@ -65,7 +67,7 @@ def main(n_files):
                     if vec is None:
                         vec = enc.encode_snapshot(snap, turn=t.get("turn") or 0)
                     with torch.no_grad():
-                        out = model(torch.as_tensor(vec))
+                        out = model(torch.as_tensor(vec))[0]   # (actions, gimmicks) → actions
                     logit = np.asarray(out[head].detach()).ravel()
                     am = masked_argmax(logit, row)
                     c["decisions"] += 1
@@ -89,7 +91,7 @@ def main(n_files):
                             pvec = permute_move_slots(base_vec, slot_index, perm)
                             prow = permute_mask_row(row, perm)
                             with torch.no_grad():
-                                pout = model(torch.as_tensor(pvec))
+                                pout = model(torch.as_tensor(pvec))[0]
                             pam = masked_argmax(np.asarray(pout[head].detach()).ravel(), prow)
                             mapped = unpermute_action(pam, perm)
                             a_move = base_am // 3 if (base_am is not None and base_am < SWITCH_OFFSET) else base_am
@@ -103,7 +105,7 @@ def main(n_files):
 
                     fvec = flatten_move_known(vec, slot_index)
                     with torch.no_grad():
-                        fam = masked_argmax(np.asarray(model(torch.as_tensor(fvec))[head].detach()).ravel(), row)
+                        fam = masked_argmax(np.asarray(model(torch.as_tensor(fvec))[0][head].detach()).ravel(), row)
                     if move_flip(fvec, fam):
                         c["order_move_flip_flat"] += 1
 
@@ -124,4 +126,6 @@ def main(n_files):
 
 
 if __name__ == "__main__":
-    main(int(sys.argv[1]) if len(sys.argv) > 1 else 300)
+    n = int(sys.argv[1]) if len(sys.argv) > 1 else 300
+    ckpt = sys.argv[2] if len(sys.argv) > 2 else None
+    main(n, ckpt)

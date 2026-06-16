@@ -225,6 +225,18 @@ ACTION_DIM       = ACTIONS_PER_SLOT
 MOVE_TARGET_PAIRS = [(m, t) for m in range(4) for t in range(3)]  # indices 0–11
 SWITCH_OFFSET     = 12   # actions 12–15 → bench slots 0–3
 
+# ── Gimmick (mega-evolution) decision ────────────────────────────────────────
+# A SEPARATE per-slot 2-way head, ORTHOGONAL to the 16-way move/switch head: a
+# mega is a checkbox alongside the chosen move, not a competing action.  Keeping
+# it out of ACTION_DIM (frozen 16) leaves the move/switch policy untouched and
+# stops the rare positive mega signal from competing in the move softmax.
+# TODO(tera): when Terastallization enters Reg M-A AND replays carry it, bump to
+# 3 {none, mega, tera}, add the tera label-join + a serve branch, and re-export.
+# Tera is NOT in the format yet — build NOTHING tera-specific now.
+GIMMICK_NONE = 0
+GIMMICK_MEGA = 1
+GIMMICK_DIM  = 2
+
 
 # ── Boost key order (must match encoder) ──────────────────────────────────────
 _BOOST_KEYS = ["atk", "def", "spa", "spd", "spe", "accuracy", "evasion"]
@@ -715,6 +727,16 @@ def action_to_index(
     return None
 
 
+def action_to_gimmick(action: dict) -> int:
+    """Map one our_actions entry to its gimmick bucket (0=none, 1=mega).
+
+    The parser stamps ``mega=True`` onto the chosen move for the slot that mega-
+    evolved that turn (replay_parser._extract_actions).  Switches/replacements
+    never gimmick, so they map to GIMMICK_NONE.
+    """
+    return GIMMICK_MEGA if action.get("mega") else GIMMICK_NONE
+
+
 def index_to_action(idx: int) -> dict:
     """Decode a 0–15 action index into its structural meaning."""
     if 0 <= idx < SWITCH_OFFSET:
@@ -728,6 +750,61 @@ def index_to_action(idx: int) -> dict:
     if SWITCH_OFFSET <= idx < ACTIONS_PER_SLOT:
         return {"kind": "switch", "bench_slot": idx - SWITCH_OFFSET}
     raise ValueError(f"action index out of range: {idx}")
+
+
+# ── Move-slot permutation (training augmentation, task #22) ──────────────────
+# The BC net is ~96% move-ORDER sensitive: it leans on a move's slot POSITION (a
+# "slot 0 = main move" prior baked in by reveal-order training) instead of the
+# move's FEATURES — and at serve the own moves arrive in poke-env REQUEST order,
+# so the prior is misapplied.  Train-only fix: randomly permute a mon's 4 move
+# sub-blocks AND the matching action label so the net must read move features,
+# not position.  These helpers are the single source for WHERE the move blocks
+# live (so the dataset augmentation can never drift from the encoder layout).
+#
+# Within a POKEMON_FEATURES block the 4 move sub-blocks start here (after hp,
+# both types, base+est stats, stats-known, mega, tera, status, boosts):
+_MOVE_BLOCK_REL = 1 + 2 * NUM_TYPES + 6 + 6 + 1 + 1 + 1 + NUM_STATUS + NUM_BOOSTS  # 70
+# Own ACTIVE mons are state blocks 0 (our_a) and 1 (our_b); opp/bench moves have
+# no action head, so they are never permuted.
+
+
+def own_active_move_base(slot: int) -> int:
+    """Absolute index of own active ``slot``'s (0=our_a, 1=our_b) first move
+    feature in an encoded state vector."""
+    return slot * POKEMON_FEATURES + _MOVE_BLOCK_REL
+
+
+def permute_move_slots(vec: np.ndarray, slot: int, perm: Sequence[int]) -> None:
+    """In place: reorder the 4 move sub-blocks of own active ``slot`` so the new
+    move-slot ``i`` holds the OLD move-slot ``perm[i]``.  ``perm`` is a
+    permutation of ``range(NUM_MOVES)``; all other features are left untouched."""
+    base = own_active_move_base(slot)
+    blocks = [vec[base + m * MOVE_FEATURES: base + (m + 1) * MOVE_FEATURES].copy()
+              for m in range(NUM_MOVES)]
+    for i, src in enumerate(perm):
+        vec[base + i * MOVE_FEATURES: base + (i + 1) * MOVE_FEATURES] = blocks[src]
+
+
+def permute_action_index(idx: Optional[int], perm: Sequence[int]) -> Optional[int]:
+    """Remap an action index under move-slot permutation ``perm`` (``perm[i]`` =
+    the old move-slot now at position ``i``).  Switch indices (>=SWITCH_OFFSET),
+    None and out-of-range pass through unchanged; a move index ``m*3+bucket`` maps
+    to ``j*3+bucket`` where ``perm[j] == m``."""
+    if idx is None or idx < 0 or idx >= SWITCH_OFFSET:
+        return idx
+    m, bucket = divmod(idx, 3)
+    return list(perm).index(m) * 3 + bucket
+
+
+def permute_action_mask_row(row: Sequence, perm: Sequence[int]) -> list:
+    """Remap a 16-wide action mask row under ``perm``: new move block ``j`` takes
+    old move block ``perm[j]``; switch entries (>=SWITCH_OFFSET) are unchanged."""
+    out = list(row)
+    for j in range(NUM_MOVES):
+        src = perm[j]
+        for b in range(3):
+            out[j * 3 + b] = row[src * 3 + b]
+    return out
 
 
 def build_action_mask(snap: dict) -> dict[str, list[int]]:
@@ -776,27 +853,83 @@ def build_action_mask(snap: dict) -> dict[str, list[int]]:
     return mask
 
 
+def _species_is_mega_capable(species: Optional[str]) -> bool:
+    """True iff this (base) species has a mega forme in the dex.
+
+    We gate the gimmick mask on mega-CAPABILITY (species) rather than on holding
+    a mega stone (item), because at the moment a mon mega-evolves its stone is
+    revealed DURING that turn — the decision-time snapshot (state_before_actions)
+    does NOT yet carry the item for ~99% of real megas.  An item-gated mask would
+    mark the actual mega label illegal and annotate_transition_actions would drop
+    it, leaving the head nothing to learn.  Capability is the stable, offline-
+    computable signal that keeps every real mega label legal; the LIVE serve path
+    additionally gates the emitted order on ``battle.can_mega_evolve`` (true item-
+    aware legality), so an illegal mega order is never sent.
+    """
+    dex = get_pokedex()
+    return bool(dex.mega_formes_for(species)) if dex else False
+
+
+def _own_team_has_megaed(snap: dict) -> bool:
+    """Has any own mon already mega-evolved this game?  A team megas at most once
+    per game, so the moment any own active/bench mon shows ``is_mega`` the gimmick
+    is spent and mega is no longer a legal choice for either slot."""
+    mons = list((snap.get("our_active") or {}).values()) + list(snap.get("our_bench") or [])
+    return any(m.get("is_mega") for m in mons)
+
+
+def build_gimmick_mask(snap: dict) -> dict[str, list[int]]:
+    """
+    Decision-time gimmick legality for one state_before_actions snapshot:
+    ``{"our_a": [2×0/1], "our_b": [2×0/1]}`` over (none, mega).
+
+    bucket 0 (none) is legal for any acting (present, non-fainted) slot — not
+    gimmicking is always allowed.  bucket 1 (mega) is legal iff the acting mon is
+    mega-capable AND no own mon has used mega this game.  An empty/fainted active
+    slot gets an all-zero row, mirroring build_action_mask.
+    """
+    our_active  = snap.get("our_active") or {}
+    team_megaed = _own_team_has_megaed(snap)
+
+    mask: dict[str, list[int]] = {}
+    for slot in ("our_a", "our_b"):
+        row = [0] * GIMMICK_DIM
+        mon = our_active.get(slot)
+        if mon and not mon.get("is_fainted"):
+            row[GIMMICK_NONE] = 1
+            base = mon.get("base_species") or mon.get("species")
+            if not team_megaed and _species_is_mega_capable(base):
+                row[GIMMICK_MEGA] = 1
+        mask[slot] = row
+    return mask
+
+
 def annotate_transition_actions(transition: dict) -> dict:
     """
     Stamp the action-space view onto one transitions.py dict, in place:
 
-      · each our_actions entry gains ``action_index`` (0–15 or None),
+      · each our_actions entry gains ``action_index`` (0–15 or None) and
+        ``gimmick_index`` (0=none / 1=mega / None),
       · ``action_mask`` becomes the build_action_mask() of
-        state_before_actions (the decision-time state).
+        state_before_actions (the decision-time state),
+      · ``gimmick_mask`` becomes the build_gimmick_mask() of the same state.
 
     Pure-python and deterministic given the stored snapshot (the belief
     padding that orders move slots is baked into the same JSON), so exports
     can carry it without the state_vector being encoded.
 
     Invariant guaranteed here: every non-null ``action_index`` is legal under
-    the same transition's ``action_mask``.  If an action cannot be resolved to a
-    mask-legal index (an unresolved auto-target / redirect edge), it is stamped
-    None — never a wrong index — so a downstream masked policy can never be told
-    the answer was an illegal action.
+    the same transition's ``action_mask``, and every non-null ``gimmick_index``
+    is legal under its ``gimmick_mask``.  An action that cannot be resolved to a
+    mask-legal index is stamped None (never a wrong index); its gimmick is then
+    None too (a gimmick is a checkbox on an action we could not encode).  A
+    decoded action whose gimmick bucket is not legal (a mega by a mon the mask
+    says cannot mega) likewise drops the gimmick to None — never a wrong label.
     """
     snap = transition.get("state_before_actions") or {}
     our_active = snap.get("our_active") or {}
     mask = build_action_mask(snap)
+    gimmick_mask = build_gimmick_mask(snap)
     for act in transition.get("our_actions") or []:
         slot = act.get("slot")
         idx = action_to_index(act, our_active.get(slot), snap)
@@ -805,7 +938,20 @@ def annotate_transition_actions(transition: dict) -> dict:
             if idx >= len(row) or row[idx] != 1:
                 idx = None  # not expressible in the turn-start frame → unencoded
         act["action_index"] = idx
+
+        # Gimmick (mega) is a checkbox on the chosen action — only meaningful
+        # when that action is itself encodable and the gimmick bucket is legal.
+        if idx is None:
+            g = None
+        else:
+            g = action_to_gimmick(act)
+            grow = gimmick_mask.get(slot) or []
+            if g >= len(grow) or grow[g] != 1:
+                g = None  # gimmick illegal under its mask (never on real data)
+        act["gimmick_index"] = g
+
     transition["action_mask"] = mask
+    transition["gimmick_mask"] = gimmick_mask
     return transition
 
 
@@ -815,6 +961,9 @@ def get_state_dim() -> int:
 
 def get_action_dim() -> int:
     return ACTION_DIM
+
+def get_gimmick_dim() -> int:
+    return GIMMICK_DIM
 
 
 # Backward-compatibility alias: the offline encoder kept the name

@@ -147,6 +147,94 @@ def test_meganium_name_does_not_false_positive_as_mega():
     assert r["revealed_info"]["p1:Meganium"]["is_mega"] is False
 
 
+# ── Synthetic: mega-evolution DECISION label join onto the chosen move ─────
+# The mega is a checkbox on the move the player selected; the parser stamps
+# action["mega"]=True onto the SAME-turn, SAME-slot move action.  (Task #1 —
+# the learned-mega blocker: without this flag the training data has no label.)
+
+def _mega_move_turn():
+    """p1a Meganium megas then attacks; p1b Incineroar attacks WITHOUT mega;
+    p2a Aerodactyl attacks (no mega).  One turn, three move decisions."""
+    return parse(
+        "|switch|p1a: Meganium|Meganium, L50, M|100/100",
+        "|switch|p1b: Incineroar|Incineroar, L50, F|100/100",
+        "|switch|p2a: Aerodactyl|Aerodactyl, L50, M|100/100",
+        "|turn|1",
+        "|detailschange|p1a: Meganium|Meganium-Mega, L50, M",
+        "|-mega|p1a: Meganium|Meganium|Meganiumite",
+        "|move|p1a: Meganium|Body Press|p2a: Aerodactyl",
+        "|move|p1b: Incineroar|Fake Out|p2a: Aerodactyl",
+        "|move|p2a: Aerodactyl|Rock Slide|p1a: Meganium",
+        "|turn|2",
+        "|win|alice",
+    )
+
+
+def test_mega_label_stamped_on_same_slot_move():
+    """The megaing slot's move carries mega=True; a non-mega teammate move does
+    not (the flag is only added when a mega actually occurred)."""
+    turn = _mega_move_turn()["turns"][0]
+    our = {a["slot"]: a for a in turn["our_actions"]}
+    assert our["p1a"]["action"] == "move"
+    assert our["p1a"].get("mega") is True            # p1a mega'd → flagged
+    assert "mega" not in our["p1b"]                   # p1b didn't → no key
+
+
+def test_mega_label_absent_on_opponent_nonmega_move():
+    """A move by a slot that never mega'd (here the opponent) carries no flag."""
+    turn = _mega_move_turn()["turns"][0]
+    opp = {a["slot"]: a for a in turn["opp_actions_actual"]}
+    assert opp["p2a"]["action"] == "move"
+    assert "mega" not in opp["p2a"]
+
+
+def test_forme_change_does_not_stamp_mega():
+    """Palafin → Palafin-Hero is an INVOLUNTARY forme change, not a player
+    decision — the move that turn must never be flagged as a gimmick."""
+    r = parse(
+        "|switch|p2a: Palafin|Palafin, L50, M|100/100",
+        "|switch|p1a: Meganium|Meganium, L50, M|100/100",
+        "|turn|1",
+        "|detailschange|p2a: Palafin|Palafin-Hero, L50, M",
+        "|move|p2a: Palafin|Jet Punch|p1a: Meganium",
+        "|turn|2",
+        "|win|alice",
+    )
+    turn = r["turns"][0]
+    # forme_change emitted, mega_evolution NOT — so no flag on the move.
+    events = [a["event"] for a in turn["actions"]]
+    assert "forme_change" in events and "mega_evolution" not in events
+    opp = {a["slot"]: a for a in turn["opp_actions_actual"]}
+    assert opp["p2a"]["action"] == "move"
+    assert "mega" not in opp["p2a"]
+
+
+def test_mega_then_flinch_no_label_and_no_teammate_leak():
+    """A mon that megas at turn-start then FLINCHES makes no move that turn:
+    there is no action to flag (an unavoidable orphan), and the join must not
+    leak the flag onto a teammate's move."""
+    r = parse(
+        "|switch|p1a: Meganium|Meganium, L50, M|100/100",
+        "|switch|p1b: Incineroar|Incineroar, L50, F|100/100",
+        "|switch|p2a: Aerodactyl|Aerodactyl, L50, M|100/100",
+        "|turn|1",
+        "|detailschange|p1a: Meganium|Meganium-Mega, L50, M",
+        "|-mega|p1a: Meganium|Meganium|Meganiumite",
+        "|move|p2a: Aerodactyl|Fake Out|p1a: Meganium",
+        "|-damage|p1a: Meganium|86/100",
+        "|cant|p1a: Meganium|flinch",
+        "|move|p1b: Incineroar|Knock Off|p2a: Aerodactyl",
+        "|turn|2",
+        "|win|alice",
+    )
+    turn = r["turns"][0]
+    our = {a["slot"]: a for a in turn["our_actions"]}
+    assert "p1a" not in our                            # mega'd but never moved
+    assert our["p1b"]["action"] == "move"
+    assert "mega" not in our["p1b"]                     # teammate not flagged
+    assert any(a["event"] == "mega_evolution" for a in turn["actions"])
+
+
 # ── Synthetic: |-mega| safety net ─────────────────────────────────────────
 
 def test_mega_line_without_detailschange_still_swaps_ability():

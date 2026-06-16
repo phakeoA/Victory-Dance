@@ -462,7 +462,7 @@ def replay_to_transitions(
     try:
         from state_encoder import (
             annotate_transition_actions, action_to_index, _living_bench,
-            SWITCH_OFFSET, ACTIONS_PER_SLOT,
+            SWITCH_OFFSET, ACTIONS_PER_SLOT, GIMMICK_DIM, GIMMICK_NONE,
         )
     except ImportError:
         annotate_transition_actions = None
@@ -592,6 +592,7 @@ def replay_to_transitions(
                 # Placeholders for future encoder output
                 "state_vector": None,
                 "action_mask":  None,
+                "gimmick_mask": None,   # filled by annotate_transition_actions
                 "players": {
                     "our_side": perspective,
                     "p1": battle["players"]["p1"],
@@ -641,6 +642,16 @@ def replay_to_transitions(
                 if rel_slot in mask:
                     mask[rel_slot] = row
 
+                # A replacement is switch-only — it NEVER gimmicks.  The deciding
+                # (fainted) slot may only pick "no gimmick" (bucket 0); mega is
+                # never legal on a replacement.  The ally slot is not deciding →
+                # all-zero, mirroring the switch-only action mask above.
+                gimmick_mask = {"our_a": [0] * GIMMICK_DIM,
+                                "our_b": [0] * GIMMICK_DIM}
+                if rel_slot in gimmick_mask:
+                    gimmick_mask[rel_slot][GIMMICK_NONE] = 1
+                switch_action["gimmick_index"] = GIMMICK_NONE if idx is not None else None
+
                 transitions.append({
                     "source_type": battle.get("source_type", "ranked_player_vod"),
                     "replay_id":   replay_id,
@@ -664,6 +675,7 @@ def replay_to_transitions(
                     "belief_fill":   fill_meta,
                     "state_vector":  None,
                     "action_mask":   mask,
+                    "gimmick_mask":  gimmick_mask,
                     "players": {
                         "our_side": rp,
                         "p1": battle["players"]["p1"],

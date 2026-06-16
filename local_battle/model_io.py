@@ -70,14 +70,27 @@ def load_bc_policy(path, device: str = "cpu"):
         raise ValueError(f"unrecognised BC checkpoint at {path}: {type(ckpt)}")
     cfg = ckpt.get("config", {})
     from bc_model import BCPolicy
+    from state_encoder import get_gimmick_dim
     model = BCPolicy(
         state_dim=cfg["state_dim"],
         action_dim=cfg["action_dim"],
         hidden_dims=tuple(cfg.get("hidden_dims", (512, 256))),
         dropout=cfg.get("dropout", 0.0),
         heads=tuple(cfg.get("heads", ("our_a", "our_b"))),
+        gimmick_dim=cfg.get("gimmick_dim", get_gimmick_dim()),
     )
-    model.load_state_dict(ckpt["model_state"])
+    # A PRE-gimmick checkpoint has no ``gimmick_heads.*`` weights.  The model now
+    # always carries gimmick heads, so load non-strictly for those old checkpoints
+    # (the untrained gimmick head stays at init) and FLAG it so the player never
+    # acts on an untrained gimmick head — it megas only with a real gimmick-trained
+    # checkpoint (post re-export+retrain), exactly as the handoff requires.
+    state = ckpt["model_state"]
+    has_gimmick = any(k.startswith("gimmick_heads.") for k in state)
+    model.load_state_dict(state, strict=has_gimmick)
+    # The gimmick head is usable only if the checkpoint both CONTAINS it AND was
+    # trained on gimmick-labelled data (config flag, default True for forward
+    # compat when the weights are present but the flag predates this field).
+    model._gimmick_trained = bool(has_gimmick and cfg.get("gimmick_trained", True))
     model.to(device).eval()
     return model, tuple(cfg.get("heads", ("our_a", "our_b")))
 
@@ -107,14 +120,38 @@ def bc_action_indices(
 def head_logits(
     model, head_names, state_vec: np.ndarray, device: str = "cpu",
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Run the policy once and return the two per-head raw logit vectors (slot 0 =
-    our_a, slot 1 = our_b).  Used when the caller needs the logits directly — e.g.
-    the forced-replacement path applies a per-slot switch-only mask with cross-slot
-    dedup, which a single bc_action_indices call can't express."""
+    """Run the policy once and return the two per-head raw ACTION logit vectors
+    (slot 0 = our_a, slot 1 = our_b).  Used when the caller needs the logits
+    directly — e.g. the forced-replacement path applies a per-slot switch-only
+    mask with cross-slot dedup, which a single bc_action_indices call can't
+    express."""
     with torch.no_grad():
         t = torch.as_tensor(np.asarray(state_vec, dtype=np.float32), device=device)
         out = model(t)
-    return _head_logits(out, head_names)
+    # forward now returns (actions, gimmicks); back-compat with an action-only dict.
+    actions = out[0] if isinstance(out, tuple) else out
+    return _head_logits(actions, head_names)
+
+
+def gimmick_logits(
+    model, head_names, state_vec: np.ndarray, device: str = "cpu",
+) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """Run the policy once and return the two per-head raw GIMMICK logit vectors
+    (slot 0 = our_a, slot 1 = our_b), or None for a legacy action-only model.
+    The caller masked-argmaxes these over the per-slot gimmick legal mask."""
+    with torch.no_grad():
+        t = torch.as_tensor(np.asarray(state_vec, dtype=np.float32), device=device)
+        out = model(t)
+    if not (isinstance(out, tuple) and len(out) >= 2):
+        return None
+    return _head_logits(out[1], head_names)
+
+
+def gimmick_trained(model) -> bool:
+    """Whether ``model`` was loaded from a checkpoint that actually trained the
+    gimmick head (load_bc_policy sets this).  The player must not act on an
+    untrained gimmick head (a pre-gimmick checkpoint loaded non-strictly)."""
+    return bool(getattr(model, "_gimmick_trained", False))
 
 
 # ── Team-preview scorer ───────────────────────────────────────────────────────
