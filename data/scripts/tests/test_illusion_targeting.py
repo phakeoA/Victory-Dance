@@ -113,3 +113,100 @@ def test_illusion_lost_slot_a_targets_position_1_with_recon():
     battle.opponent_active_pokemon = [None, foe_b]          # slot a merged/lost
     order = action_to_order(A_OPP_A, battle, 0, opp_present_recon={0: True, 1: True})
     assert _target_pos(order) == "1", f"expected deliberate opp_a @ pos1: {order.message!r}"
+
+
+# ── #1b: own ACTIVE mon under illusion has empty moves → recover from |request| ──
+def _make_illusion_active_battle():
+    """Own active mon whose poke-env object has EMPTY moves (a freshly sent-in
+    Zoroark disguised as a brought teammate, before it has used a move), while the
+    private |request| (``battle.available_moves[0]``) holds its real move.  No bench
+    and not trapped, so WITHOUT the #1b recovery the action mask is ALL-ZERO →
+    ``/choose default`` (a wasted turn)."""
+    from poke_env.battle import Move
+    cc = Move("closecombat", gen=9)
+
+    class _Mon:
+        def __init__(self, tag, moves):
+            self.tag = tag
+            self.fainted = False
+            self.species = "x"
+            self.base_species = "x"
+            self._mv = moves
+        @property
+        def moves(self):
+            return self._mv
+
+    disguise = _Mon("actor", {})                       # EMPTY — illusion-stale
+    foe_a, foe_b = _Mon("foe_a", {}), _Mon("foe_b", {})
+
+    class _Battle:
+        OPPONENT_1_POSITION = 1
+        OPPONENT_2_POSITION = 2
+        POKEMON_1_POSITION = -1
+        POKEMON_2_POSITION = -2
+        def __init__(self):
+            self.active_pokemon = [disguise, None]
+            self.opponent_active_pokemon = [foe_a, foe_b]
+            self.available_moves = [[cc], []]          # request-authoritative real move
+            self.available_switches = [[], []]
+            self.team = {}
+            self.can_mega_evolve = [False, False]
+            self.reviving = False
+        def to_showdown_target(self, mv, tgt):
+            return 1 if getattr(tgt, "tag", None) == "foe_a" else 2
+
+    return _Battle(), cc
+
+
+def test_own_active_move_list_recovers_request_moves_under_illusion():
+    _repo_on_path()
+    from live_state_encoder import own_active_move_list
+    battle, _cc = _make_illusion_active_battle()
+    got = own_active_move_list(battle, 0, battle.active_pokemon[0])
+    assert [m.id for m in got] == ["closecombat"], \
+        "empty mon.moves must fall back to the request's available_moves"
+
+
+def test_own_active_move_list_prefers_mon_moves_when_present():
+    _repo_on_path()
+    from live_state_encoder import own_active_move_list
+    from poke_env.battle import Move
+    battle, _cc = _make_illusion_active_battle()
+    battle.active_pokemon[0]._mv = {"tackle": Move("tackle", gen=9)}
+    got = own_active_move_list(battle, 0, battle.active_pokemon[0])
+    assert [m.id for m in got] == ["tackle"], \
+        "request fallback must trigger ONLY when mon.moves is empty"
+
+
+def test_own_active_move_list_empty_when_no_moves_anywhere():
+    _repo_on_path()
+    from live_state_encoder import own_active_move_list
+    battle, _cc = _make_illusion_active_battle()
+    battle.available_moves = [[], []]
+    assert own_active_move_list(battle, 0, battle.active_pokemon[0]) == []
+
+
+def test_illusion_empty_moves_mask_offers_request_move_not_default():
+    """WITHOUT #1b the disguise's empty moves yield an all-zero mask → /choose
+    default; WITH it the mask offers the request move's foe buckets (switch-free)."""
+    _repo_on_path()
+    from vgc_base import build_legal_action_mask
+    from state_encoder import SWITCH_OFFSET
+    battle, _cc = _make_illusion_active_battle()
+    mask = build_legal_action_mask(battle, 0)
+    assert mask[0] is True and mask[1] is True, "move slot 0 opp_a/opp_b must be legal"
+    assert mask[2] is False                       # no ally present → no ally bucket
+    assert not any(mask[SWITCH_OFFSET:])          # no bench → no switches
+    assert any(mask), "mask must NOT be all-zero (that would force /choose default)"
+
+
+def test_illusion_empty_moves_codec_orders_real_move_not_none():
+    """The chosen move decodes to a real /choose order instead of None → Pass →
+    'must make a move' retry → default."""
+    _repo_on_path()
+    from vgc_base import action_to_order
+    battle, _cc = _make_illusion_active_battle()
+    order = action_to_order(A_OPP_A, battle, 0)   # move slot 0, target opp_a
+    assert order is not None, "empty-moves illusion slot must still order a real move"
+    assert "closecombat" in order.message.lower()
+    assert _target_pos(order) == "1"              # opp_a → foe_a → position 1

@@ -291,8 +291,13 @@ class LiveStateEncoder:
 
         own_active_set = {p for p in own_active if p is not None}
 
-        for mon in list(own_active):
-            self._write_pokemon(vec, cursor, mon, is_active=True, is_own=True)
+        for slot, mon in enumerate(list(own_active)):
+            # #1b: under an own-side Illusion the active object's moves can be empty
+            # while the |request| holds the real ones — encode those (request-
+            # authoritative) so the move features match the mask + the offline parser.
+            mv = own_active_move_list(battle, slot, mon) if mon is not None else None
+            self._write_pokemon(vec, cursor, mon, is_active=True, is_own=True,
+                                move_override=mv)
             cursor += POKEMON_FEATURES
         for mon in list(opp_active):
             self._write_pokemon(vec, cursor, mon, is_active=True, is_own=False)
@@ -574,8 +579,13 @@ class LiveStateEncoder:
         mon: Optional["Pokemon"],
         is_active: bool,
         is_own: bool,
+        move_override: Optional[list] = None,
     ) -> None:
-        """Write POKEMON_FEATURES floats into vec starting at `start`."""
+        """Write POKEMON_FEATURES floats into vec starting at `start`.
+
+        ``move_override`` (own active mons only) supplies the move list when poke-env's
+        ``mon.moves`` is an Illusion-stale empty (#1b — see own_active_move_list); None
+        ⇒ the default ``mon.moves`` ordering, so every other slot is unchanged."""
         # Empty / unrevealed slot → all zeros (already zeroed by np.zeros)
         if mon is None:
             return
@@ -642,7 +652,8 @@ class LiveStateEncoder:
         i += NUM_BOOSTS
 
         # Moves (up to 4; remaining slots stay zero = unknown)
-        move_list = list(mon.moves.values())[:NUM_MOVES]
+        move_list = (move_override if move_override is not None
+                     else list(mon.moves.values())[:NUM_MOVES])
         for m_idx in range(NUM_MOVES):
             if m_idx < len(move_list):
                 self._write_move(vec, i, move_list[m_idx], mon)
@@ -931,16 +942,89 @@ def own_bench_mons(battle) -> list:
     |request| when available (#11b — so an Illusion-corrupted active/fainted FLAG
     can no longer drop a healthy bench mon from the replacement set), falling back
     to poke-env's flags only when no request exists (replay-driven path)."""
+    active_set = _active_mon_set(battle)
     req = _request_own_state(battle)
     if req is not None:
+        # Cross-check the request's `active` flag against the LIVE field
+        # (battle.active_pokemon): under a mid-turn-faint Illusion the request can
+        # momentarily report an on-field mon as inactive, and offering it as a
+        # switch-in makes Showdown reject the order ("can't switch to an active
+        # Pokémon") → the forced-switch loop escape.  A mon whose OBJECT is on the
+        # field is never a legal switch-in, so exclude it regardless of the flag.
+        # This only ever drops a genuinely-active mon (active_pokemon is the field
+        # truth, not the per-mon flag / available_switches the #11 desync corrupts),
+        # so it can't re-drop a healthy bencher.
         return [m for ident, m in battle.team.items()
                 if ident in req and not req[ident][0] and not req[ident][1]
+                and m not in active_set
                 and LiveStateEncoder._is_real_mon(m)]
-    active_set = _active_mon_set(battle)
     return [
         m for m in brought_team_mons(battle)
         if m not in active_set and not getattr(m, "fainted", False)
     ]
+
+
+def own_switch_slot(battle, mon) -> Optional[int]:
+    """Showdown's 1-based switch SLOT for ``mon`` — its position in the request's
+    ``side.pokemon`` — so a switch can be ordered by SLOT (``/choose switch 3``)
+    instead of by species name (``/choose switch Charizard``).
+
+    THE root fix for the 'can't switch to an active Pokémon' rejection (#1b): under
+    an Illusion (Zoroark) or Imposter (Ditto), an ACTIVE mon can be DISPLAYED as the
+    same species as a benched mon; Showdown then resolves a name-based switch to the
+    ACTIVE disguise and rejects it.  The team-slot index is assigned at team preview
+    and never changes, so it identifies the exact (benched) team member regardless of
+    what any mon is currently disguised/transformed as — AND it is immune to a stale
+    ``last_request`` (the order of side.pokemon is fixed; only the active/condition
+    fields churn).  Returns None when there is no usable request (offline / replay
+    path) or the mon isn't found, so the caller falls back to the name-based order
+    (unchanged offline behaviour)."""
+    req = getattr(battle, "last_request", None) or {}
+    if not isinstance(req, dict) or req.get("teamPreview"):
+        return None
+    side = req.get("side") or {}
+    pokemon = side.get("pokemon") if isinstance(side, dict) else None
+    if not pokemon:
+        return None
+    team = getattr(battle, "team", {}) or {}
+    target_ident = next((ident for ident, m in team.items() if m is mon), None)
+    if target_ident is None:
+        return None
+    for i, e in enumerate(pokemon):
+        if e.get("ident") == target_ident:
+            return i + 1
+    return None
+
+
+def own_active_move_list(battle, slot: int, mon) -> list:
+    """The own ACTIVE mon's move list (``Move`` objects, <= NUM_MOVES) shared by the
+    encoder, the action mask, and the order codec — normally ``mon.moves``, but
+    request-authoritative under an own-side Illusion (#1b).
+
+    poke-env attributes a disguise's |move| lines to the DISGUISE object, so a freshly
+    sent-in Zoroark (disguised as a brought teammate) that hasn't moved yet leaves the
+    active object's ``moves`` EMPTY: the encoder then writes zero move features, the
+    action mask offers no move, and — if the slot also can't switch (trapped / no
+    bench) — the turn collapses to ``/choose default`` (a wasted turn).  Showdown's
+    private |request| always lists the TRUE active mon's usable moves, which poke-env
+    exposes as ``battle.available_moves[slot]`` (already ``Move`` objects).  When
+    ``mon.moves`` is empty we fall back to it so all three codec sites see the SAME
+    real moves in ONE order — matching the offline parser, which reconstructs the true
+    mon under illusion (so this moves the LIVE encoding TOWARD offline parity; the
+    replay-driven path has no live ``available_moves`` and is unaffected).  Empty
+    ``mon.moves`` is the only trigger, so every normal turn is byte-identical to the
+    prior behaviour."""
+    moves = list(mon.moves.values())[:NUM_MOVES] if mon is not None else []
+    if moves:
+        return moves
+    try:
+        av = battle.available_moves
+    except (ValueError, AttributeError):
+        return moves
+    if (isinstance(av, (list, tuple)) and slot is not None
+            and slot < len(av) and av[slot]):
+        return list(av[slot])[:NUM_MOVES]
+    return moves
 
 
 # ══════════════════════════════════════════════════════════════════════════════

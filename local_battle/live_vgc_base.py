@@ -395,7 +395,9 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
         bench = own_bench_mons(battle)
         i = action - SWITCH_OFFSET
         if 0 <= i < len(bench):
-            return Player.create_order(bench[i])
+            from vgc_base import _log_switch_choice, build_switch_order
+            _log_switch_choice(battle, slot, bench[i], "replacement")
+            return build_switch_order(battle, bench[i])
         return PassBattleOrder()
 
     @staticmethod

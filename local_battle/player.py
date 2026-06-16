@@ -42,7 +42,9 @@ from vgc_base import (
     random_legal_action,
     VGC_TEAM_SIZE,
 )
-from state_encoder import ACTIONS_PER_SLOT, STATE_DIM, SWITCH_OFFSET, GIMMICK_NONE
+from state_encoder import (
+    ACTIONS_PER_SLOT, STATE_DIM, SWITCH_OFFSET, GIMMICK_NONE, GIMMICK_MEGA,
+)
 import model_io as _M   # dict-checkpoint load + mask-aware logit decode (#13)
 
 log = logging.getLogger(__name__)
@@ -243,6 +245,21 @@ class VGCPlayer(VGCPlayerBase):
                 gmask = build_gimmick_legal_mask(battle, slot)
                 g = _M.masked_argmax(glog[slot], gmask)
                 out.append(g if g is not None else GIMMICK_NONE)
+            # Cross-slot mega dedup: Showdown allows only ONE Mega Evolution per
+            # BATTLE (so at most one per turn).  The two gimmick heads decide
+            # independently and build_gimmick_legal_mask only blocks mega once the
+            # team has mega'd on a PRIOR turn — so both active slots can pick mega the
+            # SAME turn → Showdown rejects ("can only Mega-Evolve once per battle") →
+            # retry.  Keep the slot with the stronger mega preference (the mega−none
+            # logit margin) and drop the other to GIMMICK_NONE (the analogue of the
+            # cross-slot SWITCH dedup in _select_actions).
+            if out[0] == GIMMICK_MEGA and out[1] == GIMMICK_MEGA:
+                try:
+                    margin0 = float(glog[0][GIMMICK_MEGA]) - float(glog[0][GIMMICK_NONE])
+                    margin1 = float(glog[1][GIMMICK_MEGA]) - float(glog[1][GIMMICK_NONE])
+                except Exception:
+                    margin0, margin1 = 1.0, 0.0      # any error → keep slot 0's mega
+                out[1 if margin0 >= margin1 else 0] = GIMMICK_NONE
             return out[0], out[1]
         except Exception as exc:
             log.warning("gimmick selection failed (%s) — no gimmick.", exc)
@@ -260,8 +277,16 @@ class VGCPlayer(VGCPlayerBase):
         ``decision_type='replacement'`` transitions are labelled (the fainted slot's
         head, switch-only mask), so the heads are in-distribution for it.
 
-        Returns ``(a0, a1, "forced_switch_model")`` or ``None`` to fall back to the
-        inherited random picker (no model, or no legal model replacement)."""
+        Returns ``(a0, a1, "forced_switch_model")`` — a switch index for each fainted
+        slot that has a brought replacement, ``None`` (→ Pass) for a fainted slot whose
+        bench is EXHAUSTED (a genuine double faint with fewer survivors than fainted
+        slots — "Pattern A") AND for a non-switching slot.  Passing the empty slot IS
+        the model's decision (the only legal action), not a fallback, so the whole
+        post-faint turn stays MODEL-DRIVEN — Showdown accepts switch+Pass.  Returns
+        ``None`` only to defer to the inherited random picker when the MODEL itself is
+        unavailable / errors (so a genuine inference failure still has a safety net,
+        and the forced-switch loop-guard escape remains the backstop for a rejected
+        order)."""
         if self._model is None or not _TORCH_AVAILABLE:
             return None
         try:
@@ -270,19 +295,25 @@ class VGCPlayer(VGCPlayerBase):
             logits = (l0, l1)
             out: List[Optional[int]] = [None, None]
             taken: set = set()      # bench indices already assigned (dedupe slots)
+            forced_any = False
             for slot in (0, 1):
                 if slot >= len(force) or not force[slot]:
-                    continue
+                    continue        # not switching → out[slot] stays None → Pass
+                forced_any = True
                 mask = build_replacement_mask(battle, slot)
                 for i in taken:
                     mask[SWITCH_OFFSET + i] = False
                 a = _M.masked_argmax(logits[slot], mask)
                 if a is None:
-                    return None     # no legal model replacement → random fallback
+                    # Forced slot but the brought bench is exhausted (Pattern A): PASS
+                    # this slot (out[slot] stays None).  This is the model's decision,
+                    # not a random fallback — so we DON'T bail the whole turn (which
+                    # would also throw away a valid pick on the OTHER fainted slot).
+                    continue
                 out[slot] = a
                 taken.add(a - SWITCH_OFFSET)
-            if out[0] is None and out[1] is None:
-                return None
+            if not forced_any:
+                return None         # nothing to replace → defer (defensive; caller gates on any(force))
             return out[0], out[1], "forced_switch_model"
         except Exception as exc:
             log.warning("Model replacement selection failed (%s) — using random.", exc)

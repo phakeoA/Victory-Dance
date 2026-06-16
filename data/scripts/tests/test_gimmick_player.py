@@ -136,6 +136,27 @@ def test_model_select_gimmicks_megas_capable_move_slot_only():
     assert gsw == GIMMICK_NONE
 
 
+def test_select_gimmicks_dedups_double_mega(monkeypatch):
+    """Showdown allows only ONE Mega Evolution per battle; the two gimmick heads
+    decide independently, so both active slots can pick mega the SAME turn →
+    Showdown rejects 'can only Mega-Evolve once per battle'.  _select_gimmicks must
+    keep exactly ONE mega (cross-slot dedup) and drop the other to none."""
+    _setup_path()
+    import types
+    import numpy as np
+    import player as P
+    from state_encoder import STATE_DIM, GIMMICK_MEGA, GIMMICK_NONE
+
+    # both active slots mega-capable → both per-slot gimmick masks allow mega
+    monkeypatch.setattr(P, "build_gimmick_legal_mask", lambda b, s: [True, True])
+    fake = types.SimpleNamespace(_model=_mega_favoring_model(),
+                                 _model_heads=("our_a", "our_b"), _device="cpu")
+    battle = _DBattle([_DMon("charizard"), _DMon("venusaur")])
+    g0, g1 = P.VGCPlayer._select_gimmicks(fake, battle, np.zeros(STATE_DIM, np.float32), 0, 0)
+    assert [g0, g1].count(GIMMICK_MEGA) == 1, f"exactly one mega expected, got {(g0, g1)}"
+    assert (g0, g1) == (GIMMICK_MEGA, GIMMICK_NONE)   # tie on margin keeps slot 0
+
+
 def test_model_select_gimmicks_untrained_head_never_megas():
     _setup_path()
     import types

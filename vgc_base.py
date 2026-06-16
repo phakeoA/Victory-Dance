@@ -82,7 +82,10 @@ from state_encoder import (
     GIMMICK_MEGA,
     _species_is_mega_capable,
 )
-from live_state_encoder import LiveStateEncoder, own_bench_mons, team_has_megaed_live
+from live_state_encoder import (
+    LiveStateEncoder, own_bench_mons, own_active_move_list, own_switch_slot,
+    team_has_megaed_live,
+)
 
 log = logging.getLogger(__name__)
 
@@ -238,7 +241,11 @@ def build_legal_action_mask(battle: DoubleBattle, slot: int) -> list[bool]:
         return mask
 
     # ── Move-target actions (0–11), keyed by DEX target kind (training parity) ──
-    available_moves = list(mon.moves.values())[:NUM_MOVES]
+    # own_active_move_list is mon.moves normally, but the request-authoritative real
+    # moves when an own-side Illusion leaves mon.moves empty (#1b) — so the mask
+    # offers the true moves (matching the encoder) instead of collapsing to a switch-
+    # only / empty row that forces /choose default.
+    available_moves = own_active_move_list(battle, slot, mon)
     opp_active  = battle.opponent_active_pokemon
     opp0_alive  = len(opp_active) > 0 and opp_active[0] is not None
     opp1_alive  = len(opp_active) > 1 and opp_active[1] is not None
@@ -349,42 +356,32 @@ def build_replacement_mask(battle: DoubleBattle, slot: int) -> list[bool]:
     the bench the model saw — exactly the switch-only mask training's
     ``decision_type='replacement'`` transitions carried for the fainted slot.
 
-    poke-env ``available_switches`` DESYNC RECOVERY (#11, the endgame forced-switch
-    fix): poke-env builds available_switches from each team mon's ``active`` /
-    ``fainted`` flags, which can go stale after an Imposter (Ditto) or Illusion
-    (Zoroark) turn — so a healthy, brought bench mon is sometimes DROPPED from the
-    list, leaving the model no legal replacement and collapsing the decision to
-    ``/choose default`` (model not driving).  But a post-faint replacement is never
-    trapped — EVERY living, brought bench mon (``own_bench_mons``, our own
-    reconstruction) is a legal replacement.  So when poke-env offers NOTHING for a
-    slot that MUST switch yet our reconstruction sees living bench mons, fall back
-    to offering them by POSITION; ``_replacement_order`` builds the ``/switch`` from
-    the same ``own_bench_mons`` list, so Showdown accepts the real mon.  Only fires
-    when poke-env's list is empty, so normal play — and the un-brought-mon exclusion
-    (``own_bench_mons`` already drops the un-brought 2-of-6) — is unchanged.
+    poke-env ``available_switches`` DESYNC RECOVERY (#11): poke-env builds
+    available_switches from each team mon's ``active`` / ``fainted`` flags, which go
+    stale after an Imposter (Ditto) / Illusion (Zoroark) turn — so a healthy, brought
+    bench mon is DROPPED from the list.  Critically this happens on a DOUBLE FAINT:
+    the gauntlet showed ``available_switches=[['ditto'],['ditto']]`` while basculegion
+    + zoroark + ditto were ALL healthy — poke-env offered 1 of 3, boxing the model
+    into one switch for two fainted slots → ``/choose default``.
+
+    A post-faint replacement is NEVER trapped, so EVERY living, brought bench mon
+    (``own_bench_mons`` — request-authoritative, #11b) is a legal replacement.  We
+    therefore IGNORE ``available_switches`` here entirely and offer the full own bench
+    by POSITION; cross-slot dedup (the caller) picks distinct mons, and
+    ``_replacement_order`` builds the ``/switch`` from the same ``own_bench_mons``
+    list, so Showdown accepts each.  The un-brought 2-of-6 are already excluded by
+    ``own_bench_mons``, so this never offers an un-switchable mon.  (Reviving / Revival
+    Blessing is a MOVE that brings in a FAINTED ally, not a post-faint switch, so it
+    does not reach this mask — own_bench_mons is living-only.)
     """
     mask = [False] * ACTIONS_PER_SLOT
-    # Only a slot that MUST switch has replacement actions (mirror the caller's
-    # force_switch gate, so a non-switching slot never exposes the desync fallback).
+    # Only a slot that MUST switch has replacement actions.
     force = getattr(battle, "force_switch", None) or []
     if slot >= len(force) or not force[slot]:
         return mask
-
     bench = own_bench_mons(battle)
-    try:
-        avail = battle.available_switches
-        legal = set(avail[slot]) if slot < len(avail) else set()
-    except (ValueError, AttributeError, IndexError, TypeError):
-        legal = set()
-    for i, mon_b in enumerate(bench[:4]):
-        if mon_b in legal:
-            mask[SWITCH_OFFSET + i] = True
-
-    # Desync recovery: poke-env offered no legal switch for a must-switch slot, but
-    # our reconstruction sees living brought bench mons → offer them by position.
-    if not any(mask) and bench:
-        for i in range(min(len(bench), 4)):
-            mask[SWITCH_OFFSET + i] = True
+    for i in range(min(len(bench), 4)):
+        mask[SWITCH_OFFSET + i] = True
     return mask
 
 
@@ -479,7 +476,10 @@ def action_to_order(action: int, battle: DoubleBattle, slot: int,
         # picked it AND poke-env confirms it is legal right now (item + team).
         do_mega = (gimmick == GIMMICK_MEGA) and _live_can_mega(battle, slot)
         move_idx, target_code = MOVE_TARGET_PAIRS[action]
-        moves = list(mon.moves.values())[:NUM_MOVES]
+        # SAME list as the encoder + the mask (own_active_move_list): mon.moves
+        # normally, the request's real moves when illusion leaves mon.moves empty
+        # (#1b), so move_idx decodes to the move the model actually saw + chose.
+        moves = own_active_move_list(battle, slot, mon)
         if move_idx >= len(moves):
             return None
         move = moves[move_idx]
@@ -554,7 +554,58 @@ def action_to_order(action: int, battle: DoubleBattle, slot: int,
         bench = own_bench_mons(battle)
         if bench_idx >= len(bench):
             return None
-        return Player.create_order(bench[bench_idx])
+        _log_switch_choice(battle, slot, bench[bench_idx], "normal")
+        return build_switch_order(battle, bench[bench_idx])
+
+
+def build_switch_order(battle: DoubleBattle, mon) -> SingleBattleOrder:
+    """A ``/switch`` order for ``mon`` by unambiguous team SLOT (its position in the
+    request's side.pokemon) when a live request is available, else by species name.
+
+    Slot-based ordering is THE fix for the 'can't switch to an active Pokémon'
+    rejection under Illusion / Imposter (see live_state_encoder.own_switch_slot): a
+    name-based ``/choose switch Charizard`` can match an ACTIVE mon disguised as that
+    species, but ``/choose switch 3`` targets the exact (benched) team member.  No
+    request (offline / replay parity path) → name-based create_order, unchanged."""
+    slot = own_switch_slot(battle, mon)
+    if slot is not None:
+        return SingleBattleOrder(f"/choose switch {slot}")
+    return Player.create_order(mon)
+
+
+def _log_switch_choice(battle: DoubleBattle, slot: int, chosen, ctx: str) -> None:
+    """DIAG: dump a chosen SWITCH so a 'can't switch to an active Pokémon' rejection
+    can be traced — the chosen mon vs the live active set (by object id) vs the
+    request's own-side flags vs poke-env's available_switches.  Debug-only; never
+    throws."""
+    if not log.isEnabledFor(logging.DEBUG):
+        return
+    try:
+        from live_state_encoder import (_request_own_state, own_bench_mons,
+                                         _active_mon_set)
+        act = []
+        try:
+            for m in (battle.active_pokemon or []):
+                act.append("None" if m is None else
+                           f"{getattr(m,'species','?')}#{id(m)%10000}"
+                           f"(act={getattr(m,'active',None)},fnt={getattr(m,'fainted',None)})")
+        except Exception:
+            act = ["err"]
+        try:
+            av = battle.available_switches
+            avs = [[getattr(m, "species", "?") for m in (av[s] if s < len(av) else [])]
+                   for s in range(2)]
+        except Exception:
+            avs = "err"
+        bench = [f"{getattr(m,'species','?')}#{id(m)%10000}" for m in own_bench_mons(battle)]
+        log.debug("switchDIAG [%s] turn=%s slot=%s ctx=%s chosen=%s#%s in_active_set=%s "
+                  "active=%s own_bench=%s available_switches=%s request=%s",
+                  getattr(battle, "battle_tag", "?"), getattr(battle, "turn", None),
+                  slot, ctx, getattr(chosen, "species", "?"), id(chosen) % 10000,
+                  chosen in _active_mon_set(battle), act, bench, avs,
+                  _request_own_state(battle))
+    except Exception:
+        log.debug("switchDIAG failed", exc_info=True)
 
 
 def random_legal_action(battle: DoubleBattle, slot: int) -> int:
@@ -766,11 +817,24 @@ class VGCPlayerBase(Player):
                     f"(act={getattr(mon, 'active', None)},"
                     f"fnt={getattr(mon, 'fainted', None)},"
                     f"hp={getattr(mon, 'current_hp_fraction', None)})")
+            # #11 diag: what OUR fix actually sees — the request-authoritative state
+            # and the resulting own bench (the set build_replacement_mask offers).
+            try:
+                from live_state_encoder import _request_own_state, own_bench_mons
+                req = _request_own_state(battle)
+                req_s = ("None" if req is None
+                         else {k.split(": ")[-1]: ("act" if a else "") + ("fnt" if f else "")
+                               for k, (a, f) in req.items()})
+                bench_s = [getattr(m, "species", "?") for m in own_bench_mons(battle)]
+                team_keys = list((getattr(battle, "team", {}) or {}).keys())
+            except Exception as _e:
+                req_s, bench_s, team_keys = f"err:{_e}", "err", "err"
             log.debug("forceSwitch DIAG [%s] turn=%s slot=%s force=%s "
-                      "available_switches=%s team=[%s]",
+                      "available_switches=%s own_bench_mons=%s request_state=%s "
+                      "team_keys=%s team=[%s]",
                       getattr(battle, "battle_tag", "?"), getattr(battle, "turn", None),
                       slot, list(getattr(battle, "force_switch", []) or []),
-                      avail_s, ", ".join(roster))
+                      avail_s, bench_s, req_s, team_keys, ", ".join(roster))
         except Exception:  # pragma: no cover - diagnostics must never throw
             log.debug("force-switch diag failed", exc_info=True)
 
@@ -809,7 +873,7 @@ class VGCPlayerBase(Player):
                 if candidates:
                     chosen = random.choice(candidates)
                     used_switches.add(id(chosen))
-                    orders.append(Player.create_order(chosen))
+                    orders.append(build_switch_order(battle, chosen))
                 else:
                     # A KNOWN, HANDLED poke-env desync (stale available_switches at an
                     # endgame double-faint): /choose default lets Showdown pick the real

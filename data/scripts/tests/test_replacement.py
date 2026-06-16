@@ -184,6 +184,31 @@ def test_normal_switch_mask_reviving_offers_no_living_switch():
     assert not any(build_legal_action_mask(b, 0)[SWITCH_OFFSET:SWITCH_OFFSET + 4])
 
 
+def test_replacement_mask_offers_full_bench_on_partial_double_faint_desync():
+    """Gauntlet repro (Trickery, battle 1501): on a DOUBLE faint poke-env's
+    available_switches returned only ONE of three healthy benched mons
+    (available_switches=[['ditto'],['ditto']] while basculegion + zoroark + ditto
+    were all hp=1.0), boxing the model into one switch for two fainted slots →
+    /choose default.  A post-faint replacement is never trapped, so the mask must
+    offer the FULL own bench (own_bench_mons) regardless of available_switches."""
+    basc = _mon("basculegion", revealed=True)
+    zoro = _mon("zoroark", revealed=True)
+    ditto = _mon("ditto", revealed=True)
+    battle = _Battle(
+        active=[None, None],                       # both active slots fainted
+        available_switches=[[ditto], [ditto]],     # DESYNC: only 1 of 3 offered
+        team=[basc, zoro, ditto],
+        force_switch=[True, True],
+    )
+    for slot in (0, 1):
+        mask = build_replacement_mask(battle, slot)
+        offered = [i - SWITCH_OFFSET for i in range(SWITCH_OFFSET, SWITCH_OFFSET + 4) if mask[i]]
+        assert offered == [0, 1, 2], (
+            f"slot {slot}: expected all 3 healthy bench mons offered (not just the "
+            f"one poke-env listed), got bench indices {offered}")
+        assert not any(mask[:SWITCH_OFFSET])       # still switch-only
+
+
 # ── #11b: request-authoritative own bench (immune to Illusion flag corruption) ─
 def test_own_bench_uses_request_over_corrupted_fainted_flag():
     """#11b: an Illusion can leave a healthy bench mon's poke-env ``fainted`` FLAG
@@ -240,6 +265,116 @@ def test_request_aware_bench_excludes_unbrought_mon():
 
     species = [m.species for m in own_bench_mons(_B())]
     assert "sneasler" in species and "charizard" not in species
+
+
+def test_request_aware_bench_offers_brought_drops_unbrought_on_double_faint():
+    """Faithful gauntlet repro (Trickery, battles 1598/1607 shape) of the #11
+    forced-switch-under-Illusion desync — the Pattern-B bug case.
+
+    On a DOUBLE faint a same-species Zoroark illusion corrupts poke-env's object
+    model: ``available_switches`` both DROPS the real brought benchers AND surfaces
+    an UN-brought roster mon (poke-env still reports zoroark/ditto healthy in
+    ``battle.team``).  The authoritative in-battle |request| lists ONLY the brought
+    4-of-6, so the request-aware bench must offer EXACTLY the brought, healthy
+    benchers — never the un-brought mons (even though one is the ONLY thing
+    available_switches lists), never the just-fainted actives.  (>=2 brought benchers
+    exist but get dropped = the bug; Pattern A, 1 survivor for 2 slots, legitimately
+    /choose defaults and is NOT exercised here.)"""
+    from live_state_encoder import own_bench_mons
+    # brought 4-of-6: two actives just fainted, two healthy on the bench
+    king = _mon("kingambit", fainted=True)         # active, fainted
+    sneas = _mon("sneasler", fainted=True)         # active, fainted
+    basc = _mon("basculegion", hp="200/200")       # brought, healthy bench
+    whim = _mon("whimsicott", hp="180/180")        # brought, healthy bench
+    # un-brought 2-of-6: poke-env reports them HEALTHY; zoroark even leaks into the
+    # corrupted available_switches (the flag-path would wrongly surface it)
+    zoro = _mon("zoroark")
+    ditto = _mon("ditto")
+
+    class _B:
+        team = {
+            "p2: Kingambit": king, "p2: Sneasler": sneas,
+            "p2: Basculegion": basc, "p2: Whimsicott": whim,
+            "p2: Zoroark": zoro, "p2: Ditto": ditto,
+        }
+        last_request = {"side": {"pokemon": [
+            {"ident": "p2: Kingambit", "active": True, "condition": "0 fnt"},
+            {"ident": "p2: Sneasler", "active": True, "condition": "0 fnt"},
+            {"ident": "p2: Basculegion", "active": False, "condition": "200/200"},
+            {"ident": "p2: Whimsicott", "active": False, "condition": "180/180"},
+        ]}}
+        available_switches = [[zoro], [zoro]]      # DESYNC: benchers dropped, un-brought surfaced
+        force_switch = [True, True]
+        battle_tag = "t-11-double"; turn = 7
+        @property
+        def active_pokemon(self):
+            return [king, sneas]
+
+    b = _B()
+    species = [m.species for m in own_bench_mons(b)]
+    # ONLY the brought, healthy benchers, in stable team order
+    assert species == ["basculegion", "whimsicott"], species
+    # un-brought mons excluded though poke-env reports them healthy AND zoroark is
+    # the only mon available_switches lists
+    assert "zoroark" not in species and "ditto" not in species
+    # both fainted slots offer EXACTLY those two bench mons, switch-only
+    for slot in (0, 1):
+        mask = build_replacement_mask(b, slot)
+        offered = [i - SWITCH_OFFSET for i in range(SWITCH_OFFSET, SWITCH_OFFSET + 4) if mask[i]]
+        assert offered == [0, 1], f"slot {slot}: expected brought benchers [0,1], got {offered}"
+        assert not any(mask[:SWITCH_OFFSET])       # switch-only
+
+
+def test_own_switch_slot_resolves_team_position_from_request():
+    """The Showdown switch SLOT is the mon's 1-based position in the request's
+    side.pokemon (invariant from team preview) — used to order a switch by slot
+    instead of by ambiguous species name."""
+    from live_state_encoder import own_switch_slot
+    sneasler = _mon("sneasler", revealed=True)
+    charizard = _mon("charizard")
+
+    class _B:
+        team = {"p1: Sneasler": sneasler, "p1: Charizard": charizard}
+        last_request = {"side": {"pokemon": [
+            {"ident": "p1: Sneasler", "active": True, "condition": "100/100"},
+            {"ident": "p1: Charizard", "active": False, "condition": "150/150"},
+        ]}}
+
+    b = _B()
+    assert own_switch_slot(b, sneasler) == 1
+    assert own_switch_slot(b, charizard) == 2
+    assert own_switch_slot(b, _mon("ditto")) is None   # not on the team → None
+
+
+def test_build_switch_order_uses_slot_under_illusion_not_name():
+    """THE root fix: with a live request, a switch is ordered by SLOT
+    ('/choose switch 2'), so it can't be mis-resolved to an active mon DISPLAYED as
+    the same species (Illusion/Imposter) the way '/choose switch Charizard' can."""
+    from vgc_base import build_switch_order
+    charizard = _mon("charizard")
+
+    class _B:
+        team = {"p1: Sneasler": _mon("sneasler", revealed=True),
+                "p1: Charizard": charizard}
+        last_request = {"side": {"pokemon": [
+            {"ident": "p1: Sneasler", "active": True, "condition": "100/100"},
+            {"ident": "p1: Charizard", "active": False, "condition": "150/150"},
+        ]}}
+
+    assert build_switch_order(_B(), charizard).message == "/choose switch 2"
+
+
+def test_build_switch_order_falls_back_to_name_without_request():
+    """No live request (the offline / replay parity path) → name-based order,
+    unchanged behaviour."""
+    from vgc_base import build_switch_order
+    charizard = _mon("charizard")
+
+    class _B:
+        team = {"p1: Charizard": charizard}
+        last_request = {}
+
+    assert "charizard" in build_switch_order(_B(), charizard).message.lower()
 
 
 def test_no_request_falls_back_to_flag_heuristic():
@@ -390,7 +525,11 @@ def test_model_replacement_dedupes_double_faint(bc_model):
     assert a0 != a1, "both slots brought the SAME mon (dedupe failed)"
 
 
-def test_model_replacement_falls_back_when_no_legal_switch(bc_model):
+def test_model_replacement_passes_exhausted_slot_model_driven(bc_model):
+    """A fainted slot whose bench is EXHAUSTED (no brought mon left) gets a Pass
+    (action None), and the decision stays MODEL-DRIVEN (forced_switch_model) — the
+    model does NOT defer to the random picker just because there's nothing to bring
+    in.  Passing is the only legal action; that is still the model's call."""
     p = _dummy_player(bc_model)
     survivor = _mon("kingambit", revealed=True)
     battle = _Battle(
@@ -400,5 +539,27 @@ def test_model_replacement_falls_back_when_no_legal_switch(bc_model):
         force_switch=[False, True],
     )
     state = np.zeros(STATE_DIM, dtype=np.float32)
-    # No legal replacement → defer to the random picker (None).
-    assert p._select_replacement_actions(battle, state) is None
+    res = p._select_replacement_actions(battle, state)
+    assert res == (None, None, "forced_switch_model"), res
+
+
+def test_model_replacement_passes_second_slot_on_partial_double_faint(bc_model):
+    """Pattern A (THE 100%-model-driven fix): a double faint with only ONE surviving
+    brought mon for two fainted slots.  The model switches it into one slot and
+    PASSES the other (bench exhausted), and the WHOLE turn counts as
+    forced_switch_model — previously the None on the second slot bailed BOTH slots to
+    the random forced_switch fallback."""
+    p = _dummy_player(bc_model)
+    b1 = _mon("sneasler", revealed=True)
+    battle = _Battle(
+        active=[None, None],                        # BOTH fainted
+        available_switches=[[b1], [b1]],            # only ONE survivor for two slots
+        team=[b1],
+        force_switch=[True, True],
+    )
+    state = np.zeros(STATE_DIM, dtype=np.float32)
+    res = p._select_replacement_actions(battle, state)
+    assert res is not None, "must not bail the whole decision to the random picker"
+    a0, a1, source = res
+    assert source == "forced_switch_model"
+    assert a0 == SWITCH_OFFSET + 0 and a1 is None, (a0, a1)   # switch slot 0, Pass slot 1
