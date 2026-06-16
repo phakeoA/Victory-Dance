@@ -41,6 +41,7 @@ from state_encoder import (
     VodStateEncoder, POKEMON_FEATURES, ACTIVE_SLOTS, BENCH_SLOTS,
     MOVE_FEATURES, NUM_MOVES, STATE_DIM, OPP_BENCH_SLOTS,
     NUM_WEATHER, NUM_FIELDS, NUM_SIDE_CONDS,
+    NUM_ITEM_EFFECTS, NUM_ABILITY_EFFECTS, ITEM_FEATURES, ABILITY_FEATURES,
 )
 from live_state_encoder import LiveStateEncoder, opp_snapshot_from_log_prefix
 
@@ -64,15 +65,21 @@ OFF_TERA    = OFF_MEGA + 1           # 55
 OFF_STATUS  = OFF_TERA + 1           # 56  status one-hot (7)
 OFF_BOOST   = OFF_STATUS + 7         # 63  boosts (7)
 OFF_MOVES   = OFF_BOOST + 7          # 70  4×9 move features
-OFF_ACTIVE  = POKEMON_FEATURES - 4   # 106
-OFF_REV     = POKEMON_FEATURES - 3   # 107
-OFF_FNT     = POKEMON_FEATURES - 2   # 108
-OFF_TRANS   = POKEMON_FEATURES - 1   # 109
+# gap #5 item/ability effect blocks sit right after the move block
+OFF_ITEM        = OFF_MOVES + NUM_MOVES * MOVE_FEATURES   # 106  item effects (16)
+OFF_ITEM_KNOWN  = OFF_ITEM + NUM_ITEM_EFFECTS             # 122  item_known
+OFF_ABILITY     = OFF_ITEM + ITEM_FEATURES                # 123  ability effects (16)
+OFF_ABIL_KNOWN  = OFF_ABILITY + NUM_ABILITY_EFFECTS       # 139  ability_known
+OFF_ACTIVE  = POKEMON_FEATURES - 4   # 140
+OFF_REV     = POKEMON_FEATURES - 3   # 141
+OFF_FNT     = POKEMON_FEATURES - 2   # 142
+OFF_TRANS   = POKEMON_FEATURES - 1   # 143
 
-# pp_fraction position WITHIN one MOVE_FEATURES block (gap #3):
+# pp_fraction position WITHIN one MOVE_FEATURES block (gap #3/#7):
 #   0 base_power, 1 type, 2 category, 3 priority, 4 accuracy, 5 pp_fraction,
-#   6 is_protect, 7 STAB, 8 is_known
+#   6 is_protect, 7 STAB, 8 is_spread (gap #6), 9 is_known
 OFF_MOVE_PP = 5
+OFF_MOVE_SPREAD = 8
 
 
 OFF_MOVE_KNOWN = MOVE_FEATURES - 1   # is_known position within a move block
@@ -254,6 +261,14 @@ def identity_slot(vec: np.ndarray, slot_idx: int) -> np.ndarray:
     (no HP, so robust to %/real HP-scale differences between paths)."""
     b = slot_base(slot_idx)
     return vec[b + OFF_TYPE1:b + OFF_BASE + 6]
+
+
+def itemabil_block(vec: np.ndarray, slot_idx: int) -> np.ndarray:
+    """The item+ability effect block (item effects + item_known + ability effects
+    + ability_known) of one mon slot — the gap-#5 features, isolated for parity
+    diffs (structural_slot/diff_blocks deliberately skip this region)."""
+    b = slot_base(slot_idx) + OFF_ITEM
+    return vec[b:b + ITEM_FEATURES + ABILITY_FEATURES]
 
 
 def slot_is_empty(vec: np.ndarray, slot_idx: int) -> bool:

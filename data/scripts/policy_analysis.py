@@ -28,6 +28,7 @@ if str(_SCRIPTS) not in sys.path:
 
 from state_encoder import (  # noqa: E402
     POKEMON_FEATURES, NUM_TYPES, NUM_STATUS, NUM_BOOSTS, NUM_MOVES, MOVE_FEATURES,
+    ITEM_FEATURES, ABILITY_FEATURES,
     SWITCH_OFFSET, move_slots_for_mon, _move_target_kind, _ALLY_KINDS,
 )
 
@@ -35,9 +36,11 @@ from state_encoder import (  # noqa: E402
 # frozen layout (hp + 2×types + base6 + est6 + known1 + mega1 + tera1 + status +
 # boosts), NOT hardcoded, so it can't silently drift from POKEMON_FEATURES.
 MOVE_BLOCK_START = 1 + 2 * NUM_TYPES + 6 + 6 + 1 + 1 + 1 + NUM_STATUS + NUM_BOOSTS
-# Sanity: the 4 move blocks are followed by exactly 4 tail flags
-# (is_active/is_revealed/is_fainted/is_transformed).
-assert MOVE_BLOCK_START + NUM_MOVES * MOVE_FEATURES + 4 == POKEMON_FEATURES, (
+# Sanity: the 4 move blocks are followed by the item + ability effect blocks
+# (gap #5) and then exactly 4 tail flags (is_active/is_revealed/is_fainted/
+# is_transformed).
+assert (MOVE_BLOCK_START + NUM_MOVES * MOVE_FEATURES
+        + ITEM_FEATURES + ABILITY_FEATURES + 4 == POKEMON_FEATURES), (
     f"move-block offset {MOVE_BLOCK_START} inconsistent with POKEMON_FEATURES "
     f"{POKEMON_FEATURES}"
 )

@@ -198,6 +198,7 @@ def run_epoch(
     opp_loss_weight: float = 0.0,
     opp_class_weight: Optional[torch.Tensor] = None,
     sample_weighted: bool = False,
+    value_loss_weight: float = 1.0,
 ) -> Dict[str, float]:
     """One pass over ``loader``.  Train if ``optimizer`` given, else eval.
 
@@ -214,7 +215,8 @@ def run_epoch(
     # Opponent aux heads = the model's action heads that are not our own slots.
     opp_heads = [h for h in getattr(model, "head_names", HEADS) if h not in HEADS]
 
-    totals = {"loss": 0.0, "n": 0, "g_loss": 0.0, "g_n": 0, "opp_loss": 0.0, "opp_n": 0}
+    totals = {"loss": 0.0, "n": 0, "g_loss": 0.0, "g_n": 0, "opp_loss": 0.0, "opp_n": 0,
+              "v_loss": 0.0, "v_n": 0, "v_correct": 0, "v_brier": 0.0}
     per_head = {h: {"n": 0, "top1": 0, "top3": 0} for h in HEADS}
     opp_acc = {h: {"n": 0, "top1": 0} for h in opp_heads}
     gim = {"tp": 0, "fn": 0}
@@ -234,7 +236,9 @@ def run_epoch(
             sample_weight = (batch["weight"].to(device)
                              if sample_weighted and "weight" in batch else None)
 
-            actions, gimmicks = model(x)
+            actions, gimmicks, value = model(x)
+            v_target = batch["value_target"].to(device)    # (B,) win=1/loss=0
+            v_valid = batch["value_valid"].to(device)      # (B,) 1 where known
 
             batch_loss = x.new_zeros(())
             batch_valid = 0
@@ -277,19 +281,38 @@ def run_epoch(
                     opp_acc[ohead]["n"] += n_valid
                     opp_acc[ohead]["top1"] += n1
 
+            # ── Scalar VALUE head (win probability, BCE over the game outcome) ──
+            v_mask = v_valid > 0.5
+            v_nv = int(v_mask.sum().item())
+            if v_nv > 0:
+                v_loss = F.binary_cross_entropy_with_logits(
+                    value[v_mask], v_target[v_mask], reduction="sum")
+                with torch.no_grad():
+                    p = torch.sigmoid(value[v_mask])
+                    v_correct = int(((p > 0.5).float() == v_target[v_mask]).sum().item())
+                    v_brier = float(((p - v_target[v_mask]) ** 2).sum().item())
+            else:
+                v_loss = value.sum() * 0.0
+                v_correct, v_brier = 0, 0.0
+
             if batch_valid == 0:
                 continue
             mean_loss = batch_loss / batch_valid
             mean_gimmick = g_batch_loss / max(g_batch_valid, 1)
             mean_opp = o_batch_loss / max(o_batch_valid, 1)
+            mean_value = v_loss / max(v_nv, 1)
             total = (mean_loss + gimmick_loss_weight * mean_gimmick
-                     + opp_loss_weight * mean_opp)
+                     + opp_loss_weight * mean_opp + value_loss_weight * mean_value)
 
             if train:
                 optimizer.zero_grad()
                 total.backward()
                 optimizer.step()
 
+            totals["v_loss"] += float(v_loss.item())
+            totals["v_n"] += v_nv
+            totals["v_correct"] += v_correct
+            totals["v_brier"] += v_brier
             totals["loss"] += float(batch_loss.item())
             totals["n"] += batch_valid
             totals["g_loss"] += float(g_batch_loss.item())
@@ -317,6 +340,10 @@ def run_epoch(
         "opp_loss": totals["opp_loss"] / max(totals["opp_n"], 1),
         "opp_top1": opp_top1 / opp_n if opp_n else 0.0,
         "opp_n": totals["opp_n"],
+        "value_loss": totals["v_loss"] / max(totals["v_n"], 1),
+        "value_acc": totals["v_correct"] / max(totals["v_n"], 1),
+        "value_brier": totals["v_brier"] / max(totals["v_n"], 1),
+        "value_n": totals["v_n"],
     }
     for head in HEADS:
         hn = max(per_head[head]["n"], 1)
@@ -440,14 +467,25 @@ def train(args: argparse.Namespace) -> dict:
           f"{[round(float(v), 2) for v in gw_np]} "
           f"(counts none={int(gcounts[0])} mega={int(gcounts[1])})")
 
+    # Value head trains only when the data carries game-outcome labels (`won`);
+    # the serve player must not trust an untrained value head (the flag gates it).
+    n_value = sum(1 for e in train_ex if e.get("won") is not None)
+    value_trained = n_value > 0
+    print(f"[train_bc] value head: {n_value}/{len(train_ex)} train examples have an "
+          f"outcome label (value_trained={value_trained}, weight {args.value_loss_weight})")
+
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     ckpt_path = out_dir / "bc_best.pt"
 
+    from state_encoder import get_state_layout_version
     config = {
         "state_dim": model.state_dim,
+        "state_layout_version": get_state_layout_version(),
         "action_dim": model.action_dim,
         "gimmick_dim": model.gimmick_dim,
+        "value_loss_weight": args.value_loss_weight,
+        "value_trained": bool(value_trained),
         # True only when the train data actually carried gimmick labels — a
         # gimmick head trained on pre-gimmick JSONL is at init and must NOT drive
         # live mega decisions (the serve player honours this flag).
@@ -484,7 +522,8 @@ def train(args: argparse.Namespace) -> dict:
                        gimmick_class_weight=gimmick_class_weight,
                        gimmick_loss_weight=args.gimmick_loss_weight,
                        opp_loss_weight=args.aux_opp_weight if args.aux_opp_head else 0.0,
-                       sample_weighted=sample_weighted)
+                       sample_weighted=sample_weighted,
+                       value_loss_weight=args.value_loss_weight)
         va = run_epoch(model, val_loader, device, optimizer=None)
         history.append({"epoch": epoch, "train": tr, "val": va})
         opp_str = f" | opp top1 {va['opp_top1']:.3f}" if args.aux_opp_head else ""
@@ -493,7 +532,8 @@ def train(args: argparse.Namespace) -> dict:
             f"train loss {tr['loss']:.4f} top1 {tr['top1']:.3f} | "
             f"val loss {va['loss']:.4f} top1 {va['top1']:.3f} top3 {va['top3']:.3f} "
             f"(a {va['our_a_top1']:.3f} / b {va['our_b_top1']:.3f}) "
-            f"| gim recall {va['gimmick_recall']:.3f} pos {va['gimmick_pos']}{opp_str}"
+            f"| gim recall {va['gimmick_recall']:.3f} pos {va['gimmick_pos']} "
+            f"| val win-acc {va['value_acc']:.3f} brier {va['value_brier']:.3f}{opp_str}"
         )
 
         if va["top1"] > best_top1:
@@ -546,6 +586,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap.add_argument("--gimmick-loss-weight", type=float, default=1.0,
                     help="weight on the gimmick (mega) CE term in the total loss "
                          "(default: 1.0). The gimmick head is always class-balanced.")
+    ap.add_argument("--value-loss-weight", type=float, default=1.0,
+                    help="weight on the scalar value-head (win-prob) BCE term in the "
+                         "total loss (default: 1.0; 0 disables the value head). #2")
     ap.add_argument("--augment-move-order", action=argparse.BooleanOptionalAction,
                     default=True,
                     help="train-only: randomly permute each mon's 4 move slots + "

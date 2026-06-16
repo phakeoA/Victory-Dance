@@ -46,7 +46,7 @@ class BCPolicy(nn.Module):
     (mega) head per slot.
 
     Args:
-        state_dim:   input width (default: frozen STATE_DIM == 1398)
+        state_dim:   input width (frozen STATE_DIM, 1806 as of gap #5 item/ability)
         action_dim:  move/switch logits per head (default: frozen ACTION_DIM == 16)
         gimmick_dim: gimmick logits per head (default: GIMMICK_DIM == 2, {none, mega})
         hidden_dims: trunk layer widths (default: (512, 256))
@@ -99,21 +99,28 @@ class BCPolicy(nn.Module):
         self.gimmick_heads = nn.ModuleDict(
             {name: nn.Linear(prev, gimmick_dim) for name in self.gimmick_head_names}
         )
+        # Scalar position-VALUE head (win probability): ONE number per board,
+        # trained on the game OUTCOME (BCE over sigmoid).  Shares the trunk; the
+        # policy/gimmick heads are unchanged.  This is the strength unlock — it
+        # enables a 1-ply value lookahead / search on top of the BC prior (#2).
+        self.value_head = nn.Linear(prev, 1)
 
         self._init_weights()
 
     def forward(
         self, x: torch.Tensor
-    ) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
-        """x: (B, state_dim) -> (actions, gimmicks).
+    ) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor], torch.Tensor]:
+        """x: (B, state_dim) -> (actions, gimmicks, value).
 
         ``actions``  = {head_name: (B, action_dim)} raw move/switch logits.
         ``gimmicks`` = {head_name: (B, gimmick_dim)} raw gimmick logits.
+        ``value``    = (B,) raw win-LOGIT (apply sigmoid for win probability).
         """
         z = self.trunk(x)
         actions = {name: head(z) for name, head in self.heads.items()}
         gimmicks = {name: head(z) for name, head in self.gimmick_heads.items()}
-        return actions, gimmicks
+        value = self.value_head(z).squeeze(-1)          # (B,) raw win-logit
+        return actions, gimmicks, value
 
     def _init_weights(self) -> None:
         for module in self.modules():

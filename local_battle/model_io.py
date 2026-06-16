@@ -113,7 +113,29 @@ def load_bc_policy(path, device: str = "cpu"):
         raise ValueError(f"unrecognised BC checkpoint at {path}: {type(ckpt)}")
     cfg = ckpt.get("config", {})
     from bc_model import BCPolicy
-    from state_encoder import get_gimmick_dim
+    from state_encoder import get_gimmick_dim, get_state_dim, get_state_layout_version
+
+    # Stale-layout guard (#5): a checkpoint trained on an older tensor layout has a
+    # different STATE_DIM, which would otherwise fail deep inside the first matmul
+    # with a cryptic shape error (the 938→1386→1398→1806 churn did exactly that).
+    # Reject it loudly here so the only fix — re-export + retrain on the current
+    # layout — is unmistakable.  The layout VERSION is checked first (it survives
+    # even a future same-dim reorder); the dim is the hard backstop.
+    ckpt_dim = cfg.get("state_dim")
+    ckpt_ver = cfg.get("state_layout_version")
+    cur_dim, cur_ver = get_state_dim(), get_state_layout_version()
+    if ckpt_dim is not None and ckpt_dim != cur_dim:
+        raise ValueError(
+            f"BC checkpoint state_dim={ckpt_dim} (layout v{ckpt_ver}) does not match "
+            f"the current encoder STATE_DIM={cur_dim} (layout v{cur_ver}) at {path}. "
+            f"This checkpoint predates a state-layout change — re-export + retrain "
+            f"on the current layout."
+        )
+    if ckpt_ver is not None and ckpt_ver != cur_ver:
+        raise ValueError(
+            f"BC checkpoint state_layout_version={ckpt_ver} != current {cur_ver} "
+            f"at {path} (same STATE_DIM but a different layout) — retrain required."
+        )
     model = BCPolicy(
         state_dim=cfg["state_dim"],
         action_dim=cfg["action_dim"],
@@ -132,11 +154,17 @@ def load_bc_policy(path, device: str = "cpu"):
     # checkpoint (post re-export+retrain), exactly as the handoff requires.
     state = ckpt["model_state"]
     has_gimmick = any(k.startswith("gimmick_heads.") for k in state)
-    model.load_state_dict(state, strict=has_gimmick)
+    has_value = any(k.startswith("value_head.") for k in state)
+    # Load non-strictly when EITHER newer head is absent (a pre-gimmick or
+    # pre-value checkpoint) so the missing head stays at init; the *_trained flags
+    # below gate whether the serve player is allowed to act on it.
+    model.load_state_dict(state, strict=has_gimmick and has_value)
     # The gimmick head is usable only if the checkpoint both CONTAINS it AND was
     # trained on gimmick-labelled data (config flag, default True for forward
     # compat when the weights are present but the flag predates this field).
     model._gimmick_trained = bool(has_gimmick and cfg.get("gimmick_trained", True))
+    # Value head usable only if present AND trained on outcome-labelled data.
+    model._value_trained = bool(has_value and cfg.get("value_trained", False))
     model.to(device).eval()
     return model, tuple(cfg.get("heads", ("our_a", "our_b")))
 
@@ -204,6 +232,27 @@ def gimmick_trained(model) -> bool:
     gimmick head (load_bc_policy sets this).  The player must not act on an
     untrained gimmick head (a pre-gimmick checkpoint loaded non-strictly)."""
     return bool(getattr(model, "_gimmick_trained", False))
+
+
+def value_logit(model, state_vec: np.ndarray, device: str = "cpu") -> Optional[float]:
+    """Win PROBABILITY in [0,1] for one state from the value head, or None for a
+    legacy (pre-value) model.  Runs the policy once and applies sigmoid to the
+    scalar value logit — the basis for a 1-ply value lookahead at serve (#2)."""
+    import math
+    with torch.no_grad():
+        t = torch.as_tensor(np.asarray(state_vec, dtype=np.float32), device=device)
+        out = model(t)
+    if not (isinstance(out, tuple) and len(out) >= 3):
+        return None
+    v = float(np.asarray(out[2].detach().cpu()).ravel()[0])
+    return 1.0 / (1.0 + math.exp(-v))
+
+
+def value_trained(model) -> bool:
+    """Whether ``model`` was loaded from a checkpoint that actually trained the
+    value head (load_bc_policy sets this); the serve player must not trust an
+    untrained value head."""
+    return bool(getattr(model, "_value_trained", False))
 
 
 # ── Team-preview scorer ───────────────────────────────────────────────────────

@@ -14,14 +14,14 @@ from state_encoder import (
     POKEMON_FEATURES, ACTIVE_SLOTS, BENCH_SLOTS, OPP_BENCH_SLOTS, GLOBAL_FEATURES,
 )
 
-# Per-mon feature offsets (within a 110-float slot, layout-v2)
+# Per-mon feature offsets (within a 144-float slot, layout-v2 + gap #5)
 _HP = 0
 _TYPE1 = 1                             # type1 one-hot starts here (20 wide)
 _BASE = 1 + 20 + 20                    # base stats start (6 wide)
-_IS_ACTIVE = POKEMON_FEATURES - 4      # 106
-_IS_REVEALED = POKEMON_FEATURES - 3    # 107
-_IS_FAINTED = POKEMON_FEATURES - 2     # 108
-_IS_TRANSFORMED = POKEMON_FEATURES - 1 # 109
+_IS_ACTIVE = POKEMON_FEATURES - 4      # 140
+_IS_REVEALED = POKEMON_FEATURES - 3    # 141
+_IS_FAINTED = POKEMON_FEATURES - 2     # 142
+_IS_TRANSFORMED = POKEMON_FEATURES - 1 # 143
 _OPP_BENCH0 = (ACTIVE_SLOTS + BENCH_SLOTS) * POKEMON_FEATURES   # slot 8 base
 
 
@@ -51,10 +51,10 @@ def _snap():
 
 # ── Dimension / structure ───────────────────────────────────────────────────
 def test_state_dim_is_layout_v2():
-    assert POKEMON_FEATURES == 110
+    assert POKEMON_FEATURES == 148      # 110 + item(17) + ability(17) + 4×(MOVE 9→10)
     assert (ACTIVE_SLOTS, BENCH_SLOTS, OPP_BENCH_SLOTS) == (4, 4, 4)
     assert GLOBAL_FEATURES == 78
-    assert get_state_dim() == 1398
+    assert get_state_dim() == 1854      # 12*148 + 78  (gap #5 item/ability + #6 is_spread)
 
 
 def test_encode_shape_and_finite():
@@ -146,3 +146,139 @@ def test_untransformed_ditto_encodes_as_ditto():
     # a plain Ditto's base stats differ from Garchomp's, and no transform flag
     assert not np.allclose(vec[a + _BASE:a + _BASE + 6], vec[b + _BASE:b + _BASE + 6])
     assert vec[a + _IS_TRANSFORMED] == 0.0
+
+
+# ── Gap #5: item + ability EFFECT-CATEGORY features ──────────────────────────
+from state_encoder import (  # noqa: E402
+    ITEM_EFFECT_NAMES, ABILITY_EFFECT_NAMES, NUM_ITEM_EFFECTS, NUM_ABILITY_EFFECTS,
+    ITEM_FEATURES, MOVE_FEATURES, NUM_MOVES, item_effect_indices, ability_effect_indices,
+    resolve_item_json, resolve_ability_json, dex_unique_ability,
+)
+
+# item block base = hp + 2×types + base6 + est6 + known + mega + tera + status7 +
+# boosts7 + the 4 move blocks
+_ITEM0 = 1 + 20 + 20 + 6 + 6 + 1 + 1 + 1 + 7 + 7 + NUM_MOVES * MOVE_FEATURES
+_ABIL0 = _ITEM0 + ITEM_FEATURES                            # ability block base
+
+
+def _names(idxs, table):
+    return {table[i] for i in idxs}
+
+
+def test_item_effect_indices_categories():
+    assert _names(item_effect_indices("focussash"), ITEM_EFFECT_NAMES) == {"has_item", "focus_sash"}
+    assert _names(item_effect_indices("choicescarf"), ITEM_EFFECT_NAMES) == {"has_item", "choice", "choice_speed"}
+    assert _names(item_effect_indices("choiceband"), ITEM_EFFECT_NAMES) == {"has_item", "choice"}
+    assert _names(item_effect_indices("leftovers"), ITEM_EFFECT_NAMES) == {"has_item", "passive_recovery"}
+    assert _names(item_effect_indices("occaberry"), ITEM_EFFECT_NAMES) == {"has_item", "resist_berry"}
+    assert _names(item_effect_indices("splashplate"), ITEM_EFFECT_NAMES) == {"has_item", "type_boost"}
+    # itemless / unknown / mega-stone placeholder
+    assert item_effect_indices("") == []
+    assert item_effect_indices("nothing") == []
+    assert _names(item_effect_indices("megastone"), ITEM_EFFECT_NAMES) == {"has_item"}
+
+
+def test_ability_effect_indices_categories():
+    assert _names(ability_effect_indices("intimidate"), ABILITY_EFFECT_NAMES) == {"intimidate"}
+    assert _names(ability_effect_indices("protosynthesis"), ABILITY_EFFECT_NAMES) == {"booster_ability"}
+    assert _names(ability_effect_indices("drizzle"), ABILITY_EFFECT_NAMES) == {"weather_setter"}
+    assert _names(ability_effect_indices("guts"), ABILITY_EFFECT_NAMES) == {"damage_boost", "guts_boost"}
+    assert ability_effect_indices("") == []
+    assert ability_effect_indices("illusion") == []   # tracked elsewhere, no stat effect
+
+
+def test_resolve_item_json_confidence():
+    assert resolve_item_json({"known_item": "Assault Vest"}) == ("assaultvest", 1.0)
+    # consumed item is no longer held → unknown (matches poke-env nulled item)
+    assert resolve_item_json({"known_item": "White Herb", "item_consumed": True}) == ("", 0.0)
+    # exact (team-sheet) mon with no item = confirmed itemless at 1.0
+    assert resolve_item_json({"exact": {"source": "team_sheet"}}) == ("", 1.0)
+    # belief top item at 0.5
+    bel = {"belief": {"items": [{"name": "Focus Sash", "p": 0.4}]}}
+    assert resolve_item_json(bel) == ("focussash", 0.5)
+    assert resolve_item_json({}) == ("", 0.0)
+
+
+def test_resolve_ability_json_bug8_and_unique():
+    # revealed ability on a non-mega mon
+    assert resolve_ability_json({"species": "Incineroar", "known_ability": "Intimidate"}) == ("intimidate", 1.0)
+    # mega'd mon: pre_mega (user-choosable) ability wins, mega ability ignored
+    assert resolve_ability_json(
+        {"species": "Gardevoir-Mega", "is_mega": True,
+         "known_ability": "Pixilate", "pre_mega_ability": "Trace"}
+    ) == ("trace", 1.0)
+    # single-ability species is publicly known even with nothing revealed
+    assert dex_unique_ability("Zoroark-Hisui") == "Illusion"
+    assert resolve_ability_json(
+        {"species": "Zoroark-Hisui", "base_species": "Zoroark-Hisui"}
+    ) == ("illusion", 1.0)
+    # belief fallback at 0.5
+    bel = {"species": "Charizard", "base_species": "Charizard",
+           "belief": {"abilities": [{"name": "Blaze", "p": 0.7}]}}
+    assert resolve_ability_json(bel) == ("blaze", 0.5)
+
+
+# ── Gap #6: move spread/target-shape flag ────────────────────────────────────
+_MOVE0 = 1 + 20 + 20 + 6 + 6 + 1 + 1 + 1 + 7 + 7        # first move block base (70)
+_SPREAD_REL = MOVE_FEATURES - 2                          # is_spread position in a move
+
+
+def test_is_spread_target_both_forms():
+    from state_encoder import is_spread_target
+    assert is_spread_target("allAdjacentFoes") is True   # offline camelCase
+    assert is_spread_target("allAdjacent") is True
+    assert is_spread_target("normal") is False
+    assert is_spread_target("self") is False
+    assert is_spread_target(None) is False
+
+    class _T:                                            # mimic poke-env Target enum
+        def __init__(self, n): self.name = n
+    assert is_spread_target(_T("ALL_ADJACENT_FOES")) is True
+    assert is_spread_target(_T("ALL_ADJACENT")) is True
+    assert is_spread_target(_T("NORMAL")) is False
+
+
+def test_spread_flag_set_for_spread_move_only():
+    mon = _mon("Charizard", moves=("Heat Wave", "Close Combat"))
+    snap = {"our_active": {"our_a": mon, "our_b": None}, "opp_active": {},
+            "our_bench": [], "opp_bench": [], "field": {}, "side_conditions": {}}
+    vec = StateEncoder().encode_snapshot(snap, turn=1)
+    spread0 = vec[_MOVE0 + 0 * MOVE_FEATURES + _SPREAD_REL]   # Heat Wave (allAdjacentFoes)
+    spread1 = vec[_MOVE0 + 1 * MOVE_FEATURES + _SPREAD_REL]   # Close Combat (normal)
+    assert spread0 == 1.0
+    assert spread1 == 0.0
+
+
+# ── Gap #7: PP fraction (offline derives from move_pp_used) ──────────────────
+_PP_REL = 5                                             # pp_fraction position in a move
+
+
+def test_pp_fraction_offline_from_move_uses():
+    """The OFFLINE path derives pp_fraction from move_pp_used with the SAME max as
+    poke-env (base·8//5).  Thunderbolt base pp 15 → max 24; 5 uses → 19/24.  An
+    unused move stays 1.0."""
+    mon = _mon("Pikachu", moves=("Thunderbolt", "Volt Switch"))
+    mon["move_pp_used"] = {"thunderbolt": 5}            # volt switch unused
+    snap = {"our_active": {"our_a": mon, "our_b": None}, "opp_active": {},
+            "our_bench": [], "opp_bench": [], "field": {}, "side_conditions": {}}
+    vec = StateEncoder().encode_snapshot(snap, turn=1)
+    pp0 = vec[_MOVE0 + 0 * MOVE_FEATURES + _PP_REL]     # Thunderbolt (used 5)
+    pp1 = vec[_MOVE0 + 1 * MOVE_FEATURES + _PP_REL]     # Volt Switch (unused)
+    assert pp0 == pytest.approx((24 - 5) / 24)
+    assert pp1 == pytest.approx(1.0)
+
+
+def test_item_ability_block_written_in_snapshot():
+    mon = _mon("Incineroar")
+    mon.update({"known_item": "Assault Vest", "known_ability": "Intimidate"})
+    snap = {
+        "our_active": {"our_a": mon, "our_b": None}, "opp_active": {},
+        "our_bench": [], "opp_bench": [], "field": {}, "side_conditions": {},
+    }
+    vec = StateEncoder().encode_snapshot(snap, turn=1)
+    item_on = {ITEM_EFFECT_NAMES[k] for k in range(NUM_ITEM_EFFECTS) if vec[_ITEM0 + k] == 1.0}
+    assert item_on == {"has_item", "assault_vest"}
+    assert vec[_ITEM0 + NUM_ITEM_EFFECTS] == 1.0          # item_known
+    abil_on = {ABILITY_EFFECT_NAMES[k] for k in range(NUM_ABILITY_EFFECTS) if vec[_ABIL0 + k] == 1.0}
+    assert abil_on == {"intimidate"}
+    assert vec[_ABIL0 + NUM_ABILITY_EFFECTS] == 1.0       # ability_known

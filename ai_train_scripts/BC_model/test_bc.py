@@ -303,7 +303,7 @@ def test_run_epoch_sample_weight_emphasises_high_weight_examples():
     opt = torch.optim.Adam(model.parameters(), lr=5e-2)
     for _ in range(40):
         train_bc.run_epoch(model, loader, "cpu", opt, sample_weighted=True)
-    actions, _ = model(torch.as_tensor(x))
+    actions, _, _ = model(torch.as_tensor(x))
     assert int(actions["our_a"].argmax().item()) == 0      # high-weight label won
 
 
@@ -543,7 +543,7 @@ def _train_tiny(examples, augment, epochs=40, seed=0):
 def _move_acc(model, examples):
     correct = 0
     for ex in examples:
-        actions, _ = model(torch.as_tensor(ex["x"]))
+        actions, _, _ = model(torch.as_tensor(ex["x"]))
         logits = actions["our_a"].detach().numpy().ravel()
         mask = ex["masks"]["our_a"]
         best = max((i for i in range(ACTIONS_PER_SLOT) if mask[i] > 0.5),
@@ -571,12 +571,13 @@ def test_augmentation_makes_policy_move_order_invariant():
 def test_model_forward_shapes():
     model = BCPolicy(hidden_dims=(64, 32), heads=HEADS)
     x = torch.randn(5, get_state_dim())
-    actions, gimmicks = model(x)
+    actions, gimmicks, value = model(x)
     assert set(actions.keys()) == set(HEADS)
     assert set(gimmicks.keys()) == set(HEADS)
     for h in HEADS:
         assert actions[h].shape == (5, ACTIONS_PER_SLOT)
         assert gimmicks[h].shape == (5, model.gimmick_dim)
+    assert value.shape == (5,)                       # scalar win-logit per board
     assert model.gimmick_dim == 2
     assert model.count_parameters() > 0
 
@@ -585,7 +586,7 @@ def test_model_with_aux_opp_heads_has_action_but_not_gimmick_heads():
     # 4 action heads (our + opp), gimmick heads ONLY for the own slots (task #9b).
     model = BCPolicy(hidden_dims=(32,), heads=("our_a", "our_b", "opp_a", "opp_b"))
     x = torch.randn(3, get_state_dim())
-    actions, gimmicks = model(x)
+    actions, gimmicks, value = model(x)
     assert set(actions.keys()) == {"our_a", "our_b", "opp_a", "opp_b"}
     assert set(gimmicks.keys()) == {"our_a", "our_b"}         # no opp gimmick head
     assert actions["opp_a"].shape == (3, ACTIONS_PER_SLOT)
@@ -611,7 +612,7 @@ def test_one_optim_step_reduces_loss():
     opt = torch.optim.Adam(model.parameters(), lr=1e-2)
 
     def step():
-        actions, _gimmicks = model(x)
+        actions, _gimmicks, _value = model(x)
         loss = x.new_zeros(())
         nv = 0
         for hi, h in enumerate(HEADS):
@@ -755,6 +756,61 @@ def test_run_epoch_baseline_model_reports_zero_opp():
     m = train_bc.run_epoch(model, loader, "cpu", opt, opp_loss_weight=0.3)
     assert m["opp_top1"] == 0.0 and m["opp_n"] == 0
     assert m["n"] > 0                          # our head trains normally
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Value head (win probability) — dataset + training (#2)
+# ══════════════════════════════════════════════════════════════════════════════
+def _value_example(won, x0=0.0):
+    return {"x": np.full(get_state_dim(), 0.0, np.float32) if x0 == 0.0
+            else np.concatenate([[x0], np.zeros(get_state_dim() - 1, np.float32)]).astype(np.float32),
+            "replay_id": "r", "targets": {"our_a": 0},
+            "masks": {"our_a": np.ones(ACTIONS_PER_SLOT, np.float32)},
+            "gimmick_targets": {}, "gimmick_masks": {}, "won": won}
+
+
+def test_value_target_from_won():
+    dset = BCDataset([_value_example(True), _value_example(False), _value_example(None)])
+    assert dset[0]["value_target"].item() == 1.0 and dset[0]["value_valid"].item() == 1.0
+    assert dset[1]["value_target"].item() == 0.0 and dset[1]["value_valid"].item() == 1.0
+    assert dset[2]["value_valid"].item() == 0.0          # unknown outcome → no signal
+
+
+def test_run_epoch_trains_value_head():
+    from torch.utils.data import DataLoader
+    rng = np.random.default_rng(0)
+    examples = []
+    for i in range(256):
+        won = bool(i % 2)
+        ex = _value_example(won, x0=1.0 if won else -1.0)   # outcome encoded in x[0]
+        ex["targets"] = {"our_a": int(rng.integers(0, ACTIONS_PER_SLOT))}
+        examples.append(ex)
+    loader = DataLoader(BCDataset(examples), batch_size=64, shuffle=True)
+    torch.manual_seed(0)
+    model = BCPolicy(hidden_dims=(32,), dropout=0.0, heads=HEADS)
+    opt = torch.optim.Adam(model.parameters(), lr=1e-2)
+    m0 = train_bc.run_epoch(model, loader, "cpu", opt)
+    for _ in range(20):
+        m = train_bc.run_epoch(model, loader, "cpu", opt)
+    assert "value_acc" in m and m["value_n"] > 0
+    assert m["value_loss"] < m0["value_loss"]
+    assert m["value_acc"] >= 0.95                          # learned win-from-x[0]
+    assert m["value_brier"] < m0["value_brier"]
+
+
+def test_run_epoch_handles_no_value_labels():
+    """Pre-value data (no `won`) → value_valid all 0; the value term is zero and
+    the action head still trains."""
+    from torch.utils.data import DataLoader
+    examples = [{"x": np.zeros(get_state_dim(), np.float32), "replay_id": "r",
+                 "targets": {"our_a": 0}, "masks": {"our_a": np.ones(ACTIONS_PER_SLOT, np.float32)},
+                 "gimmick_targets": {}, "gimmick_masks": {}} for _ in range(32)]
+    loader = DataLoader(BCDataset(examples), batch_size=16, shuffle=True)
+    model = BCPolicy(hidden_dims=(16,), heads=HEADS)
+    opt = torch.optim.Adam(model.parameters(), lr=1e-2)
+    m = train_bc.run_epoch(model, loader, "cpu", opt)
+    assert m["value_n"] == 0
+    assert m["n"] > 0                                      # action head still trained
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -940,7 +996,7 @@ def test_evaluate_end_to_end_on_synthetic_model():
             "x": np.zeros(get_state_dim(), np.float32), "replay_id": f"r{i}",
             "targets": {"our_a": i % ACTIONS_PER_SLOT}, "masks": {"our_a": mask},
             "turn": (i % 8) + 1, "decision_type": "turn" if i % 4 else "replacement",
-            "rating": 1750 + i,
+            "rating": 1750 + i, "won": bool(i % 2),
         })
     rep = ev.evaluate(model, examples)
     assert rep["n_decisions"] == 20
@@ -948,6 +1004,10 @@ def test_evaluate_end_to_end_on_synthetic_model():
     assert 0.0 <= rep["ece"] <= 1.0
     assert set(rep["by_phase"]) <= {"lead", "mid", "endgame", "replacement"}
     assert sum(b["n"] for b in rep["by_phase"].values()) == 20
+    # value head bucketed by phase (#2)
+    assert rep["value_n"] == 20
+    assert 0.0 <= rep["value_win_acc"] <= 1.0
+    assert sum(b["n"] for b in rep["value_by_phase"].values()) == 20
 
 
 # ══════════════════════════════════════════════════════════════════════════════

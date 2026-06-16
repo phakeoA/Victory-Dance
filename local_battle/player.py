@@ -89,6 +89,11 @@ class VGCPlayer(VGCPlayerBase):
         # did we fall back to the first-N heuristic?  Surfaced per run so the TP
         # net's live behaviour is measurable (#4 — it was never exercised before).
         self._tp_source: Counter = Counter()
+        # Value-head readout (#2): the model's per-turn win-probability estimate,
+        # logged + traced so the value head is OBSERVABLE live (it does not drive
+        # action selection — VGC has no doubles forward sim).
+        self._last_value: Optional[float] = None
+        self._value_trace: List[Tuple[int, float]] = []
 
         # Serve-side action sampling (TIER-4).  temperature<=0 → deterministic
         # masked argmax (the default, unchanged behaviour); >0 → temperature /
@@ -166,6 +171,19 @@ class VGCPlayer(VGCPlayerBase):
             log.error("VGCPlayer has NO model loaded — cannot drive this turn "
                       "(NOT playing random; check the checkpoint path).")
             return self._first_legal(battle, 0), self._first_legal(battle, 1), "no_model"
+
+        # ── Value-head readout (#2): log the win-probability for this board ──────
+        if _M.value_trained(self._model):
+            try:
+                wp = _M.value_logit(self._model, state_vec, self._device)
+                if wp is not None:
+                    self._last_value = wp
+                    self._value_trace.append((battle.turn, round(wp, 3)))
+                    log.info("Turn %d [%s] value head win-prob: %.3f  (%s)",
+                             battle.turn, battle.battle_tag, wp,
+                             "winning" if wp >= 0.55 else "losing" if wp <= 0.45 else "even")
+            except Exception as exc:        # never let the readout break a turn
+                log.debug("value readout failed (%s)", exc)
 
         try:
             mask0 = build_legal_action_mask(battle, 0)

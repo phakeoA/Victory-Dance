@@ -813,18 +813,15 @@ def test_transform_parity_dualedge(dual_log):
     assert transformed_seen > 0, "fixture exercised no transform — test inert"
 
 
-# ── Gap #3: PP fraction — live must pin 1.0 to match the PP-less offline path ──
-def test_pp_fraction_pinned_to_one_micro():
-    """Direct guard for the gap: even a move with heavily depleted PP must
-    encode pp_fraction == 1.0 on the LIVE path, because the offline parser does
-    not track PP (encode_snapshot always emits 1.0).  Emitting the real
-    current_pp/max_pp would be a train/serve mismatch on a feature the net only
-    ever saw as 1.0 during training."""
+# ── Gap #7: PP fraction — real remaining PP, matched across paths ─────────────
+def test_pp_fraction_live_micro_reflects_real_pp():
+    """The LIVE path now encodes real remaining PP (current_pp / max_pp) — gap #7,
+    no longer pinned to 1.0.  A depleted move encodes < 1.0."""
     from poke_env.battle import Move, Pokemon
 
     enc = StateEncoder()
     move = Move("thunderbolt", gen=9)
-    for _ in range(5):                  # burn 5 of 24 PP → real frac ≈ 0.79
+    for _ in range(5):                  # burn 5 of 24 PP → 19/24 ≈ 0.792
         move.use()
     assert move.current_pp < move.max_pp, "move PP not actually depleted"
 
@@ -832,44 +829,99 @@ def test_pp_fraction_pinned_to_one_micro():
     vec = np.zeros(H.MOVE_FEATURES, dtype=np.float32)
     enc._write_move(vec, 0, move, user)
 
-    assert vec[H.OFF_MOVE_PP] == pytest.approx(1.0), (
-        f"live pp_fraction={vec[H.OFF_MOVE_PP]} (want 1.0 to match offline); "
-        f"real depleted frac would be {move.current_pp / move.max_pp:.3f}"
-    )
+    assert vec[H.OFF_MOVE_PP] == pytest.approx(move.current_pp / move.max_pp)
+    assert vec[H.OFF_MOVE_PP] < 1.0
 
 
 @pytest.mark.parametrize("perspective", ["p1", "p2"])
-def test_pp_fraction_one_on_real_replay(clean_log, perspective):
-    """Across every turn/slot of a real replay (where opponent moves have been
-    used multiple times so a buggy path would emit < 1.0), every POPULATED move
-    block must carry pp_fraction == 1.0 on BOTH paths — full gap-#3 parity."""
+def test_pp_fraction_parity_on_real_replay(clean_log, perspective):
+    """Gap #7 parity: a real replay's |move| stream drives BOTH poke-env's
+    current_pp and the parser's move_pp_used (same base·8//5 max), so every
+    opponent move's pp_fraction must AGREE live-vs-offline.  Moves are matched by
+    their (order-independent) intrinsic features, not block position (the two paths
+    can order a mon's moves differently — see the move-perm augmentation).  Some
+    must be < 1.0, proving real PP is tracked rather than pinned."""
     username = H.player_usernames(clean_log)[perspective]
     live = H.live_vectors_per_turn(clean_log, username)
     offline = H.offline_vectors_per_turn(clean_log, perspective)
 
-    all_slots = (*H.ACTIVE_OWN, *H.ACTIVE_OPP, *H.OWN_BENCH, *H.OPP_BENCH)
-    live_checked = off_checked = 0
+    def moves_by_identity(vec, slot):
+        """{intrinsic-feature tuple (sans pp) -> pp_fraction} for a slot's
+        populated move blocks — keys a move by features identical on both paths."""
+        b = H.slot_base(slot) + H.OFF_MOVES
+        out = {}
+        for m in range(H.NUM_MOVES):
+            block = vec[b + m * H.MOVE_FEATURES: b + (m + 1) * H.MOVE_FEATURES]
+            if block[H.OFF_MOVE_KNOWN] == 0.0:
+                continue
+            sig = tuple(round(float(x), 4)
+                        for i, x in enumerate(block) if i != H.OFF_MOVE_PP)
+            out[sig] = float(block[H.OFF_MOVE_PP])
+        return out
+
+    checked = depleted = 0
     for turn in sorted(offline):
         if turn not in live:
             continue
-        for slot in all_slots:
-            pp_offs = H.move_pp_offsets(slot)
-            kn_offs = H.move_known_offsets(slot)
-            for pp, kn in zip(pp_offs, kn_offs):
-                if live[turn][kn] != 0.0:        # live wrote a move here
-                    live_checked += 1
-                    assert live[turn][pp] == pytest.approx(1.0), (
-                        f"[{perspective}] turn {turn} slot {slot}: live "
-                        f"pp_fraction={live[turn][pp]} (want 1.0)"
-                    )
-                if offline[turn][kn] != 0.0:     # offline wrote a move here
-                    off_checked += 1
-                    assert offline[turn][pp] == pytest.approx(1.0), (
-                        f"[{perspective}] turn {turn} slot {slot}: offline "
-                        f"pp_fraction={offline[turn][pp]} (want 1.0)"
-                    )
-    assert live_checked > 0, "no live move blocks exercised — test inert"
-    assert off_checked > 0, "no offline move blocks exercised — test inert"
+        for slot in (*H.ACTIVE_OPP, *H.OPP_BENCH):
+            lm = moves_by_identity(live[turn], slot)
+            om = moves_by_identity(offline[turn], slot)
+            for sig in set(lm) & set(om):
+                checked += 1
+                assert lm[sig] == pytest.approx(om[sig], abs=1e-4), (
+                    f"[{perspective}] turn {turn} slot {slot}: pp_fraction "
+                    f"live={lm[sig]:.4f} offline={om[sig]:.4f}")
+                depleted += int(om[sig] < 0.999)
+    assert checked > 0, "no matching opponent move blocks compared — test inert"
+    assert depleted > 0, "no depleted-PP move matched — gap #7 not exercised"
+
+
+# ── Gap #5 (item/ability): effect-category block parity ──────────────────────
+@pytest.mark.parametrize("perspective", ["p1", "p2"])
+def test_item_ability_block_parity_clean(clean_log, perspective):
+    """The gap-#5 item+ability effect block (16 item flags + item_known + 16
+    ability flags + ability_known) must agree live-vs-offline on the OPPONENT
+    side for every turn of the clean replay.  Both encoders run belief-free here,
+    so the block is driven purely by publicly-revealed item/ability events — which
+    poke-env (mon.item/mon.ability) and the parser (known_item/known_ability) must
+    surface identically at each turn boundary."""
+    username = H.player_usernames(clean_log)[perspective]
+    live = H.live_vectors_per_turn(clean_log, username)
+    offline = H.offline_vectors_per_turn(clean_log, perspective)
+    assert offline, "offline path produced no turns"
+    nonzero_seen = 0
+    for turn in sorted(offline):
+        if turn not in live:
+            continue
+        for slot in (*H.ACTIVE_OPP, *H.OPP_BENCH):
+            lv = H.itemabil_block(live[turn], slot)
+            ov = H.itemabil_block(offline[turn], slot)
+            assert np.array_equal(lv, ov), (
+                f"[{perspective}] turn {turn} slot {slot}: item/ability block "
+                f"diverges\n  live={list(lv)}\n  off ={list(ov)}"
+            )
+            nonzero_seen += int(ov.sum() > 0)
+    assert nonzero_seen > 0, "no revealed item/ability encoded — test inert"
+
+
+@pytest.mark.parametrize("perspective", ["p1", "p2"])
+def test_item_ability_block_parity_dualedge(dual_log, perspective):
+    """Same item/ability block parity on the dual-edge fixture (both run Zoroark +
+    Ditto + a mega), exercising the mega-stone item stamp and the Bug-8 mega
+    ability fallback under the opponent-illusion path."""
+    username = H.player_usernames(dual_log)[perspective]
+    live = H.live_vectors_per_turn(dual_log, username)
+    offline = H.offline_vectors_per_turn(dual_log, perspective)
+    for turn in sorted(offline):
+        if turn not in live:
+            continue
+        for slot in (*H.ACTIVE_OPP, *H.OPP_BENCH):
+            lv = H.itemabil_block(live[turn], slot)
+            ov = H.itemabil_block(offline[turn], slot)
+            assert np.array_equal(lv, ov), (
+                f"[{perspective}] dual turn {turn} slot {slot}: item/ability "
+                f"block diverges\n  live={list(lv)}\n  off ={list(ov)}"
+            )
 
 
 # ── Gap #4: team-count globals + per-mon is_fainted audit ─────────────────────

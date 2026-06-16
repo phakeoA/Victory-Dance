@@ -90,6 +90,29 @@ def test_select_actions_dedups_cross_slot_switch(monkeypatch):
     assert src == "model"
 
 
+def test_select_actions_logs_value_when_trained(monkeypatch):
+    """The value-head readout (#2) records the per-turn win-prob when the model has
+    a TRAINED value head (and is skipped for a legacy/untrained one)."""
+    _setup_path()
+    import types
+    import numpy as np
+    import player as P
+
+    monkeypatch.setattr(P, "build_legal_action_mask", lambda b, s: [i == 0 for i in range(16)])
+    monkeypatch.setattr(P._M, "bc_action_indices", lambda *a, **k: (0, 0))
+    monkeypatch.setattr(P._M, "value_trained", lambda m: True)
+    monkeypatch.setattr(P._M, "value_logit", lambda m, sv, dev: 0.73)
+
+    fake = types.SimpleNamespace(_model=object(), _model_heads=("our_a", "our_b"),
+                                 _device="cpu", _temperature=0.0, _top_p=1.0, _rng=None,
+                                 _last_value=None, _value_trace=[])
+    battle = types.SimpleNamespace(turn=5, battle_tag="b1")
+    a0, a1, src = P.VGCPlayer._select_actions(fake, battle, np.zeros(4, np.float32))
+    assert fake._last_value == 0.73
+    assert fake._value_trace == [(5, 0.73)]
+    assert src == "model"
+
+
 def test_model_select_gimmicks_megas_capable_move_slot_only():
     _setup_path()
     import types

@@ -31,6 +31,12 @@ class PokemonSlot:
     # --- new in v2 ---
     revealed_moves: list = field(default_factory=list)   # moves seen this match
     known_item: Optional[str] = None                     # item if revealed
+    # Item consumed/removed (|-enditem|: berry eaten, Sash popped, Herb used,
+    # Knock Off, …).  known_item keeps the item's IDENTITY for belief/UI, but the
+    # mon no longer HOLDS it — the encoder treats it as itemless (gap #5), matching
+    # poke-env, which sets mon.item = None on consumption.  Not cleared on switch
+    # (a consumed item is gone for the game).
+    item_consumed: bool = False
     known_tera_type: Optional[str] = None                # tera type if revealed
     is_terastallized: bool = False
     known_ability: Optional[str] = None                  # CURRENTLY-active ability, if known
@@ -57,6 +63,12 @@ class PokemonSlot:
     # the ORIGINAL item).
     can_have_choice_item: bool = True
     stint_moves: list = field(default_factory=list)
+    # PP tracking (gap #7): {norm_species(move) -> uses} for the pp_fraction
+    # feature.  PERSISTS across switch-outs (PP is not restored), unlike
+    # stint_moves.  Counts only self-selected uses (transformed/called moves are
+    # skipped in _handle_move, mirroring poke-env's `use` flag); Pressure (2 PP)
+    # is not modelled — a rare, documented residual.
+    move_pp_used: dict = field(default_factory=dict)
     # Transform / Imposter (Ditto, Mew, …): once a mon Transforms it borrows
     # the target's species/moves/stats for the rest of its stay on the field.
     # Moves used while transformed are the COPIED foe's moves and reveal
@@ -101,12 +113,14 @@ class PokemonSlot:
             "is_fainted": self.is_fainted,
             "revealed_moves": list(self.revealed_moves),
             "known_item": "mega stone" if self.is_mega else self.known_item,
+            "item_consumed": self.item_consumed and not self.is_mega,
             "known_tera_type": self.known_tera_type,
             "is_terastallized": self.is_terastallized,
             "known_ability": self.known_ability,
             "pre_mega_ability": self.pre_mega_ability,
             "mega_ability": self.mega_ability,
             "can_have_choice_item": self.can_have_choice_item,
+            "move_pp_used": dict(self.move_pp_used),
             "is_transformed": self.is_transformed,
             "transformed_into": self.transformed_into,
             "illusion_active": self.illusion_active,

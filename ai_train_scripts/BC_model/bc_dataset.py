@@ -465,6 +465,12 @@ class BCDataset(Dataset):
         self.gimmick_target = np.full((n, len(HEADS)), -1, dtype=np.int64)
         self.gimmick_mask = np.zeros((n, len(HEADS), GIMMICK_DIM), dtype=np.float32)
         self.gimmick_valid = np.zeros((n, len(HEADS)), dtype=np.float32)
+        # Scalar value target (win=1.0 / loss=0.0) + validity (#2 value head).  The
+        # label is the game OUTCOME from our perspective, back-filled to EVERY turn
+        # (the value head learns expected win-prob by averaging over games — the
+        # standard AlphaZero MC return); unknown outcome → value_valid 0.
+        self.value_target = np.zeros((n,), dtype=np.float32)
+        self.value_valid = np.zeros((n,), dtype=np.float32)
         # Per-example action-loss weight (TIER-1 #1).  Default all-ones → no effect
         # (the trainer only applies it when a weighting flag is set).
         self.weight = np.ones((n,), dtype=np.float32)
@@ -483,6 +489,10 @@ class BCDataset(Dataset):
         for i, ex in enumerate(examples):
             self.X[i] = ex["x"]
             self.replay_ids.append(ex["replay_id"])
+            won = ex.get("won")
+            if won is not None:
+                self.value_target[i] = 1.0 if won else 0.0
+                self.value_valid[i] = 1.0
             g_targets = ex.get("gimmick_targets") or {}
             g_masks = ex.get("gimmick_masks") or {}
             for h_idx, head in enumerate(HEADS):
@@ -511,6 +521,8 @@ class BCDataset(Dataset):
         self.gimmick_target_t = torch.from_numpy(self.gimmick_target)
         self.gimmick_mask_t = torch.from_numpy(self.gimmick_mask)
         self.gimmick_valid_t = torch.from_numpy(self.gimmick_valid)
+        self.value_target_t = torch.from_numpy(self.value_target)
+        self.value_valid_t = torch.from_numpy(self.value_valid)
         self.weight_t = torch.from_numpy(self.weight)
         if self.with_opp:
             self.opp_target_t = torch.from_numpy(self.opp_target)
@@ -542,6 +554,8 @@ class BCDataset(Dataset):
                 "gimmick_target": self.gimmick_target_t[idx],
                 "gimmick_mask": self.gimmick_mask_t[idx],
                 "gimmick_valid": self.gimmick_valid_t[idx],
+                "value_target": self.value_target_t[idx],
+                "value_valid": self.value_valid_t[idx],
                 "weight": self.weight_t[idx],
                 **self._opp_fields(idx),
             }
@@ -567,6 +581,8 @@ class BCDataset(Dataset):
             "gimmick_target": self.gimmick_target_t[idx],
             "gimmick_mask": self.gimmick_mask_t[idx],
             "gimmick_valid": self.gimmick_valid_t[idx],
+            "value_target": self.value_target_t[idx],
+            "value_valid": self.value_valid_t[idx],
             "weight": self.weight_t[idx],
             **self._opp_fields(idx),
         }

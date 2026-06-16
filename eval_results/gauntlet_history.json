@@ -62,5 +62,75 @@
       "forced_switch_model": 97,
       "forced_switch": 4
     }
+  },
+  {
+    "run": "run-20260616-162603",
+    "timestamp": "2026-06-16T16:26:03",
+    "ckpt": "ai_train_scripts\\BC_model\\checkpoints_v3\\bc_best.pt",
+    "per_opponent": {
+      "random": {
+        "wins": 22,
+        "n": 30,
+        "win_rate": 0.7333333333333333,
+        "anchor": 1000.0
+      },
+      "max_damage": {
+        "wins": 17,
+        "n": 30,
+        "win_rate": 0.5666666666666667,
+        "anchor": 1300.0
+      },
+      "heuristic": {
+        "wins": 7,
+        "n": 30,
+        "win_rate": 0.23333333333333334,
+        "anchor": 1500.0
+      }
+    },
+    "scripted_win_rate": 0.5111111111111111,
+    "model_elo": 1271.894462253115,
+    "sources": {
+      "model": 754,
+      "forced_switch_model": 153,
+      "retry": 9,
+      "forced_switch_escape": 2,
+      "tp_model": 90,
+      "forced_switch": 5
+    }
+  },
+  {
+    "run": "run-20260616-163140",
+    "timestamp": "2026-06-16T16:31:40",
+    "ckpt": "ai_train_scripts\\BC_model\\checkpoints_v3\\bc_best.pt",
+    "per_opponent": {
+      "random": {
+        "wins": 8,
+        "n": 10,
+        "win_rate": 0.8,
+        "anchor": 1000.0
+      },
+      "max_damage": {
+        "wins": 7,
+        "n": 10,
+        "win_rate": 0.7,
+        "anchor": 1300.0
+      },
+      "heuristic": {
+        "wins": 0,
+        "n": 10,
+        "win_rate": 0.0,
+        "anchor": 1500.0
+      }
+    },
+    "scripted_win_rate": 0.5,
+    "model_elo": 1225.5044234226305,
+    "sources": {
+      "model": 216,
+      "forced_switch_model": 58,
+      "tp_model": 30,
+      "retry": 1,
+      "forced_switch": 3,
+      "forced_switch_escape": 6
+    }
   }
 ]

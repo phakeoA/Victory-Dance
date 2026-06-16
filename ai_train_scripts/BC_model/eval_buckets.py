@@ -142,13 +142,31 @@ def evaluate(model, examples: Sequence[dict], device: str = "cpu") -> dict:
     brier_sum = 0.0
     n_dec = 0
     overall = {"n": 0, "top1": 0, "top3": 0}
+    # Value head (win prob) bucketed by phase: did sigmoid(value)>0.5 match the
+    # actual game outcome, and the Brier (p-outcome)^2 — tells us WHERE the value
+    # head is useful (a static eval is near-50/50 early, sharper late) (#2).
+    value_buckets: Dict[str, Dict[str, float]] = {}
+    v_overall = {"n": 0, "correct": 0, "brier": 0.0}
 
     with torch.no_grad():
         for ex in examples:
             x = torch.as_tensor(np.asarray(ex["x"], dtype=np.float32), device=device)
-            actions, _ = model(x)
+            actions, _, value = model(x)
             ph = phase_of(ex.get("turn"), ex.get("decision_type"))
             rb = rating_band(ex.get("rating"))
+
+            won = ex.get("won")
+            if won is not None:
+                vp = 1.0 / (1.0 + np.exp(-float(np.asarray(value.detach().cpu()))))
+                outcome = 1.0 if won else 0.0
+                vb = value_buckets.setdefault(ph, {"n": 0, "correct": 0, "brier": 0.0})
+                vb["n"] += 1
+                hit = int((vp > 0.5) == bool(won))
+                vb["correct"] += hit
+                vb["brier"] += (vp - outcome) ** 2
+                v_overall["n"] += 1
+                v_overall["correct"] += hit
+                v_overall["brier"] += (vp - outcome) ** 2
             for head in HEADS:
                 if head not in ex["targets"]:
                     continue
@@ -177,6 +195,10 @@ def evaluate(model, examples: Sequence[dict], device: str = "cpu") -> dict:
                 n_dec += 1
 
     ece, table = expected_calibration_error(confidences, corrects)
+    value_by_phase = {k: {"n": v["n"],
+                          "win_acc": round(v["correct"] / max(v["n"], 1), 3),
+                          "brier": round(v["brier"] / max(v["n"], 1), 3)}
+                      for k, v in value_buckets.items()}
     return {
         "n_decisions": overall["n"],
         "top1": overall["top1"] / max(overall["n"], 1),
@@ -187,6 +209,10 @@ def evaluate(model, examples: Sequence[dict], device: str = "cpu") -> dict:
         "brier": brier_sum / max(n_dec, 1),
         "reliability": table,
         "mean_confidence": float(np.mean(confidences)) if confidences else 0.0,
+        "value_n": v_overall["n"],
+        "value_win_acc": v_overall["correct"] / max(v_overall["n"], 1),
+        "value_brier": v_overall["brier"] / max(v_overall["n"], 1),
+        "value_by_phase": value_by_phase,
     }
 
 
@@ -220,6 +246,13 @@ def print_report(rep: dict) -> None:
     for row in rep["reliability"]:
         print(f"    ({row['range'][0]:.2f},{row['range'][1]:.2f}]: n {row['n']:6d}"
               f"  conf {row['confidence']:.3f}  acc {row['accuracy']:.3f}")
+    if rep.get("value_n"):
+        print(f"  -- VALUE head (win-prob) -- overall win-acc {rep['value_win_acc']:.3f} "
+              f"brier {rep['value_brier']:.3f}  (0.50 = chance, 0.25 brier = always-0.5)")
+        for k in _PHASE_ORDER + [k for k in rep["value_by_phase"] if k not in _PHASE_ORDER]:
+            if k in rep["value_by_phase"]:
+                b = rep["value_by_phase"][k]
+                print(f"    {k:12s}: n {b['n']:6d}  win-acc {b['win_acc']:.3f}  brier {b['brier']:.3f}")
     print("============================================================")
 
 

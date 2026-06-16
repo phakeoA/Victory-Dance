@@ -2,7 +2,7 @@
 State encoder for VGC Reg M-A (Pokémon Champions doubles format) — OFFLINE
 (VOD-parsing) path + the FROZEN tensor layout shared by both paths.
 
-This module is the canonical owner of the 1398-dim layout: every feature
+This module is the canonical owner of the 1806-dim layout: every feature
 ordering, dimension constant, and the action codec live here, and the LIVE
 encoder (``live_state_encoder.LiveStateEncoder``) imports them so the two paths
 can never drift.  It encodes parsed/belief-enriched VOD JSON:
@@ -63,7 +63,7 @@ TENSOR LAYOUT  (total STATE_DIM floats)
         trick room flag (1)
         team counts (4)      ← own/opp living-bench, own/opp fainted (each /4)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-POKEMON_FEATURES per slot (110 floats):
+POKEMON_FEATURES per slot (144 floats):
     hp_frac       (1)
     type1 one-hot (20)
     type2 one-hot (20)   ← zeros if single-type
@@ -75,21 +75,27 @@ POKEMON_FEATURES per slot (110 floats):
     status one-hot(7)    ← BRN FNT FRZ PAR PSN SLP TOX
     boosts        (7)    ← atk def spa spd spe acc eva / 6
     4 × MOVE_FEATURES    ← 4 × 9 = 36
+    item effects  (16)   ← gap #5; multi-hot over ITEM_EFFECT_NAMES (mechanics,
+                           NOT identity — scalable across formats)
+    item_known    (1)    ← 1.0 revealed/exact · 0.5 belief-top · 0.0 unknown
+    ability effects(16)  ← gap #5; multi-hot over ABILITY_EFFECT_NAMES
+    ability_known (1)    ← 1.0 revealed/exact · 0.5 belief-top · 0.0 unknown
     is_active     (1)
     is_revealed   (1)    ← always 1 for own mons
     is_fainted    (1)    ← layout-v2; KO flag (opp bench / counting)
     is_transformed(1)    ← layout-v2; Ditto copied a forme (types/stats above
                            are the COPY's); reverts on switch-out
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-MOVE_FEATURES per move (9 floats):
+MOVE_FEATURES per move (10 floats):
     base_power / 150     (1)
     type_idx / 19        (1)   ← ordinal, not one-hot (keep dim small)
     category             (1)   ← 0=phys 0.5=spec 1=status
     priority / 7         (1)
     accuracy             (1)   ← 0–1
-    pp_fraction          (1)   ← 1.0 offline (TODO: track PP in parser)
+    pp_fraction          (1)   ← remaining PP / max (gap #7); max = base·8//5
     is_protect           (1)
     is_stab              (1)
+    is_spread            (1)   ← gap #6; hits both foes (allAdjacentFoes/allAdjacent)
     is_known             (1)   ← 1.0 revealed/exact · p(usage) belief-padded
                                  · 0 empty slot
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -171,6 +177,71 @@ _WEATHER_IDX = {n: i for i, n in enumerate(WEATHER_NAMES)}
 _FIELD_IDX   = {n: i for i, n in enumerate(FIELD_NAMES)}
 _SC_IDX      = {n: i for i, n in enumerate(SIDE_COND_NAMES)}
 
+# ══════════════════════════════════════════════════════════════════════════════
+# ITEM + ABILITY EFFECT CATEGORIES (gap #5) — FORMAT-SCALABLE, MECHANICS-BASED
+# ══════════════════════════════════════════════════════════════════════════════
+# We do NOT encode item/ability IDENTITY (a one-hot over the current meta's item
+# list would not generalise to a future format's items, and an opaque ordinal id
+# is a poor MLP feature).  Instead each mon's held item and ability are encoded as
+# a multi-hot over their strategic EFFECT CATEGORIES — the game *mechanics*, which
+# are stable across formats.  A brand-new Choice item in a later regulation is
+# still ``choice``; a new weather-setter ability is still ``weather_setter``; so
+# the LAYOUT never changes when the item/ability roster does, only the id→category
+# membership tables below grow.  This is the SAME philosophy the encoder already
+# uses for Pokémon themselves (types + base stats, never a species one-hot).
+#
+# The categories are FROZEN here (single source of tensor indices); both encode
+# paths collapse their different raw forms — the offline display name ("Focus
+# Sash") and poke-env's id ("focussash") — to the same id via norm_species and
+# look up the SAME category function, so parity is at the EFFECT level, not the
+# raw-string level.  Add a new id to the relevant ``_ITEM_*`` / ``_ABIL_*`` set
+# (below, near the resolvers) to teach a new format's item/ability — no STATE_DIM
+# change, no retrain of the layout.
+ITEM_EFFECT_NAMES = [
+    "has_item",         # holds any item at all (0 = itemless / Knock Off'd)
+    "choice",           # Choice Band / Specs / Scarf — move-lock + stat boost
+    "choice_speed",     # Choice Scarf specifically (1.5× speed)
+    "focus_sash",       # survive a KO at 1 HP from full
+    "life_orb",         # +30% damage, recoil
+    "assault_vest",     # +50% SpD, status moves locked out
+    "passive_recovery", # Leftovers / Black Sludge / Shell Bell — per-turn heal
+    "heal_berry",       # Sitrus / pinch HP-restore berries (one-shot heal)
+    "resist_berry",     # type-resist berries (Occa/Passho/…) — one-shot dmg cut
+    "status_cure",      # Lum / Chesto / … — consumable status cure
+    "booster_energy",   # Protosynthesis / Quark Drive trigger
+    "contact_punish",   # Rocky Helmet — chip the attacker on contact
+    "effect_shield",    # Covert Cloak / Safety Goggles — block secondary/spread
+    "drop_guard",       # White Herb / Mental Herb / Clear Amulet — drop/taunt guard
+    "luck_item",        # Bright Powder / Quick Claw / Scope Lens — rng items
+    "type_boost",       # type-boosting held items (Charcoal/Mystic Water/plates…)
+]
+ABILITY_EFFECT_NAMES = [
+    "intimidate",       # lower foes' Atk on switch-in
+    "weather_setter",   # Drought / Drizzle / Sand Stream / Snow Warning / …
+    "terrain_setter",   # Electric / Grassy / Misty / Psychic Surge
+    "booster_ability",  # Protosynthesis / Quark Drive (paradox stat boost)
+    "weather_speed",    # Swift Swim / Chlorophyll / Sand Rush / Slush Rush
+    "speed_control",    # Speed Boost / Unburden (self speed escalation)
+    "type_immunity",    # Levitate / Volt Absorb / Flash Fire / redirection / …
+    "damage_boost",     # Adaptability / Tough Claws / Sheer Force / -ate / …
+    "regenerator",      # heal on switch-out
+    "prankster",        # +priority to status moves
+    "magic_bounce",     # reflect status moves back
+    "defensive_reduce", # Multiscale / Thick Fat / Filter / Ice Scales / …
+    "status_immunity",  # Limber / Insomnia / Own Tempo / Purifying Salt / …
+    "reactive_boost",   # Justified / Anger Point / Defiant / Weak Armor — buff on hit
+    "mold_breaker",     # ignore the target's ability
+    "guts_boost",       # Guts / Quick Feet / Marvel Scale — status-as-buff
+]
+
+_ITEM_EFFECT_IDX = {n: i for i, n in enumerate(ITEM_EFFECT_NAMES)}
+_ABIL_EFFECT_IDX = {n: i for i, n in enumerate(ABILITY_EFFECT_NAMES)}
+
+NUM_ITEM_EFFECTS    = len(ITEM_EFFECT_NAMES)      # 16
+NUM_ABILITY_EFFECTS = len(ABILITY_EFFECT_NAMES)   # 16
+ITEM_FEATURES    = NUM_ITEM_EFFECTS + 1     # effect multi-hot + 1 known/confidence
+ABILITY_FEATURES = NUM_ABILITY_EFFECTS + 1  # effect multi-hot + 1 known/confidence
+
 # ── Dimension constants ────────────────────────────────────────────────────────
 NUM_TYPES      = len(TYPE_NAMES)        # 20
 NUM_STATUS     = len(STATUS_NAMES)      # 7
@@ -179,7 +250,7 @@ NUM_FIELDS     = len(FIELD_NAMES)       # 15
 NUM_SIDE_CONDS = len(SIDE_COND_NAMES)   # 24
 NUM_BOOSTS     = 7                      # atk def spa spd spe acc eva
 NUM_MOVES      = 4
-MOVE_FEATURES  = 9
+MOVE_FEATURES  = 10   # +is_spread (gap #6); is_known stays last (MOVE_FEATURES-1)
 
 POKEMON_FEATURES = (
     1               # hp_frac
@@ -193,12 +264,17 @@ POKEMON_FEATURES = (
     + NUM_STATUS    # status one-hot  (7)
     + NUM_BOOSTS    # stat boosts     (7)
     + NUM_MOVES * MOVE_FEATURES  # 4 × 9 = 36
+    + ITEM_FEATURES     # item effect multi-hot + known   (gap #5)
+    + ABILITY_FEATURES  # ability effect multi-hot + known (gap #5)
     + 1             # is_active
     + 1             # is_revealed
     + 1             # is_fainted      (layout-v2: see/count KO'd mons)
     + 1             # is_transformed  (layout-v2: Ditto copies a forme; reverts)
 )
-# POKEMON_FEATURES = 1+20+20+6+6+1+1+1+7+7+36+1+1+1+1 = 110
+# POKEMON_FEATURES = 1+20+20+6+6+1+1+1+7+7+36 + 17+17 + 1+1+1+1 = 144
+# (item/ability blocks sit AFTER the move block and BEFORE the 4 trailing slot
+#  flags, so the move-block offset _MOVE_BLOCK_REL and the move-perm augmentation
+#  are untouched, and the flags stay last — addressed by negative offsets.)
 
 ACTIVE_SLOTS    = 4   # 2 own + 2 opp
 BENCH_SLOTS     = 4   # own bench (living switch-ins; aligned with the action codec)
@@ -215,7 +291,18 @@ GLOBAL_FEATURES = (
 )  # = 78
 
 STATE_DIM = (ACTIVE_SLOTS + BENCH_SLOTS + OPP_BENCH_SLOTS) * POKEMON_FEATURES + GLOBAL_FEATURES
-# = 12 × 110 + 78 = 1398
+# = 12 × 148 + 78 = 1854   (POKEMON_FEATURES 148 = 144 + 4×(MOVE_FEATURES 9→10))
+
+# Monotonic layout version: bump whenever the tensor LAYOUT changes (a new
+# feature block, a reorder, a dim change) so a checkpoint trained on an older
+# layout can be REJECTED at load instead of silently matmul-mismatching.  History:
+#   1 → STATE_DIM 1398 (layout-v2 + Ditto/Zoroark v2, pre item/ability)
+#   2 → STATE_DIM 1806 (gap #5: per-mon item/ability effect-category blocks)
+#   3 → STATE_DIM 1854 (gap #6 is_spread move flag; gap #7 real pp_fraction — no
+#       dim change, a value not a slot)
+# train_bc stamps this into the checkpoint config; model_io.load_bc_policy asserts
+# it (and the dim) match the running code.
+STATE_LAYOUT_VERSION = 3
 
 # ── Action space ───────────────────────────────────────────────────────────────
 ACTIONS_PER_SLOT = 16    # 12 move-target + 4 switch
@@ -287,6 +374,30 @@ def _get_moves_data() -> dict:
     return _moves_data
 
 
+# Spread moves (hit BOTH foes) — the core doubles tradeoff (gap #6): wider reach
+# for 0.75× damage.  ``allAdjacentFoes`` = both foes (Heat Wave, Rock Slide);
+# ``allAdjacent`` = both foes AND the ally (Earthquake, Surf).  Both count as
+# spread (the model can read the ally-hit risk from is_protect / the board).
+_SPREAD_TARGET_IDS = frozenset({"alladjacentfoes", "alladjacent"})
+
+
+def is_spread_target(target) -> bool:
+    """True for a move whose target hits both foes.  Accepts the offline camelCase
+    string from data/moves.json ("allAdjacentFoes") OR a poke-env ``Target`` enum
+    member — both normalised to a common id, so the two encode paths agree."""
+    if target is None:
+        return False
+    name = getattr(target, "name", target)     # poke-env Target enum → its NAME
+    return str(name).replace("_", "").lower() in _SPREAD_TARGET_IDS
+
+
+def pp_max(base_pp: Optional[int]) -> int:
+    """Max PP assuming 3 PP Ups — ``base_pp × 8 // 5`` — matching poke-env's
+    ``Move.max_pp`` (gap #7), so the offline and live ``pp_fraction`` use the same
+    denominator (e.g. Heat Wave base 10 → max 16)."""
+    return (int(base_pp) * 8 // 5) if base_pp else 0
+
+
 def _dex_types(species: Optional[str]) -> list[str]:
     """Dex types for a species as canonical names, e.g. ['DARK', 'STEEL']."""
     dex = get_pokedex()
@@ -294,6 +405,229 @@ def _dex_types(species: Optional[str]) -> list[str]:
     if not entry:
         return []
     return [_canon(t) for t in (entry.get("types") or [])]
+
+
+def dex_unique_ability(species: Optional[str]) -> Optional[str]:
+    """The species' ability when it has exactly ONE possible ability, else None.
+
+    A single-ability species' ability is public knowledge (fixed by the species,
+    visible from team preview), so BOTH encode paths can know it without any
+    in-battle reveal — and poke-env already sets ``mon.ability`` for such mons.
+    Deriving it here from OUR pokedex keeps the offline path in lockstep with the
+    live one (gap #5 parity): e.g. Zoroark-Hisui's only ability is Illusion."""
+    if not species:
+        return None
+    dex = get_pokedex()
+    entry = dex.entry(species) if dex else None
+    abilities = (entry or {}).get("abilities") or {}
+    distinct = list(dict.fromkeys(abilities.values()))
+    return distinct[0] if len(distinct) == 1 else None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Item / ability id → EFFECT-CATEGORY resolvers (gap #5)
+# ──────────────────────────────────────────────────────────────────────────────
+# Membership tables keyed on the NORMALISED id (norm_species form: lowercase,
+# alphanumerics only — "Focus Sash"→"focussash", matching poke-env's id).  To
+# teach a new format's item/ability, add its id to the relevant set; the tensor
+# LAYOUT (ITEM_EFFECT_NAMES / ABILITY_EFFECT_NAMES) never changes.  Sets are
+# deliberately non-exhaustive of every item that ever existed — they cover the
+# Reg M-A meta and the evergreen staples; unknown ids simply set only ``has_item``
+# (still strictly more than the zero the net saw before).
+_ITEM_NONE_IDS   = frozenset({"", "nothing", "none", "noitem", "unknownitem", "unknown_item"})
+_RECOVERY_ITEMS  = frozenset({"leftovers", "blacksludge", "shellbell"})
+_HEAL_BERRIES    = frozenset({
+    "sitrusberry", "oranberry", "aguavberry", "figyberry", "wikiberry",
+    "magoberry", "iapapaberry", "enigmaberry",
+})
+_RESIST_BERRIES  = frozenset({
+    "occaberry", "passhoberry", "wacanberry", "rindoberry", "yacheberry",
+    "chopleberry", "kebiaberry", "shucaberry", "cobaberry", "payapaberry",
+    "tangaberry", "chartiberry", "kasibberry", "habanberry", "colburberry",
+    "babiriberry", "chilanberry", "roseliberry",
+})
+_STATUS_CURE_BERRIES = frozenset({
+    "lumberry", "chestoberry", "cheriberry", "pechaberry", "rawstberry",
+    "aspearberry", "persimberry", "mintberry",
+})
+_CONTACT_PUNISH_ITEMS = frozenset({"rockyhelmet"})
+_EFFECT_SHIELD_ITEMS  = frozenset({"covertcloak", "safetygoggles"})
+_DROP_GUARD_ITEMS     = frozenset({"whiteherb", "mentalherb", "clearamulet"})
+_LUCK_ITEMS           = frozenset({
+    "brightpowder", "quickclaw", "scopelens", "widelens", "zoomlens",
+    "laggingtail", "focusband", "kingsrock", "razorclaw", "razorfang",
+})
+_TYPE_BOOST_ITEMS     = frozenset({
+    "charcoal", "mysticwater", "blackbelt", "magnet", "miracleseed",
+    "nevermeltice", "dragonfang", "blackglasses", "sharpbeak", "poisonbarb",
+    "softsand", "hardstone", "silkscarf", "spelltag", "twistedspoon",
+    "metalcoat", "silverpowder", "oddincense", "rockincense", "seaincense",
+    "roseincense", "waveincense", "fairyfeather", "pixieplate",
+})
+
+
+def item_effect_indices(item_id: Optional[str]) -> list[int]:
+    """ITEM_EFFECT_NAMES indices set for a normalised item id.
+
+    Empty / itemless / unknown → ``[]`` (no flags, including no ``has_item``).
+    Any concrete item sets ``has_item`` plus every effect category it belongs to.
+    A type-boosting *plate* (id ending in 'plate') counts as ``type_boost`` even
+    if not in the explicit set, so new plates need no table edit.
+    """
+    iid = (item_id or "")
+    if iid in _ITEM_NONE_IDS:
+        return []
+    out = [_ITEM_EFFECT_IDX["has_item"]]
+    if iid.startswith("choice"):
+        out.append(_ITEM_EFFECT_IDX["choice"])
+        if iid == "choicescarf":
+            out.append(_ITEM_EFFECT_IDX["choice_speed"])
+    if iid == "focussash":
+        out.append(_ITEM_EFFECT_IDX["focus_sash"])
+    if iid == "lifeorb":
+        out.append(_ITEM_EFFECT_IDX["life_orb"])
+    if iid == "assaultvest":
+        out.append(_ITEM_EFFECT_IDX["assault_vest"])
+    if iid in _RECOVERY_ITEMS:
+        out.append(_ITEM_EFFECT_IDX["passive_recovery"])
+    if iid in _HEAL_BERRIES:
+        out.append(_ITEM_EFFECT_IDX["heal_berry"])
+    if iid in _RESIST_BERRIES:
+        out.append(_ITEM_EFFECT_IDX["resist_berry"])
+    if iid in _STATUS_CURE_BERRIES:
+        out.append(_ITEM_EFFECT_IDX["status_cure"])
+    if iid == "boosterenergy":
+        out.append(_ITEM_EFFECT_IDX["booster_energy"])
+    if iid in _CONTACT_PUNISH_ITEMS:
+        out.append(_ITEM_EFFECT_IDX["contact_punish"])
+    if iid in _EFFECT_SHIELD_ITEMS:
+        out.append(_ITEM_EFFECT_IDX["effect_shield"])
+    if iid in _DROP_GUARD_ITEMS:
+        out.append(_ITEM_EFFECT_IDX["drop_guard"])
+    if iid in _LUCK_ITEMS:
+        out.append(_ITEM_EFFECT_IDX["luck_item"])
+    if iid in _TYPE_BOOST_ITEMS or iid.endswith("plate") or iid.endswith("gem"):
+        out.append(_ITEM_EFFECT_IDX["type_boost"])
+    return out
+
+
+_INTIMIDATE_AB   = frozenset({"intimidate"})
+_WEATHER_SET_AB  = frozenset({
+    "drought", "drizzle", "sandstream", "snowwarning", "desolateland",
+    "primordialsea", "deltastream", "orichalcumpulse",
+})
+_TERRAIN_SET_AB  = frozenset({
+    "electricsurge", "grassysurge", "mistysurge", "psychicsurge", "hadronengine",
+})
+_BOOSTER_AB      = frozenset({"protosynthesis", "quarkdrive"})
+_WEATHER_SPEED_AB = frozenset({"swiftswim", "chlorophyll", "sandrush", "slushrush"})
+_SPEED_CTRL_AB   = frozenset({"speedboost", "unburden"})
+_TYPE_IMMUNE_AB  = frozenset({
+    "levitate", "voltabsorb", "waterabsorb", "flashfire", "sapsipper",
+    "lightningrod", "stormdrain", "motordrive", "dryskin", "eartheater",
+    "wellbakedbody", "windrider", "purifyingsalt",
+})
+_DMG_BOOST_AB    = frozenset({
+    "adaptability", "toughclaws", "sheerforce", "technician", "ironfist",
+    "strongjaw", "reckless", "pixilate", "refrigerate", "aerilate",
+    "galvanize", "steelworker", "punkrock", "sharpness", "rockypayload",
+    "transistor", "dragonsmaw", "steelyspirit", "hugepower", "purepower",
+    "hustle", "guts", "tintedlens",
+})
+_REGENERATOR_AB  = frozenset({"regenerator"})
+_PRANKSTER_AB    = frozenset({"prankster"})
+_MAGIC_BOUNCE_AB = frozenset({"magicbounce"})
+_DEF_REDUCE_AB   = frozenset({
+    "multiscale", "shadowshield", "thickfat", "filter", "solidrock",
+    "prismarmor", "fluffy", "icescales", "furcoat", "heatproof", "wonderguard",
+})
+_STATUS_IMMUNE_AB = frozenset({
+    "limber", "insomnia", "vitalspirit", "waterveil", "magmaarmor", "immunity",
+    "owntempo", "innerfocus", "sweetveil", "leafguard", "pastelveil",
+    "thermalexchange", "goodasgold", "shieldsdown",
+})
+_REACTIVE_AB     = frozenset({
+    "justified", "angerpoint", "berserk", "weakarmor", "defiant", "competitive",
+    "rattled", "stamina", "watercompaction", "electromorphosis", "windpower",
+    "angershell", "sandspit", "seedsower", "toxicdebris",
+})
+_MOLD_BREAKER_AB = frozenset({"moldbreaker", "teravolt", "turboblaze"})
+_GUTS_AB         = frozenset({"guts", "quickfeet", "marvelscale", "flareboost", "toxicboost"})
+
+
+def ability_effect_indices(ability_id: Optional[str]) -> list[int]:
+    """ABILITY_EFFECT_NAMES indices set for a normalised ability id (``[]`` for
+    empty/unknown).  An ability can belong to several categories (e.g. Guts is
+    both a damage_boost and a guts_boost)."""
+    aid = (ability_id or "")
+    if not aid:
+        return []
+    out: list[int] = []
+    if aid in _INTIMIDATE_AB:    out.append(_ABIL_EFFECT_IDX["intimidate"])
+    if aid in _WEATHER_SET_AB:   out.append(_ABIL_EFFECT_IDX["weather_setter"])
+    if aid in _TERRAIN_SET_AB:   out.append(_ABIL_EFFECT_IDX["terrain_setter"])
+    if aid in _BOOSTER_AB:       out.append(_ABIL_EFFECT_IDX["booster_ability"])
+    if aid in _WEATHER_SPEED_AB: out.append(_ABIL_EFFECT_IDX["weather_speed"])
+    if aid in _SPEED_CTRL_AB:    out.append(_ABIL_EFFECT_IDX["speed_control"])
+    if aid in _TYPE_IMMUNE_AB:   out.append(_ABIL_EFFECT_IDX["type_immunity"])
+    if aid in _DMG_BOOST_AB:     out.append(_ABIL_EFFECT_IDX["damage_boost"])
+    if aid in _REGENERATOR_AB:   out.append(_ABIL_EFFECT_IDX["regenerator"])
+    if aid in _PRANKSTER_AB:     out.append(_ABIL_EFFECT_IDX["prankster"])
+    if aid in _MAGIC_BOUNCE_AB:  out.append(_ABIL_EFFECT_IDX["magic_bounce"])
+    if aid in _DEF_REDUCE_AB:    out.append(_ABIL_EFFECT_IDX["defensive_reduce"])
+    if aid in _STATUS_IMMUNE_AB: out.append(_ABIL_EFFECT_IDX["status_immunity"])
+    if aid in _REACTIVE_AB:      out.append(_ABIL_EFFECT_IDX["reactive_boost"])
+    if aid in _MOLD_BREAKER_AB:  out.append(_ABIL_EFFECT_IDX["mold_breaker"])
+    if aid in _GUTS_AB:          out.append(_ABIL_EFFECT_IDX["guts_boost"])
+    return out
+
+
+def resolve_item_json(mon: dict) -> tuple[str, float]:
+    """(normalised item id, confidence) for an OFFLINE mon dict.
+
+    A revealed/injected ``known_item`` (incl. the ``"mega stone"`` placeholder the
+    parser stamps on a mega'd mon) wins at confidence 1.0; an exact (team-sheet)
+    mon with no item is a confirmed-itemless 1.0; else the belief top item
+    (belief["items"][0]) at 0.5; else unknown ("", 0.0).
+
+    A CONSUMED item (item_consumed; berry eaten / Sash popped / Knocked Off) is
+    no longer held → unknown ("", 0.0), matching poke-env's nulled mon.item — the
+    historical identity stays in known_item for belief/UI but is not encoded as a
+    held item."""
+    if mon.get("item_consumed"):
+        return "", 0.0
+    ki = mon.get("known_item")
+    if ki:
+        return norm_species(ki), 1.0
+    if mon.get("exact"):
+        return "", 1.0                      # team sheet vouches: itemless
+    items = (mon.get("belief") or {}).get("items") or []
+    if items and items[0].get("name"):
+        return norm_species(items[0]["name"]), 0.5
+    return "", 0.0
+
+
+def resolve_ability_json(mon: dict) -> tuple[str, float]:
+    """(normalised ability id, confidence) for an OFFLINE mon dict — the
+    USER-CHOOSABLE ability (Bug 8 mega split): ``pre_mega_ability`` when present,
+    else ``known_ability`` for a non-mega mon (a mega'd mon's ``known_ability`` is
+    the fixed mega ability, NOT the chosen one, so it is ignored); else the belief
+    top ability (which fill_blanks derives from the BASE forme for a mega) at 0.5;
+    else unknown."""
+    abil = mon.get("pre_mega_ability") or (
+        None if mon.get("is_mega") else mon.get("known_ability")
+    )
+    if abil:
+        return norm_species(abil), 1.0
+    # Single-ability species → publicly known (poke-env sets it live too).
+    if not mon.get("is_mega"):
+        uniq = dex_unique_ability(mon.get("base_species") or mon.get("species"))
+        if uniq:
+            return norm_species(uniq), 1.0
+    abilities = (mon.get("belief") or {}).get("abilities") or []
+    if abilities and abilities[0].get("name"):
+        return norm_species(abilities[0]["name"]), 0.5
+    return "", 0.0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -518,12 +852,29 @@ class VodStateEncoder:
 
         # Moves: canonical slot order shared with the action codec — see
         # move_slots_for_mon().
+        pp_used_map = mon.get("move_pp_used") or {}
         slots = move_slots_for_mon(mon)
         for m_idx in range(NUM_MOVES):
             if m_idx < len(slots):
                 name, confidence = slots[m_idx]
-                self._write_move_json(vec, i, name, confidence, types)
+                pp_used = pp_used_map.get(norm_species(name), 0)
+                self._write_move_json(vec, i, name, confidence, types, pp_used)
             i += MOVE_FEATURES
+
+        # Item + ability EFFECT categories (gap #5) — see resolve_item_json /
+        # resolve_ability_json + item_effect_indices / ability_effect_indices.
+        item_id, item_known = resolve_item_json(mon)
+        for idx in item_effect_indices(item_id):
+            vec[i + idx] = 1.0
+        i += NUM_ITEM_EFFECTS
+        vec[i] = item_known
+        i += 1
+        abil_id, abil_known = resolve_ability_json(mon)
+        for idx in ability_effect_indices(abil_id):
+            vec[i + idx] = 1.0
+        i += NUM_ABILITY_EFFECTS
+        vec[i] = abil_known
+        i += 1
 
         # is_active / is_revealed / is_fainted / is_transformed (layout-v2)
         vec[i] = 1.0 if is_active else 0.0
@@ -543,6 +894,7 @@ class VodStateEncoder:
         move_name: str,
         confidence: float,
         user_types: list[str],
+        pp_used: int = 0,
     ) -> None:
         """JSON twin of _write_move using data/moves.json."""
         i = start
@@ -571,15 +923,22 @@ class VodStateEncoder:
         vec[i] = 1.0 if acc is True else (acc or 0) / 100.0
         i += 1
 
-        # PP fraction — the parser does not track PP yet.
-        # TODO(parser): count move uses per mon to derive real PP fractions.
-        vec[i] = 1.0
+        # PP fraction (gap #7): remaining PP / max, where max = base·8//5 (3 PP
+        # Ups) to match poke-env's Move.max_pp.  pp_used is the parser's count of
+        # this mon's self-selected uses (move_pp_used); a belief-padded / unused
+        # move has pp_used 0 → 1.0.  Moves with no PP data fall back to 1.0.
+        mx = pp_max(data.get("pp"))
+        vec[i] = (max(0, mx - pp_used) / mx) if mx else 1.0
         i += 1
 
         vec[i] = 1.0 if norm_species(move_name) in _PROTECT_MOVES else 0.0
         i += 1
 
         vec[i] = 1.0 if mtype in user_types else 0.0
+        i += 1
+
+        # is_spread (gap #6): hits both foes (the core doubles tradeoff).
+        vec[i] = 1.0 if is_spread_target(data.get("target")) else 0.0
         i += 1
 
         # is_known: 1.0 revealed/exact, p(usage) for belief-padded moves
@@ -1038,6 +1397,9 @@ def annotate_opp_actions(transition: dict) -> dict:
 # ── Convenience accessors ──────────────────────────────────────────────────────
 def get_state_dim() -> int:
     return STATE_DIM
+
+def get_state_layout_version() -> int:
+    return STATE_LAYOUT_VERSION
 
 def get_action_dim() -> int:
     return ACTION_DIM

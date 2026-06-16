@@ -845,6 +845,12 @@ class ShowdownReplayParser:
                         mon.stint_moves.append(move_name)
                     if len(mon.stint_moves) >= 2:
                         mon.can_have_choice_item = False
+                    # PP tracking (gap #7): count this self-selected use.  The
+                    # transformed / [from]-called / Struggle exclusions above
+                    # mirror poke-env's PP `use` flag, so the offline use-count
+                    # matches poke-env's current_pp on a replay (Pressure aside).
+                    mid = norm_species(move_name)
+                    mon.move_pp_used[mid] = mon.move_pp_used.get(mid, 0) + 1
 
         is_protect = move_name.lower() in {
             "protect", "detect", "wide guard", "quick guard",
@@ -977,6 +983,13 @@ class ShowdownReplayParser:
             mon = self.active_slots[slot_key]
             if item:
                 mon.known_item = item
+            # |-enditem| means the item was consumed/removed (berry eaten, Sash
+            # popped, Herb used, Knock Off): the mon no longer HOLDS it, so the
+            # encoder must stop treating it as held (gap #5 parity with poke-env,
+            # which nulls mon.item on consumption).  A plain |-item| reveal (Frisk
+            # /Trick) leaves the item in hand, so it does NOT set this.
+            if consumed:
+                mon.item_consumed = True
             # The item just changed hands or was consumed/revealed (Trick,
             # Knock Off, berry, Frisk, …) — moves used from here on prove
             # nothing about the item the mon BROUGHT, so the choice-constraint

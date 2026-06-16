@@ -299,22 +299,42 @@ def build_legal_action_mask(battle: DoubleBattle, slot: int) -> list[bool]:
 
     # ── Switch actions (12–15) ────────────────────────────────────────────────
     # own_bench_mons is the SAME brought-only bench the live encoder writes into
-    # bench slots 4..7, so switch index i ↔ encoder bench slot 4+i.  It excludes
-    # the un-brought 2-of-6 roster mons (VGC brings 4) that Showdown would reject
-    # as a switch target.  Legality is then keyed PER SLOT by poke-env's
-    # available_switches, so a trapped active correctly exposes no switches (and
-    # a switch we DO mark legal is one Showdown will accept — no retry storm).
+    # bench slots 4..7 (request-authoritative — #11b), so switch index i ↔ encoder
+    # bench slot 4+i, and it excludes the un-brought 2-of-6.  A normal-turn switch
+    # is illegal ONLY when the active mon is TRAPPED.  That trap signal lives in
+    # ``battle.trapped`` (poke-env fills it position-indexed straight from the
+    # request's active[].trapped), so an Illusion's object-model desync can't
+    # corrupt it — unlike the per-mon active/fainted MEMBERSHIP of
+    # ``available_switches``, which the Illusion DOES corrupt (dropping a healthy
+    # bench mon).  So we gate the request-authoritative bench on ``not trapped``
+    # (#11c) rather than available_switches membership — robust to the same desync
+    # the forced-replacement path handles, and closer to the offline training mask
+    # (which offers every living bench switch).  ``maybe_trapped`` still offers
+    # switches (Showdown resolves), matching available_switches.  Reviving (Revival
+    # Blessing switches in a FAINTED mon) is the one case the living-bench codec
+    # can't express → offer no switch (the prior behaviour: living ∩ fainted = ∅).
     bench = own_bench_mons(battle)
-    try:
-        avail = battle.available_switches
-        slot_switchable = set(avail[slot]) if slot < len(avail) else set()
-    except (ValueError, AttributeError, IndexError, TypeError):
-        slot_switchable = set()
-    for bench_idx, mon_b in enumerate(bench[:4]):
-        if mon_b in slot_switchable:
+    if not getattr(battle, "reviving", False) and not _slot_trapped(battle, slot):
+        for bench_idx in range(min(len(bench), 4)):
             mask[SWITCH_OFFSET + bench_idx] = True
 
     return mask
+
+
+def _slot_trapped(battle: DoubleBattle, slot: int) -> bool:
+    """Whether the active mon in ``slot`` is DEFINITELY trapped (cannot switch).
+
+    Read from ``battle.trapped`` — poke-env fills it per active-slot position
+    directly from the request's ``active[].trapped`` field, so an Illusion's
+    object-model desync cannot corrupt it (unlike ``available_switches``' per-mon
+    membership).  ``maybe_trapped`` is intentionally NOT treated as trapped
+    (Showdown resolves an uncertain trap), matching poke-env's available_switches,
+    which gates on ``trapped`` only.  Any error → not trapped (offer switches)."""
+    try:
+        tr = battle.trapped
+        return bool(tr[slot]) if slot is not None and slot < len(tr) else False
+    except (AttributeError, IndexError, TypeError):
+        return False
 
 
 def build_replacement_mask(battle: DoubleBattle, slot: int) -> list[bool]:
@@ -328,8 +348,28 @@ def build_replacement_mask(battle: DoubleBattle, slot: int) -> list[bool]:
     Index i ↔ encoder bench slot 4+i, so the policy's switch logits line up with
     the bench the model saw — exactly the switch-only mask training's
     ``decision_type='replacement'`` transitions carried for the fainted slot.
+
+    poke-env ``available_switches`` DESYNC RECOVERY (#11, the endgame forced-switch
+    fix): poke-env builds available_switches from each team mon's ``active`` /
+    ``fainted`` flags, which can go stale after an Imposter (Ditto) or Illusion
+    (Zoroark) turn — so a healthy, brought bench mon is sometimes DROPPED from the
+    list, leaving the model no legal replacement and collapsing the decision to
+    ``/choose default`` (model not driving).  But a post-faint replacement is never
+    trapped — EVERY living, brought bench mon (``own_bench_mons``, our own
+    reconstruction) is a legal replacement.  So when poke-env offers NOTHING for a
+    slot that MUST switch yet our reconstruction sees living bench mons, fall back
+    to offering them by POSITION; ``_replacement_order`` builds the ``/switch`` from
+    the same ``own_bench_mons`` list, so Showdown accepts the real mon.  Only fires
+    when poke-env's list is empty, so normal play — and the un-brought-mon exclusion
+    (``own_bench_mons`` already drops the un-brought 2-of-6) — is unchanged.
     """
     mask = [False] * ACTIONS_PER_SLOT
+    # Only a slot that MUST switch has replacement actions (mirror the caller's
+    # force_switch gate, so a non-switching slot never exposes the desync fallback).
+    force = getattr(battle, "force_switch", None) or []
+    if slot >= len(force) or not force[slot]:
+        return mask
+
     bench = own_bench_mons(battle)
     try:
         avail = battle.available_switches
@@ -338,6 +378,12 @@ def build_replacement_mask(battle: DoubleBattle, slot: int) -> list[bool]:
         legal = set()
     for i, mon_b in enumerate(bench[:4]):
         if mon_b in legal:
+            mask[SWITCH_OFFSET + i] = True
+
+    # Desync recovery: poke-env offered no legal switch for a must-switch slot, but
+    # our reconstruction sees living brought bench mons → offer them by position.
+    if not any(mask) and bench:
+        for i in range(min(len(bench), 4)):
             mask[SWITCH_OFFSET + i] = True
     return mask
 

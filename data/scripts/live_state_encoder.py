@@ -33,9 +33,12 @@ from state_encoder import (
     _TYPE_IDX, _STATUS_IDX, _WEATHER_IDX, _FIELD_IDX, _SC_IDX,
     NUM_TYPES, NUM_STATUS, NUM_WEATHER, NUM_FIELDS, NUM_SIDE_CONDS,
     NUM_BOOSTS, NUM_MOVES, MOVE_FEATURES,
+    NUM_ITEM_EFFECTS, NUM_ABILITY_EFFECTS,
     POKEMON_FEATURES, STATE_DIM, ACTION_DIM,
     ACTIVE_SLOTS, BENCH_SLOTS, OPP_BENCH_SLOTS,
     _BOOST_KEYS, _EST_STAT_NORM,
+    item_effect_indices, ability_effect_indices, dex_unique_ability,
+    is_spread_target,
     VodStateEncoder,
 )
 
@@ -377,9 +380,18 @@ class LiveStateEncoder:
         # 4).  _is_real_mon (inside the helper) also drops the broken-illusion
         # phantom (max_hp==0) that would inflate own_live after an own Zoroark's
         # disguise drops (gap #4).
-        own_team = brought_team_mons(battle)
-        own_live = sum(1 for p in own_team if p not in own_active_set and not p.fainted)
-        own_fnt  = sum(1 for p in own_team if p.fainted)
+        # Own counts: authoritative from the in-battle request when available (#11b
+        # — an Illusion can corrupt poke-env's per-mon fainted/active FLAGS, but the
+        # brought-only request carries the truth), else poke-env's flags (offline /
+        # replay-driven path).
+        own_req = _request_own_state(battle)
+        if own_req is not None:
+            own_live = sum(1 for a, f in own_req.values() if not a and not f)
+            own_fnt  = sum(1 for a, f in own_req.values() if f)
+        else:
+            own_team = brought_team_mons(battle)
+            own_live = sum(1 for p in own_team if p not in own_active_set and not p.fainted)
+            own_fnt  = sum(1 for p in own_team if p.fainted)
         opp_active_bases = {self._base_species(p) for p in opp_active_set}
         opp_seen = [
             p for p in getattr(battle, "opponent_team", {}).values()
@@ -636,6 +648,22 @@ class LiveStateEncoder:
                 self._write_move(vec, i, move_list[m_idx], mon)
             i += MOVE_FEATURES
 
+        # Item + ability EFFECT categories (gap #5) — byte-identical layout to
+        # encode_snapshot: poke-env's item/ability id (else the BeliefState top)
+        # collapses to the SAME effect flags via item_/ability_effect_indices.
+        item_id, item_known = self._live_item(mon, is_own)
+        for idx in item_effect_indices(item_id):
+            vec[i + idx] = 1.0
+        i += NUM_ITEM_EFFECTS
+        vec[i] = item_known
+        i += 1
+        abil_id, abil_known = self._live_ability(mon, is_own)
+        for idx in ability_effect_indices(abil_id):
+            vec[i + idx] = 1.0
+        i += NUM_ABILITY_EFFECTS
+        vec[i] = abil_known
+        i += 1
+
         # is_active slot flag
         vec[i] = 1.0 if is_active else 0.0
         i += 1
@@ -679,6 +707,52 @@ class LiveStateEncoder:
                 return est, 0.5
         return None, 0.0
 
+    # ── Item / ability resolution (live, gap #5) ──────────────────────────────
+    def _live_item(self, mon: "Pokemon", is_own: bool) -> tuple[str, float]:
+        """(normalised item id, confidence) for a live mon — parity twin of
+        resolve_item_json.  A mega'd mon is treated as holding a mega stone
+        (matching the offline ``known_item="mega stone"`` stamp).  A concrete
+        poke-env item (incl. ``''`` = confirmed itemless after Knock Off) is
+        confidence 1.0; an unknown item falls back to the BeliefState top item
+        at 0.5 (opponent), else unknown."""
+        if self._is_mega_forme(mon):
+            return "megastone", 1.0
+        it = getattr(mon, "item", None)
+        if it is not None and it != "unknown_item":
+            return norm_species(it), 1.0     # '' (itemless) → has_item stays 0
+        if self.belief is not None:
+            top = self.belief.top_item(mon.species)
+            if top:
+                return norm_species(top), 0.5
+        return "", 0.0
+
+    def _live_ability(self, mon: "Pokemon", is_own: bool) -> tuple[str, float]:
+        """(normalised ability id, confidence) for a live mon — parity twin of
+        resolve_ability_json.  For a mega'd mon poke-env exposes the FIXED mega
+        ability, but training encodes the user-choosable (base) ability (Bug 8),
+        so we take the BeliefState top ability of the base species instead (the
+        exact pre-mega ability is not recoverable live — a documented residual).
+        Otherwise a revealed ``mon.ability`` is 1.0, else belief top at 0.5."""
+        if self._is_mega_forme(mon):
+            if self.belief is not None:
+                top = self.belief.top_ability(self._base_species(mon))
+                if top:
+                    return norm_species(top), 0.5
+            return "", 0.0
+        ab = getattr(mon, "ability", None)
+        if ab:
+            return norm_species(ab), 1.0
+        # Single-ability species → publicly known (parity with resolve_ability_json
+        # when poke-env has not yet populated mon.ability for an unseen stub).
+        uniq = dex_unique_ability(self._base_species(mon))
+        if uniq:
+            return norm_species(uniq), 1.0
+        if self.belief is not None:
+            top = self.belief.top_ability(mon.species)
+            if top:
+                return norm_species(top), 0.5
+        return "", 0.0
+
     # ── Move encoder (live) ───────────────────────────────────────────────────
     def _write_move(
         self,
@@ -717,15 +791,13 @@ class LiveStateEncoder:
         vec[i] = move.accuracy
         i += 1
 
-        # PP fraction — pinned to 1.0 to MATCH the offline path (gap #3).
-        # encode_snapshot's _write_move_json always emits 1.0 because the VOD
-        # parser does not track PP yet. Emitting the real live PP here
-        # (move.current_pp / move.max_pp) would be a train/serve mismatch: the
-        # net only ever saw PP==1.0 in training, so a depleted-PP value at serve
-        # time is an out-of-distribution signal on a feature it learned to
-        # ignore. Keep both paths constant until the parser learns to count
-        # move uses per mon (the TODO in state_encoder._write_move_json).
-        vec[i] = 1.0
+        # PP fraction (gap #7): real remaining PP / max.  The VOD parser now counts
+        # per-mon self-selected move uses (move_pp_used) and the offline encoder
+        # derives the same fraction with max = base·8//5 — which equals poke-env's
+        # Move.max_pp — so this matches training (a replay's |move| count == the
+        # parser's use-count == poke-env's current_pp decrement; Pressure aside).
+        mx = getattr(move, "max_pp", 0) or 0
+        vec[i] = (move.current_pp / mx) if mx else 1.0
         i += 1
 
         # Protect-family move flag (high strategic value in doubles)
@@ -734,6 +806,11 @@ class LiveStateEncoder:
 
         # STAB: move type in user's current types (accounts for tera)
         vec[i] = 1.0 if move.type in user.types else 0.0
+        i += 1
+
+        # is_spread (gap #6): hits both foes — poke-env Move.target enum, mapped to
+        # the same id as the offline data/moves.json target by is_spread_target.
+        vec[i] = 1.0 if is_spread_target(getattr(move, "target", None)) else 0.0
         i += 1
 
         # Known flag (always 1 here — zero-slot means unknown)
@@ -791,9 +868,51 @@ def _is_brought(mon, active_set: set, switch_set: set) -> bool:
     )
 
 
+# ── Request-authoritative own-side state (#11b) ───────────────────────────────
+# poke-env derives a mon's active/fainted from per-mon flags + a species/name-keyed
+# object model, which a same-species Illusion (Zoroark disguised as a brought
+# teammate) corrupts — dropping a healthy bench mon from available_switches (and so
+# from the flag-based bench below).  Showdown's in-battle |request|, by contrast, is
+# AUTHORITATIVE and uncorruptible: at team preview Showdown rebuilds side.pokemon to
+# the picked mons only (sim/battle.ts 'team' action), so an in-battle request lists
+# EXACTLY the brought team, each with its true ident + active flag + condition.  We
+# read that directly, immune to the object-model desync.  poke-env still keeps all 6
+# in battle.team (from the team-preview request), keyed by the same ident, so we map
+# the request idents back to objects for order construction.
+def _request_own_state(battle) -> Optional[Dict[str, tuple]]:
+    """``{ident: (active: bool, fainted: bool)}`` for the OWN side from the live
+    in-battle ``battle.last_request`` (brought-only, authoritative).  None when no
+    usable request exists (e.g. the replay-driven parity path) so callers fall back
+    to the flag-based heuristic and behaviour is unchanged offline."""
+    req = getattr(battle, "last_request", None) or {}
+    if not isinstance(req, dict) or req.get("teamPreview"):
+        return None     # team-preview request lists all 6, not the brought team
+    side = req.get("side") or {}
+    pokemon = side.get("pokemon") if isinstance(side, dict) else None
+    if not pokemon:
+        return None
+    out: Dict[str, tuple] = {}
+    for e in pokemon:
+        ident = e.get("ident")
+        if not ident:
+            continue
+        cond = str(e.get("condition") or "").strip()
+        # condition is "cur/max[ status]" or "0 fnt"; fainted iff it ends "fnt".
+        out[ident] = (bool(e.get("active")), cond.endswith("fnt"))
+    return out or None
+
+
 def brought_team_mons(battle) -> list:
     """The BROUGHT own mons (~4 of 6) in stable team order, real mons only
-    (broken-illusion phantoms with max_hp==0 excluded)."""
+    (broken-illusion phantoms with max_hp==0 excluded).
+
+    Brought membership is taken from the authoritative in-battle |request| (which
+    lists ONLY the brought team) when one is available — immune to the Illusion
+    flag corruption — falling back to the flag/reveal heuristic offline."""
+    req = _request_own_state(battle)
+    if req is not None:
+        return [m for ident, m in battle.team.items()
+                if ident in req and LiveStateEncoder._is_real_mon(m)]
     active_set = _active_mon_set(battle)
     switch_set = switchable_union(battle)
     return [
@@ -806,7 +925,17 @@ def own_bench_mons(battle) -> list:
     """Brought, non-active, non-fainted own mons — the mons that occupy encoder
     bench slots 4..7 and switch action indices 12..15 (stable team order; the
     un-brought 2-of-6 are excluded so a switch action always decodes to a mon
-    Showdown will accept)."""
+    Showdown will accept).
+
+    The living/active determination is taken from the authoritative in-battle
+    |request| when available (#11b — so an Illusion-corrupted active/fainted FLAG
+    can no longer drop a healthy bench mon from the replacement set), falling back
+    to poke-env's flags only when no request exists (replay-driven path)."""
+    req = _request_own_state(battle)
+    if req is not None:
+        return [m for ident, m in battle.team.items()
+                if ident in req and not req[ident][0] and not req[ident][1]
+                and LiveStateEncoder._is_real_mon(m)]
     active_set = _active_mon_set(battle)
     return [
         m for m in brought_team_mons(battle)
