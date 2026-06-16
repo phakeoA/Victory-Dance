@@ -292,6 +292,58 @@ def test_gimmick_dropped_when_illegal_under_mask():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Auxiliary opponent head — dataset labels (Task #9c)
+# ══════════════════════════════════════════════════════════════════════════════
+def _opp_transition():
+    t = make_transition(
+        "r1",
+        our_actions=[{"slot": "our_a", "action": "move", "move": "Fake Out", "action_index": 3}],
+        mask_a=_row(3, 12), mask_b=_row(0),
+    )
+    snap = t["state_before_actions"]
+    snap["opp_active"]["opp_a"]["known_moves"] = ["Spore", "Pollen Puff", "Rage Powder", "Protect"]
+    snap["opp_active"]["opp_b"]["known_moves"] = ["Moonblast", "Dazzling Gleam"]
+    snap["opp_bench"] = []
+    t["opp_actions_actual"] = [
+        {"slot": "opp_a", "action": "move", "move": "Spore", "target_slot": "our_a"},
+        {"slot": "opp_b", "action": "move", "move": "Moonblast", "target_slot": "our_a"},
+    ]
+    return t
+
+
+def test_with_opp_extracts_opp_targets_and_tensors():
+    from state_encoder import OPP_HEADS
+    ex = transition_to_example(_opp_transition(), ds.StateEncoder(), None, with_opp=True)
+    assert "opp_targets" in ex and ex["opp_targets"]            # at least one opp action encoded
+    assert set(ex["opp_targets"]) <= {"opp_a", "opp_b"}
+
+    item = BCDataset([ex], with_opp=True)[0]
+    assert item["opp_target"].shape == (len(OPP_HEADS),)
+    assert item["opp_mask"].shape == (len(OPP_HEADS), ACTIONS_PER_SLOT)
+    # every valid opp target is legal under its opp mask (the codec invariant)
+    for o in range(len(OPP_HEADS)):
+        if item["opp_valid"][o].item() > 0.5:
+            assert item["opp_mask"][o][int(item["opp_target"][o])].item() == 1.0
+
+
+def test_without_opp_has_no_opp_fields():
+    ex = transition_to_example(_opp_transition(), ds.StateEncoder(), None)  # with_opp default False
+    assert "opp_targets" not in ex
+    item = BCDataset([ex])[0]                                   # with_opp default False
+    assert "opp_target" not in item
+
+
+def test_opp_fields_survive_move_order_augmentation():
+    """Augmentation permutes only OUR move blocks → the opp aux labels pass
+    through unchanged."""
+    ex = transition_to_example(_opp_transition(), ds.StateEncoder(), None, with_opp=True)
+    plain = BCDataset([ex], with_opp=True)[0]
+    aug = BCDataset([ex], with_opp=True, augment_move_order=True)[0]
+    assert aug["opp_target"].tolist() == plain["opp_target"].tolist()
+    assert aug["opp_valid"].tolist() == plain["opp_valid"].tolist()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Move-slot permutation augmentation — dataset (Task #7b)
 # ══════════════════════════════════════════════════════════════════════════════
 def _marked_example(target_move: int = 1):
@@ -406,6 +458,17 @@ def test_model_forward_shapes():
         assert gimmicks[h].shape == (5, model.gimmick_dim)
     assert model.gimmick_dim == 2
     assert model.count_parameters() > 0
+
+
+def test_model_with_aux_opp_heads_has_action_but_not_gimmick_heads():
+    # 4 action heads (our + opp), gimmick heads ONLY for the own slots (task #9b).
+    model = BCPolicy(hidden_dims=(32,), heads=("our_a", "our_b", "opp_a", "opp_b"))
+    x = torch.randn(3, get_state_dim())
+    actions, gimmicks = model(x)
+    assert set(actions.keys()) == {"our_a", "our_b", "opp_a", "opp_b"}
+    assert set(gimmicks.keys()) == {"our_a", "our_b"}         # no opp gimmick head
+    assert actions["opp_a"].shape == (3, ACTIONS_PER_SLOT)
+    assert model.gimmick_head_names == ("our_a", "our_b")
 
 
 def test_masked_logits_blocks_illegal():
@@ -526,6 +589,51 @@ def test_run_epoch_handles_no_gimmick_labels():
     assert m["gimmick_pos"] == 0
     assert m["gimmick_recall"] == 0.0
     assert m["n"] > 0                          # action head still trained
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Auxiliary opponent head — training (Task #9d)
+# ══════════════════════════════════════════════════════════════════════════════
+def test_run_epoch_aux_opp_head_trains_and_reports_top1():
+    from torch.utils.data import DataLoader
+    rng = np.random.default_rng(0)
+    examples = []
+    for i in range(256):
+        x = np.zeros(get_state_dim(), np.float32)
+        x[1] = float(i % 4)                    # x[1] ⇒ opp action (learnable)
+        examples.append({
+            "x": x, "replay_id": "r",
+            "targets": {"our_a": int(rng.integers(0, ACTIONS_PER_SLOT))},
+            "masks": {"our_a": np.ones(ACTIONS_PER_SLOT, np.float32)},
+            "gimmick_targets": {}, "gimmick_masks": {},
+            "opp_targets": {"opp_a": i % 4},
+            "opp_masks": {"opp_a": np.ones(ACTIONS_PER_SLOT, np.float32)},
+        })
+    loader = DataLoader(BCDataset(examples, with_opp=True), batch_size=64, shuffle=True)
+    torch.manual_seed(0)
+    model = BCPolicy(hidden_dims=(64,), dropout=0.0,
+                     heads=("our_a", "our_b", "opp_a", "opp_b"))
+    opt = torch.optim.Adam(model.parameters(), lr=1e-2)
+    m0 = train_bc.run_epoch(model, loader, "cpu", opt, opp_loss_weight=1.0)
+    for _ in range(20):
+        m = train_bc.run_epoch(model, loader, "cpu", opt, opp_loss_weight=1.0)
+    assert "opp_top1" in m and m["opp_n"] > 0
+    assert m["opp_top1"] > m0["opp_top1"]      # opp head learned
+    assert m["opp_top1"] >= 0.8
+    assert m["n"] > 0                          # our head also trained
+
+
+def test_run_epoch_baseline_model_reports_zero_opp():
+    from torch.utils.data import DataLoader
+    examples = [{"x": np.zeros(get_state_dim(), np.float32), "replay_id": "r",
+                 "targets": {"our_a": 0}, "masks": {"our_a": np.ones(ACTIONS_PER_SLOT, np.float32)},
+                 "gimmick_targets": {}, "gimmick_masks": {}} for _ in range(32)]
+    loader = DataLoader(BCDataset(examples), batch_size=16, shuffle=True)
+    model = BCPolicy(hidden_dims=(16,), heads=HEADS)        # no opp heads
+    opt = torch.optim.Adam(model.parameters(), lr=1e-2)
+    m = train_bc.run_epoch(model, loader, "cpu", opt, opp_loss_weight=0.3)
+    assert m["opp_top1"] == 0.0 and m["opp_n"] == 0
+    assert m["n"] > 0                          # our head trains normally
 
 
 # ══════════════════════════════════════════════════════════════════════════════

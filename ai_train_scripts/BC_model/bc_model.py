@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Dict, Sequence, Tuple
+from typing import Dict, Optional, Sequence, Tuple
 
 import torch
 import torch.nn as nn
@@ -67,12 +67,19 @@ class BCPolicy(nn.Module):
         dropout: float = 0.1,
         heads: Sequence[str] = DEFAULT_HEADS,
         gimmick_dim: int = get_gimmick_dim(),
+        gimmick_heads: Optional[Sequence[str]] = None,
     ):
         super().__init__()
         self.state_dim = state_dim
         self.action_dim = action_dim
         self.gimmick_dim = gimmick_dim
         self.head_names: Tuple[str, ...] = tuple(heads)
+        # Gimmick heads default to the OWN active slots only (our_a, our_b) — the
+        # only slots whose gimmick is a real decision.  Auxiliary opponent heads
+        # (opp_a/opp_b, task #9) predict ACTIONS only, no opp gimmick head.
+        if gimmick_heads is None:
+            gimmick_heads = tuple(h for h in self.head_names if h in DEFAULT_HEADS)
+        self.gimmick_head_names: Tuple[str, ...] = tuple(gimmick_heads)
 
         layers: list[nn.Module] = []
         prev = state_dim
@@ -90,7 +97,7 @@ class BCPolicy(nn.Module):
         )
         # Parallel per-slot gimmick (mega) heads — same trunk, separate logits.
         self.gimmick_heads = nn.ModuleDict(
-            {name: nn.Linear(prev, gimmick_dim) for name in self.head_names}
+            {name: nn.Linear(prev, gimmick_dim) for name in self.gimmick_head_names}
         )
 
         self._init_weights()
@@ -124,6 +131,7 @@ def build_model(
     dropout: float = 0.1,
     heads: Sequence[str] = DEFAULT_HEADS,
     device: str = "cpu",
+    gimmick_heads: Optional[Sequence[str]] = None,
 ) -> BCPolicy:
     """Build a BCPolicy on ``device`` and print a one-line summary."""
     model = BCPolicy(
@@ -132,11 +140,12 @@ def build_model(
         hidden_dims=hidden_dims,
         dropout=dropout,
         heads=heads,
+        gimmick_heads=gimmick_heads,
     ).to(device)
     print(
         f"[BCPolicy] {model.count_parameters():,} params | "
         f"state_dim={model.state_dim} action_dim={model.action_dim} "
         f"gimmick_dim={model.gimmick_dim} "
-        f"hidden={tuple(hidden_dims)} heads={model.head_names} device={device}"
+        f"heads={model.head_names} gimmick_heads={model.gimmick_head_names} device={device}"
     )
     return model

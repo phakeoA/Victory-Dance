@@ -362,6 +362,12 @@ def build_gimmick_legal_mask(battle: DoubleBattle, slot: int) -> list[bool]:
     return row
 
 
+# Diagnostic counter: how many times the gap-#6 reconstruction let the codec aim
+# a foe slot poke-env had merged away under a same-species illusion (#15).  Read
+# by the illusion-targeting harness; harmless (a plain int) in production.
+_ILLUSION_DELIBERATE_TARGETS = 0
+
+
 def _live_can_mega(battle: DoubleBattle, slot: int) -> bool:
     """Authoritative serve-time mega legality for ``slot`` from poke-env's
     ``battle.can_mega_evolve`` — item- AND team-aware (False once the stone is
@@ -379,7 +385,8 @@ def _live_can_mega(battle: DoubleBattle, slot: int) -> bool:
 
 
 def action_to_order(action: int, battle: DoubleBattle, slot: int,
-                    gimmick: int = GIMMICK_NONE) -> Optional[SingleBattleOrder]:
+                    gimmick: int = GIMMICK_NONE,
+                    opp_present_recon: Optional[dict] = None) -> Optional[SingleBattleOrder]:
     """
     Convert an integer action (0–15) into a SingleBattleOrder for the given slot.
     Returns None if the action cannot be executed (caller should fall back).
@@ -389,6 +396,14 @@ def action_to_order(action: int, battle: DoubleBattle, slot: int,
     AND ``battle.can_mega_evolve[slot]`` confirms it is currently legal — otherwise
     the plain move is ordered, so a rejected /choose is never emitted.  Switches
     never gimmick.  Tera / Z-move / Dynamax are never set (not in this format).
+
+    ``opp_present_recon`` ({0: bool, 1: bool}) is the gap-#6 RECONSTRUCTED opponent
+    slot occupancy.  During a same-species Zoroark illusion poke-env can MERGE the
+    two foes and lose one of its target slots; the reconstruction still knows both
+    slots are occupied, so when poke-env can't resolve the model's chosen opp_a/
+    opp_b foe we target that slot's FIXED Showdown position — making mid-illusion
+    targeting DELIBERATE (#15) instead of collapsing to the only visible foe.
+    None ⇒ the legacy behaviour (no reconstruction available).
 
     Uses Player.create_order (static) with an integer move_target from
     DoubleBattle.to_showdown_target(), as required by poke-env's doubles API.
@@ -424,46 +439,57 @@ def action_to_order(action: int, battle: DoubleBattle, slot: int,
         if _usable and move.id not in _usable:
             return None
 
-        # Foe slots are positional (opp_a/opp_b); fall back to the only present
-        # foe so the index still resolves under auto-targeting.
+        # Foe slots are positional (opp_a/opp_b).
         opp_present = [p for p in opp_active if p is not None]
-        if target_code == _TARGET_OPP0:
-            target_mon = opp_active[0] if (len(opp_active) > 0 and opp_active[0]) \
-                else (opp_present[0] if opp_present else None)
-        elif target_code == _TARGET_OPP1:
-            target_mon = opp_active[1] if (len(opp_active) > 1 and opp_active[1]) \
-                else (opp_present[0] if opp_present else None)
-        else:  # ally (bucket 2)
-            ally_slot = 1 - slot
-            ally_mon = active[ally_slot] if ally_slot < len(active) else None
-            if ally_mon is None:
-                return None   # no ally to target → fall back (don't send a bad order)
-            # poke-env's to_showdown_target returns EMPTY (0) for adjacentAlly moves
-            # (Helping Hand / Coaching / Decorate / …) — Showdown then rejects the
-            # order ("X needs a target").  The ally's OWN-side position is required;
-            # supply it directly (same value to_showdown_target gives for a
-            # normal/any move aimed at the ally, e.g. a Justified self-hit).
-            pos = (battle.POKEMON_1_POSITION if ally_slot == 0
-                   else battle.POKEMON_2_POSITION)
-            return Player.create_order(move, mega=do_mega, move_target=pos)
+        if target_code in (_TARGET_OPP0, _TARGET_OPP1):
+            bucket = 0 if target_code == _TARGET_OPP0 else 1
+            direct = opp_active[bucket] if (len(opp_active) > bucket and opp_active[bucket]) \
+                else None
+            if direct is not None:
+                # poke-env has THIS exact foe → deliberate target by mon.
+                return Player.create_order(
+                    move, mega=do_mega,
+                    move_target=battle.to_showdown_target(move, direct))
 
-        if target_mon is None:
-            # poke-env shows NO foe — it can lose a foe to a same-species Zoroark
-            # illusion (gap #6) or briefly desync on the opponent's last mon — yet
-            # Showdown still has one.  A SINGLE-TARGET move (normal/any/adjacentFoe)
-            # needs an explicit target (a targetless order is rejected "X needs a
-            # target"; a Pass is rejected "must make a move").  Target the FIRST
-            # opponent slot: Showdown auto-redirects a single-target move to the only
-            # living foe when that exact slot is empty, so this resolves regardless
-            # of which slot the (poke-env-invisible) foe actually occupies, and the
-            # explicit foe slot removes any foe/ally ambiguity.
+            # poke-env lost this exact slot to a same-species illusion merge.  If
+            # the gap-#6 reconstruction confirms the slot is occupied and the move
+            # is single-target, honour the model's opp_a/opp_b choice via the FIXED
+            # Showdown position (opp_a→1, opp_b→2) — DELIBERATE mid-illusion targeting
+            # (#15).  Showdown accepts a position target on an occupied slot.
+            if (opp_present_recon and opp_present_recon.get(bucket)
+                    and _move_target_kind(move.id) in _CHOOSABLE_SINGLE):
+                global _ILLUSION_DELIBERATE_TARGETS
+                _ILLUSION_DELIBERATE_TARGETS += 1
+                return Player.create_order(
+                    move, mega=do_mega,
+                    move_target=(battle.OPPONENT_1_POSITION if bucket == 0
+                                 else battle.OPPONENT_2_POSITION))
+
+            # Fallbacks (UNCHANGED): the only visible foe; then a single-target move
+            # with NO visible foe is ordered at the first opp slot (Showdown auto-
+            # redirects to the only living foe); spread/self/field need no target.
+            if opp_present:
+                return Player.create_order(
+                    move, mega=do_mega,
+                    move_target=battle.to_showdown_target(move, opp_present[0]))
             if _move_target_kind(move.id) in _CHOOSABLE_SINGLE:
                 return Player.create_order(move, mega=do_mega,
                                            move_target=battle.OPPONENT_1_POSITION)
             return Player.create_order(move, mega=do_mega)   # spread/self/field
 
-        showdown_target = battle.to_showdown_target(move, target_mon)
-        return Player.create_order(move, mega=do_mega, move_target=showdown_target)
+        # ── ally (bucket 2) ──────────────────────────────────────────────────
+        ally_slot = 1 - slot
+        ally_mon = active[ally_slot] if ally_slot < len(active) else None
+        if ally_mon is None:
+            return None   # no ally to target → fall back (don't send a bad order)
+        # poke-env's to_showdown_target returns EMPTY (0) for adjacentAlly moves
+        # (Helping Hand / Coaching / Decorate / …) — Showdown then rejects the
+        # order ("X needs a target").  The ally's OWN-side position is required;
+        # supply it directly (same value to_showdown_target gives for a
+        # normal/any move aimed at the ally, e.g. a Justified self-hit).
+        pos = (battle.POKEMON_1_POSITION if ally_slot == 0
+               else battle.POKEMON_2_POSITION)
+        return Player.create_order(move, mega=do_mega, move_target=pos)
 
     else:
         bench_idx = action - SWITCH_OFFSET
@@ -662,16 +688,18 @@ class VGCPlayerBase(Player):
         return DoubleBattleOrder(order_s0, order_s1)
 
     def _safe_order(self, action: int, battle: DoubleBattle, slot: int,
-                    gimmick: int = GIMMICK_NONE) -> SingleBattleOrder:
+                    gimmick: int = GIMMICK_NONE,
+                    opp_present_recon: Optional[dict] = None) -> SingleBattleOrder:
         """
         Convert action int → SingleBattleOrder, with two fallback levels:
-          1. Try the given action (with the model's ``gimmick`` decision).
+          1. Try the given action (with the model's ``gimmick`` decision and the
+             gap-#6 reconstructed opponent occupancy for deliberate targeting).
           2. Try a fresh random legal action (no gimmick — an emergency legal
              order, never speculatively mega'd).
           3. PassBattleOrder (slot has nothing to do this turn).
         DoubleBattleOrder never accepts None, so Pass is the correct no-op.
         """
-        order = action_to_order(action, battle, slot, gimmick)
+        order = action_to_order(action, battle, slot, gimmick, opp_present_recon)
         if order is not None:
             return order
         # The chosen action was undecodable (e.g. a single-target move with an ally
@@ -683,7 +711,8 @@ class VGCPlayerBase(Player):
         mask = build_legal_action_mask(battle, slot)
         for a, ok in enumerate(mask):
             if ok and a != action:
-                order = action_to_order(a, battle, slot)
+                order = action_to_order(a, battle, slot,
+                                        opp_present_recon=opp_present_recon)
                 if order is not None:
                     return order
         log.debug("_safe_order: slot %d has no decodable legal action — sending Pass.", slot)

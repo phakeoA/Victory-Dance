@@ -57,6 +57,39 @@ def test_base_select_gimmicks_never_megas():
     assert VGCPlayerBase._select_gimmicks(None, None, None, 0, 1) == (GIMMICK_NONE, GIMMICK_NONE)
 
 
+def test_select_actions_dedups_cross_slot_switch(monkeypatch):
+    """Both heads picking the SAME bench mon to switch into is rejected by Showdown
+    ('can only switch in once'); _select_actions must re-decode slot 1 with the
+    colliding switch masked → a non-colliding action (#8 follow-up bug)."""
+    _setup_path()
+    import types
+    import numpy as np
+    import player as P
+    from state_encoder import SWITCH_OFFSET
+
+    def fake_mask(battle, slot):
+        row = [False] * 16
+        row[SWITCH_OFFSET] = True            # bench-0 switch legal for both slots
+        if slot == 1:
+            row[0] = True                     # slot 1 also has move-0 available
+        return row
+
+    def fake_indices(model, heads, sv, m0, m1, device):
+        # both heads want the same switch; once it's masked for slot 1, slot 1
+        # falls to move 0.
+        return (SWITCH_OFFSET, SWITCH_OFFSET) if m1[SWITCH_OFFSET] else (SWITCH_OFFSET, 0)
+
+    monkeypatch.setattr(P, "build_legal_action_mask", fake_mask)
+    monkeypatch.setattr(P._M, "bc_action_indices", fake_indices)
+
+    fake = types.SimpleNamespace(_model=object(), _model_heads=("our_a", "our_b"),
+                                 _device="cpu")
+    a0, a1, src = P.VGCPlayer._select_actions(fake, object(), np.zeros(4, np.float32))
+    assert a0 == SWITCH_OFFSET
+    assert a1 == 0 and a1 != a0               # deduped to a non-colliding action
+    assert src == "model"
+
+
 def test_model_select_gimmicks_megas_capable_move_slot_only():
     _setup_path()
     import types

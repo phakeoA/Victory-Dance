@@ -78,6 +78,9 @@ def load_bc_policy(path, device: str = "cpu"):
         dropout=cfg.get("dropout", 0.0),
         heads=tuple(cfg.get("heads", ("our_a", "our_b"))),
         gimmick_dim=cfg.get("gimmick_dim", get_gimmick_dim()),
+        # Aux-opp checkpoints carry extra action heads but gimmick heads only for
+        # the own slots — pass the saved set so the strict load matches.
+        gimmick_heads=cfg.get("gimmick_heads"),
     )
     # A PRE-gimmick checkpoint has no ``gimmick_heads.*`` weights.  The model now
     # always carries gimmick heads, so load non-strictly for those old checkpoints

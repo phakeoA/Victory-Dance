@@ -163,6 +163,12 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
 
         opp_snapshot = self._build_opp_snapshot(battle)
         state_vec = self._encoder.encode(battle, opp_snapshot=opp_snapshot)
+        # gap-#6 reconstructed opponent slot occupancy → lets the codec target
+        # opp_a vs opp_b DELIBERATELY when a same-species illusion makes poke-env
+        # lose a foe slot (#15).  None when no reconstruction (legacy targeting).
+        _oa = (opp_snapshot or {}).get("opp_active") or {}
+        opp_present_recon = ({0: bool(_oa.get("opp_a")), 1: bool(_oa.get("opp_b"))}
+                             if opp_snapshot else None)
         action_s0, action_s1, source = self._select_actions(battle, state_vec)
 
         # ── Retry exploration ───────────────────────────────────────────────
@@ -214,8 +220,10 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
             source=source,
         )
 
-        order_s0 = self._safe_order(action_s0, battle, slot=0, gimmick=g0)
-        order_s1 = self._safe_order(action_s1, battle, slot=1, gimmick=g1)
+        order_s0 = self._safe_order(action_s0, battle, slot=0, gimmick=g0,
+                                    opp_present_recon=opp_present_recon)
+        order_s1 = self._safe_order(action_s1, battle, slot=1, gimmick=g1,
+                                    opp_present_recon=opp_present_recon)
         return DoubleBattleOrder(order_s0, order_s1)
 
     @staticmethod

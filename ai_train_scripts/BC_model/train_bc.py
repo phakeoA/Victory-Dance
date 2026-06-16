@@ -182,19 +182,27 @@ def run_epoch(
     class_weight: Optional[torch.Tensor] = None,
     gimmick_class_weight: Optional[torch.Tensor] = None,
     gimmick_loss_weight: float = 1.0,
+    opp_loss_weight: float = 0.0,
+    opp_class_weight: Optional[torch.Tensor] = None,
 ) -> Dict[str, float]:
     """One pass over ``loader``.  Train if ``optimizer`` given, else eval.
 
-    Trains BOTH the action heads and the parallel gimmick (mega) heads.  The
-    total loss is ``action_mean + gimmick_loss_weight * gimmick_mean``; each term
-    is meaned over its own valid-decision count so the two heads stay balanced
-    regardless of how many gimmick labels a batch carries (pre-gimmick JSONL has
-    none → the gimmick term is 0 and the gimmick heads simply don't update)."""
+    Trains the action heads + the parallel gimmick (mega) heads, and OPTIONALLY
+    the auxiliary opponent action heads (task #9) when the model carries opp_*
+    heads and the batch carries opp labels.  The backward total is
+    ``action_mean + gimmick_loss_weight*gimmick_mean + opp_loss_weight*opp_mean``;
+    each term is meaned over its own valid-decision count.  The reported ``loss``/
+    ``top1`` stay OUR-action-only so baseline-vs-aux comparison is apples-to-apples;
+    the opp head's accuracy is reported separately as ``opp_top1``."""
     train = optimizer is not None
     model.train(train)
 
-    totals = {"loss": 0.0, "n": 0, "g_loss": 0.0, "g_n": 0}
+    # Opponent aux heads = the model's action heads that are not our own slots.
+    opp_heads = [h for h in getattr(model, "head_names", HEADS) if h not in HEADS]
+
+    totals = {"loss": 0.0, "n": 0, "g_loss": 0.0, "g_n": 0, "opp_loss": 0.0, "opp_n": 0}
     per_head = {h: {"n": 0, "top1": 0, "top3": 0} for h in HEADS}
+    opp_acc = {h: {"n": 0, "top1": 0} for h in opp_heads}
     gim = {"tp": 0, "fn": 0}
 
     ctx = torch.enable_grad() if train else torch.no_grad()
@@ -234,11 +242,30 @@ def run_epoch(
                 gim["tp"] += g_tp
                 gim["fn"] += g_fn
 
+            # ── Auxiliary opponent-action heads ──────────────────────────────
+            o_batch_loss = x.new_zeros(())
+            o_batch_valid = 0
+            if opp_heads and "opp_target" in batch:
+                o_target = batch["opp_target"].to(device)   # (B, n_opp)
+                o_mask = batch["opp_mask"].to(device)        # (B, n_opp, A)
+                o_valid = batch["opp_valid"].to(device)      # (B, n_opp)
+                for o_idx, ohead in enumerate(opp_heads):
+                    ce, n_valid, n1, _ = head_loss_and_acc(
+                        actions[ohead], o_mask[:, o_idx], o_target[:, o_idx],
+                        o_valid[:, o_idx], class_weight=opp_class_weight,
+                    )
+                    o_batch_loss = o_batch_loss + ce
+                    o_batch_valid += n_valid
+                    opp_acc[ohead]["n"] += n_valid
+                    opp_acc[ohead]["top1"] += n1
+
             if batch_valid == 0:
                 continue
             mean_loss = batch_loss / batch_valid
             mean_gimmick = g_batch_loss / max(g_batch_valid, 1)
-            total = mean_loss + gimmick_loss_weight * mean_gimmick
+            mean_opp = o_batch_loss / max(o_batch_valid, 1)
+            total = (mean_loss + gimmick_loss_weight * mean_gimmick
+                     + opp_loss_weight * mean_opp)
 
             if train:
                 optimizer.zero_grad()
@@ -249,12 +276,16 @@ def run_epoch(
             totals["n"] += batch_valid
             totals["g_loss"] += float(g_batch_loss.item())
             totals["g_n"] += g_batch_valid
+            totals["opp_loss"] += float(o_batch_loss.item())
+            totals["opp_n"] += o_batch_valid
 
     n = max(totals["n"], 1)
     pooled_top1 = sum(per_head[h]["top1"] for h in HEADS)
     pooled_top3 = sum(per_head[h]["top3"] for h in HEADS)
     pooled_n = sum(per_head[h]["n"] for h in HEADS) or 1
     g_pos = gim["tp"] + gim["fn"]
+    opp_n = sum(opp_acc[h]["n"] for h in opp_heads)
+    opp_top1 = sum(opp_acc[h]["top1"] for h in opp_heads)
 
     metrics = {
         "loss": totals["loss"] / n,
@@ -265,6 +296,9 @@ def run_epoch(
         "gimmick_recall": gim["tp"] / g_pos if g_pos else 0.0,
         "gimmick_pos": g_pos,
         "gimmick_n": totals["g_n"],
+        "opp_loss": totals["opp_loss"] / max(totals["opp_n"], 1),
+        "opp_top1": opp_top1 / opp_n if opp_n else 0.0,
+        "opp_n": totals["opp_n"],
     }
     for head in HEADS:
         hn = max(per_head[head]["n"], 1)
@@ -294,6 +328,7 @@ def train(args: argparse.Namespace) -> dict:
         folders,
         limit_transitions=args.limit_transitions,
         limit_files=args.limit_files,
+        with_opp=args.aux_opp_head,
     )
     print_stats(stats)
     print(f"[train_bc] loaded {len(examples)} examples in {time.time()-t0:.1f}s")
@@ -310,18 +345,28 @@ def train(args: argparse.Namespace) -> dict:
     # Move-slot permutation augmentation is TRAIN-ONLY (val stays raw so its
     # metrics are true).  It makes the policy order-invariant — see task #22.
     train_ds = BCDataset(train_ex, augment_move_order=args.augment_move_order,
-                         aug_seed=args.seed)
-    val_ds = BCDataset(val_ex)
+                         aug_seed=args.seed, with_opp=args.aux_opp_head)
+    val_ds = BCDataset(val_ex, with_opp=args.aux_opp_head)
     print(f"[train_bc] move-slot permutation augmentation: "
           f"{'ON' if args.augment_move_order else 'OFF'} (train only)")
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
 
+    # ── Auxiliary opponent head (task #9): adds opp_a/opp_b ACTION heads (no opp
+    # gimmick head).  OUR action/gimmick heads + reported our top1 are unchanged,
+    # so the A/B comparison vs the no-aux baseline is apples-to-apples. ──────────
+    OPP = ["opp_a", "opp_b"]
+    train_heads = list(HEADS) + (OPP if args.aux_opp_head else [])
+    if args.aux_opp_head:
+        print(f"[train_bc] auxiliary opponent head: ON (heads={tuple(train_heads)}, "
+              f"weight {args.aux_opp_weight})")
+
     # ── Model / optimizer ─────────────────────────────────────────────────────
     model = build_model(
+        heads=train_heads,
+        gimmick_heads=list(HEADS),
         hidden_dims=tuple(args.hidden),
         dropout=args.dropout,
-        heads=HEADS,
         device=device,
     )
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -360,7 +405,11 @@ def train(args: argparse.Namespace) -> dict:
         "gimmick_trained": bool(gcounts.sum() > 0),
         "hidden_dims": list(args.hidden),
         "dropout": args.dropout,
-        "heads": list(HEADS),
+        "heads": list(model.head_names),               # our (+ opp aux when on)
+        "gimmick_heads": list(model.gimmick_head_names),
+        "aux_opp_head": bool(args.aux_opp_head),
+        "aux_opp_weight": args.aux_opp_weight,
+        "augment_move_order": bool(args.augment_move_order),
         "lr": args.lr,
         "weight_decay": args.weight_decay,
         "batch_size": args.batch_size,
@@ -378,15 +427,17 @@ def train(args: argparse.Namespace) -> dict:
     for epoch in range(1, args.epochs + 1):
         tr = run_epoch(model, train_loader, device, optimizer, class_weight=class_weight,
                        gimmick_class_weight=gimmick_class_weight,
-                       gimmick_loss_weight=args.gimmick_loss_weight)
+                       gimmick_loss_weight=args.gimmick_loss_weight,
+                       opp_loss_weight=args.aux_opp_weight if args.aux_opp_head else 0.0)
         va = run_epoch(model, val_loader, device, optimizer=None)
         history.append({"epoch": epoch, "train": tr, "val": va})
+        opp_str = f" | opp top1 {va['opp_top1']:.3f}" if args.aux_opp_head else ""
         print(
             f"epoch {epoch:3d} | "
             f"train loss {tr['loss']:.4f} top1 {tr['top1']:.3f} | "
             f"val loss {va['loss']:.4f} top1 {va['top1']:.3f} top3 {va['top3']:.3f} "
             f"(a {va['our_a_top1']:.3f} / b {va['our_b_top1']:.3f}) "
-            f"| gim recall {va['gimmick_recall']:.3f} pos {va['gimmick_pos']}"
+            f"| gim recall {va['gimmick_recall']:.3f} pos {va['gimmick_pos']}{opp_str}"
         )
 
         if va["top1"] > best_top1:
@@ -445,6 +496,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                          "remap the action label so the policy is move-ORDER "
                          "invariant (task #22). Default ON; --no-augment-move-order "
                          "to disable.")
+    ap.add_argument("--aux-opp-head", action=argparse.BooleanOptionalAction,
+                    default=False,
+                    help="add auxiliary opponent action heads (opp_a/opp_b) that "
+                         "predict the opponent's action — a representation-shaping "
+                         "aux signal (task #9). Default OFF (the A/B baseline).")
+    ap.add_argument("--aux-opp-weight", type=float, default=0.3,
+                    help="weight on the auxiliary opponent CE term (default 0.3).")
     ap.add_argument("--patience", type=int, default=0,
                     help="early-stop after N epochs with no val top-1 gain (0=off)")
     ap.add_argument("--val-frac", type=float, default=0.1)

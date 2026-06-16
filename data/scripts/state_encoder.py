@@ -955,6 +955,86 @@ def annotate_transition_actions(transition: dict) -> dict:
     return transition
 
 
+# ── Opponent-perspective action codec (auxiliary head, task #9) ──────────────
+# The aux opponent head predicts the OPPONENT's action from the same (our-
+# perspective) state vector — a representation-shaping signal so the trunk
+# captures opponent threats (e.g. for board-dependent mega timing).  It is
+# TRAIN-ONLY (never served), so it lives entirely offline.
+#
+# Rather than fork the battle-tested codec, we FLIP the snapshot (swap our<->opp
+# actives/benches + relabel slot keys) and reuse build_action_mask /
+# action_to_index unchanged: from the opponent's seat, OUR mons are the foes and
+# the opp bench holds the switch-ins.
+OPP_HEADS: tuple[str, str] = ("opp_a", "opp_b")
+
+
+def _relabel_slots(d: Optional[dict], frm: str, to: str) -> dict:
+    return {(k.replace(frm, to, 1) if isinstance(k, str) else k): v
+            for k, v in (d or {}).items()}
+
+
+def _flip_perspective(snap: dict) -> dict:
+    """A snapshot seen from the OPPONENT's seat: our<->opp actives/benches swapped
+    and the active-slot keys relabeled (opp_a->our_a, our_a->opp_a, …).  Only the
+    fields the action codec reads are populated."""
+    return {
+        "our_active": _relabel_slots(snap.get("opp_active"), "opp_", "our_"),
+        "opp_active": _relabel_slots(snap.get("our_active"), "our_", "opp_"),
+        "our_bench": snap.get("opp_bench") or [],
+        "opp_bench": snap.get("our_bench") or [],
+    }
+
+
+def _flip_action_slots(action: dict) -> dict:
+    """Swap our_<->opp_ in an action's ``slot`` / ``target_slot`` so an opp action
+    reads correctly under the flipped snapshot."""
+    out = dict(action)
+    for field in ("slot", "target_slot"):
+        v = out.get(field)
+        if isinstance(v, str):
+            if v.startswith("opp_"):
+                out[field] = "our_" + v[4:]
+            elif v.startswith("our_"):
+                out[field] = "opp_" + v[4:]
+    return out
+
+
+def build_opp_action_mask(snap: dict) -> dict[str, list[int]]:
+    """Decision-time legality mask for the OPPONENT's active slots:
+    ``{"opp_a": [16], "opp_b": [16]}`` — build_action_mask over the flipped snap."""
+    m = build_action_mask(_flip_perspective(snap))
+    return {"opp_a": m.get("our_a") or [0] * ACTIONS_PER_SLOT,
+            "opp_b": m.get("our_b") or [0] * ACTIONS_PER_SLOT}
+
+
+def opp_action_to_index(action: dict, snap: dict) -> Optional[int]:
+    """Encode one opp_actions_actual entry into the 0–15 codec from the
+    opponent's perspective (our mons are its foes, opp bench its switch-ins)."""
+    flipped = _flip_perspective(snap)
+    fa = _flip_action_slots(action)
+    mon = (flipped.get("our_active") or {}).get(fa.get("slot"))
+    return action_to_index(fa, mon, flipped)
+
+
+def annotate_opp_actions(transition: dict) -> dict:
+    """Stamp ``opp_action_index`` on each opp_actions_actual entry + the
+    ``opp_action_mask`` onto a transition, in place — the auxiliary opponent-head
+    target/mask.  Same invariant as annotate_transition_actions: a non-null
+    opp_action_index is always legal under opp_action_mask (else stamped None)."""
+    snap = transition.get("state_before_actions") or {}
+    opp_mask = build_opp_action_mask(snap)
+    for act in transition.get("opp_actions_actual") or []:
+        slot = act.get("slot")
+        idx = opp_action_to_index(act, snap)
+        if idx is not None:
+            row = opp_mask.get(slot) or []
+            if idx >= len(row) or row[idx] != 1:
+                idx = None
+        act["opp_action_index"] = idx
+    transition["opp_action_mask"] = opp_mask
+    return transition
+
+
 # ── Convenience accessors ──────────────────────────────────────────────────────
 def get_state_dim() -> int:
     return STATE_DIM

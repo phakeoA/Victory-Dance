@@ -64,6 +64,7 @@ from state_encoder import (  # noqa: E402  (import after sys.path bootstrap)
     get_state_dim,
     get_gimmick_dim,
     NUM_MOVES,
+    OPP_HEADS,
     permute_move_slots,
     permute_action_index,
     permute_action_mask_row,
@@ -108,6 +109,7 @@ def transition_to_example(
     t: dict,
     encoder: StateEncoder,
     stats: Optional[Counter] = None,
+    with_opp: bool = False,
 ) -> Optional[dict]:
     """
     Convert one transition dict into a BC example, or None if no head is usable.
@@ -176,7 +178,7 @@ def transition_to_example(
     x = encoder.encode_snapshot(
         t.get("state_before_actions") or {}, turn=t.get("turn") or 0
     )
-    return {
+    ex = {
         "x": x,
         "targets": targets,
         "masks": masks,
@@ -185,17 +187,47 @@ def transition_to_example(
         "replay_id": t.get("replay_id"),
     }
 
+    # Auxiliary opponent-head labels (task #9): the opponent's action index +
+    # legality mask per opp slot, computed from the SAME stored snapshot via the
+    # opp-perspective codec — no re-export needed.  Only attached when requested.
+    if with_opp:
+        from state_encoder import annotate_opp_actions, OPP_HEADS  # noqa: E402
+        annotate_opp_actions(t)
+        opp_mask_all = t.get("opp_action_mask") or {}
+        opp_first = _first_action_per_slot(t.get("opp_actions_actual") or [])
+        opp_targets: Dict[str, int] = {}
+        opp_masks: Dict[str, np.ndarray] = {}
+        for head in OPP_HEADS:
+            act = opp_first.get(head)
+            if act is None:
+                continue
+            ai = act.get("opp_action_index")
+            row = opp_mask_all.get(head)
+            if ai is None or not row or sum(row) == 0:
+                continue
+            if ai < 0 or ai >= len(row) or row[ai] != 1:
+                continue
+            opp_targets[head] = int(ai)
+            opp_masks[head] = np.asarray(row, dtype=np.float32)
+            if stats is not None:
+                stats["usable_opp_examples"] += 1
+        ex["opp_targets"] = opp_targets
+        ex["opp_masks"] = opp_masks
+    return ex
+
 
 def build_examples(
     files: Sequence[str],
     encoder: Optional[StateEncoder] = None,
     limit_transitions: Optional[int] = None,
     limit_files: Optional[int] = None,
+    with_opp: bool = False,
 ) -> Tuple[List[dict], Counter]:
     """
     Walk JSONL ``files`` and return ``(examples, stats)``.
 
     ``limit_files`` / ``limit_transitions`` cap the work for smoke runs.
+    ``with_opp`` also extracts the auxiliary opponent-head labels (task #9).
     """
     encoder = encoder or StateEncoder()
     stats: Counter = Counter()
@@ -214,7 +246,7 @@ def build_examples(
                         continue
                     stats["transitions"] += 1
                     t = json.loads(line)
-                    ex = transition_to_example(t, encoder, stats)
+                    ex = transition_to_example(t, encoder, stats, with_opp=with_opp)
                     if ex is not None:
                         examples.append(ex)
                     if limit_transitions is not None and stats["transitions"] >= limit_transitions:
@@ -235,6 +267,7 @@ def examples_from_folders(
     recursive: bool = True,
     limit_transitions: Optional[int] = None,
     limit_files: Optional[int] = None,
+    with_opp: bool = False,
 ) -> Tuple[List[dict], Counter]:
     """Convenience: gather examples from one or more folders of JSONL.
 
@@ -255,6 +288,7 @@ def examples_from_folders(
         encoder=encoder,
         limit_transitions=limit_transitions,
         limit_files=limit_files,
+        with_opp=with_opp,
     )
 
 
@@ -299,7 +333,7 @@ class BCDataset(Dataset):
     """
 
     def __init__(self, examples: Sequence[dict], augment_move_order: bool = False,
-                 aug_seed: int = 0):
+                 aug_seed: int = 0, with_opp: bool = False):
         if not _HAS_TORCH:  # pragma: no cover
             raise RuntimeError("torch is required for BCDataset")
         # Train-only move-slot permutation augmentation (task #22): when True,
@@ -307,6 +341,10 @@ class BCDataset(Dataset):
         # AND remaps that head's action target + mask, so the net learns move
         # FEATURES rather than slot POSITION.  Leave False for val (true metrics).
         self.augment_move_order = bool(augment_move_order)
+        # Auxiliary opponent-head targets/masks (task #9) when the examples carry
+        # them.  Move-order augmentation does NOT touch the opp move blocks (it
+        # only permutes our slots), so the opp fields pass through unchanged.
+        self.with_opp = bool(with_opp)
         self._rng = np.random.RandomState(aug_seed)
         n = len(examples)
         state_dim = get_state_dim()
@@ -317,6 +355,10 @@ class BCDataset(Dataset):
         self.gimmick_target = np.full((n, len(HEADS)), -1, dtype=np.int64)
         self.gimmick_mask = np.zeros((n, len(HEADS), GIMMICK_DIM), dtype=np.float32)
         self.gimmick_valid = np.zeros((n, len(HEADS)), dtype=np.float32)
+        if self.with_opp:
+            self.opp_target = np.full((n, len(OPP_HEADS)), -1, dtype=np.int64)
+            self.opp_mask = np.zeros((n, len(OPP_HEADS), ACTIONS_PER_SLOT), dtype=np.float32)
+            self.opp_valid = np.zeros((n, len(OPP_HEADS)), dtype=np.float32)
         self.replay_ids: List[str] = []
 
         for i, ex in enumerate(examples):
@@ -333,6 +375,14 @@ class BCDataset(Dataset):
                     self.gimmick_target[i, h_idx] = g_targets[head]
                     self.gimmick_mask[i, h_idx] = g_masks[head]
                     self.gimmick_valid[i, h_idx] = 1.0
+            if self.with_opp:
+                o_targets = ex.get("opp_targets") or {}
+                o_masks = ex.get("opp_masks") or {}
+                for o_idx, ohead in enumerate(OPP_HEADS):
+                    if ohead in o_targets:
+                        self.opp_target[i, o_idx] = o_targets[ohead]
+                        self.opp_mask[i, o_idx] = o_masks[ohead]
+                        self.opp_valid[i, o_idx] = 1.0
 
         # Pre-convert to tensors once (dataset fits comfortably in RAM).
         self.X_t = torch.from_numpy(self.X)
@@ -342,9 +392,25 @@ class BCDataset(Dataset):
         self.gimmick_target_t = torch.from_numpy(self.gimmick_target)
         self.gimmick_mask_t = torch.from_numpy(self.gimmick_mask)
         self.gimmick_valid_t = torch.from_numpy(self.gimmick_valid)
+        if self.with_opp:
+            self.opp_target_t = torch.from_numpy(self.opp_target)
+            self.opp_mask_t = torch.from_numpy(self.opp_mask)
+            self.opp_valid_t = torch.from_numpy(self.opp_valid)
 
     def __len__(self) -> int:
         return self.X_t.shape[0]
+
+    def _opp_fields(self, idx: int) -> dict:
+        """Opponent aux targets/masks for this item (empty unless with_opp).  The
+        move-order augmentation only permutes OUR move blocks, so opp fields are
+        identical on both fetch paths."""
+        if not self.with_opp:
+            return {}
+        return {
+            "opp_target": self.opp_target_t[idx],
+            "opp_mask": self.opp_mask_t[idx],
+            "opp_valid": self.opp_valid_t[idx],
+        }
 
     def __getitem__(self, idx: int) -> dict:
         if not self.augment_move_order:
@@ -356,6 +422,7 @@ class BCDataset(Dataset):
                 "gimmick_target": self.gimmick_target_t[idx],
                 "gimmick_mask": self.gimmick_mask_t[idx],
                 "gimmick_valid": self.gimmick_valid_t[idx],
+                **self._opp_fields(idx),
             }
 
         # Augmented fetch: permute each own active slot's move blocks + remap the
@@ -379,6 +446,7 @@ class BCDataset(Dataset):
             "gimmick_target": self.gimmick_target_t[idx],
             "gimmick_mask": self.gimmick_mask_t[idx],
             "gimmick_valid": self.gimmick_valid_t[idx],
+            **self._opp_fields(idx),
         }
 
 

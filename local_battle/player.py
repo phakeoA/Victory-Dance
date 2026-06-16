@@ -156,6 +156,18 @@ class VGCPlayer(VGCPlayerBase):
             a0, a1 = _M.bc_action_indices(
                 self._model, self._model_heads, state_vec, mask0, mask1, self._device
             )
+            # ── Cross-slot SWITCH dedup (doubles "can only switch in once") ──────
+            # The two heads pick independently, so both active slots can choose the
+            # SAME bench mon to switch into — Showdown rejects the second order.
+            # Re-decode slot 1 with the colliding switch masked out → the model's
+            # best NON-colliding legal action (preserves intent; no retry storm).
+            if (a0 is not None and a0 == a1 and a0 >= SWITCH_OFFSET
+                    and a0 < len(mask1) and mask1[a0]):
+                mask1 = list(mask1)
+                mask1[a0] = False
+                _, a1 = _M.bc_action_indices(
+                    self._model, self._model_heads, state_vec, mask0, mask1, self._device
+                )
             # None ⟺ all-zero mask ⟺ empty/fainted slot → 0 (passes via _safe_order).
             return (a0 if a0 is not None else 0,
                     a1 if a1 is not None else 0,
