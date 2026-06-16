@@ -540,5 +540,37 @@
       "forced_switch_model": 146,
       "tp_model": 90
     }
+  },
+  {
+    "run": "run-20260616-181328",
+    "timestamp": "2026-06-16T18:13:28",
+    "ckpt": "ai_train_scripts\\BC_model\\checkpoints\\bc_best.pt",
+    "per_opponent": {
+      "random": {
+        "wins": 23,
+        "n": 30,
+        "win_rate": 0.7666666666666667,
+        "anchor": 1000.0
+      },
+      "max_damage": {
+        "wins": 13,
+        "n": 30,
+        "win_rate": 0.43333333333333335,
+        "anchor": 1300.0
+      },
+      "heuristic": {
+        "wins": 6,
+        "n": 30,
+        "win_rate": 0.2,
+        "anchor": 1500.0
+      }
+    },
+    "scripted_win_rate": 0.4666666666666667,
+    "model_elo": 1239.7418980805248,
+    "sources": {
+      "model": 792,
+      "forced_switch_model": 150,
+      "tp_model": 90
+    }
   }
 ]
