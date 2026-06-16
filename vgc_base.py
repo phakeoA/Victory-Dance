@@ -60,10 +60,44 @@ from state_encoder import (
     SWITCH_OFFSET,
     ACTIONS_PER_SLOT,
     STATE_DIM,
+    NUM_MOVES,
+    # Shared move-target-kind tables — the SAME ones the training action mask
+    # (build_action_mask) uses, so the live serve mask is identical to training.
+    _move_target_kind,
+    _CHOOSABLE_SINGLE,
+    _ALLY_KINDS,
 )
-from live_state_encoder import LiveStateEncoder
+from live_state_encoder import LiveStateEncoder, own_bench_mons
 
 log = logging.getLogger(__name__)
+
+# ── Default Pikalytics belief (shared, loaded once) ───────────────────────────
+# The trained nets were fit on belief-ENRICHED state vectors (opponent mons carry
+# Pikalytics distribution est-stats + predicted move slots).  The live encoder
+# must be given the SAME BeliefState or those opponent features sit at zero at
+# serve time — a train/serve mismatch that degrades the policy.
+_BELIEF_SINGLETON = None
+_BELIEF_LOADED = False
+
+
+def _default_belief():
+    """Load (once) the default Pikalytics BeliefState, or None if unavailable."""
+    global _BELIEF_SINGLETON, _BELIEF_LOADED
+    if _BELIEF_LOADED:
+        return _BELIEF_SINGLETON
+    _BELIEF_LOADED = True
+    try:
+        from belief_state import BeliefState, _DEFAULT_PIKALYTICS_PATH
+        if _DEFAULT_PIKALYTICS_PATH.exists():
+            _BELIEF_SINGLETON = BeliefState(_DEFAULT_PIKALYTICS_PATH)
+            log.info("Loaded default BeliefState from %s", _DEFAULT_PIKALYTICS_PATH)
+        else:
+            log.warning("Pikalytics file missing (%s) — opponent est-stats will be "
+                        "zeroed (train/serve mismatch).", _DEFAULT_PIKALYTICS_PATH)
+    except Exception as exc:  # pragma: no cover - degrade gracefully
+        log.warning("Could not load default BeliefState (%s) — opponent est-stats "
+                    "will be zeroed.", exc)
+    return _BELIEF_SINGLETON
 
 # ── Target constants (mirror state_encoder action space) ──────────────────────
 _TARGET_OPP0 = 0
@@ -166,6 +200,16 @@ def build_legal_action_mask(battle: DoubleBattle, slot: int) -> list[bool]:
     """
     Return a 16-element bool list marking which actions are legal for `slot`.
     slot 0 = own active mon 0,  slot 1 = own active mon 1.
+
+    Parity with training (state_encoder.build_action_mask): move-target buckets
+    are restricted by the move's DEX TARGET KIND — a spread/self/field move
+    exposes only its canonical bucket 0, an ally move only bucket 2, a single-
+    target move only the present-foe buckets (+ ally for non-adjacentFoe).  The
+    one serve-time addition is the PP check (the offline parser doesn't track PP,
+    but a 0-PP move is genuinely illegal live).  Switch bench uses the same
+    _is_real_mon filter as the live encoder, so switch index i refers to the
+    SAME mon the model saw in encoder bench slot 4+i (drops broken-illusion
+    phantoms).
     """
     mask = [False] * ACTIONS_PER_SLOT
 
@@ -178,8 +222,8 @@ def build_legal_action_mask(battle: DoubleBattle, slot: int) -> list[bool]:
     if mon is None or mon.fainted:
         return mask
 
-    # ── Move-target actions (0–11) ────────────────────────────────────────────
-    available_moves = list(mon.moves.values())
+    # ── Move-target actions (0–11), keyed by DEX target kind (training parity) ──
+    available_moves = list(mon.moves.values())[:NUM_MOVES]
     opp_active  = battle.opponent_active_pokemon
     opp0_alive  = len(opp_active) > 0 and opp_active[0] is not None
     opp1_alive  = len(opp_active) > 1 and opp_active[1] is not None
@@ -190,27 +234,70 @@ def build_legal_action_mask(battle: DoubleBattle, slot: int) -> list[bool]:
         and not active[ally_slot].fainted
     )
 
-    for action_idx, (move_idx, target) in enumerate(MOVE_TARGET_PAIRS):
-        if move_idx >= len(available_moves):
+    # Serve-time move legality: poke-env's available_moves[slot] is Showdown's
+    # authoritative usable-move list — it drops Disabled / Choice-locked / Taunted
+    # / Encored / consecutive-Protect / Fake-Out-after-turn-1 moves.  Gate on it
+    # the SAME way the switch branch gates on available_switches[slot]; without it
+    # the mask marks a disabled move legal, the model argmaxes it, and Showdown
+    # rejects the order ("[Unavailable choice] Can't move: X is disabled") → the
+    # player thrashes to a random fallback (the un-brought-switch bug's twin).
+    # Like the PP guard this is SERVE-ONLY (the offline parser has no disabled
+    # concept) and only ever REMOVES an action no player could take, so train/serve
+    # legality stays consistent.  Skipped when poke-env exposes no list (empty →
+    # request-less harness / non-move request) so the move mask never goes empty
+    # spuriously; matched by Move.id (poke-env may hold distinct Move instances).
+    try:
+        _av = battle.available_moves
+        usable_ids = {m.id for m in _av[slot]} if slot < len(_av) else set()
+    except (ValueError, AttributeError, IndexError, TypeError):
+        usable_ids = set()
+
+    for m_idx, move in enumerate(available_moves):
+        if move.current_pp == 0:        # serve-time only: 0-PP move is illegal
             continue
-        move: Move = available_moves[move_idx]
-        if move.current_pp == 0:
+        if usable_ids and move.id not in usable_ids:   # Showdown-disabled / locked
             continue
-        if target == _TARGET_OPP0 and not opp0_alive:
-            continue
-        if target == _TARGET_OPP1 and not opp1_alive:
-            continue
-        if target == _TARGET_ALLY and not ally_alive:
-            continue
-        mask[action_idx] = True
+        kind = _move_target_kind(move.id)
+        if kind in _ALLY_KINDS:
+            if kind == "adjacentAllyOrSelf" or ally_alive:
+                mask[m_idx * 3 + _TARGET_ALLY] = True
+        elif kind in _CHOOSABLE_SINGLE:
+            buckets = [b for b, alive in ((_TARGET_OPP0, opp0_alive),
+                                          (_TARGET_OPP1, opp1_alive)) if alive]
+            # Ally bucket (2) only for NON-damaging single-target moves (Heal
+            # Pulse, Skill Swap, …).  A damaging single-target move (Acrobatics,
+            # Iron Head, …) must NEVER be allowed to hit our OWN ally — that
+            # "self-attack" is the model mis-targeting the ally (esp. when the
+            # ally and a foe share a species, e.g. two Kingambits on the field).
+            # Genuine ally-support moves (Helping Hand/Coaching) are adjacentAlly
+            # → the _ALLY_KINDS branch above, so they are unaffected.  Serve-only:
+            # humans never target a damaging move at their ally, so this only ever
+            # removes an action the training labels never contain.
+            if kind != "adjacentFoe" and ally_alive and move.base_power == 0:
+                buckets.append(_TARGET_ALLY)
+            for b in (buckets or [_TARGET_OPP0]):   # no foe present → bucket 0
+                mask[m_idx * 3 + b] = True
+        else:
+            # self / spread / field / unknown → canonical bucket 0 only,
+            # unconditionally (these moves are always usable).
+            mask[m_idx * 3 + _TARGET_OPP0] = True
 
     # ── Switch actions (12–15) ────────────────────────────────────────────────
-    bench = [
-        p for p in battle.team.values()
-        if p not in set(filter(None, active)) and not p.fainted
-    ]
-    for bench_idx, _ in enumerate(bench[:4]):
-        mask[SWITCH_OFFSET + bench_idx] = True
+    # own_bench_mons is the SAME brought-only bench the live encoder writes into
+    # bench slots 4..7, so switch index i ↔ encoder bench slot 4+i.  It excludes
+    # the un-brought 2-of-6 roster mons (VGC brings 4) that Showdown would reject
+    # as a switch target.  Legality is then keyed PER SLOT by poke-env's
+    # available_switches, so a trapped active correctly exposes no switches (and
+    # a switch we DO mark legal is one Showdown will accept — no retry storm).
+    bench = own_bench_mons(battle)
+    try:
+        avail = battle.available_switches
+        slot_switchable = set(avail[slot]) if slot < len(avail) else set()
+    except (ValueError, AttributeError, IndexError, TypeError):
+        slot_switchable = set()
+    for bench_idx, mon_b in enumerate(bench[:4]):
+        if mon_b in slot_switchable:
+            mask[SWITCH_OFFSET + bench_idx] = True
 
     return mask
 
@@ -236,33 +323,52 @@ def action_to_order(action: int, battle: DoubleBattle, slot: int) -> Optional[Si
 
     if action < SWITCH_OFFSET:
         move_idx, target_code = MOVE_TARGET_PAIRS[action]
-        moves = list(mon.moves.values())
+        moves = list(mon.moves.values())[:NUM_MOVES]
         if move_idx >= len(moves):
             return None
         move = moves[move_idx]
+        # Serve-time: a Showdown-disabled / Choice-locked / Taunted move cannot be
+        # ordered — fall back cleanly instead of emitting a rejected /choose order
+        # (mirrors the build_legal_action_mask available_moves gate; Move.id match).
+        try:
+            _av = battle.available_moves
+            _usable = {m.id for m in _av[slot]} if slot < len(_av) else set()
+        except (ValueError, AttributeError, IndexError, TypeError):
+            _usable = set()
+        if _usable and move.id not in _usable:
+            return None
 
+        # Foe slots are positional (opp_a/opp_b); fall back to the only present
+        # foe so the index still resolves under auto-targeting.
+        opp_present = [p for p in opp_active if p is not None]
         if target_code == _TARGET_OPP0:
-            targets = [p for p in opp_active if p is not None]
-            target_mon = targets[0] if targets else None
+            target_mon = opp_active[0] if (len(opp_active) > 0 and opp_active[0]) \
+                else (opp_present[0] if opp_present else None)
         elif target_code == _TARGET_OPP1:
-            targets = [p for p in opp_active if p is not None]
-            target_mon = targets[1] if len(targets) > 1 else (targets[0] if targets else None)
+            target_mon = opp_active[1] if (len(opp_active) > 1 and opp_active[1]) \
+                else (opp_present[0] if opp_present else None)
         else:  # ally
             ally_slot = 1 - slot
             target_mon = active[ally_slot] if ally_slot < len(active) else None
+            # Never order a DAMAGING move at our own ally (the mask forbids it too,
+            # but guard the codec so a stale/fallback index can't self-attack).
+            if target_mon is not None and move.base_power > 0:
+                return None
 
+        # self / spread / field moves (and bucket-0 with no foe present) need no
+        # explicit target — let Showdown auto-target rather than failing.
         if target_mon is None:
-            return None
+            return Player.create_order(move)
 
         showdown_target = battle.to_showdown_target(move, target_mon)
         return Player.create_order(move, move_target=showdown_target)
 
     else:
         bench_idx = action - SWITCH_OFFSET
-        bench = [
-            p for p in battle.team.values()
-            if p not in set(filter(None, active)) and not p.fainted
-        ]
+        # SAME brought-only bench as the encoder + the mask, so switch index i
+        # decodes to the mon in encoder bench slot 4+i (and never an un-brought
+        # roster mon Showdown would reject).
+        bench = own_bench_mons(battle)
         if bench_idx >= len(bench):
             return None
         return Player.create_order(bench[bench_idx])
@@ -297,7 +403,10 @@ class VGCPlayerBase(Player):
 
     def __init__(self, replay_path: Optional[Path] = None, **kwargs):
         super().__init__(**kwargs)
-        self._encoder = LiveStateEncoder()
+        # Give the live encoder the SAME BeliefState the training data was
+        # enriched with, so opponent est-stats + predicted move slots are
+        # populated at serve time (matching the net's training distribution).
+        self._encoder = LiveStateEncoder(belief=_default_belief())
         _rp = replay_path or Path("replay_buffer/replay.jsonl")
         self._replay  = ReplayBuffer(_rp)
 

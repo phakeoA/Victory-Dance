@@ -463,3 +463,107 @@ def test_redisguise_mega_zoroark_no_phantom_double_count():
     after_bench = [m["species"] for m in after["opp_bench"]]
     assert "Zoroark-Hisui" in after_active        # disguise resolved
     assert any("Charizard" in s for s in after_bench)   # real Charizard restored
+
+
+# ── #6: post-faint forced-replacement opponent snapshot ──────────────────────
+# opp_snapshot_current reconstructs the CURRENT (mid-turn / post-faint) opponent
+# board the way a live bot must encode a forced-switch decision — distinct from
+# the start-of-turn snapshot opp_snapshot_from_log_prefix returns.
+
+def _post_faint_doubles_log() -> str:
+    """A turn where an opponent (p2) mon faints AND our (p1) mon faints — the
+    log ends at the forceSwitch point, BEFORE any replacement switch-in."""
+    return make_log(
+        "|player|p1|alice|101|1500",
+        "|player|p2|bob|102|1500",
+        "|teamsize|p1|4",
+        "|teamsize|p2|4",
+        "|tier|[Gen 9 Champions] VGC 2026 Reg M-A",
+        "|poke|p1|Pikachu, L50, M|",
+        "|poke|p1|Eevee, L50, M|",
+        "|poke|p1|Snorlax, L50, M|",
+        "|poke|p2|Farigiraf, L50, F|",
+        "|poke|p2|Rampardos, L50, F|",
+        "|poke|p2|Sableye, L50, F|",
+        "|switch|p1a: Pikachu|Pikachu, L50, M|100/100",
+        "|switch|p1b: Eevee|Eevee, L50, M|100/100",
+        "|switch|p2a: Farigiraf|Farigiraf, L50, F|100/100",
+        "|switch|p2b: Rampardos|Rampardos, L50, F|100/100",
+        "|turn|1",
+        "|move|p1a: Pikachu|Thunderbolt|p2b: Rampardos",
+        "|-damage|p2b: Rampardos|0 fnt",
+        "|faint|p2b: Rampardos",          # opponent mon faints mid-turn
+        "|move|p2a: Farigiraf|Body Slam|p1a: Pikachu",
+        "|-damage|p1a: Pikachu|0 fnt",
+        "|faint|p1a: Pikachu",            # our mon faints → forceSwitch point
+    )
+
+
+def test_opp_snapshot_current_reflects_post_faint():
+    """opp_snapshot_current must show the post-faint board (the fainted opponent
+    mon dropped from opp_active), whereas opp_snapshot_from_log_prefix returns the
+    stale start-of-turn board (both opponents still active)."""
+    from live_state_encoder import opp_snapshot_current, opp_snapshot_from_log_prefix
+
+    log = _post_faint_doubles_log()
+    start = opp_snapshot_from_log_prefix(log, "p1", 1)   # opp = p2, START of turn 1
+    cur = opp_snapshot_current(log, "p1")                # CURRENT (post-faint)
+
+    assert start is not None and cur is not None
+    assert {d["species"] for d in start["opp_active"].values()} == {"Farigiraf", "Rampardos"}, \
+        "start-of-turn snapshot should show both opponents active"
+    assert {d["species"] for d in cur["opp_active"].values()} == {"Farigiraf"}, \
+        "post-faint snapshot should drop the fainted Rampardos from active"
+    fainted_bench = {m["species"] for m in cur["opp_bench"] if m.get("is_fainted")}
+    assert "Rampardos" in fainted_bench, "Rampardos should be on the bench, KO-flagged"
+
+
+def test_opp_snapshot_current_equals_prefix_at_turn_boundary():
+    """At a turn boundary (no mid-turn faints yet) the CURRENT snapshot equals the
+    START-of-turn snapshot — opp_snapshot_current is the general form of the
+    prefix helper."""
+    from live_state_encoder import opp_snapshot_current, opp_snapshot_from_log_prefix
+
+    log = _post_faint_doubles_log()
+    # Truncate to the |turn|1 boundary (drop the turn-1 action lines).
+    lines = log.split("\n")
+    cut = lines.index("|turn|1") + 1
+    prefix = "\n".join(lines[:cut])
+
+    cur = opp_snapshot_current(prefix, "p1")
+    pre = opp_snapshot_from_log_prefix(log, "p1", 1)
+    assert cur is not None and pre is not None
+    assert ({k: v["species"] for k, v in cur["opp_active"].items()}
+            == {k: v["species"] for k, v in pre["opp_active"].items()})
+    assert ([m["species"] for m in cur["opp_bench"]]
+            == [m["species"] for m in pre["opp_bench"]])
+
+
+def test_opp_snapshot_current_post_faint_real_replay():
+    """Real-replay check: truncating the orangeomar log right after the opponent
+    Rampardos faints (post Ally-Switch) yields a CURRENT opp snapshot with only
+    Farigiraf active and Rampardos KO-flagged on the bench — the post-faint board
+    a forced-replacement decision must encode."""
+    from pathlib import Path
+    from live_state_encoder import opp_snapshot_current, opp_snapshot_from_log_prefix
+
+    vods = Path(__file__).resolve().parents[2] / "vods"
+    hit = next(vods.rglob("*kronomono-orangeomar*.html"), None)
+    if hit is None:
+        pytest.skip("orangeomar fixture not found")
+    log = extract_log_from_html(hit.read_text(encoding="utf-8"))
+
+    lines = log.split("\n")
+    faint_idx = next(i for i, ln in enumerate(lines)
+                     if ln.strip() == "|faint|p2a: Rampardos")
+    prefix = "\n".join(lines[:faint_idx + 1])   # up to & incl. the opp faint
+
+    cur = opp_snapshot_current(prefix, "p1")     # opp = p2
+    assert cur is not None
+    assert {d["species"] for d in cur["opp_active"].values()} == {"Farigiraf"}, \
+        "only Farigiraf should be active after Rampardos faints"
+    assert "Rampardos" in {m["species"] for m in cur["opp_bench"] if m.get("is_fainted")}
+
+    # The stale start-of-turn-1 snapshot still shows both opponents active.
+    start = opp_snapshot_from_log_prefix(log, "p1", 1)
+    assert {d["species"] for d in start["opp_active"].values()} == {"Farigiraf", "Rampardos"}

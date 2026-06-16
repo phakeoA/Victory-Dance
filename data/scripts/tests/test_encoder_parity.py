@@ -394,6 +394,245 @@ def test_gap6_encode_opp_snapshot_changes_only_opp_bytes():
     assert not np.array_equal(base, spliced), "splice had no effect"
 
 
+# ── #7: live action codec / mask parity at serve time ───────────────────────
+# The live serve codec (vgc_base.build_legal_action_mask / action_to_order) must
+# agree with the frozen TRAINING codec (state_encoder.build_action_mask /
+# action_to_index): move-target buckets keyed by DEX target kind, and the own
+# bench filtered by _is_real_mon so switch index i ↔ encoder bench slot 4+i.
+def _repo_root_on_path():
+    import sys as _sys
+    rr = Path(__file__).resolve().parents[3]   # repo root (holds vgc_base.py)
+    if str(rr) not in _sys.path:
+        _sys.path.insert(0, str(rr))
+
+
+@pytest.mark.parametrize("name", [_CLEAN_NAME, _DUAL_NAME])
+def test_live_mask_target_buckets_match_training_kinds(name):
+    """build_legal_action_mask must expose move-target buckets by DEX target
+    kind exactly like training's build_action_mask — spread/self/field → bucket
+    0 only, ally → bucket 2, single → present foes (+ ally) — and every legal
+    action must decode to a non-None order.  (Pre-fix the live mask marked ALL
+    present-target buckets for EVERY move, far broader than training.)"""
+    _repo_root_on_path()
+    from vgc_base import build_legal_action_mask, action_to_order
+    from state_encoder import (
+        _move_target_kind, _CHOOSABLE_SINGLE, _ALLY_KINDS, ACTIONS_PER_SLOT,
+    )
+    log = extract_log_from_html(_find(name).read_text(encoding="utf-8"))
+    checked = 0
+    for persp in ("p1", "p2"):
+        user = H.player_usernames(log)[persp]
+        for turn in range(1, 12):
+            battle = H.drive_live_battle_to_turn(log, user, turn)
+            try:
+                active = battle.active_pokemon
+            except ValueError:
+                continue
+            for slot, mon in enumerate(active):
+                if mon is None or mon.fainted:
+                    continue
+                mask = build_legal_action_mask(battle, slot)
+                checked += 1
+                ally = active[1 - slot] if (1 - slot) < len(active) else None
+                ally_alive = ally is not None and not ally.fainted
+                for m_idx, mv in enumerate(list(mon.moves.values())[:4]):
+                    if mv.current_pp == 0:
+                        continue
+                    kind = _move_target_kind(mv.id)
+                    buckets = {t for t in range(3) if mask[m_idx * 3 + t]}
+                    if kind in _ALLY_KINDS:
+                        exp = {2} if (kind == "adjacentAllyOrSelf" or ally_alive) else set()
+                        assert buckets == exp, f"{mv.id} ({kind}) buckets {buckets} != {exp}"
+                    elif kind not in _CHOOSABLE_SINGLE:
+                        assert buckets == {0}, f"{mv.id} ({kind}) buckets {buckets} != {{0}}"
+                    # single-target buckets are presence-dependent → decodability below
+                for a in range(ACTIONS_PER_SLOT):
+                    if mask[a]:
+                        assert action_to_order(a, battle, slot) is not None, \
+                            f"legal action {a} (slot {slot}) failed to decode"
+    assert checked > 0, "no decisions exercised"
+
+
+def test_live_codec_bench_excludes_illusion_phantom(clean_log):
+    """The live codec's switch bench must (a) only offer mons Showdown will accept
+    as a switch — i.e. the BROUGHT 4-of-6 in ``available_switches``, NOT every mon
+    in ``battle.team`` (VGC leaves 2 roster mons un-brought) — and (b) drop a
+    broken-illusion phantom (max_hp==0) via _is_real_mon, so switch index i refers
+    to the SAME mon the live encoder wrote into bench slot 4+i.
+
+    A request-less driven battle exposes no available_switches, so we synthesise a
+    bench mon and toggle its membership of available_switches to exercise both the
+    brought filter (the un-brought-switch bug fix) and the phantom filter."""
+    _repo_root_on_path()
+    from vgc_base import build_legal_action_mask
+    from state_encoder import SWITCH_OFFSET
+    from poke_env.battle import Pokemon
+
+    user = H.player_usernames(clean_log)["p1"]
+    battle = H.drive_live_battle_to_turn(clean_log, user, 2)
+
+    def switch_count():
+        return sum(build_legal_action_mask(battle, 0)[SWITCH_OFFSET:SWITCH_OFFSET + 4])
+
+    base = switch_count()
+
+    ghost = Pokemon(gen=9, species="snorlax")
+    ghost.set_hp_status("100/100")
+    battle.team["p1: PhantomTest"] = ghost
+
+    # In battle.team but NOT in available_switches (an un-brought roster mon) →
+    # must NOT be switchable.  This is the regression guard for the un-brought
+    # switch bug: before the fix, any battle.team member was offered as a switch
+    # and Showdown rejected it ("you do not have a Pokémon named X to switch to").
+    assert switch_count() == base, "un-brought team mon wrongly offered as a switch"
+
+    # Now mark it switchable (brought) for slot 0 → it must become switchable.
+    battle._available_switches = [[ghost], []]
+    assert switch_count() == base + 1, "brought, switchable bench mon not offered"
+
+    # Broken-illusion phantom: switchable per poke-env but revealed disguise left
+    # with no HP → _is_real_mon must still drop it out.
+    ghost._max_hp = 0
+    assert ghost.max_hp == 0
+    assert switch_count() == base, "phantom (max_hp 0) not filtered from switch mask"
+
+
+def test_live_mask_excludes_disabled_moves(clean_log):
+    """Serve-time move legality: a Showdown-disabled move (one absent from
+    battle.available_moves[slot] — Fake Out after turn 1, consecutive Protect,
+    Choice-lock, Taunt, Encore, …) must be dropped from the legal-action mask AND
+    refused by the codec, mirroring the available_switches gate.
+
+    Before the fix the move mask only checked current_pp, so a disabled move was
+    marked legal, the model argmaxed it, and Showdown rejected the order
+    ('[Unavailable choice] Can't move: X is disabled') → a random fallback ran
+    instead of the model — a major source of the bot "seeming random"."""
+    _repo_root_on_path()
+    from vgc_base import build_legal_action_mask, action_to_order
+    from state_encoder import NUM_MOVES
+
+    user = H.player_usernames(clean_log)["p1"]
+    # Drive a few turns so the lead has revealed >=2 moves to work with.
+    battle = None
+    moves: list = []
+    for tn in (4, 3, 5, 2):
+        battle = H.drive_live_battle_to_turn(clean_log, user, tn)
+        mon0 = battle.active_pokemon[0]
+        if mon0 is not None:
+            moves = list(mon0.moves.values())[:NUM_MOVES]
+            if len(moves) >= 2 and moves[0].id != moves[1].id:
+                break
+    if not moves or len(moves) < 2 or moves[0].id == moves[1].id:
+        pytest.skip("replay did not reveal >=2 distinct moves on the lead")
+
+    # All moves available → move slot 0 exposes at least one legal target bucket.
+    battle._available_moves = [list(moves), list(moves)]
+    full = build_legal_action_mask(battle, 0)
+    assert any(full[0:3]), "move slot 0 should be legal when all moves are available"
+
+    # DISABLE move slot 0 (drop it from poke-env's available_moves[slot]).
+    battle._available_moves = [moves[1:], moves[1:]]
+    gated = build_legal_action_mask(battle, 0)
+    assert not any(gated[0:3]), "disabled move (slot 0) not dropped from the mask"
+    assert any(gated[3:6]), "a still-available move (slot 1) must stay legal"
+    # The codec must also refuse the disabled move so a stale index can't be ordered.
+    assert action_to_order(0, battle, 0) is None, "codec ordered a disabled move"
+    # …and still decode an available one.
+    assert action_to_order(3, battle, 0) is not None, "codec dropped an available move"
+
+
+def test_live_mask_forbids_ally_target_for_damaging_moves():
+    """A DAMAGING single-target move (Acrobatics, Iron Head, …) must NOT be allowed
+    to target our own ally — that self-attack is the model mis-picking the ally
+    (e.g. two Kingambits on the field, one ours one the opponent's).  A NON-damaging
+    single-target support move (Heal Pulse) MUST still be allowed at the ally, and
+    dedicated ally moves (Helping Hand/Coaching = adjacentAlly) are unaffected.
+
+    Pure mask logic over a duck-typed board + real poke-env Move objects."""
+    _repo_root_on_path()
+    from poke_env.battle import Move
+    from vgc_base import (
+        build_legal_action_mask, action_to_order, _TARGET_OPP0, _TARGET_ALLY,
+    )
+
+    acro = Move("acrobatics", gen=9)   # 'any' target, base_power > 0  (damaging)
+    heal = Move("healpulse", gen=9)    # 'any' target, base_power == 0 (support)
+    assert acro.base_power > 0 and heal.base_power == 0
+
+    class _Mon:
+        def __init__(self, moves, fainted=False):
+            self._mv = moves
+            self.fainted = fainted
+        @property
+        def moves(self):
+            return self._mv
+
+    actor = _Mon({"acrobatics": acro, "healpulse": heal})
+    ally  = _Mon({"acrobatics": acro})
+    foe   = _Mon({"acrobatics": acro})
+
+    class _Battle:
+        active_pokemon = [actor, ally]
+        opponent_active_pokemon = [foe, None]      # one foe present (opp_a)
+        available_moves = [list(actor.moves.values()), []]
+        available_switches = [[], []]
+        team = {}
+        def to_showdown_target(self, move, target_mon):   # stub for the codec
+            return 1
+
+    battle = _Battle()
+    mask = build_legal_action_mask(battle, 0)
+
+    # move slot 0 = Acrobatics (damaging): foe legal, ALLY FORBIDDEN.
+    assert mask[0 * 3 + _TARGET_OPP0] is True, "damaging move can't hit the present foe"
+    assert mask[0 * 3 + _TARGET_ALLY] is False, "damaging move wrongly allowed at the ally"
+    # move slot 1 = Heal Pulse (support): ally ALLOWED.
+    assert mask[1 * 3 + _TARGET_ALLY] is True, "support move wrongly blocked from the ally"
+
+    # Codec mirrors the mask: it refuses to order Acrobatics at the ally (action 2),
+    # but allows it at the foe (action 0).
+    assert action_to_order(0 * 3 + _TARGET_ALLY, battle, 0) is None
+    assert action_to_order(0 * 3 + _TARGET_OPP0, battle, 0) is not None
+
+
+def test_fresh_legal_explores_untried_actions(clean_log):
+    """#13 retry-escape: when a deterministic policy's order is rejected as
+    '[Unavailable]', _fresh_legal returns a LEGAL action not already tried this
+    turn (so the player explores instead of looping), and still returns a legal
+    action once every option has been tried."""
+    _repo_root_on_path()
+    import sys as _sys
+    lb = str(Path(__file__).resolve().parents[3] / "local_battle")
+    if lb not in _sys.path:
+        _sys.path.insert(0, lb)
+    from live_vgc_base import SplicingVGCPlayerBase as S
+    from vgc_base import build_legal_action_mask
+
+    user = H.player_usernames(clean_log)["p1"]
+    # Find a turn where slot 0 has >= 2 legal actions (enough revealed moves).
+    battle = legal = None
+    for turn in range(1, 16):
+        b = H.drive_live_battle_to_turn(clean_log, user, turn)
+        try:
+            lg = {i for i, ok in enumerate(build_legal_action_mask(b, 0)) if ok}
+        except Exception:
+            continue
+        if len(lg) >= 2:
+            battle, legal = b, lg
+            break
+    if battle is None:
+        pytest.skip("no turn with >= 2 legal slot-0 actions in this replay")
+
+    one = next(iter(legal))
+    for _ in range(25):
+        a = S._fresh_legal(battle, 0, {one}, fallback=-1)
+        assert a in legal and a != one, "fresh action must be legal and not the tried one"
+
+    # All legal actions exhausted → still returns a legal action (give-up path).
+    a = S._fresh_legal(battle, 0, set(legal), fallback=-1)
+    assert a in legal
+
+
 def test_is_seen_filters_broken_illusion_phantom():
     """When a Zoroark illusion breaks, poke-env leaves the DISGUISE mon in
     opponent_team flagged revealed=True but with no HP (max_hp 0).  _is_seen

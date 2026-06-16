@@ -241,15 +241,14 @@ class LiveStateEncoder:
             cursor += POKEMON_FEATURES
 
         # ── [B] Bench slots ──────────────────────────────────────────────────
-        # _is_real_mon drops broken-illusion phantoms (gap #4): when an OWN
-        # Zoroark illusion breaks, poke-env leaves the disguise species in
-        # battle.team revealed=True but with max_hp==0 — it would otherwise fill
-        # a bench slot the offline parser leaves empty (it resolves the illusion
-        # cleanly). This mirrors the opp side's _is_seen phantom filter.
-        bench = [
-            p for p in battle.team.values()
-            if p not in own_active_set and not p.fainted and self._is_real_mon(p)
-        ][:BENCH_SLOTS]
+        # own_bench_mons returns the BROUGHT (4-of-6), non-active, non-fainted
+        # own mons in stable team order.  VGC team-preview brings only 4 of the 6
+        # roster mons, but poke-env keeps all 6 in battle.team; the 2 un-brought
+        # ones can never enter play, so listing them here both desyncs the bench
+        # from the offline parser (which only ever sees the brought 4) AND makes
+        # the switch action codec emit un-switchable mons (Showdown rejects the
+        # order).  It also drops broken-illusion phantoms (max_hp==0, gap #4).
+        bench = own_bench_mons(battle)[:BENCH_SLOTS]
 
         for i in range(BENCH_SLOTS):
             mon = bench[i] if i < len(bench) else None
@@ -317,10 +316,13 @@ class LiveStateEncoder:
         # ── Team counts (layout-v2): living-bench + fainted per side ──────────
         # Opp counts use SEEN (revealed, non-active) mons only — the information
         # asymmetry the offline path encodes (opp_seen_alive / opp_seen_fainted).
-        # Own counts iterate REAL team members only: _is_real_mon drops the
-        # broken-illusion phantom (max_hp==0) that would otherwise inflate
-        # own_live by one after an own Zoroark's disguise drops (gap #4).
-        own_team = [p for p in battle.team.values() if self._is_real_mon(p)]
+        # Own counts iterate the BROUGHT team only (brought_team_mons): the
+        # un-brought 2-of-6 roster mons in battle.team would otherwise inflate
+        # own_live by up to 2 vs the offline parser (which only sees the brought
+        # 4).  _is_real_mon (inside the helper) also drops the broken-illusion
+        # phantom (max_hp==0) that would inflate own_live after an own Zoroark's
+        # disguise drops (gap #4).
+        own_team = brought_team_mons(battle)
         own_live = sum(1 for p in own_team if p not in own_active_set and not p.fainted)
         own_fnt  = sum(1 for p in own_team if p.fainted)
         opp_active_bases = {self._base_species(p) for p in opp_active_set}
@@ -343,11 +345,48 @@ class LiveStateEncoder:
         # ── [D] Gap #6 opponent splice ───────────────────────────────────────
         # Replace the poke-env-derived opponent bytes with the vod_parser
         # reconstruction (same code as training), so the live opp view is
-        # immune to poke-env's duplicate-species illusion merge.
+        # immune to poke-env's duplicate-species illusion merge.  Belief-enrich
+        # the opponent mons FIRST (distribution est-stats + predicted move slots)
+        # so the spliced bytes match the (belief-enriched) TRAINING data instead
+        # of leaving those features zeroed at serve time — see _enrich_opp_snapshot.
         if opp_snapshot is not None:
+            opp_snapshot = self._enrich_opp_snapshot(opp_snapshot)
             self._splice_opponent(vec, opp_snapshot, turn=getattr(battle, "turn", 0))
 
         return vec
+
+    def _enrich_opp_snapshot(self, opp_snapshot: dict) -> dict:
+        """Belief-enrich the OPPONENT mons of a reconstructed snapshot so the
+        spliced opp bytes carry the same Pikalytics distribution est-stats
+        (``stats_estimate``) and predicted move-slot padding (``belief``) that the
+        TRAINING data was exported with (Type B fill_blanks → opponent =
+        distribution).  Without this the gap-#6 splice produces opp bytes with the
+        est-stat block and the unrevealed move slots all ZERO — a large train/serve
+        mismatch on every opponent mon (the net was trained with those populated).
+
+        Idempotent (skips a mon that already carries an estimate) and a no-op when
+        the encoder has no BeliefState.  Mutates the ephemeral per-turn snapshot in
+        place (it is rebuilt every decision) and returns it.
+        """
+        if self.belief is None or not opp_snapshot:
+            return opp_snapshot
+        try:
+            from belief_state import _enrich_mon_belief
+        except Exception:  # pragma: no cover
+            return opp_snapshot
+        opp_active = opp_snapshot.get("opp_active") or {}
+        mons = [opp_active.get("opp_a"), opp_active.get("opp_b")]
+        mons += list(opp_snapshot.get("opp_bench") or [])
+        warned: set = set()
+        for m in mons:
+            if m and not m.get("stats_estimate"):
+                try:
+                    # top_k=5 matches belief_state.fill_blanks' default (the value
+                    # the training export used), so serve == train byte-for-byte.
+                    _enrich_mon_belief(m, self.belief, 5, [], warned, level=self.level)
+                except Exception:  # pragma: no cover - never break a live turn
+                    pass
+        return opp_snapshot
 
     def _splice_opponent(self, vec: np.ndarray, opp_snapshot: dict, turn: int) -> None:
         """Overwrite the opponent byte ranges of ``vec`` with the offline
@@ -665,6 +704,79 @@ class LiveStateEncoder:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Own brought-team / bench resolution  (SINGLE SOURCE OF TRUTH)
+#
+# VGC team-preview brings 4 of the 6 roster mons.  poke-env still keeps all 6 in
+# ``battle.team`` (it knows the full roster from the team paste), but the 2
+# un-brought mons can NEVER enter play — they are never active, never fainted,
+# never revealed, and never appear in ``available_switches``.  Listing them as
+# bench / switch targets has two bad effects:
+#   1. the live own bench desyncs from the OFFLINE parser (which only ever sees
+#      the brought 4) → a train/serve state mismatch, and
+#   2. the action codec emits a switch to an un-brought mon → Showdown rejects
+#      the order ("you do not have a Pokémon named X to switch to") → the live
+#      player thrashes through retry/random fallbacks every turn.
+#
+# These helpers define the brought set ONCE so the encoder bench, the team-count
+# globals, the legal-action mask, and ``action_to_order`` all agree on which mon
+# occupies bench slot i / switch action 12+i (stable team order).
+# ══════════════════════════════════════════════════════════════════════════════
+def _active_mon_set(battle) -> set:
+    """The set of currently-active own mons (handles poke-env's ValueError when
+    the active list is momentarily unavailable)."""
+    try:
+        actives = battle.active_pokemon
+    except (ValueError, AttributeError):
+        actives = []
+    return {m for m in (actives or []) if m is not None}
+
+
+def switchable_union(battle) -> set:
+    """Every mon Showdown currently lists as a legal switch-in across both active
+    slots (``battle.available_switches`` is List[List[Pokemon]] per active slot)."""
+    out: set = set()
+    for slot_sw in (getattr(battle, "available_switches", None) or []):
+        for m in (slot_sw or []):
+            out.add(m)
+    return out
+
+
+def _is_brought(mon, active_set: set, switch_set: set) -> bool:
+    """Whether ``mon`` is one of the BROUGHT 4-of-6.  A brought mon is (or has
+    been) in play or is currently switchable; the un-brought roster mons are
+    never any of these."""
+    return (
+        mon in active_set
+        or bool(getattr(mon, "fainted", False))
+        or bool(getattr(mon, "revealed", False))
+        or mon in switch_set
+    )
+
+
+def brought_team_mons(battle) -> list:
+    """The BROUGHT own mons (~4 of 6) in stable team order, real mons only
+    (broken-illusion phantoms with max_hp==0 excluded)."""
+    active_set = _active_mon_set(battle)
+    switch_set = switchable_union(battle)
+    return [
+        m for m in battle.team.values()
+        if LiveStateEncoder._is_real_mon(m) and _is_brought(m, active_set, switch_set)
+    ]
+
+
+def own_bench_mons(battle) -> list:
+    """Brought, non-active, non-fainted own mons — the mons that occupy encoder
+    bench slots 4..7 and switch action indices 12..15 (stable team order; the
+    un-brought 2-of-6 are excluded so a switch action always decodes to a mon
+    Showdown will accept)."""
+    active_set = _active_mon_set(battle)
+    return [
+        m for m in brought_team_mons(battle)
+        if m not in active_set and not getattr(m, "fainted", False)
+    ]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Own-side resolution (live) — "which side is the bot's own side?"
 #
 # The bot is configured (its .env) with a Showdown username and a team file for
@@ -796,3 +908,33 @@ def opp_snapshot_from_log_prefix(
     if not state_before:
         return None
     return state_before.get(own_role)
+
+
+def opp_snapshot_current(log: str, own_role: str) -> Optional[dict]:
+    """Reconstruct the OPPONENT side as of the END of the given log (the CURRENT
+    board), for MID-TURN decisions where the start-of-turn snapshot is stale.
+
+    A forced replacement (poke-env ``forceSwitch``) is decided AFTER a faint, in
+    the middle of a turn — there is no new ``|turn|`` line, so
+    ``opp_snapshot_from_log_prefix`` would return the pre-faint start-of-turn
+    board.  This instead parses the WHOLE log-so-far (which a live bot has
+    captured up to, but not including, its own pending replacement) and returns
+    ``_snapshot_state`` — the post-faint board.  That is exactly the moment the
+    OFFLINE parser captures a ``replacement`` decision's state (in
+    ``_handle_switch``, just before the replacement switch mutates the slot), so
+    the live replacement decision sees the same opponent composition training did.
+
+    Works for turn boundaries too (there the end-of-log board == the start-of-turn
+    board), so it is the general form of the prefix helper.  Returns None on
+    failure / empty log.
+    """
+    from vod_parser.replay_parser import ShowdownReplayParser
+
+    if not (log or "").strip():
+        return None
+    try:
+        parser = ShowdownReplayParser(log, our_player=own_role)
+        parser.parse()
+        return parser._snapshot_state(own_role)
+    except Exception:
+        return None
