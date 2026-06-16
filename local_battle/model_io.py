@@ -100,11 +100,21 @@ def bc_action_indices(
 ) -> Tuple[Optional[int], Optional[int]]:
     """Run the policy on one state vector and return the masked-argmax action
     index for each active slot (None where no legal action exists)."""
+    l0, l1 = head_logits(model, head_names, state_vec, device)
+    return masked_argmax(l0, mask0), masked_argmax(l1, mask1)
+
+
+def head_logits(
+    model, head_names, state_vec: np.ndarray, device: str = "cpu",
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Run the policy once and return the two per-head raw logit vectors (slot 0 =
+    our_a, slot 1 = our_b).  Used when the caller needs the logits directly — e.g.
+    the forced-replacement path applies a per-slot switch-only mask with cross-slot
+    dedup, which a single bc_action_indices call can't express."""
     with torch.no_grad():
         t = torch.as_tensor(np.asarray(state_vec, dtype=np.float32), device=device)
         out = model(t)
-    l0, l1 = _head_logits(out, head_names)
-    return masked_argmax(l0, mask0), masked_argmax(l1, mask1)
+    return _head_logits(out, head_names)
 
 
 # ── Team-preview scorer ───────────────────────────────────────────────────────

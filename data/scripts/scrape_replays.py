@@ -458,7 +458,7 @@ def cli() -> None:
     )
     ap.add_argument("--format", default="gen9championsvgc2026regma",
                     help="Showdown format slug (as it appears in the replay-search URL)")
-    ap.add_argument("--target", type=int, default=1000,
+    ap.add_argument("--target", type=int, default=3000,
                     help="Number of NEW (not-yet-downloaded) replays to fetch")
     ap.add_argument("--max-per-team", type=int, default=12,
                     help="Skip a replay only if BOTH teams already appear this many "

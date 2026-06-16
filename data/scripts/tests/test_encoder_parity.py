@@ -417,6 +417,7 @@ def test_live_mask_target_buckets_match_training_kinds(name):
     from vgc_base import build_legal_action_mask, action_to_order
     from state_encoder import (
         _move_target_kind, _CHOOSABLE_SINGLE, _ALLY_KINDS, ACTIONS_PER_SLOT,
+        SWITCH_OFFSET,
     )
     log = extract_log_from_html(_find(name).read_text(encoding="utf-8"))
     checked = 0
@@ -446,10 +447,28 @@ def test_live_mask_target_buckets_match_training_kinds(name):
                     elif kind not in _CHOOSABLE_SINGLE:
                         assert buckets == {0}, f"{mv.id} ({kind}) buckets {buckets} != {{0}}"
                     # single-target buckets are presence-dependent → decodability below
+                moves_here = list(mon.moves.values())[:4]
+                opp_present = any(
+                    p is not None for p in battle.opponent_active_pokemon
+                )
                 for a in range(ACTIONS_PER_SLOT):
-                    if mask[a]:
-                        assert action_to_order(a, battle, slot) is not None, \
-                            f"legal action {a} (slot {slot}) failed to decode"
+                    if not mask[a]:
+                        continue
+                    order = action_to_order(a, battle, slot)
+                    if order is None:
+                        # A single-target move at a FOE bucket with NO foe on the
+                        # field is mask-legal only as the auto-target fallback (for
+                        # train parity) but is genuinely UNDECODABLE live — Showdown
+                        # rejects a targetless single-target move, so the codec
+                        # correctly returns None and the bot falls back.  Allow it.
+                        if a < SWITCH_OFFSET:
+                            m_idx, bucket = divmod(a, 3)
+                            kind = (_move_target_kind(moves_here[m_idx].id)
+                                    if m_idx < len(moves_here) else None)
+                            if bucket in (0, 1) and kind in _CHOOSABLE_SINGLE \
+                                    and not opp_present:
+                                continue
+                        assert False, f"legal action {a} (slot {slot}) failed to decode"
     assert checked > 0, "no decisions exercised"
 
 
@@ -541,23 +560,22 @@ def test_live_mask_excludes_disabled_moves(clean_log):
     assert action_to_order(3, battle, 0) is not None, "codec dropped an available move"
 
 
-def test_live_mask_forbids_ally_target_for_damaging_moves():
-    """A DAMAGING single-target move (Acrobatics, Iron Head, …) must NOT be allowed
-    to target our own ally — that self-attack is the model mis-picking the ally
-    (e.g. two Kingambits on the field, one ours one the opponent's).  A NON-damaging
-    single-target support move (Heal Pulse) MUST still be allowed at the ally, and
-    dedicated ally moves (Helping Hand/Coaching = adjacentAlly) are unaffected.
+def test_live_mask_allows_ally_target_for_damaging_moves():
+    """The live mask must KEEP the ally bucket legal for a damaging single-target
+    move when the ally is alive — intentionally damaging your own teammate is a real
+    tactic (activating an ally's Justified / Anger Point / Berserk / Weakness Policy,
+    Beat Up, …) AND the offline training mask (state_encoder.build_action_mask) marks
+    it legal, so the LIVE mask must match it (train/serve parity).  Helping Hand /
+    Coaching (adjacentAlly) are also ally-legal.
 
     Pure mask logic over a duck-typed board + real poke-env Move objects."""
     _repo_root_on_path()
     from poke_env.battle import Move
-    from vgc_base import (
-        build_legal_action_mask, action_to_order, _TARGET_OPP0, _TARGET_ALLY,
-    )
+    from vgc_base import build_legal_action_mask, action_to_order, _TARGET_OPP0, _TARGET_ALLY
+    from state_encoder import build_action_mask
 
-    acro = Move("acrobatics", gen=9)   # 'any' target, base_power > 0  (damaging)
-    heal = Move("healpulse", gen=9)    # 'any' target, base_power == 0 (support)
-    assert acro.base_power > 0 and heal.base_power == 0
+    acro = Move("acrobatics", gen=9)   # 'any' target, base_power > 0 (damaging)
+    assert acro.base_power > 0
 
     class _Mon:
         def __init__(self, moves, fainted=False):
@@ -567,7 +585,7 @@ def test_live_mask_forbids_ally_target_for_damaging_moves():
         def moves(self):
             return self._mv
 
-    actor = _Mon({"acrobatics": acro, "healpulse": heal})
+    actor = _Mon({"acrobatics": acro})
     ally  = _Mon({"acrobatics": acro})
     foe   = _Mon({"acrobatics": acro})
 
@@ -577,22 +595,107 @@ def test_live_mask_forbids_ally_target_for_damaging_moves():
         available_moves = [list(actor.moves.values()), []]
         available_switches = [[], []]
         team = {}
+        POKEMON_1_POSITION = -1
+        POKEMON_2_POSITION = -2
         def to_showdown_target(self, move, target_mon):   # stub for the codec
             return 1
 
     battle = _Battle()
     mask = build_legal_action_mask(battle, 0)
 
-    # move slot 0 = Acrobatics (damaging): foe legal, ALLY FORBIDDEN.
+    # move slot 0 = Acrobatics (damaging): BOTH the present foe AND the ally legal.
     assert mask[0 * 3 + _TARGET_OPP0] is True, "damaging move can't hit the present foe"
-    assert mask[0 * 3 + _TARGET_ALLY] is False, "damaging move wrongly allowed at the ally"
-    # move slot 1 = Heal Pulse (support): ally ALLOWED.
-    assert mask[1 * 3 + _TARGET_ALLY] is True, "support move wrongly blocked from the ally"
+    assert mask[0 * 3 + _TARGET_ALLY] is True, "ally-damage wrongly blocked (Justified/AngerPoint)"
+    # Codec can order it at the ally (no self-attack refusal).
+    assert action_to_order(0 * 3 + _TARGET_ALLY, battle, 0) is not None
 
-    # Codec mirrors the mask: it refuses to order Acrobatics at the ally (action 2),
-    # but allows it at the foe (action 0).
-    assert action_to_order(0 * 3 + _TARGET_ALLY, battle, 0) is None
-    assert action_to_order(0 * 3 + _TARGET_OPP0, battle, 0) is not None
+    # Train/serve parity: the OFFLINE mask also marks the ally bucket legal for the
+    # same damaging single-target move (both actives present, ally alive).
+    snap = {
+        "our_active": {"our_a": {"species": "Talonflame", "revealed_moves": ["Acrobatics"]},
+                       "our_b": {"species": "Talonflame", "revealed_moves": ["Acrobatics"]}},
+        "opp_active": {"opp_a": {"species": "Talonflame", "revealed_moves": ["Acrobatics"]}},
+        "our_bench": [],
+    }
+    off = build_action_mask(snap)
+    assert off["our_a"][0 * 3 + _TARGET_ALLY] == 1, "offline mask blocks ally-damage (parity broken)"
+
+
+def test_codec_attaches_ally_target_for_adjacent_ally_move():
+    """An adjacentAlly move (Helping Hand / Coaching / …) must be ordered WITH the
+    ally's own-side position.  poke-env's to_showdown_target returns EMPTY (0) for
+    adjacentAlly moves, so the raw order has no target and Showdown rejects it
+    ("Helping Hand needs a target").  Regression for the Kronomono3/Whimsicott
+    Zoroark-smoke failure."""
+    _repo_root_on_path()
+    from poke_env.battle import Move
+    from vgc_base import action_to_order, _TARGET_ALLY
+
+    hh = Move("helpinghand", gen=9)
+
+    class _Mon:
+        def __init__(self, moves):
+            self._mv = moves
+            self.fainted = False
+        @property
+        def moves(self):
+            return self._mv
+
+    actor = _Mon({"helpinghand": hh})
+    ally  = _Mon({"helpinghand": hh})
+    foe   = _Mon({"helpinghand": hh})
+
+    class _Battle:
+        active_pokemon = [actor, ally]
+        opponent_active_pokemon = [foe, None]
+        available_moves = [list(actor.moves.values()), []]
+        available_switches = [[], []]
+        team = {}
+        POKEMON_1_POSITION = -1
+        POKEMON_2_POSITION = -2
+
+    battle = _Battle()
+    # slot 0 uses Helping Hand on its ally (slot 1 → Showdown position -2).
+    order = action_to_order(0 * 3 + _TARGET_ALLY, battle, 0)
+    assert order is not None, "Helping Hand at ally returned no order"
+    assert "-2" in order.message, f"ally target missing from order: {order.message!r}"
+
+
+def test_codec_targets_first_opp_slot_when_pokeenv_sees_no_foe():
+    """When poke-env shows NO opponent active (it can lose a foe to a same-species
+    Zoroark illusion / desync on the opponent's last mon) but Showdown still has
+    one, a single-target move must be ordered at the FIRST opponent slot — Showdown
+    auto-redirects it to the only living foe — NOT targetless ("needs a target")
+    and NOT a Pass ("must make a move").  Regression for the Kronomono3 Zoroark
+    smoke retry storm."""
+    _repo_root_on_path()
+    from poke_env.battle import Move
+    from vgc_base import action_to_order, _TARGET_OPP0
+
+    cc = Move("closecombat", gen=9)
+
+    class _Mon:
+        def __init__(self, moves):
+            self._mv = moves
+            self.fainted = False
+        @property
+        def moves(self):
+            return self._mv
+
+    actor = _Mon({"closecombat": cc})
+
+    class _Battle:
+        active_pokemon = [actor, None]            # actor alone (no ally)
+        opponent_active_pokemon = [None, None]    # poke-env sees NO foe
+        available_moves = [list(actor.moves.values()), []]
+        available_switches = [[], []]
+        team = {}
+        OPPONENT_1_POSITION = 1
+
+    order = action_to_order(0 * 3 + _TARGET_OPP0, _Battle(), 0)
+    assert order is not None, "no-foe single-target move returned no order (would Pass/loop)"
+    assert order.message.strip().endswith("1"), \
+        f"expected an explicit first-opp-slot target: {order.message!r}"
 
 
 def test_fresh_legal_explores_untried_actions(clean_log):

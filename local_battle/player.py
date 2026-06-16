@@ -36,10 +36,11 @@ from live_vgc_base import SplicingVGCPlayerBase as VGCPlayerBase
 from vgc_base import (
     _heuristic_team_order,
     build_legal_action_mask,
+    build_replacement_mask,
     random_legal_action,
     VGC_TEAM_SIZE,
 )
-from state_encoder import ACTIONS_PER_SLOT, STATE_DIM
+from state_encoder import ACTIONS_PER_SLOT, STATE_DIM, SWITCH_OFFSET
 import model_io as _M   # dict-checkpoint load + mask-aware logit decode (#13)
 
 log = logging.getLogger(__name__)
@@ -166,6 +167,46 @@ class VGCPlayer(VGCPlayerBase):
                       "action (NOT random) so the failure stays visible.",
                       exc, exc_info=True)
             return self._first_legal(battle, 0), self._first_legal(battle, 1), "model_error"
+
+    # ── Forced replacement (post-faint) — model-driven ─────────────────────────
+
+    def _select_replacement_actions(self, battle: DoubleBattle, state_vec: np.ndarray):
+        """Model-driven post-faint replacement.
+
+        For each slot that must switch (``battle.force_switch[slot]``), masked-argmax
+        the MATCHING head (slot 0 → our_a, slot 1 → our_b) over a switch-only
+        replacement mask (build_replacement_mask), deduping the chosen bench mon
+        across slots when both fainted.  This is exactly how training's
+        ``decision_type='replacement'`` transitions are labelled (the fainted slot's
+        head, switch-only mask), so the heads are in-distribution for it.
+
+        Returns ``(a0, a1, "forced_switch_model")`` or ``None`` to fall back to the
+        inherited random picker (no model, or no legal model replacement)."""
+        if self._model is None or not _TORCH_AVAILABLE:
+            return None
+        try:
+            force = list(getattr(battle, "force_switch", []) or [])
+            l0, l1 = _M.head_logits(self._model, self._model_heads, state_vec, self._device)
+            logits = (l0, l1)
+            out: List[Optional[int]] = [None, None]
+            taken: set = set()      # bench indices already assigned (dedupe slots)
+            for slot in (0, 1):
+                if slot >= len(force) or not force[slot]:
+                    continue
+                mask = build_replacement_mask(battle, slot)
+                for i in taken:
+                    mask[SWITCH_OFFSET + i] = False
+                a = _M.masked_argmax(logits[slot], mask)
+                if a is None:
+                    return None     # no legal model replacement → random fallback
+                out[slot] = a
+                taken.add(a - SWITCH_OFFSET)
+            if out[0] is None and out[1] is None:
+                return None
+            return out[0], out[1], "forced_switch_model"
+        except Exception as exc:
+            log.warning("Model replacement selection failed (%s) — using random.", exc)
+            return None
 
     # ── Team chooser ──────────────────────────────────────────────────────────
 

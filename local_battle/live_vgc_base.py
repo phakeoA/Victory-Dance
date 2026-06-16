@@ -57,17 +57,22 @@ for _p in (str(_REPO_ROOT / "data" / "scripts"), str(_REPO_ROOT), str(_HERE)):
     sys.path.insert(0, _p)
 
 from poke_env.battle import DoubleBattle
-from poke_env.player.battle_order import DoubleBattleOrder
+from poke_env.player import Player
+from poke_env.player.battle_order import DoubleBattleOrder, PassBattleOrder
 
 # Reuse the tested root base + its pure helpers unchanged.
 from vgc_base import (  # noqa: E402
     VGCPlayerBase as _RootVGCPlayerBase,
     build_legal_action_mask,
+    build_replacement_mask,
     random_legal_action,
 )
 import random as _random  # noqa: E402  (retry-exploration on rejected choices)
 
-from live_state_encoder import opp_snapshot_from_log_prefix, opp_snapshot_current  # noqa: E402
+from live_state_encoder import (  # noqa: E402
+    opp_snapshot_from_log_prefix, opp_snapshot_current, own_bench_mons,
+)
+from state_encoder import SWITCH_OFFSET  # noqa: E402
 
 log = logging.getLogger(__name__)
 
@@ -261,32 +266,82 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
             log.debug("current opp_snapshot build failed (degrading to poke-env)", exc_info=True)
             return None
 
-    # ── Forced replacement (post-faint) — encode the CURRENT opp board ──────────
+    # ── Forced replacement (post-faint) — encode + let the POLICY choose ────────
     def _handle_force_switch(self, battle: DoubleBattle):
-        """Encode the post-faint board with the gap-#6 opponent splice and record
-        it (so replacement decisions carry the same opponent composition training's
-        ``replacement`` transitions did), THEN defer the actual switch choice to
-        the inherited handler."""
+        """Encode the post-faint board with the gap-#6 opponent splice (so the
+        replacement decision sees the SAME opponent composition training's
+        ``decision_type='replacement'`` transitions did), then let the policy pick
+        the replacement via the ``_select_replacement_actions`` hook.  The base hook
+        returns None → the inherited RANDOM picker; ``VGCPlayer`` overrides it with
+        the model (masked-argmax of the fainted slot's head over a switch-only
+        replacement mask).  Degrades to random on any failure."""
+        state_vec = None
+        opp_snapshot = None
         try:
-            self._source_counts["forced_switch"] += 1
             opp_snapshot = self._build_opp_snapshot_current(battle)
             state_vec = self._encoder.encode(battle, opp_snapshot=opp_snapshot)
-            self._replay.record(
-                battle_id=battle.battle_tag,
-                turn=battle.turn,
-                state=state_vec,
-                action_s0=-1,            # replacement target chosen below; the
-                action_s1=-1,            # forced-switch action codec is separate
-                source="forced_switch",
-            )
+        except Exception:
+            log.debug("forceSwitch encode failed (non-fatal)", exc_info=True)
+
+        repl = None
+        if state_vec is not None:
+            try:
+                repl = self._select_replacement_actions(battle, state_vec)
+            except Exception:
+                log.debug("replacement selection failed (→ random)", exc_info=True)
+                repl = None
+
+        if repl is not None:
+            a0, a1, source = repl
+            order_s0 = self._replacement_order(battle, 0, a0)
+            order_s1 = self._replacement_order(battle, 1, a1)
+            self._source_counts[source] += 1
+            try:
+                self._replay.record(
+                    battle_id=battle.battle_tag, turn=battle.turn, state=state_vec,
+                    action_s0=a0 if a0 is not None else -1,
+                    action_s1=a1 if a1 is not None else -1, source=source,
+                )
+            except Exception:
+                log.debug("forceSwitch record failed (non-fatal)", exc_info=True)
             log.debug(
-                "forceSwitch encode [%s] turn %d opp_splice=%s",
-                battle.battle_tag, battle.turn,
+                "forceSwitch %s [%s] turn %d a0=%s a1=%s opp_splice=%s",
+                source, battle.battle_tag, battle.turn, a0, a1,
                 "on" if opp_snapshot is not None else "off",
             )
-        except Exception:
-            log.debug("forceSwitch encode/record failed (non-fatal)", exc_info=True)
+            return DoubleBattleOrder(order_s0, order_s1)
+
+        # Fallback: record the state (if any) then the inherited RANDOM pick.
+        self._source_counts["forced_switch"] += 1
+        if state_vec is not None:
+            try:
+                self._replay.record(
+                    battle_id=battle.battle_tag, turn=battle.turn, state=state_vec,
+                    action_s0=-1, action_s1=-1, source="forced_switch",
+                )
+            except Exception:
+                log.debug("forceSwitch record failed (non-fatal)", exc_info=True)
         return super()._handle_force_switch(battle)
+
+    def _select_replacement_actions(self, battle: DoubleBattle, state_vec):
+        """Hook: return ``(a0, a1, source)`` — switch action indices (12..15) for the
+        fainted slot(s), ``None`` for a slot that is not switching — or ``None`` to
+        defer to the inherited RANDOM replacement.  Base = random (None); the
+        model-driven override lives in ``VGCPlayer``."""
+        return None
+
+    @staticmethod
+    def _replacement_order(battle: DoubleBattle, slot: int, action):
+        """A SingleBattleOrder for a replacement switch action (or Pass).  ``action``
+        is a switch index (12..15) → ``own_bench_mons(battle)[action-12]``; None → a
+        non-switching slot → Pass."""
+        if action is None:
+            return PassBattleOrder()
+        bench = own_bench_mons(battle)
+        i = action - SWITCH_OFFSET
+        if 0 <= i < len(bench):
+            return Player.create_order(bench[i])
+        return PassBattleOrder()
 
     @staticmethod
     def _synth_poke_lines(battle: DoubleBattle) -> List[str]:

@@ -264,16 +264,16 @@ def build_legal_action_mask(battle: DoubleBattle, slot: int) -> list[bool]:
         elif kind in _CHOOSABLE_SINGLE:
             buckets = [b for b, alive in ((_TARGET_OPP0, opp0_alive),
                                           (_TARGET_OPP1, opp1_alive)) if alive]
-            # Ally bucket (2) only for NON-damaging single-target moves (Heal
-            # Pulse, Skill Swap, …).  A damaging single-target move (Acrobatics,
-            # Iron Head, …) must NEVER be allowed to hit our OWN ally — that
-            # "self-attack" is the model mis-targeting the ally (esp. when the
-            # ally and a foe share a species, e.g. two Kingambits on the field).
-            # Genuine ally-support moves (Helping Hand/Coaching) are adjacentAlly
-            # → the _ALLY_KINDS branch above, so they are unaffected.  Serve-only:
-            # humans never target a damaging move at their ally, so this only ever
-            # removes an action the training labels never contain.
-            if kind != "adjacentFoe" and ally_alive and move.base_power == 0:
+            # Ally bucket (2) is kept legal for any choosable-single move that can
+            # face an ally (normal/any).  Targeting your OWN ally with a DAMAGING
+            # move is intentionally allowed — it is a real tactic (activating an
+            # ally's Justified / Anger Point / Berserk / Weakness Policy, Beat Up,
+            # etc.) and, crucially, the offline training mask
+            # (state_encoder.build_action_mask) marks it legal too, so blocking it
+            # here would break train/serve parity.  A nonsensical self-attack is a
+            # MODEL-QUALITY issue (rare: ~1/13164 corpus argmaxes), to be improved
+            # by training/data — not by removing a legal action.
+            if kind != "adjacentFoe" and ally_alive:
                 buckets.append(_TARGET_ALLY)
             for b in (buckets or [_TARGET_OPP0]):   # no foe present → bucket 0
                 mask[m_idx * 3 + b] = True
@@ -299,6 +299,31 @@ def build_legal_action_mask(battle: DoubleBattle, slot: int) -> list[bool]:
         if mon_b in slot_switchable:
             mask[SWITCH_OFFSET + bench_idx] = True
 
+    return mask
+
+
+def build_replacement_mask(battle: DoubleBattle, slot: int) -> list[bool]:
+    """Switch-only legal mask for a FORCED replacement of ``slot`` (post-faint).
+
+    ``build_legal_action_mask`` returns an all-zero row for a fainted/empty active
+    slot (the mon is gone), so it can't drive a replacement.  This is the
+    replacement analogue used by the model-driven forced-switch path: it marks
+    switch index 12+i legal iff ``own_bench_mons(battle)[i]`` is one of Showdown's
+    available replacements for that slot (``battle.available_switches[slot]``).
+    Index i ↔ encoder bench slot 4+i, so the policy's switch logits line up with
+    the bench the model saw — exactly the switch-only mask training's
+    ``decision_type='replacement'`` transitions carried for the fainted slot.
+    """
+    mask = [False] * ACTIONS_PER_SLOT
+    bench = own_bench_mons(battle)
+    try:
+        avail = battle.available_switches
+        legal = set(avail[slot]) if slot < len(avail) else set()
+    except (ValueError, AttributeError, IndexError, TypeError):
+        legal = set()
+    for i, mon_b in enumerate(bench[:4]):
+        if mon_b in legal:
+            mask[SWITCH_OFFSET + i] = True
     return mask
 
 
@@ -347,18 +372,33 @@ def action_to_order(action: int, battle: DoubleBattle, slot: int) -> Optional[Si
         elif target_code == _TARGET_OPP1:
             target_mon = opp_active[1] if (len(opp_active) > 1 and opp_active[1]) \
                 else (opp_present[0] if opp_present else None)
-        else:  # ally
+        else:  # ally (bucket 2)
             ally_slot = 1 - slot
-            target_mon = active[ally_slot] if ally_slot < len(active) else None
-            # Never order a DAMAGING move at our own ally (the mask forbids it too,
-            # but guard the codec so a stale/fallback index can't self-attack).
-            if target_mon is not None and move.base_power > 0:
-                return None
+            ally_mon = active[ally_slot] if ally_slot < len(active) else None
+            if ally_mon is None:
+                return None   # no ally to target → fall back (don't send a bad order)
+            # poke-env's to_showdown_target returns EMPTY (0) for adjacentAlly moves
+            # (Helping Hand / Coaching / Decorate / …) — Showdown then rejects the
+            # order ("X needs a target").  The ally's OWN-side position is required;
+            # supply it directly (same value to_showdown_target gives for a
+            # normal/any move aimed at the ally, e.g. a Justified self-hit).
+            pos = (battle.POKEMON_1_POSITION if ally_slot == 0
+                   else battle.POKEMON_2_POSITION)
+            return Player.create_order(move, move_target=pos)
 
-        # self / spread / field moves (and bucket-0 with no foe present) need no
-        # explicit target — let Showdown auto-target rather than failing.
         if target_mon is None:
-            return Player.create_order(move)
+            # poke-env shows NO foe — it can lose a foe to a same-species Zoroark
+            # illusion (gap #6) or briefly desync on the opponent's last mon — yet
+            # Showdown still has one.  A SINGLE-TARGET move (normal/any/adjacentFoe)
+            # needs an explicit target (a targetless order is rejected "X needs a
+            # target"; a Pass is rejected "must make a move").  Target the FIRST
+            # opponent slot: Showdown auto-redirects a single-target move to the only
+            # living foe when that exact slot is empty, so this resolves regardless
+            # of which slot the (poke-env-invisible) foe actually occupies, and the
+            # explicit foe slot removes any foe/ally ambiguity.
+            if _move_target_kind(move.id) in _CHOOSABLE_SINGLE:
+                return Player.create_order(move, move_target=battle.OPPONENT_1_POSITION)
+            return Player.create_order(move)   # spread/self/field — no target needed
 
         showdown_target = battle.to_showdown_target(move, target_mon)
         return Player.create_order(move, move_target=showdown_target)
@@ -554,11 +594,19 @@ class VGCPlayerBase(Player):
         order = action_to_order(action, battle, slot)
         if order is not None:
             return order
-        log.debug("_safe_order: action %d slot %d → None, trying random fallback.", action, slot)
-        order = action_to_order(random_legal_action(battle, slot), battle, slot)
-        if order is not None:
-            return order
-        log.debug("_safe_order: slot %d has no legal actions — sending Pass.", slot)
+        # The chosen action was undecodable (e.g. a single-target move with an ally
+        # present but no foe poke-env can see during a Zoroark illusion).  Try EVERY
+        # other legal action — a switch always decodes — before giving up with Pass,
+        # so we never Pass a slot that actually has a usable order (Showdown rejects
+        # "Can't pass: your X must make a move or switch").
+        log.debug("_safe_order: action %d slot %d → None, scanning legal actions.", action, slot)
+        mask = build_legal_action_mask(battle, slot)
+        for a, ok in enumerate(mask):
+            if ok and a != action:
+                order = action_to_order(a, battle, slot)
+                if order is not None:
+                    return order
+        log.debug("_safe_order: slot %d has no decodable legal action — sending Pass.", slot)
         return PassBattleOrder()
 
     def _battle_finished_callback(self, battle: DoubleBattle) -> None:
