@@ -166,17 +166,28 @@ def regression_gate(history: Sequence[dict], current: dict,
 def print_sources(sources) -> None:
     """Show how the model player's decisions were actually made.  A win-rate is
     only trustworthy if the MODEL drove most decisions; retry/default/forfeit
-    fallbacks mean a mask/board desync took over (the gauntlet result is diluted
-    by however much fell back)."""
-    total = sum(sources.values())
-    if not total:
-        return
-    model = sources.get("model", 0) + sources.get("forced_switch_model", 0)
-    print("  -- decisions by source --")
-    for k, v in sorted(sources.items(), key=lambda kv: -kv[1]):
-        print(f"    {k:22s}: {v:6d}  ({v / total * 100:4.1f}%)")
-    print(f"  MODEL-DRIVEN      : {model}/{total} = {model / total * 100:.1f}%  "
-          f"(lower ⇒ more fallbacks ⇒ win-rate less trustworthy)")
+    fallbacks mean a mask/board desync took over.  Team-preview (``tp_*``) is
+    reported separately — it's one decision per BATTLE, not per turn (#4)."""
+    actions = {k: v for k, v in sources.items() if not k.startswith("tp_")}
+    tp = {k[len("tp_"):]: v for k, v in sources.items() if k.startswith("tp_")}
+
+    total = sum(actions.values())
+    if total:
+        model = actions.get("model", 0) + actions.get("forced_switch_model", 0)
+        print("  -- decisions by source --")
+        for k, v in sorted(actions.items(), key=lambda kv: -kv[1]):
+            print(f"    {k:22s}: {v:6d}  ({v / total * 100:4.1f}%)")
+        print(f"  MODEL-DRIVEN      : {model}/{total} = {model / total * 100:.1f}%  "
+              f"(lower ⇒ more fallbacks ⇒ win-rate less trustworthy)")
+
+    tp_total = sum(tp.values())
+    if tp_total:
+        tp_model = tp.get("model", 0)
+        print("  -- team-preview by source (#4) --")
+        for k, v in sorted(tp.items(), key=lambda kv: -kv[1]):
+            print(f"    {k:22s}: {v:6d}")
+        print(f"  TP NET-DRIVEN     : {tp_model}/{tp_total} = "
+              f"{tp_model / tp_total * 100:.1f}%  (want 100% = the net chose every team)")
     print("============================================================")
 
 
@@ -347,6 +358,8 @@ async def run_gauntlet(
                     fin += f
                 finally:
                     source_totals.update(getattr(model_player, "_source_counts", {}) or {})
+                    for k, v in (getattr(model_player, "_tp_source", {}) or {}).items():
+                        source_totals[f"tp_{k}"] += v          # team-preview tally (#4)
                     await model_player.ps_client.stop_listening()
                     await opp.ps_client.stop_listening()
                     model_player.close()

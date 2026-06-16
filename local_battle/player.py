@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -84,6 +85,10 @@ class VGCPlayer(VGCPlayerBase):
         self._team_chooser = None
         self._tc_vocab     = None
         self._tc_cfg       = None
+        # Team-preview decision tally: did the TP NET drive the bring-4/leads, or
+        # did we fall back to the first-N heuristic?  Surfaced per run so the TP
+        # net's live behaviour is measurable (#4 — it was never exercised before).
+        self._tp_source: Counter = Counter()
 
         # Serve-side action sampling (TIER-4).  temperature<=0 → deterministic
         # masked argmax (the default, unchanged behaviour); >0 → temperature /
@@ -270,8 +275,15 @@ class VGCPlayer(VGCPlayerBase):
     def _choose_team_order(self, battle: DoubleBattle, team: list, n: int) -> List[int]:
         """Score the matchup with the team-preview model (our + opponent rosters)
         and return n roster indices, LEADS FIRST.  Falls back to the first-N
-        heuristic if the model is absent or anything goes wrong."""
+        heuristic if the model is absent or anything goes wrong.
+
+        Logs (INFO) whether the TP NET drove or it fell back, with the chosen
+        bring/leads, and tallies it in ``self._tp_source`` so a run can report how
+        often the net actually drove team preview (#4)."""
         if self._team_chooser is None or not _TORCH_AVAILABLE:
+            self._tp_source["heuristic"] += 1
+            log.info("Team-preview [%s]: no chooser model — HEURISTIC (first-%d).",
+                     battle.battle_tag, n)
             return _heuristic_team_order(battle)[:n]
 
         try:
@@ -294,9 +306,19 @@ class VGCPlayer(VGCPlayerBase):
                     if i not in used:
                         valid.append(i)
                         used.add(i)
-                return valid[:n]
-            log.warning("team_chooser produced invalid indices %s — using heuristic.", order)
+                picks = valid[:n]
+                lead_k = int((self._tc_cfg or {}).get("lead_k", 2))
+                brought = [getattr(team[i], "species", "?") for i in picks]
+                self._tp_source["model"] += 1
+                log.info("Team-preview [%s] NET drove: bring=%s leads=%s (vs opp %s)",
+                         battle.battle_tag, brought, brought[:lead_k],
+                         [s for s in opp_species if s][:6])
+                return picks
+            log.warning("Team-preview [%s] NET produced invalid indices %s — "
+                        "FALLING BACK to heuristic.", battle.battle_tag, order)
         except Exception as exc:
-            log.warning("team_chooser inference failed (%s) — using heuristic.", exc)
+            log.warning("Team-preview [%s] NET inference FAILED (%s) — FALLING BACK "
+                        "to heuristic.", battle.battle_tag, exc)
 
+        self._tp_source["heuristic"] += 1
         return _heuristic_team_order(battle)[:n]

@@ -307,6 +307,15 @@ async def run(
     print(f"  TrainerRed  decisions by source: {_src(player1)}")
     print(f"  TrainerBlue decisions by source: {_src(player2)}")
     print("  (want mostly 'model'; 'retry'/'model_error'/'no_model' = a problem)")
+
+    def _tp(p):
+        c = getattr(p, "_tp_source", {})
+        return dict(c) if c else {}
+
+    print("-" * 50)
+    print(f"  TrainerRed  team-preview by source: {_tp(player1)}")
+    print(f"  TrainerBlue team-preview by source: {_tp(player2)}")
+    print("  (#4: want all 'model' = TP NET drove team preview; 'heuristic' = fell back)")
     print("━" * 50)
 
 
