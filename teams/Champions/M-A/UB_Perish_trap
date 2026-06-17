@@ -13,7 +13,6 @@ Ability: Cursed Body
 Level: 50  
 EVs: 32 HP / 9 Def / 1 SpA / 1 SpD / 23 Spe  
 Timid Nature  
-IVs: 0 Atk  
 - Shadow Ball  
 - Protect  
 - Substitute  
@@ -24,13 +23,12 @@ Ability: Hospitality
 Level: 50  
 EVs: 31 HP / 10 Def / 1 SpA / 23 SpD / 1 Spe  
 Calm Nature  
-IVs: 0 Atk  
 - Matcha Gotcha  
 - Rage Powder  
 - Protect  
 - Life Dew  
 
-Kingambit @ Chople Berry  
+Kingambit @ Occa Berry  
 Ability: Defiant  
 Level: 50  
 EVs: 32 HP / 30 Atk / 2 Def / 2 Spe  
@@ -55,7 +53,6 @@ Ability: Soundproof
 Level: 50  
 EVs: 5 HP / 1 Def / 30 SpA / 1 SpD / 29 Spe  
 Modest Nature  
-IVs: 0 Atk  
 - Clanging Scales  
 - Clangorous Soul  
 - Aura Sphere  

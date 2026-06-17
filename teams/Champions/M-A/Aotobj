@@ -3,7 +3,6 @@ Ability: Flash Fire
 Level: 50  
 EVs: 32 HP / 25 SpA / 1 SpD / 8 Spe  
 Modest Nature  
-IVs: 0 Atk  
 - Shadow Ball  
 - Heat Wave  
 - Trick Room  
@@ -53,8 +52,7 @@ Clefable @ Sitrus Berry
 Ability: Unaware  
 Level: 50  
 EVs: 32 HP / 14 Def / 20 SpD  
-Calm Nature  
-IVs: 0 Atk  
+Calm Nature   
 - Follow Me  
 - Helping Hand  
 - Moonblast  

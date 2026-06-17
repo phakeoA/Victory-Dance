@@ -3,7 +3,6 @@ Ability: Rain Dish
 Level: 50  
 EVs: 1 HP / 1 Def / 32 SpA / 32 Spe  
 Quiet Nature  
-IVs: 0 Atk  
 - Water Spout  
 - Water Pulse  
 - Ice Beam  
@@ -24,7 +23,6 @@ Ability: Hospitality
 Level: 50  
 EVs: 32 HP / 32 SpA / 2 SpD  
 Modest Nature  
-IVs: 0 Atk  
 - Matcha Gotcha  
 - Life Dew  
 - Rage Powder  

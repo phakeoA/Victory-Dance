@@ -3,7 +3,6 @@ Ability: Trace
 Level: 50  
 EVs: 32 HP / 14 Def / 5 SpA / 15 Spe  
 Modest Nature  
-IVs: 0 Atk  
 - Psychic  
 - Hyper Voice  
 - Calm Mind  
@@ -24,7 +23,6 @@ Ability: Levitate
 Level: 50  
 EVs: 20 HP / 2 Def / 15 SpA / 1 SpD / 28 Spe  
 Modest Nature  
-IVs: 0 Atk  
 - Dark Pulse  
 - Draco Meteor  
 - Earth Power  

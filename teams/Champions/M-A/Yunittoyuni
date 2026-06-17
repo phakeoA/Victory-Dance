@@ -23,7 +23,6 @@ Ability: Levitate
 Level: 50  
 EVs: 2 HP / 32 SpA / 32 Spe  
 Timid Nature  
-IVs: 0 Atk  
 - Thunderbolt  
 - Blizzard  
 - Electroweb  
@@ -34,7 +33,6 @@ Ability: Competitive
 Level: 50  
 EVs: 32 HP / 19 SpA / 15 Spe  
 Modest Nature  
-IVs: 0 Atk  
 - Water Pulse  
 - Flash Cannon  
 - Roar  

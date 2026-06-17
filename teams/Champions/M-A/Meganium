@@ -3,7 +3,6 @@ Ability: Overgrow
 Level: 50  
 EVs: 21 HP / 32 SpA / 1 SpD / 12 Spe  
 Modest Nature  
-IVs: 0 Atk  
 - Solar Beam  
 - Earth Power  
 - Dazzling Gleam  
@@ -14,7 +13,6 @@ Ability: Sturdy
 Level: 50  
 EVs: 2 HP / 32 SpA / 32 Spe  
 Timid Nature  
-IVs: 0 Atk  
 - Flash Cannon  
 - Electro Shot  
 - Draco Meteor  
@@ -45,7 +43,6 @@ Ability: Drizzle
 Level: 50  
 EVs: 32 HP / 15 Def / 19 SpD  
 Relaxed Nature  
-IVs: 0 Atk  
 - Weather Ball  
 - Icy Wind  
 - Helping Hand  
@@ -56,7 +53,6 @@ Ability: Gale Wings
 Level: 50  
 EVs: 1 Def / 32 SpA / 1 SpD / 32 Spe  
 Jolly Nature  
-IVs: 0 Atk  
 - Hurricane  
 - Rain Dance  
 - Tailwind  

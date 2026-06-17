@@ -3,7 +3,6 @@ Ability: Blaze
 Level: 50  
 EVs: 1 Def / 32 SpA / 1 SpD / 32 Spe  
 Timid Nature  
-IVs: 0 Atk  
 - Heat Wave  
 - Substitute  
 - Psychic  
@@ -24,7 +23,6 @@ Ability: Unaware
 Level: 50  
 EVs: 32 HP / 32 Def / 1 SpA / 1 SpD  
 Bold Nature  
-IVs: 0 Atk  
 - Moonblast  
 - Helping Hand  
 - Follow Me  

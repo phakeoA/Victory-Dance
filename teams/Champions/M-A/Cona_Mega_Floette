@@ -1,10 +1,8 @@
-Floette @ Floettite  
+Floette-Eternal (F) @ Floettite 
 Ability: Flower Veil  
 Level: 50  
-Tera Type: Fairy  
 EVs: 32 HP / 1 Def / 32 SpA / 1 Spe  
 Modest Nature  
-IVs: 0 Atk  
 - Moonblast  
 - Dazzling Gleam  
 - Calm Mind  
@@ -13,10 +11,8 @@ IVs: 0 Atk
 Maushold @ Focus Sash  
 Ability: Friend Guard  
 Level: 50  
-Tera Type: Normal  
 EVs: 32 HP / 1 Def / 1 SpD / 32 Spe  
 Jolly Nature  
-IVs: 0 Atk  
 - Super Fang  
 - Taunt  
 - Follow Me  
@@ -25,7 +21,6 @@ IVs: 0 Atk
 Garchomp @ Soft Sand  
 Ability: Rough Skin  
 Level: 50  
-Tera Type: Dragon  
 EVs: 2 HP / 32 Atk / 32 Spe  
 Jolly Nature  
 - Earthquake  
@@ -36,7 +31,6 @@ Jolly Nature
 Talonflame  
 Ability: Gale Wings  
 Level: 50  
-Tera Type: Fire  
 EVs: 2 HP / 32 Atk / 32 Spe  
 Jolly Nature  
 - Acrobatics  
@@ -47,10 +41,8 @@ Jolly Nature
 Rotom-Wash @ Sitrus Berry  
 Ability: Levitate  
 Level: 50  
-Tera Type: Electric  
 EVs: 32 HP / 25 SpA / 1 SpD / 8 Spe  
 Modest Nature  
-IVs: 0 Atk  
 - Hydro Pump  
 - Volt Switch  
 - Thunderbolt  
@@ -59,7 +51,6 @@ IVs: 0 Atk
 Aegislash @ Spell Tag  
 Ability: Stance Change  
 Level: 50  
-Tera Type: Steel  
 EVs: 32 HP / 29 Atk / 5 Spe  
 Adamant Nature  
 - Poltergeist  
