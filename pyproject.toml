@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "v_dance"
+version = "0.1.0"
+description = "Victory-Dance — Gen 9 VGC Pokemon Showdown bot (BC + PPO self-play pipeline)"
+requires-python = ">=3.12"
+# Runtime dependencies (torch, poke-env, flask, numpy, ...) are managed via
+# requirements.txt against the project .venv. They are intentionally NOT pinned
+# here so `pip install -e .` only registers the package in editable mode and does
+# not try to re-resolve / reinstall the heavy ML stack.
+
+[tool.setuptools.packages.find]
+# Restrict discovery to the new package ONLY. Without this, setuptools' flat-layout
+# autodiscovery would trip over the sibling top-level dirs (data/, local_battle/,
+# ai_train_scripts/, pokemon-showdown/) during the migration.
+include = ["v_dance*"]
+
+[tool.pytest.ini_options]
+# All tests live at the top-level tests/ dir (Stage 2). Bare `pytest` finds them.
+testpaths = ["tests"]
+addopts = "-q"

@@ -2,6 +2,9 @@ logs/
 .venv/
 venv/
 dist/
+build/
+# editable install metadata (pip install -e . -> v_dance.egg-info/)
+*.egg-info/
 .idea/
 **/actual_states/*
 **/__pycache__/*
@@ -20,6 +23,7 @@ target/
 *.pyc
 models/*.pt
 models/*.pth
-replay_buffer/
+# all runtime outputs live under artifacts/ (self_play_archive, replay_buffer, logs, eval_results)
+artifacts/
 # Pokémon Showdown local server (cloned by setup.sh — not part of this repo)
 pokemon-showdown/

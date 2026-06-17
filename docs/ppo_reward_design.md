@@ -461,6 +461,12 @@ co-development; pin-deps is a prerequisite for long runs.**
   episode-length dist, calibration, critic/PPO health, action-mix, sacrifice rate, MODEL-DRIVEN%, p1/p2.
 - 3c.7 **Exploration seeding (sec 12):** KL-to-BC (in 3b) + scripted demo episodes in the early buffer +
   archetype injection into the team pool & league.
+- 3c.8 **Throughput / hybrid GPU+CPU compute + resource budget (sec 20) [do LATER — after 3c.4 + a
+  throughput MEASUREMENT]:** (a) profile games/hour + the per-game time breakdown; (b) CPU-parallel
+  collection (N concurrent games across cores — the dominant lever); (c) GPU for the PPO update only
+  (batched backprop); (d) user-settable caps — max CPU cores / fraction, max VRAM GB — so a long run
+  never pegs the machine. NOT GPU-on-per-game-inference (tiny model + async play -> transfer overhead
+  loses).
 
 **v1 — TP co-development [needs: 3c stable + battle competent at archetypes (sec 14 ordering)]**
 - v1.1 TP value baseline (turn-1 value head or a dedicated TP critic).
@@ -468,3 +474,41 @@ co-development; pin-deps is a prerequisite for long runs.**
 - v1.3 TP stochastic sampling + exploitability tracking.
 
 **Prereq — pin deps:** pin poke-env / Showdown SHA before long multi-session runs (sec 17).
+
+## 20. Compute throughput, hybrid GPU+CPU, and the resource budget
+
+**Do this LATER** — after resumability (sec 17 / 3c.4) and after a throughput MEASUREMENT. Optimising
+before the loop is stable + profiled is guessing; correctness and a stable multi-generation run come
+first. Logged here so the design + the user-settable caps are specified now.
+
+**Where the time actually goes (the counter-intuitive part).** A self-play game is dominated by the
+**Showdown server (Node engine) + poke-env protocol + the 1854-dim state encoding — all CPU**. The
+policy is a TINY MLP (~1M params, 1854->512->256->heads); per-turn inference is microseconds. So:
+- **The dominant throughput lever is CPU PARALLELISM** — run many games concurrently across cores. NOT
+  the GPU.
+- **The GPU's clean win is the PPO UPDATE only** (batched backprop over minibatches), which is a small
+  slice of wall-clock (collection dominates) but trivial to move (`device=cuda` for the trainer +
+  GAE/loss tensors).
+- **Do NOT put per-game inference on the GPU.** Games are ASYNC (poke-env websockets), so the per-turn
+  forwards can't be batched, and for a model this small the CPU<->GPU transfer overhead per single
+  sample makes collection SLOWER, not faster. (A vectorised batched-inference server could change this,
+  but it's a big lift for ~no gain at this model size — explicitly out of scope.)
+
+**Hybrid split (the actual "use both"):** CPU runs collection (parallel games, model on CPU); GPU runs
+the training update. Each does what it's strong at.
+
+**Resource budget — USER-SETTABLE CAPS (a long run must never peg the machine):** a `ResourceBudget`
+config threaded through the loop, e.g. `max_cpu_fraction=0.5` (or `max_cores=N`), `max_vram_gb=4.0`,
+`device="auto"`. Enforcement:
+- **CPU cap:** concurrent collection workers/games = `floor(max_cpu_fraction * os.cpu_count())` (or
+  `max_cores`), clamped to >=1; `torch.set_num_threads(k)` to bound torch's intra-op CPU threads during
+  the update; optionally lower process priority on Windows so the box stays usable. The cap is
+  approximate (Node + Python + torch all draw CPU) — controlling the parallel-game count is the primary
+  knob, leaving headroom by default so the user can keep working.
+- **VRAM cap:** `torch.cuda.set_per_process_memory_fraction(max_vram_gb / total_vram_gb, device)` so
+  allocations beyond the cap FAIL loudly instead of silently ballooning; bound the PPO minibatch size to
+  fit; OOM-safe fallback to CPU for the update if the cap is below what the model+batch needs. For a ~1M
+  param model 4 GB is generous (the cap is mostly a safety rail / lets the user keep the GPU for other
+  apps).
+- **Defaults:** leave headroom (don't default to 100%); `device="auto"` = GPU for the update if present
+  else CPU; fail loud (not silent) if a cap is set impossibly tight (0 cores, VRAM < model).
