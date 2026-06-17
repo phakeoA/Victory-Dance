@@ -68,6 +68,7 @@ from v_dance.play.vgc_base import (  # noqa: E402
     build_legal_action_mask,
     build_replacement_mask,
     random_legal_action,
+    _switch_order_target,
 )
 import random as _random  # noqa: E402  (retry-exploration on rejected choices)
 
@@ -130,6 +131,10 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
         # per-source decision tally (model / retry / forced_switch / model_error …)
         # so a run can show, at a glance, that the AI — not randomness — is driving.
         self._source_counts: "Counter[str]" = Counter()
+        # latest Showdown |error| text per battle tag — surfaced in the rejection
+        # warnings so a mask desync shows the REASON ("Can't move: X is disabled",
+        # "trapped", "Invalid choice", …) instead of an opaque "REJECTED".
+        self._last_error: Dict[str, str] = {}
 
     # ── Protocol capture ───────────────────────────────────────────────────────
     async def _handle_battle_message(self, split_messages):  # type: ignore[override]
@@ -146,6 +151,8 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
                     for sm in split_messages[1:]:
                         if not sm or len(sm) < 2:
                             continue
+                        if sm[1] == "error":     # Showdown's rejection reason (for diagnosis)
+                            self._last_error[tag] = "|".join(sm[2:])[:200]
                         if sm[1] in _CAPTURE_SKIP:
                             continue
                         buf.append("|".join(sm))
@@ -173,6 +180,18 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
                              if opp_snapshot else None)
         action_s0, action_s1, source = self._select_actions(battle, state_vec)
 
+        # ── Forced-move escape (no representable legal action) ──────────────
+        # If an ACTIVE, non-fainted slot has an EMPTY legal mask, its only usable order is one
+        # the 16-action codec can't express — Struggle (all real moves unusable), a recharge /
+        # 2-turn move's forced continuation, or a move whose live id != mon.moves. Passing such
+        # a slot is ILLEGAL ("must make a move/switch") and the model has NO real choice, so
+        # resolve the whole turn with /choose default (Showdown plays the forced move) instead
+        # of the retry-storm + rejected Pass. Normal turns (non-empty mask) are unaffected.
+        if self._active_empty_mask(battle):
+            self._source_counts["forced_default"] += 1
+            self._discard_rl_decision(battle, "turn")
+            return DefaultBattleOrder()
+
         # ── Retry exploration ───────────────────────────────────────────────
         # poke-env re-calls choose_move (without the battle advancing) when
         # Showdown rejects the order as "[Unavailable choice]".  A deterministic
@@ -194,8 +213,9 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
                          and not self._has_fresh_legal(battle, 1, tried[1]))
             if tried["n"] > _MAX_TURN_RETRIES or exhausted:
                 log.warning("Turn %d [%s] order rejected %d× / legal actions exhausted "
-                            "— '/choose default' (mask desync; model not driving).",
-                            battle.turn, battle.battle_tag, tried["n"])
+                            "— '/choose default' (mask desync; model not driving). reason=%r",
+                            battle.turn, battle.battle_tag, tried["n"],
+                            self._last_error.get(battle.battle_tag, "?"))
                 self._source_counts["retry_default"] += 1
                 self._discard_rl_decision(battle, "turn")   # default executes, not the model
                 return DefaultBattleOrder()
@@ -206,9 +226,10 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
             # (the bench/disabled-move mask fixes should make this ~never fire; if
             # it does it's an unmodelled lock to investigate, NOT normal play).
             log.warning(
-                "Turn %d [%s] order REJECTED by Showdown — perturbing to a fresh "
-                "legal action (src=retry). The model did NOT drive this slot.",
+                "Turn %d [%s] order REJECTED by Showdown (reason=%r) — perturbing to a "
+                "fresh legal action (src=retry). The model did NOT drive this slot.",
                 battle.turn, battle.battle_tag,
+                self._last_error.get(battle.battle_tag, "?"),
             )
             # The model's pick was rejected; a random perturbation will execute instead
             # — drop the rejected step so the trajectory holds only executed decisions.
@@ -248,8 +269,15 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
 
         order_s0 = self._safe_order(action_s0, battle, slot=0, gimmick=g0,
                                     opp_present_recon=opp_present_recon)
+        # Slot-1 must not switch in the same mon slot-0 is switching in ("slot N can
+        # only switch in once").  Thread slot-0's resolved switch command so slot-1's
+        # decode AND its fallback scan both avoid it — closes BOTH the retry-
+        # perturbation collision and the under-illusion two-moves-fall-back-to-the-
+        # same-switch collision the action-level dedup in _select_actions can't see.
+        taken = _switch_order_target(order_s0)
         order_s1 = self._safe_order(action_s1, battle, slot=1, gimmick=g1,
-                                    opp_present_recon=opp_present_recon)
+                                    opp_present_recon=opp_present_recon,
+                                    taken_switch_targets={taken} if taken else None)
         return DoubleBattleOrder(order_s0, order_s1)
 
     @staticmethod

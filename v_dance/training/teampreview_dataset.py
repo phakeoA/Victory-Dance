@@ -71,6 +71,10 @@ LEAD_K = 2
 PAD_IDX = 0  # reserved vocab slot for padding / unseen species
 
 # ── Per-mon dex feature vector (types one-hot + base stats) ───────────────────
+# NOTE (#A, 2026-06-17): a belief-most-likely-ability multi-hot block was trialled
+# here, but a clean same-recipe A/B showed NO improvement (mean-exact 0.221 with vs
+# 0.228 without) — the learned species embedding already captures a species' typical
+# ability, so the explicit block was redundant.  Reverted; see the memory note.
 _TYPE_IDX = {n: i for i, n in enumerate(TYPE_NAMES)}
 NUM_TYPES = len(TYPE_NAMES)
 MON_FEAT_DIM = NUM_TYPES * 2 + 6

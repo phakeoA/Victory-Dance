@@ -226,9 +226,10 @@ ABILITY_EFFECT_NAMES = [
     "magic_bounce",     # reflect status moves back
     "defensive_reduce", # Multiscale / Thick Fat / Filter / Ice Scales / …
     "status_immunity",  # Limber / Insomnia / Own Tempo / Purifying Salt / …
-    "reactive_boost",   # Justified / Anger Point / Defiant / Weak Armor — buff on hit
+    "reactive_boost",   # Justified / Anger Point / Weak Armor / Berserk — buff on being HIT
     "mold_breaker",     # ignore the target's ability
     "guts_boost",       # Guts / Quick Feet / Marvel Scale — status-as-buff
+    "statdrop_boost",   # Defiant / Competitive — offensive boost when a stat is LOWERED (Intimidate-punish)  (state-rep #B, layout v4)
 ]
 
 _ITEM_EFFECT_IDX = {n: i for i, n in enumerate(ITEM_EFFECT_NAMES)}
@@ -268,7 +269,9 @@ POKEMON_FEATURES = (
     + 1             # is_fainted      (layout-v2: see/count KO'd mons)
     + 1             # is_transformed  (layout-v2: Ditto copies a forme; reverts)
 )
-# POKEMON_FEATURES = 1+20+20+6+6+1+1+1+7+7+36 + 17+17 + 1+1+1+1 = 144
+# POKEMON_FEATURES = 1+20+20+6+6+1+1+1+7+7+40 + 17+18 + 1+1+1+1 = 149  (layout v4)
+#   item block = ITEM_FEATURES 17 (16 effects + known); ability block =
+#   ABILITY_FEATURES 18 (17 effects + known) after the Defiant/Competitive split.
 # (item/ability blocks sit AFTER the move block and BEFORE the 4 trailing slot
 #  flags, so the move-block offset _MOVE_BLOCK_REL and the move-perm augmentation
 #  are untouched, and the flags stay last — addressed by negative offsets.)
@@ -288,7 +291,7 @@ GLOBAL_FEATURES = (
 )  # = 78
 
 STATE_DIM = (ACTIVE_SLOTS + BENCH_SLOTS + OPP_BENCH_SLOTS) * POKEMON_FEATURES + GLOBAL_FEATURES
-# = 12 × 148 + 78 = 1854   (POKEMON_FEATURES 148 = 144 + 4×(MOVE_FEATURES 9→10))
+# = 12 × 149 + 78 = 1866   (POKEMON_FEATURES 149 = 148 + 1×(NUM_ABILITY_EFFECTS 16→17))
 
 # Monotonic layout version: bump whenever the tensor LAYOUT changes (a new
 # feature block, a reorder, a dim change) so a checkpoint trained on an older
@@ -297,9 +300,11 @@ STATE_DIM = (ACTIVE_SLOTS + BENCH_SLOTS + OPP_BENCH_SLOTS) * POKEMON_FEATURES + 
 #   2 → STATE_DIM 1806 (gap #5: per-mon item/ability effect-category blocks)
 #   3 → STATE_DIM 1854 (gap #6 is_spread move flag; gap #7 real pp_fraction — no
 #       dim change, a value not a slot)
+#   4 → STATE_DIM 1866 (state-rep #B: Defiant/Competitive split into a dedicated
+#       statdrop_boost ability category, NUM_ABILITY_EFFECTS 16→17)
 # train_bc stamps this into the checkpoint config; model_io.load_bc_policy asserts
 # it (and the dim) match the running code.
-STATE_LAYOUT_VERSION = 3
+STATE_LAYOUT_VERSION = 4
 
 # ── Action space ───────────────────────────────────────────────────────────────
 ACTIONS_PER_SLOT = 16    # 12 move-target + 4 switch
@@ -544,10 +549,16 @@ _STATUS_IMMUNE_AB = frozenset({
     "thermalexchange", "goodasgold", "shieldsdown",
 })
 _REACTIVE_AB     = frozenset({
-    "justified", "angerpoint", "berserk", "weakarmor", "defiant", "competitive",
+    "justified", "angerpoint", "berserk", "weakarmor",
     "rattled", "stamina", "watercompaction", "electromorphosis", "windpower",
     "angershell", "sandspit", "seedsower", "toxicdebris",
 })
+# Defiant / Competitive boost an OFFENSIVE stat (Atk / SpA) when ANY of the holder's
+# stats is LOWERED — the Intimidate-punish abilities.  SPLIT out of _REACTIVE_AB
+# (which is buff-on-being-HIT) into their own category so the model can tell
+# "punishes my stat-drops / Intimidate" apart from "buffs when I land a hit".
+# (state-rep #B, layout v4.)
+_STATDROP_AB     = frozenset({"defiant", "competitive"})
 _MOLD_BREAKER_AB = frozenset({"moldbreaker", "teravolt", "turboblaze"})
 _GUTS_AB         = frozenset({"guts", "quickfeet", "marvelscale", "flareboost", "toxicboost"})
 
@@ -574,6 +585,7 @@ def ability_effect_indices(ability_id: Optional[str]) -> list[int]:
     if aid in _DEF_REDUCE_AB:    out.append(_ABIL_EFFECT_IDX["defensive_reduce"])
     if aid in _STATUS_IMMUNE_AB: out.append(_ABIL_EFFECT_IDX["status_immunity"])
     if aid in _REACTIVE_AB:      out.append(_ABIL_EFFECT_IDX["reactive_boost"])
+    if aid in _STATDROP_AB:      out.append(_ABIL_EFFECT_IDX["statdrop_boost"])
     if aid in _MOLD_BREAKER_AB:  out.append(_ABIL_EFFECT_IDX["mold_breaker"])
     if aid in _GUTS_AB:          out.append(_ABIL_EFFECT_IDX["guts_boost"])
     return out

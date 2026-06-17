@@ -431,10 +431,22 @@ def _live_can_mega(battle: DoubleBattle, slot: int) -> bool:
 
 def action_to_order(action: int, battle: DoubleBattle, slot: int,
                     gimmick: int = GIMMICK_NONE,
-                    opp_present_recon: Optional[dict] = None) -> Optional[SingleBattleOrder]:
+                    opp_present_recon: Optional[dict] = None,
+                    taken_switch_targets: Optional[set] = None) -> Optional[SingleBattleOrder]:
     """
     Convert an integer action (0–15) into a SingleBattleOrder for the given slot.
     Returns None if the action cannot be executed (caller should fall back).
+
+    ``taken_switch_targets`` is the set of ``/choose switch …`` commands the OTHER
+    active slot is already using this turn (see ``_switch_order_target``).  A switch
+    whose resolved command is in that set is REFUSED (returns None) so the caller
+    falls back to a different legal action — this is the doubles "[Invalid choice]
+    Can't switch: The Pokémon in slot N can only switch in once" fix.  Because both
+    slots decode switch index 12+i to the SAME benched mon (own_bench_mons is
+    slot-independent), two slots can otherwise emit the same ``/choose switch`` —
+    EITHER directly (both pick a switch index, e.g. the retry perturbation) OR
+    indirectly (both move actions decode to None under an Illusion and each
+    independently substitutes the first legal switch in ``_safe_order``'s fallback).
 
     ``gimmick`` (GIMMICK_NONE / GIMMICK_MEGA) is the decoded gimmick decision for
     this slot.  A move is ordered with ``mega=True`` ONLY when the gimmick is mega
@@ -547,8 +559,15 @@ def action_to_order(action: int, battle: DoubleBattle, slot: int,
         bench = own_bench_mons(battle)
         if bench_idx >= len(bench):
             return None
+        order = build_switch_order(battle, bench[bench_idx])
+        # Cross-slot dedup: never emit a switch the OTHER active slot is already
+        # using this turn ("slot N can only switch in once").  Compared by the
+        # resolved /choose-switch command (robust to the Illusion name-vs-slot
+        # ambiguity); the caller substitutes a different legal action.
+        if taken_switch_targets and _switch_order_target(order) in taken_switch_targets:
+            return None
         _log_switch_choice(battle, slot, bench[bench_idx], "normal")
-        return build_switch_order(battle, bench[bench_idx])
+        return order
 
 
 def build_switch_order(battle: DoubleBattle, mon) -> SingleBattleOrder:
@@ -564,6 +583,24 @@ def build_switch_order(battle: DoubleBattle, mon) -> SingleBattleOrder:
     if slot is not None:
         return SingleBattleOrder(f"/choose switch {slot}")
     return Player.create_order(mon)
+
+
+def _switch_order_target(order) -> Optional[str]:
+    """The normalised ``/choose switch …`` command an order represents, or None if
+    the order is not a switch.  Two slots whose orders yield the SAME string are
+    switching in the SAME team member — the doubles "can only switch in once"
+    collision.  Comparing the command string is identical for the slot-based live
+    order ("/choose switch 3") and the name-based offline order ("/choose switch
+    Zoroark"), so it needs no mon resolution and is robust to the Illusion
+    name-vs-slot ambiguity."""
+    if order is None:
+        return None
+    msg = getattr(order, "message", None)
+    if isinstance(msg, str):
+        s = msg.strip()
+        if s.startswith("/choose switch ") or s.startswith("/switch "):
+            return s
+    return None
 
 
 def _log_switch_choice(battle: DoubleBattle, slot: int, chosen, ctx: str) -> None:
@@ -738,8 +775,20 @@ class VGCPlayerBase(Player):
             source    = source,
         )
 
+        # Forced-move escape: an active slot with an EMPTY legal mask can only play a move the
+        # 16-action codec can't express (Struggle / recharge / a forced 2-turn continuation).
+        # Passing it is illegal and — in this retry-less root path (scripted opponents) — LOOPS
+        # until the watchdog (the 835×-Sylveon flood). /choose default lets Showdown play the
+        # only legal move. Covers EVERY player (the spliced model player checks this too).
+        if self._active_empty_mask(battle):
+            return DefaultBattleOrder()
         order_s0 = self._safe_order(action_s0, battle, slot=0, gimmick=g0)
-        order_s1 = self._safe_order(action_s1, battle, slot=1, gimmick=g1)
+        # Slot-1 must not switch in the same mon slot-0 is switching in ("slot N can
+        # only switch in once") — thread slot-0's switch command so slot-1's decode
+        # AND fallback scan both avoid it (covers random/scripted players too).
+        taken = _switch_order_target(order_s0)
+        order_s1 = self._safe_order(action_s1, battle, slot=1, gimmick=g1,
+                                    taken_switch_targets={taken} if taken else None)
         return DoubleBattleOrder(order_s0, order_s1)
 
     # ── Internal helpers ──────────────────────────────────────────────────────
@@ -887,7 +936,8 @@ class VGCPlayerBase(Player):
 
     def _safe_order(self, action: int, battle: DoubleBattle, slot: int,
                     gimmick: int = GIMMICK_NONE,
-                    opp_present_recon: Optional[dict] = None) -> SingleBattleOrder:
+                    opp_present_recon: Optional[dict] = None,
+                    taken_switch_targets: Optional[set] = None) -> SingleBattleOrder:
         """
         Convert action int → SingleBattleOrder, with two fallback levels:
           1. Try the given action (with the model's ``gimmick`` decision and the
@@ -896,8 +946,15 @@ class VGCPlayerBase(Player):
              order, never speculatively mega'd).
           3. PassBattleOrder (slot has nothing to do this turn).
         DoubleBattleOrder never accepts None, so Pass is the correct no-op.
+
+        ``taken_switch_targets`` (the OTHER slot's ``/choose switch`` command, if it
+        switched) is threaded into BOTH the primary decode AND the level-2 scan so
+        neither can synthesize a switch the other slot already uses — closing the
+        "can only switch in once" collision for the perturbation path AND the
+        under-illusion case where two move actions both fall back to the same switch.
         """
-        order = action_to_order(action, battle, slot, gimmick, opp_present_recon)
+        order = action_to_order(action, battle, slot, gimmick, opp_present_recon,
+                                taken_switch_targets=taken_switch_targets)
         if order is not None:
             return order
         # The chosen action was undecodable (e.g. a single-target move with an ally
@@ -910,11 +967,55 @@ class VGCPlayerBase(Player):
         for a, ok in enumerate(mask):
             if ok and a != action:
                 order = action_to_order(a, battle, slot,
-                                        opp_present_recon=opp_present_recon)
+                                        opp_present_recon=opp_present_recon,
+                                        taken_switch_targets=taken_switch_targets)
                 if order is not None:
                     return order
-        log.debug("_safe_order: slot %d has no decodable legal action — sending Pass.", slot)
+        # Passing an ACTIVE, non-fainted mon is ALWAYS illegal ("Can't pass: your X must
+        # make a move or switch"). If we reach here for such a slot the mask/codec is out of
+        # sync with Showdown — log WHY (move/switch availability) so it can be fixed, not
+        # just papered over by the retry→/choose default escape.
+        try:
+            _active = battle.active_pokemon
+            _mon = _active[slot] if slot < len(_active) else None
+        except (ValueError, IndexError):
+            _mon = None
+        if _mon is not None and not getattr(_mon, "fainted", False):
+            try:
+                _av = battle.available_moves
+                _avs = battle.available_switches
+                _diag = (f"species={getattr(_mon, 'species', '?')} "
+                         f"mon.moves={len(getattr(_mon, 'moves', {}) or {})} "
+                         f"avail_moves[{slot}]={len(_av[slot]) if _av and slot < len(_av) else 'NA'} "
+                         f"avail_switches[{slot}]={len(_avs[slot]) if _avs and slot < len(_avs) else 'NA'} "
+                         f"mask_legal={sum(1 for x in mask if x)}")
+            except Exception:
+                _diag = "(diag unavailable)"
+            log.warning("_safe_order: slot %d would PASS an ACTIVE mon (Showdown rejects "
+                        "'must make a move/switch') — mask/codec desync. %s", slot, _diag)
+        else:
+            log.debug("_safe_order: slot %d has no decodable legal action — sending Pass.", slot)
         return PassBattleOrder()
+
+    @staticmethod
+    def _active_empty_mask(battle: DoubleBattle) -> bool:
+        """True if some ACTIVE, non-fainted slot has an EMPTY legal-action mask — its only
+        usable order is one the 16-action codec can't express (Struggle / recharge / a forced
+        2-turn continuation, or a live move-id that != mon.moves). Passing such a slot is
+        illegal (and loops in the retry-less root path), so the caller resolves the turn with
+        /choose default. False for normal turns. Lives on the ROOT base so the model, scripted,
+        and gauntlet players all share it."""
+        try:
+            active = battle.active_pokemon
+        except (ValueError, AttributeError):
+            return False
+        for slot in range(min(2, len(active))):
+            mon = active[slot] if slot < len(active) else None
+            if mon is None or getattr(mon, "fainted", False):
+                continue
+            if not any(build_legal_action_mask(battle, slot)):
+                return True
+        return False
 
     def _battle_finished_callback(self, battle: DoubleBattle) -> None:
         """Called by poke-env when a battle ends — back-fills outcomes in replay."""

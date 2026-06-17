@@ -131,3 +131,23 @@ def test_has_fresh_legal_detects_exhaustion(monkeypatch):
     assert SP._has_fresh_legal(None, 0, set()) is True       # nothing tried yet
     assert SP._has_fresh_legal(None, 0, {0}) is True         # action 2 still fresh
     assert SP._has_fresh_legal(None, 0, {0, 2}) is False      # both legal tried → exhausted
+
+
+def test_active_empty_mask_forced_move_vs_normal(monkeypatch):
+    """An active, non-fainted slot with an EMPTY mask (its only usable order is a
+    non-representable forced move — Struggle / recharge / 2-turn continuation) must be
+    detected so the turn goes to /choose default instead of an illegal Pass; a normal
+    (non-empty) mask must NOT trigger it, and a fainted slot is ignored."""
+    from v_dance.play import vgc_base as VB
+    mon0 = types.SimpleNamespace(fainted=False, species="sylveon")
+    battle = types.SimpleNamespace(active_pokemon=[mon0, None])
+
+    monkeypatch.setattr(VB, "build_legal_action_mask", lambda b, s: [False] * 16)
+    assert VB.VGCPlayerBase._active_empty_mask(battle) is True             # empty -> forced-move
+
+    monkeypatch.setattr(VB, "build_legal_action_mask", lambda b, s: [True] + [False] * 15)
+    assert VB.VGCPlayerBase._active_empty_mask(battle) is False            # has a legal action
+
+    mon0.fainted = True                                                    # fainted slot ignored
+    monkeypatch.setattr(VB, "build_legal_action_mask", lambda b, s: [False] * 16)
+    assert VB.VGCPlayerBase._active_empty_mask(battle) is False

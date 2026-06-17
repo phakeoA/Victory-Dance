@@ -50,11 +50,11 @@ def _snap():
 
 
 # ── Dimension / structure ───────────────────────────────────────────────────
-def test_state_dim_is_layout_v2():
-    assert POKEMON_FEATURES == 148      # 110 + item(17) + ability(17) + 4×(MOVE 9→10)
+def test_state_dim_is_layout_v4():
+    assert POKEMON_FEATURES == 149      # 110 + item(17) + ability(18) + 4×(MOVE 9→10)
     assert (ACTIVE_SLOTS, BENCH_SLOTS, OPP_BENCH_SLOTS) == (4, 4, 4)
     assert GLOBAL_FEATURES == 78
-    assert get_state_dim() == 1854      # 12*148 + 78  (gap #5 item/ability + #6 is_spread)
+    assert get_state_dim() == 1866      # 12*149 + 78  (state-rep #B: ability 16→17 effects)
 
 
 def test_encode_shape_and_finite():

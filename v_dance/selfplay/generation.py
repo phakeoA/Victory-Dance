@@ -58,9 +58,28 @@ def _two_prop_se(p1: float, n1: int, p2: float, n2: int) -> float:
 
 
 def promotion_gate(new_wins: int, new_games: int, base_wins: int, base_games: int,
-                   cfg: GateConfig = GateConfig()) -> Tuple[str, dict]:
-    """Decide promote / hold / revert from the scripted-ladder win-rates. With no
-    baseline (first generation) the candidate is auto-promoted to establish it."""
+                   cfg: GateConfig = GateConfig(),
+                   prevbest_wins: Optional[int] = None,
+                   prevbest_games: int = 0) -> Tuple[str, dict]:
+    """Decide promote / hold / revert.
+
+    The SCRIPTED ladder (candidate vs the accepted best's scripted win-rate) is the
+    primary signal — BUT it SATURATES once the policy crushes the scripted opponents
+    (gen N ≈ gen N+1 ≈ 98% → delta ≈ 0 → "hold" forever, a false plateau; ``model_elo``
+    is scripted-only so it saturates too).  So a NON-SATURATING, cycle-safe bar is
+    added: a head-to-head vs ``prev_best`` — the current accepted BEST, NOT gen N-1
+    (gating on the immediate predecessor lets a non-transitive RPS cycle A→B→C→A
+    promote forever with no real progress).  Beating your strongest past self by a
+    significant margin is a bar that only RISES, so the gate keeps making progress
+    after the scripted ladder goes blind.
+
+      * promote  if scripted improves significantly OR the candidate beats prev_best
+                 head-to-head significantly (>50% by the z-band);
+      * revert   only on a real scripted COLLAPSE (regression below the best);
+      * hold     otherwise.
+
+    No baseline (first generation) → auto-promote.  No prev_best data
+    (``prevbest_games<=0``) → reduces EXACTLY to the original scripted-only gate."""
     if base_games <= 0:
         return "promote", {"reason": "no_baseline", "p_new": (new_wins / new_games)
                            if new_games else None}
@@ -70,13 +89,36 @@ def promotion_gate(new_wins: int, new_games: int, base_wins: int, base_games: in
     se = _two_prop_se(p_new, new_games, p_base, base_games)
     lo, hi = delta - cfg.z * se, delta + cfg.z * se
     if lo > cfg.min_delta:
-        verdict = "promote"
+        scripted_verdict = "promote"
     elif cfg.revert_on_regression and hi < -cfg.min_delta:
-        verdict = "revert"
+        scripted_verdict = "revert"
     else:
-        verdict = "hold"
-    return verdict, {"p_new": p_new, "p_base": p_base, "delta": delta, "se": se,
-                     "ci": (lo, hi), "z": cfg.z}
+        scripted_verdict = "hold"
+    stats = {"p_new": p_new, "p_base": p_base, "delta": delta, "se": se,
+             "ci": (lo, hi), "z": cfg.z, "scripted_verdict": scripted_verdict}
+
+    # Non-saturating best-self anchor: did the candidate beat prev_best head-to-head?
+    beats_best = False
+    if prevbest_wins is not None and prevbest_games > 0:
+        p_h2h = prevbest_wins / prevbest_games
+        se_h2h = _two_prop_se(p_h2h, prevbest_games, 0.5, prevbest_games)
+        margin_lo = (p_h2h - 0.5) - cfg.z * se_h2h
+        beats_best = margin_lo > cfg.min_delta
+        stats["prevbest"] = {"p": p_h2h, "n": prevbest_games,
+                             "margin_lo": margin_lo, "beats_best": beats_best}
+
+    # Collapse safety FIRST: a real scripted regression reverts even if the candidate
+    # edges prev_best (which would be noise in a genuinely-collapsed policy).
+    if scripted_verdict == "revert":
+        verdict, reason = "revert", "scripted_collapse"
+    elif scripted_verdict == "promote":
+        verdict, reason = "promote", "scripted"
+    elif beats_best:
+        verdict, reason = "promote", "beats_prev_best"   # non-saturating bar
+    else:
+        verdict, reason = "hold", "hold"
+    stats["verdict_reason"] = reason
+    return verdict, stats
 
 
 def aggregate_scripted(results: Dict[str, Tuple[int, int]]) -> Tuple[int, int]:
@@ -87,6 +129,13 @@ def aggregate_scripted(results: Dict[str, Tuple[int, int]]) -> Tuple[int, int]:
             w += wins
             g += n
     return w, g
+
+
+def aggregate_prev_best(results: Dict[str, Tuple[int, int]]) -> Tuple[int, int]:
+    """(wins, games) of the candidate's head-to-head vs the prev_best mirror, or
+    (0, 0) when the eval did not run it (gen 0 / no accepted best yet)."""
+    w, g = results.get("prev_best", (0, 0))
+    return int(w), int(g)
 
 
 # ── generation history (pure, persistable for 3c.4) ───────────────────────────
@@ -163,7 +212,9 @@ def run_generation(
     """Run ONE generation. Injected live steps:
       * ``collect_fn(actor_critic, league, gen) -> (trajectories, source_counts)``
       * ``save_fn(actor_critic, gen) -> candidate_path``
-      * ``eval_fn(candidate_path) -> (results{opp:(wins,n)}, model_elo)``
+      * ``eval_fn(candidate_path, prev_best_path) -> (results{opp:(wins,n)}, model_elo)``
+        (``prev_best_path`` is None at gen 0; when given, the eval adds a ``"prev_best"``
+        head-to-head so the gate has the non-saturating best-self anchor)
       * ``refresh_phi_fn(actor_critic)`` (on promote) / ``restore_fn(actor_critic, best_path)`` (on revert)
     Returns a generation report dict; appends to ``history``; mutates ``league`` on promote."""
     gen = history.generation
@@ -180,10 +231,13 @@ def run_generation(
     candidate = save_fn(actor_critic, gen)
     if status is not None:
         status.phase("evaluating", generation=gen)
-    results, elo = eval_fn(candidate)
+    results, elo = eval_fn(candidate, history.best_path)   # prev_best = current accepted best
     sw, sg = aggregate_scripted(results)
+    pbw, pbg = aggregate_prev_best(results)
 
-    verdict, gate_stats = promotion_gate(sw, sg, *history.best_scripted, cfg.gate)
+    verdict, gate_stats = promotion_gate(
+        sw, sg, *history.best_scripted, cfg.gate,
+        prevbest_wins=(pbw if pbg else None), prevbest_games=pbg)
     promoted = verdict == "promote"
     if status is not None:
         status.set_update(update_stats, last_verdict=verdict)
@@ -244,7 +298,7 @@ def build_collection_chunks(league, team_pool, n_games, *, chunk_size, matchup_s
 async def collect_with_league(actor_critic, league: OpponentLeague, n_games: int, *,
                               team_pool, tau: float = 1.0, seed: int = 0,
                               matchup_seed: int = 0, chunk_size: int = 10,
-                              n_workers: int = 1,
+                              n_workers: int = 1, stop_check=None,
                               battle_timeout: Optional[float] = 90.0, team_chooser=None,
                               status=None):
     """Collect ``n_games`` self-play games against LEAGUE-sampled opponents (assumes the
@@ -291,6 +345,11 @@ async def collect_with_league(actor_critic, league: OpponentLeague, n_games: int
         # mutations below run synchronously in `finally` (no await between them), so they're
         # atomic under asyncio interleaving.
         async with sem:
+            # Stop promptly on Ctrl-C / time budget: a soft stop must abort the ~hundreds of
+            # QUEUED chunks instead of launching battles against a (Windows-Ctrl-C-killed)
+            # server, which would flood the log with ConnectionRefused.
+            if stop_check is not None and stop_check():
+                return
             ta = R.load_team(R.resolve_team_path(d["team_a"]))
             tb = R.load_team(R.resolve_team_path(d["team_b"]))
             cn, spec, uid = d["cn"], d["spec"], d["uid"]
@@ -351,10 +410,16 @@ async def collect_with_league(actor_critic, league: OpponentLeague, n_games: int
 
 def gauntlet_eval(candidate_path, *, teams, team_chooser, battles: int = 30,
                   matchup_seed: int = 0, battle_timeout: Optional[float] = 90.0,
-                  manage_server: bool = False, n_workers: int = 1):
+                  manage_server: bool = False, n_workers: int = 1,
+                  prev_best_path: Optional[str] = None):
     """Evaluate a saved checkpoint on the scripted gauntlet (>=4 teams, side-balanced).
     Returns ``(results{opp:(wins,n)}, model_elo)``. ``n_workers`` (3c.8c) parallelises the
-    eval the same way as collection so the promotion gate isn't the throughput bottleneck."""
+    eval the same way as collection so the promotion gate isn't the throughput bottleneck.
+
+    When ``prev_best_path`` is given (the current accepted best), a ``"prev_best"`` mirror
+    is added to the ladder so the gate gets a NON-SATURATING best-self anchor (the gauntlet
+    already supports it via ``prev_best_ckpt``).  ``model_elo`` excludes the mirror, so the
+    Elo stays scripted-calibrated; ``aggregate_prev_best`` reads the head-to-head."""
     import asyncio
 
     import v_dance.eval.gauntlet as GA
@@ -362,9 +427,13 @@ def gauntlet_eval(candidate_path, *, teams, team_chooser, battles: int = 30,
     # Fail LOUD if the candidate won't load — otherwise each gauntlet player silently
     # falls back to a no-model picker and the promotion gate evaluates garbage (3c.3b bug).
     model_io.load_bc_policy(candidate_path)
+    opponents = list(SCRIPTED_OPPONENTS)
+    if prev_best_path:
+        opponents.append("prev_best")
     results, _sources = asyncio.run(GA.run_gauntlet(
-        opponents=list(SCRIPTED_OPPONENTS), team_pool=list(teams),
+        opponents=opponents, team_pool=list(teams),
         battles_per_opponent=battles, ckpt=Path(candidate_path),
+        prev_best_ckpt=Path(prev_best_path) if prev_best_path else None,
         team_chooser=Path(team_chooser), manage_server=manage_server,
         matchup_seed=matchup_seed, battle_timeout=battle_timeout, n_workers=n_workers))
     return results, GA.model_elo(results)
@@ -514,7 +583,7 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
         trajs, src, log = asyncio.run(collect_with_league(
             coll_ac, lg, gen_cfg.n_games, team_pool=team_pool, tau=tau_gen,
             seed=seed + gen * 1000, matchup_seed=gen, team_chooser=team_chooser,
-            n_workers=cw, status=status))
+            n_workers=cw, stop_check=stop.should_stop, status=status))
         dt = _time.perf_counter() - t0
         thru["games"] += gen_cfg.n_games
         thru["secs"] += dt
@@ -532,15 +601,18 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
         ac_.save(p, generation=gen)
         return str(p)
 
-    def eval_fn(path):
+    def eval_fn(path, prev_best_path=None):
         t0 = _time.perf_counter()
         out = gauntlet_eval(path, teams=_eval_pool, team_chooser=team_chooser,
-                            battles=eval_battles, manage_server=False, n_workers=n_workers)
+                            battles=eval_battles, manage_server=False, n_workers=n_workers,
+                            prev_best_path=prev_best_path)
         dt = _time.perf_counter() - t0
         n_eval = sum(g for _w, g in out[0].values())     # total finished eval battles
         gpm = n_eval / dt * 60.0 if dt > 0 else float("nan")
+        pb = out[0].get("prev_best")
+        pb_s = f" | prev_best {pb[0]}/{pb[1]}" if pb else ""
         print(f"   eval throughput: {n_eval} games in {dt:.1f}s = {gpm:.1f} games/min "
-              f"({n_workers} workers)")
+              f"({n_workers} workers){pb_s}")
         return out
 
     def restore_fn(ac_, path):
@@ -617,7 +689,7 @@ def _dry_run(n_generations: int = 6, seed: int = 0) -> None:
     def save_fn(ac, gen):
         return f"archive/gen{gen}.pt"
 
-    def eval_fn(path):
+    def eval_fn(path, prev_best_path=None):
         gen = len(history.records)
         wr = scripted_wr[min(gen, len(scripted_wr) - 1)]
         wins = round(wr * eval_games)

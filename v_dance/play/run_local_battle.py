@@ -115,12 +115,19 @@ def start_showdown() -> subprocess.Popen | None:
     env["PATH"] = node_dir + os.pathsep + env.get("PATH", "")
 
     log.info("Starting Pokémon Showdown server … (first launch builds it, ~30s)")
+    # Isolate the server from the console's Ctrl-C: on Windows a Ctrl-C sends CTRL_C_EVENT
+    # to the whole process group, which would KILL the server while our (soft-stop) collection
+    # is still launching battles → a flood of ConnectionRefused. A new process group lets the
+    # server survive until we stop it cleanly in the loop's finally (stop_showdown terminates
+    # it explicitly regardless of group).
+    _flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
     proc = subprocess.Popen(
         [node, "pokemon-showdown", "start", "--no-security"],
         cwd=SHOWDOWN_DIR,
         env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        creationflags=_flags,
     )
 
     deadline = time.monotonic() + SHOWDOWN_READY_TIMEOUT

@@ -158,7 +158,7 @@ def _harness(win_rates, eval_games=400):
         calls["saved"].append(p)
         return p
 
-    def eval_fn(path):
+    def eval_fn(path, prev_best_path=None):
         gen = len(history.records)
         wr = win_rates[gen]
         return {"random": (round(wr * eval_games), eval_games)}, 1000 + (wr - 0.5) * 800
