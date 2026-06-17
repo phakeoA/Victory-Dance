@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Victory-Dance — Self-Play Dashboard</title>
+  <link rel="stylesheet" href="dashboard.css" />
+</head>
+<body>
+  <div id="hdr">
+    <h1>🏆 Victory-Dance</h1>
+    <span class="sub">Self-Play Dashboard</span>
+    <span class="src-pill" id="src-pill">demo data</span>
+    <div class="sp"></div>
+    <input type="file" id="file-in" accept="application/json,.json" hidden />
+    <button class="btn" id="btn-load">📂 Load manifest.json</button>
+    <button class="btn" id="btn-demo">↻ Demo data</button>
+  </div>
+
+  <div id="app">
+    <div id="side">
+      <div class="sec">
+        <h3>Run summary</h3>
+        <div class="mini-grid" id="run-summary"></div>
+      </div>
+      <div class="sec" style="flex:1;">
+        <h3>Generations <span id="gen-count" style="color:var(--text2)"></span></h3>
+        <div id="gen-list"></div>
+      </div>
+    </div>
+
+    <div id="main">
+      <div id="view-tabs">
+        <button class="vtab active" data-tab="overview">Overview</button>
+        <button class="vtab" data-tab="health">PPO / Critic Health</button>
+        <button class="vtab" data-tab="detail">Generation Detail</button>
+      </div>
+      <div id="tab-overview" class="tab-pane"></div>
+      <div id="tab-health" class="tab-pane hidden"></div>
+      <div id="tab-detail" class="tab-pane hidden"></div>
+    </div>
+  </div>
+
+  <div id="notif"></div>
+  <script src="dashboard.js"></script>
+</body>
+</html>

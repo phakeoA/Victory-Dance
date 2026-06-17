@@ -2,9 +2,15 @@
   "version": "0.0.1",
   "configurations": [
     {
+      "name": "dashboard",
+      "runtimeExecutable": "D:/ShowdownProject/Victory-Dance/.venv/Scripts/python.exe",
+      "runtimeArgs": ["-m", "http.server", "8011", "--bind", "127.0.0.1", "--directory", "D:/ShowdownProject/Victory-Dance/data/scripts/dashboard"],
+      "port": 8011
+    },
+    {
       "name": "team-builder",
       "runtimeExecutable": ".venv/Scripts/python.exe",
-      "runtimeArgs": ["data/scripts/server.py"],
+      "runtimeArgs": ["v_dance/datatools/server.py"],
       "port": 5174
     }
   ]

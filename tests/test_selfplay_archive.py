@@ -49,6 +49,39 @@ def test_manifest(tmp_path):
     assert json.loads(p.read_text(encoding="utf-8"))["n_generations"] == 3
 
 
+def test_manifest_enriched_health_deltas_and_summary():
+    h = GenerationHistory()
+    h.add(GenerationRecord(0, 200, 48, 100, 1000.0, "promote", True,
+                           update_stats={"loss": 0.5, "kl_to_bc": 0.002,
+                                         "explained_variance": 0.8, "clip_fraction": 0.02,
+                                         "halted": False}))
+    h.add(GenerationRecord(1, 200, 56, 100, 1080.0, "promote", True,
+                           update_stats={"loss": 0.4, "kl_to_bc": 0.003,
+                                         "explained_variance": 0.85, "clip_fraction": 0.03,
+                                         "halted": False}))
+    h.add(GenerationRecord(2, 200, 52, 100, 1050.0, "hold", False,
+                           update_stats={"loss": 0.45, "kl_to_bc": 0.004,
+                                         "explained_variance": 0.7, "clip_fraction": 0.05,
+                                         "halted": True}))
+    h.best_path, h.best_scripted = "gen1.pt", (56, 100)
+    m = AR.build_manifest(h)
+    g = m["generations"]
+    # PPO health passthrough (halted bool collapses to 0/1 for charting)
+    assert g[0]["update_stats"]["loss"] == pytest.approx(0.5)
+    assert g[2]["update_stats"]["halted"] == 1.0 and g[0]["update_stats"]["halted"] == 0.0
+    # improvement deltas
+    assert g[0]["elo_delta"] is None and g[0]["win_rate_delta"] is None        # first gen, no prior
+    assert g[1]["elo_delta"] == pytest.approx(80.0)
+    assert g[1]["win_rate_delta"] == pytest.approx(0.08)
+    assert g[2]["elo_delta"] == pytest.approx(-30.0)                           # a regression gen
+    # is_best = highest win-rate so far
+    assert g[0]["is_best"] and g[1]["is_best"] and not g[2]["is_best"]
+    assert g[0]["n_trajectories"] == 200
+    # top-level summary
+    assert m["best_generation"] == 1 and m["best_win_rate"] == pytest.approx(0.56)
+    assert m["best_elo"] == pytest.approx(1080.0) and m["n_promotions"] == 2
+
+
 # ── Type_D = standard Showdown replay format ──────────────────────────────────
 def test_render_replay_is_showdown_format():
     h = AR.render_replay_html(_LOG)

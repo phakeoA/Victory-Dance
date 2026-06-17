@@ -59,18 +59,60 @@ REPLAY_CSS = (
 
 
 # ── manifest (the dashboard's data source) ────────────────────────────────────
+def _numeric_stats(d: dict) -> dict:
+    """Keep only the plottable scalars from a PPO ``update_stats`` dict (loss,
+    kl_to_bc, clip_fraction, explained_variance, entropy, value, policy, …);
+    booleans like ``halted`` collapse to 0.0/1.0 so the dashboard can chart them."""
+    out = {}
+    for k, v in (d or {}).items():
+        if isinstance(v, bool):
+            out[k] = 1.0 if v else 0.0
+        elif isinstance(v, (int, float)):
+            out[k] = float(v)
+    return out
+
+
 def build_manifest(history, league=None) -> dict:
+    """The dashboard's single data source. Per generation: the raw result plus the
+    PPO/critic health (``update_stats``) and *improvement* signals (Elo / win-rate
+    deltas vs the prior gen, and whether this gen is the best win-rate so far). The
+    top level carries a summary (best gen/Elo/win-rate, promotion count)."""
+    recs = history.records
     gens = []
-    for r in history.records:
+    prev_elo = prev_wr = best_wr_so_far = None
+    for r in recs:
+        wr = (r.scripted_wins / r.scripted_games) if r.scripted_games else None
+        elo_delta = (r.model_elo - prev_elo) if (r.model_elo is not None and prev_elo is not None) else None
+        wr_delta = (wr - prev_wr) if (wr is not None and prev_wr is not None) else None
+        is_best = wr is not None and (best_wr_so_far is None or wr >= best_wr_so_far)
         gens.append({
             "generation": r.generation,
             "checkpoint": f"gen{r.generation}.pt",
-            "scripted_win_rate": (r.scripted_wins / r.scripted_games) if r.scripted_games else None,
+            "scripted_win_rate": wr,
             "model_elo": r.model_elo, "verdict": r.verdict, "promoted": r.promoted,
+            "n_trajectories": r.n_trajectories,
+            "update_stats": _numeric_stats(r.update_stats),
+            "elo_delta": elo_delta,
+            "win_rate_delta": wr_delta,
+            "is_best": is_best,
         })
+        if r.model_elo is not None:
+            prev_elo = r.model_elo
+        if wr is not None:
+            prev_wr = wr
+            best_wr_so_far = wr if best_wr_so_far is None else max(best_wr_so_far, wr)
+
+    wr_pts = [(g["generation"], g["scripted_win_rate"]) for g in gens if g["scripted_win_rate"] is not None]
+    elo_pts = [(g["generation"], g["model_elo"]) for g in gens if g["model_elo"] is not None]
+    best_gen, best_wr = max(wr_pts, key=lambda t: t[1]) if wr_pts else (None, None)
+    best_elo = max((e for _, e in elo_pts), default=None)
     return {
         "n_generations": history.generation,
         "best_path": history.best_path,
+        "best_generation": best_gen,
+        "best_win_rate": best_wr,
+        "best_elo": best_elo,
+        "n_promotions": sum(1 for r in recs if r.promoted),
         "league": [s.snapshot_id for s in league.snapshots] if league is not None else [],
         "generations": gens,
     }

@@ -1,0 +1,261 @@
+{
+  "n_generations": 12,
+  "best_path": "gen11.pt",
+  "best_generation": 11,
+  "best_win_rate": 0.6583333333333333,
+  "best_elo": 1278.0,
+  "n_promotions": 9,
+  "league": [
+    "gen0",
+    "gen1",
+    "gen2",
+    "gen3",
+    "gen5",
+    "gen6",
+    "gen9",
+    "gen10",
+    "gen11"
+  ],
+  "generations": [
+    {
+      "generation": 0,
+      "checkpoint": "gen0.pt",
+      "scripted_win_rate": 0.38333333333333336,
+      "model_elo": 980.0,
+      "verdict": "promote",
+      "promoted": true,
+      "n_trajectories": 400,
+      "update_stats": {
+        "loss": 0.62,
+        "kl_to_bc": 0.0018,
+        "explained_variance": 0.78,
+        "clip_fraction": 0.02,
+        "entropy": 1.3,
+        "halted": 0.0
+      },
+      "elo_delta": null,
+      "win_rate_delta": null,
+      "is_best": true
+    },
+    {
+      "generation": 1,
+      "checkpoint": "gen1.pt",
+      "scripted_win_rate": 0.44166666666666665,
+      "model_elo": 1030.0,
+      "verdict": "promote",
+      "promoted": true,
+      "n_trajectories": 402,
+      "update_stats": {
+        "loss": 0.55,
+        "kl_to_bc": 0.0024,
+        "explained_variance": 0.82,
+        "clip_fraction": 0.025,
+        "entropy": 1.24,
+        "halted": 0.0
+      },
+      "elo_delta": 50.0,
+      "win_rate_delta": 0.05833333333333329,
+      "is_best": true
+    },
+    {
+      "generation": 2,
+      "checkpoint": "gen2.pt",
+      "scripted_win_rate": 0.49166666666666664,
+      "model_elo": 1075.0,
+      "verdict": "promote",
+      "promoted": true,
+      "n_trajectories": 410,
+      "update_stats": {
+        "loss": 0.5,
+        "kl_to_bc": 0.0031,
+        "explained_variance": 0.85,
+        "clip_fraction": 0.028,
+        "entropy": 1.18,
+        "halted": 0.0
+      },
+      "elo_delta": 45.0,
+      "win_rate_delta": 0.04999999999999999,
+      "is_best": true
+    },
+    {
+      "generation": 3,
+      "checkpoint": "gen3.pt",
+      "scripted_win_rate": 0.5166666666666667,
+      "model_elo": 1110.0,
+      "verdict": "promote",
+      "promoted": true,
+      "n_trajectories": 408,
+      "update_stats": {
+        "loss": 0.47,
+        "kl_to_bc": 0.0029,
+        "explained_variance": 0.86,
+        "clip_fraction": 0.031,
+        "entropy": 1.12,
+        "halted": 0.0
+      },
+      "elo_delta": 35.0,
+      "win_rate_delta": 0.025000000000000078,
+      "is_best": true
+    },
+    {
+      "generation": 4,
+      "checkpoint": "gen4.pt",
+      "scripted_win_rate": 0.5083333333333333,
+      "model_elo": 1098.0,
+      "verdict": "hold",
+      "promoted": false,
+      "n_trajectories": 406,
+      "update_stats": {
+        "loss": 0.46,
+        "kl_to_bc": 0.0035,
+        "explained_variance": 0.84,
+        "clip_fraction": 0.034,
+        "entropy": 1.09,
+        "halted": 0.0
+      },
+      "elo_delta": -12.0,
+      "win_rate_delta": -0.008333333333333415,
+      "is_best": false
+    },
+    {
+      "generation": 5,
+      "checkpoint": "gen5.pt",
+      "scripted_win_rate": 0.5666666666666667,
+      "model_elo": 1155.0,
+      "verdict": "promote",
+      "promoted": true,
+      "n_trajectories": 415,
+      "update_stats": {
+        "loss": 0.42,
+        "kl_to_bc": 0.0042,
+        "explained_variance": 0.87,
+        "clip_fraction": 0.03,
+        "entropy": 1.04,
+        "halted": 0.0
+      },
+      "elo_delta": 57.0,
+      "win_rate_delta": 0.05833333333333335,
+      "is_best": true
+    },
+    {
+      "generation": 6,
+      "checkpoint": "gen6.pt",
+      "scripted_win_rate": 0.6,
+      "model_elo": 1190.0,
+      "verdict": "promote",
+      "promoted": true,
+      "n_trajectories": 420,
+      "update_stats": {
+        "loss": 0.4,
+        "kl_to_bc": 0.0048,
+        "explained_variance": 0.88,
+        "clip_fraction": 0.033,
+        "entropy": 0.99,
+        "halted": 0.0
+      },
+      "elo_delta": 35.0,
+      "win_rate_delta": 0.033333333333333326,
+      "is_best": true
+    },
+    {
+      "generation": 7,
+      "checkpoint": "gen7.pt",
+      "scripted_win_rate": 0.49166666666666664,
+      "model_elo": 1100.0,
+      "verdict": "revert",
+      "promoted": false,
+      "n_trajectories": 418,
+      "update_stats": {
+        "loss": 0.58,
+        "kl_to_bc": 0.0125,
+        "explained_variance": 0.55,
+        "clip_fraction": 0.09,
+        "entropy": 0.82,
+        "halted": 1.0
+      },
+      "elo_delta": -90.0,
+      "win_rate_delta": -0.10833333333333334,
+      "is_best": false
+    },
+    {
+      "generation": 8,
+      "checkpoint": "gen8.pt",
+      "scripted_win_rate": 0.5833333333333334,
+      "model_elo": 1165.0,
+      "verdict": "hold",
+      "promoted": false,
+      "n_trajectories": 416,
+      "update_stats": {
+        "loss": 0.41,
+        "kl_to_bc": 0.0044,
+        "explained_variance": 0.86,
+        "clip_fraction": 0.031,
+        "entropy": 0.98,
+        "halted": 0.0
+      },
+      "elo_delta": 65.0,
+      "win_rate_delta": 0.09166666666666673,
+      "is_best": false
+    },
+    {
+      "generation": 9,
+      "checkpoint": "gen9.pt",
+      "scripted_win_rate": 0.6166666666666667,
+      "model_elo": 1205.0,
+      "verdict": "promote",
+      "promoted": true,
+      "n_trajectories": 422,
+      "update_stats": {
+        "loss": 0.39,
+        "kl_to_bc": 0.005,
+        "explained_variance": 0.89,
+        "clip_fraction": 0.029,
+        "entropy": 0.95,
+        "halted": 0.0
+      },
+      "elo_delta": 40.0,
+      "win_rate_delta": 0.033333333333333326,
+      "is_best": true
+    },
+    {
+      "generation": 10,
+      "checkpoint": "gen10.pt",
+      "scripted_win_rate": 0.6416666666666667,
+      "model_elo": 1240.0,
+      "verdict": "promote",
+      "promoted": true,
+      "n_trajectories": 430,
+      "update_stats": {
+        "loss": 0.38,
+        "kl_to_bc": 0.0052,
+        "explained_variance": 0.9,
+        "clip_fraction": 0.028,
+        "entropy": 0.93,
+        "halted": 0.0
+      },
+      "elo_delta": 35.0,
+      "win_rate_delta": 0.025000000000000022,
+      "is_best": true
+    },
+    {
+      "generation": 11,
+      "checkpoint": "gen11.pt",
+      "scripted_win_rate": 0.6583333333333333,
+      "model_elo": 1278.0,
+      "verdict": "promote",
+      "promoted": true,
+      "n_trajectories": 433,
+      "update_stats": {
+        "loss": 0.37,
+        "kl_to_bc": 0.0055,
+        "explained_variance": 0.9,
+        "clip_fraction": 0.027,
+        "entropy": 0.91,
+        "halted": 0.0
+      },
+      "elo_delta": 38.0,
+      "win_rate_delta": 0.016666666666666607,
+      "is_best": true
+    }
+  ]
+}
