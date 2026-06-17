@@ -109,3 +109,41 @@ def test_write_live_log(tmp_path):
     assert d["tag"] == "battle-x-7" and d["turn"] == 1 and d["n_lines"] == 2
     assert d["log"][0] == "|turn|1"
     assert not p.with_name(p.name + ".tmp").exists()        # atomic, no tmp left
+
+
+# ── 3c.8c: crash-proof + throttled writes (parallel collection churns the file) ──
+def test_atomic_write_swallows_lock_errors(tmp_path, monkeypatch):
+    """A transient file lock (Windows: antivirus / the dashboard reading the file) must NOT
+    propagate — the cosmetic status feed can't be allowed to crash the training run."""
+    import pathlib
+    from v_dance.selfplay.status import _atomic_write
+    tries = {"n": 0}
+
+    def boom(self, *a, **k):
+        tries["n"] += 1
+        raise PermissionError("locked")
+
+    monkeypatch.setattr(pathlib.Path, "write_text", boom)
+    ok = _atomic_write(tmp_path / "status.json", "{}", retries=3)   # must NOT raise
+    assert ok is False and tries["n"] == 3                          # tried + gave up
+
+
+def test_status_games_never_raises_on_write_failure(tmp_path, monkeypatch):
+    import pathlib
+    ls = _ls(tmp_path)
+    monkeypatch.setattr(pathlib.Path, "write_text",
+                        lambda self, *a, **k: (_ for _ in ()).throw(PermissionError("x")))
+    ls.games(5)                                                     # the bug: this used to crash
+
+
+def test_status_throttle_skips_rapid_writes_but_force_always_writes(tmp_path):
+    t = {"v": 100.0}
+    ls = LiveStatus(tmp_path / "status.json", clock=lambda: t["v"], min_interval=10.0)
+    ls.start_run(1)                                  # forced write (sets last=100)
+    ls.games(7)                                      # t=100, within 10s -> THROTTLED (skipped)
+    assert read_status(ls.path)["run"]["games_done"] == 0
+    t["v"] = 200.0
+    ls.games(9)                                      # >10s later -> writes
+    assert read_status(ls.path)["run"]["games_done"] == 9
+    ls.phase("updating")                             # forced -> writes even at same clock
+    assert read_status(ls.path)["run"]["phase"] == "updating"

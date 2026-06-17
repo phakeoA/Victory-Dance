@@ -493,7 +493,7 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
         print(f"[3c.4] resumed from {resume_from} at generation {history.generation} "
               f"(league={len(league.snapshots)})")
     stop = RS.StopController(max_hours=max_hours)
-    status = LiveStatus(archive / "status.json")     # live dashboard feed (3c.6e-3)
+    status = LiveStatus(archive / "status.json", min_interval=0.5)   # live feed; throttled (3c.8c)
     status.start_run(n_generations, hours=max_hours)
 
     showcase = {"log": None}
