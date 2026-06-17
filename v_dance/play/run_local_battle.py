@@ -53,11 +53,12 @@ def _configure_logging(verbose: bool) -> None:
 log = logging.getLogger(__name__)
 
 # ── Defaults (anchored to repo root) ──────────────────────────────────────────
-# The two players load DISTINCT teams by default (teams/M-A/ holds many ready
-# pastes); override per-player with --team1/--team2, or force both onto one team
-# with --team.
-TEAM_FILE      = _REPO_ROOT / "teams" / "M-A" / "team1"        # TrainerRed
-TEAM_FILE_2    = _REPO_ROOT / "teams" / "M-A" / "WolfeGlick"   # TrainerBlue
+# Teams live under teams/Champions/<reg>/ (M-A now, M-B added over the coming week);
+# the two players load DISTINCT teams by default. Override per-player with
+# --team1/--team2, or force both onto one team with --team.
+CHAMPIONS_DIR  = _REPO_ROOT / "teams" / "Champions"
+TEAM_FILE      = CHAMPIONS_DIR / "M-A" / "team1"        # TrainerRed
+TEAM_FILE_2    = CHAMPIONS_DIR / "M-A" / "WolfeGlick"   # TrainerBlue
 BATTLE_FORMAT  = "gen9championsvgc2026regma"
 N_BATTLES_DEFAULT = 1
 
@@ -153,18 +154,48 @@ def stop_showdown(proc: subprocess.Popen | None) -> None:
 # Team loading
 # ══════════════════════════════════════════════════════════════════════════════
 
+# Files under teams/Champions/ that are NOT team pastes (skipped by discover_teams).
+_NON_TEAM_SUFFIXES = {".json", ".md", ".py", ".gitkeep", ".gitignore", ".lock",
+                      ".yml", ".yaml", ".txt"}
+
+
+def discover_teams(root: Path | None = None) -> list[str]:
+    """Every team paste under ``teams/Champions/`` (recursively), so the training pool
+    auto-grows as M-A/M-B (or any future reg) folders are filled in — drop a file in,
+    no code change. Returns repo-relative POSIX paths, sorted; READMEs / json / hidden
+    files are skipped. Pass ``root`` to scan a different directory (used by tests)."""
+    base = Path(root) if root is not None else CHAMPIONS_DIR
+    out: list[str] = []
+    if not base.exists():
+        return out
+    for p in sorted(base.rglob("*")):
+        if not p.is_file() or p.name.startswith(".") \
+                or p.suffix.lower() in _NON_TEAM_SUFFIXES \
+                or p.name.lower().startswith("readme"):
+            continue
+        try:
+            out.append(p.relative_to(_REPO_ROOT).as_posix())
+        except ValueError:                      # outside the repo (test tmp dir) -> absolute
+            out.append(str(p))
+    return out
+
+
 def resolve_team_path(arg) -> Path:
-    """Accept either a team NAME (resolved under teams/M-A/, e.g. 'WolfeGlick')
-    or a path to a team file.  Exits with a clear error if neither exists."""
+    """Accept either a team NAME (found anywhere under teams/Champions/, e.g. 'WolfeGlick')
+    or a path to a team file. Exits with a clear error if neither exists."""
     p = Path(arg)
     if p.exists():
         return p
-    cand = _REPO_ROOT / "teams" / "M-A" / str(arg)
-    if cand.exists():
-        return cand
-    avail = sorted(q.name for q in (_REPO_ROOT / "teams" / "M-A").glob("*") if q.is_file())
-    log.error("Team '%s' not found (looked for the file and teams/M-A/%s).\n"
-              "Available teams in teams/M-A/: %s", arg, arg, ", ".join(avail))
+    rp = _REPO_ROOT / arg                       # repo-relative (e.g. from discover_teams)
+    if rp.exists():
+        return rp
+    if CHAMPIONS_DIR.exists():                   # search by name under any reg subfolder
+        matches = sorted(q for q in CHAMPIONS_DIR.rglob(str(arg)) if q.is_file())
+        if matches:
+            return matches[0]
+    log.error("Team '%s' not found (looked for the file, %s, and by name under "
+              "teams/Champions/).\nAvailable teams under teams/Champions/: %s",
+              arg, rp, ", ".join(discover_teams()))
     sys.exit(1)
 
 

@@ -33,6 +33,17 @@ log = logging.getLogger(__name__)
 
 SCRIPTED_OPPONENTS = ("random", "max_damage", "heuristic")
 
+# Controlled, side-balanced EVAL pool (sec 15): the gauntlet gate judges on THESE so a
+# generation's measured strength isn't confounded by the random training team draw. This is
+# a USER-CURATED archetype-spanning set (one per axis: rain, a mega core, Perish/balance,
+# etc.) so the gate rewards archetype robustness, not just generic-team win-rate — kept to 6
+# so FULL both-orientation coverage is cheap (6 teams => 30 pairs; --eval-battles auto-sizes
+# to 2x that = 60/opp, ~180 eval games/gen). Training still sees all 71 teams.
+DEFAULT_EVAL_TEAMS = (
+    "Kronomono3", "Jonah_The_Juggernut", "Rain_Paradise", "Hojun_Y",
+    "Justified_Mega_Gallade", "WolfeGlick",
+)
+
 
 # ── promotion gate (pure stats) ───────────────────────────────────────────────
 @dataclass
@@ -322,16 +333,86 @@ def gauntlet_eval(candidate_path, *, teams, team_chooser, battles: int = 30,
     return results, GA.model_elo(results)
 
 
+def build_train_configs(*, kl_coef: float = 0.5, target_kl_bc: Optional[float] = 0.15,
+                        tau: float = 1.0, min_ev: Optional[float] = None):
+    """Build the (PPOConfig, TrainConfig) for a live run with BC-prior PRESERVATION ON
+    (task 3c.7a / docs sec 12 exploration-seeding item 1):
+
+      * ``kl_coef > 0``  -> the ``+kl_coef·KL(BC||new)`` penalty keeps PPO from crushing
+        the warm-started BC prior early (the rare-tactic clicks the human data already has).
+      * ``target_kl_bc`` -> EARLY-HALT a generation whose policy drifts too far from BC
+        (collapse guard, sec 2/10); a non-positive value disables the guard.
+      * ``min_ev``       -> early-halt if the critic's explained variance collapses
+        (value-surface guard); ``None`` disables it.
+      * ``tau``          -> forced IDENTICAL into ``PPOConfig.tau`` so the PPO log-prob
+        recompute matches the collection temperature (was a latent mismatch: ``--tau``
+        reached collection but not the loss).
+
+    Imported lazily so this module stays importable (``--dry-run``) without torch."""
+    from v_dance.selfplay.ppo import PPOConfig
+    from v_dance.selfplay.trainer import TrainConfig
+    tkl = target_kl_bc if (target_kl_bc is not None and target_kl_bc > 0) else None
+    ppo = PPOConfig(kl_coef=float(kl_coef), tau=float(tau))
+    train = TrainConfig(target_kl_from_bc=tkl, min_explained_variance=min_ev)
+    return ppo, train
+
+
+def resolve_train_pool(spec):
+    """Expand the TRAINING-team spec into a concrete pool (task 3c.7b). ``["all"]`` (the
+    default) or any spec containing ``"all"`` => EVERY team under ``teams/Champions/``
+    (the archetype-rich draw, sec 15 — auto-includes M-B teams as they're added);
+    otherwise the given names/paths are used verbatim. Explicit specs need no torch /
+    poke-env import (so the expansion is unit-testable offline)."""
+    spec = list(spec) if spec else ["all"]
+    if any(str(s).lower() == "all" for s in spec):
+        import v_dance.play.run_local_battle as R   # lazy: pulls poke_env
+        return R.discover_teams()
+    return spec
+
+
+def tau_for_generation(gen: int, tau_start: float, tau_end: float,
+                       anneal_gens: int) -> float:
+    """Collection temperature for generation ``gen`` (task 3c.7c, exploration seeding sec 12):
+    anneal LINEARLY from ``tau_start`` (gen 0, more stochastic => broader exploration) to
+    ``tau_end`` (held from gen ``anneal_gens`` on, the calibrated baseline => exploitation).
+    ``anneal_gens <= 0`` (or equal endpoints) => constant ``tau_end`` (no anneal). The KL-to-BC
+    anchor (3c.7a) makes the early high-tau exploration safe. **Whatever this returns is used
+    for BOTH collection AND that generation's PPO log-prob recompute** (the 3c.7a tau-match
+    invariant) — the caller drives both from this single value."""
+    if anneal_gens <= 0 or tau_start == tau_end:
+        return float(tau_end)
+    frac = min(1.0, max(0.0, gen / float(anneal_gens)))     # 0 at gen0 -> 1 at anneal_gens
+    return float(tau_start + (tau_end - tau_start) * frac)
+
+
+def resolve_eval_battles(eval_battles, n_eval_teams: int) -> int:
+    """Auto-size the gauntlet eval budget when unset (task 3c.7b). ``None`` => 2x the ordered
+    team-pairs, i.e. FULL both-orientation side-balanced coverage with each matchup sampled
+    ~twice (so the promotion-gate read isn't matchup-luck; sec 15/16). An explicit int passes
+    through unchanged (use a small one, e.g. 12, for fast UI smokes)."""
+    if eval_battles is not None:
+        return int(eval_battles)
+    pairs = max(1, n_eval_teams * (n_eval_teams - 1))
+    return 2 * pairs
+
+
 def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
-                         archive_dir, gen_cfg: GenConfig = GenConfig(), ppo_cfg=None,
-                         train_cfg=None, tau: float = 1.0, seed: int = 0,
-                         eval_battles: int = 30, manage_server: bool = True,
+                         archive_dir, eval_team_pool=None,
+                         gen_cfg: GenConfig = GenConfig(), ppo_cfg=None,
+                         train_cfg=None, tau_start: float = 1.3, tau_end: float = 1.0,
+                         tau_anneal_gens: int = 12, seed: int = 0,
+                         eval_battles=None, manage_server: bool = True,
                          resume_from=None, snapshot_path=None, max_hours=None) -> dict:
     """Run real generations end-to-end (collect via the league -> PPO update -> gauntlet
     eval -> promotion gate -> admit/refresh/revert), RESUMABLY (3c.4): a snapshot is
     written after every generation, ``resume_from`` continues exactly, and the run stops
     cleanly on Ctrl-C or after ``max_hours``. ``n_generations=None`` => run until stopped.
-    The Showdown server is started ONCE and reused across collect + eval."""
+    The Showdown server is started ONCE and reused across collect + eval.
+
+    ``team_pool`` is the TRAINING pool (sec 15: draw both sides from the full archetype-rich
+    set for pilot/counter exposure); ``eval_team_pool`` (default = ``team_pool``) is the
+    CONTROLLED, side-balanced set the gauntlet gate judges on — so a generation's measured
+    strength isn't 'got lucky with the team draw' (sec 15)."""
     import asyncio
 
     import v_dance.play.run_local_battle as R
@@ -343,6 +424,16 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
     archive = Path(archive_dir)
     archive.mkdir(parents=True, exist_ok=True)
     snap_path = Path(snapshot_path) if snapshot_path else (archive / "resume.pt")
+    _eval_pool = list(eval_team_pool) if eval_team_pool else list(team_pool)
+    _eval_pairs = len(_eval_pool) * (len(_eval_pool) - 1)
+    eval_battles = resolve_eval_battles(eval_battles, len(_eval_pool))
+    print(f"   teams: TRAIN pool={len(team_pool)} (archetype draw, sec 15)  "
+          f"EVAL pool={len(_eval_pool)} ({_eval_pairs} pairs)  "
+          f"eval-battles={eval_battles}/opp (~{3 * eval_battles} games/gen)")
+    if 0 < eval_battles < _eval_pairs:
+        print(f"   [eval] {eval_battles} battles/opp < {_eval_pairs} ordered team-pairs -> "
+              f"PARTIAL (but seed-fixed, gen-over-gen reproducible) coverage. For full "
+              f"both-orientation side-balancing use --eval-battles >= {_eval_pairs}.")
 
     # Build from the base ckpt (architecture + frozen-BC reference), THEN overlay the
     # resume snapshot's trained state if present (sec 17 — ref/arch re-derived, not stored).
@@ -361,9 +452,15 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
     showcase = {"log": None}
 
     def collect_fn(ac_, lg, gen):
+        # 3c.7c: one tau drives BOTH collection AND this gen's PPO recompute (3c.7a invariant).
+        tau_gen = tau_for_generation(gen, tau_start, tau_end, tau_anneal_gens)
+        trainer.cfg.tau = tau_gen
         status.phase("collecting", generation=gen, games_total=gen_cfg.n_games)
+        if tau_anneal_gens > 0 and tau_start != tau_end:
+            print(f"   collect: tau={tau_gen:.3f} (gen {gen}; anneal {tau_start}->{tau_end} "
+                  f"over {tau_anneal_gens} gens)")
         trajs, src, log = asyncio.run(collect_with_league(
-            ac_, lg, gen_cfg.n_games, team_pool=team_pool, tau=tau,
+            ac_, lg, gen_cfg.n_games, team_pool=team_pool, tau=tau_gen,
             seed=seed + gen * 1000, matchup_seed=gen, team_chooser=team_chooser,
             status=status))
         showcase["log"] = log
@@ -375,7 +472,7 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
         return str(p)
 
     def eval_fn(path):
-        return gauntlet_eval(path, teams=team_pool, team_chooser=team_chooser,
+        return gauntlet_eval(path, teams=_eval_pool, team_chooser=team_chooser,
                              battles=eval_battles, manage_server=False)
 
     def restore_fn(ac_, path):
@@ -493,16 +590,42 @@ if __name__ == "__main__":
                     help="run REAL generations on the local Showdown server")
     ap.add_argument("--generations", type=int, default=6)
     ap.add_argument("--games", type=int, default=100, help="self-play games per generation")
-    ap.add_argument("--eval-battles", type=int, default=30, help="gauntlet battles per opponent")
+    ap.add_argument("--eval-battles", type=int, default=None,
+                    help="gauntlet battles per scripted opponent (split across the eval "
+                         "team-pairs). DEFAULT auto-sizes to 2*N*(N-1) = full both-orientation "
+                         "side-balanced coverage of the eval pool (6 teams => 60/opp, ~180 "
+                         "games/gen). Pass a small int (e.g. 12) for a fast UI smoke.")
     ap.add_argument("--warmup", type=int, default=5, help="critic-only warm-up updates (gen 0)")
     ap.add_argument("--ckpt", default=str(_REPO_ROOT / "ai_train_scripts" / "BC_model"
                                           / "checkpoints" / "bc_best.pt"))
-    ap.add_argument("--teams", nargs="+",
-                    default=["team1", "WolfeGlick", "Kronomono1", "Kronomono3"])
+    ap.add_argument("--train-teams", nargs="+", default=["all"],
+                    help="TRAINING team pool: 'all' (default) = every team under "
+                         "teams/Champions/ (archetype-rich draw, sec 15; auto-picks up "
+                         "M-B teams as added); or explicit names/paths")
+    ap.add_argument("--eval-teams", nargs="+", default=list(DEFAULT_EVAL_TEAMS),
+                    help="controlled, side-balanced EVAL pool the gauntlet gate judges on")
+    ap.add_argument("--teams", nargs="+", default=None,
+                    help="(deprecated) set BOTH the train and eval pools to this explicit list")
     ap.add_argument("--team-chooser", default=str(_REPO_ROOT / "ai_train_scripts"
                     / "teamPreview_model" / "checkpoints" / "teampreview_best.pt"))
     ap.add_argument("--archive", default=str(_REPO_ROOT / "artifacts" / "self_play_archive"))
-    ap.add_argument("--tau", type=float, default=1.0)
+    ap.add_argument("--tau", type=float, default=1.0,
+                    help="FINAL/baseline collection temperature the anneal settles to (also the "
+                         "PPO recompute temperature each gen — kept == collection, 3c.7a)")
+    ap.add_argument("--tau-start", type=float, default=1.3,
+                    help="INITIAL collection temperature for early exploration (sec 12); anneals "
+                         "linearly to --tau over --tau-anneal-gens. Set == --tau to disable.")
+    ap.add_argument("--tau-anneal-gens", type=int, default=12,
+                    help="generations to anneal tau from --tau-start down to --tau (0 = no anneal)")
+    ap.add_argument("--kl-coef", type=float, default=0.5,
+                    help="KL-to-BC penalty weight (sec 12: >0 preserves the BC prior so PPO "
+                         "can't crush rare tactics; 0 = off)")
+    ap.add_argument("--target-kl-bc", type=float, default=0.15,
+                    help="early-halt a generation if mean KL(BC||new) exceeds this "
+                         "(warm-start-collapse guard); <=0 disables")
+    ap.add_argument("--min-ev", type=float, default=None,
+                    help="early-halt if critic explained-variance falls below this "
+                         "(value-collapse guard; default off)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--resume", default=None,
                     help="resume snapshot to continue from (3c.4); use the SAME --ckpt")
@@ -525,14 +648,34 @@ if __name__ == "__main__":
             print(f"[gen] checkpoint not found: {args.ckpt}", file=sys.stderr)
             sys.exit(2)
         n_gen = None if args.generations <= 0 else args.generations   # 0 => run until stopped
+        ppo_cfg, train_cfg = build_train_configs(
+            kl_coef=args.kl_coef, target_kl_bc=args.target_kl_bc,
+            tau=args.tau_start, min_ev=args.min_ev)   # gen-0 tau; collect_fn re-sets per gen
+        # train = full archetype-rich pool; eval = controlled set (sec 15). --teams (deprecated)
+        # overrides BOTH with an explicit list.
+        train_pool = resolve_train_pool(args.teams if args.teams else args.train_teams)
+        eval_pool = list(args.teams) if args.teams else list(args.eval_teams)
+        if not train_pool:
+            print("[gen] no training teams found under teams/Champions/ — add team files "
+                  "or pass --train-teams <names>", file=sys.stderr)
+            sys.exit(2)
         print(f"== Live generation run: {n_gen if n_gen else 'until-stop'} gen x "
-              f"{args.games} games (eval {args.eval_battles}/opp"
+              f"{args.games} games (eval {args.eval_battles if args.eval_battles is not None else 'auto'}/opp"
               f"{f', max {args.hours}h' if args.hours else ''}) ==")
+        _tau_desc = (f"tau {args.tau_start}->{args.tau} over {args.tau_anneal_gens} gens"
+                     if args.tau_anneal_gens > 0 and args.tau_start != args.tau
+                     else f"tau={args.tau} (flat)")
+        print(f"   exploration (sec 12): KL-to-BC coef={args.kl_coef} "
+              f"target_kl_bc={'off' if args.target_kl_bc <= 0 else args.target_kl_bc} "
+              f"min_ev={'off' if args.min_ev is None else args.min_ev} {_tau_desc}")
         run_live_generations(
-            Path(args.ckpt), n_generations=n_gen, team_pool=args.teams,
+            Path(args.ckpt), n_generations=n_gen, team_pool=train_pool,
+            eval_team_pool=eval_pool,
             team_chooser=args.team_chooser, archive_dir=args.archive,
             gen_cfg=GenConfig(n_games=args.games, warmup_updates=args.warmup),
-            tau=args.tau, seed=args.seed, eval_battles=args.eval_battles,
+            ppo_cfg=ppo_cfg, train_cfg=train_cfg,
+            tau_start=args.tau_start, tau_end=args.tau, tau_anneal_gens=args.tau_anneal_gens,
+            seed=args.seed, eval_battles=args.eval_battles,
             manage_server=not args.no_server, resume_from=args.resume,
             snapshot_path=args.snapshot, max_hours=args.hours)
     else:

@@ -328,6 +328,10 @@ header "Setting Up Pokémon Showdown Server"
 
 SHOWDOWN_DIR="$(pwd)/pokemon-showdown"
 SHOWDOWN_REPO="https://github.com/smogon/pokemon-showdown.git"
+# PINNED commit — the exact sim/protocol the bot was built + tested against (see PINS.md).
+# Showdown's master moves fast and can change the battle protocol; bumping this must be
+# followed by re-verifying the full test suite + a live self-play smoke. Empty = track master.
+SHOWDOWN_SHA="ecf39eef1e9cd2fd6ed2e9b9011b86610258d757"   # v0.11.10-1271 (smogon/master, 2026-06-17)
 
 if [[ -d "$SHOWDOWN_DIR/.git" ]]; then
     log "pokemon-showdown already cloned at $SHOWDOWN_DIR — skipping clone."
@@ -337,6 +341,20 @@ else
         error "git clone failed. Check your internet connection and that git is on PATH."
     fi
     log "Clone complete ✅"
+fi
+
+# Pin to the tested commit (see PINS.md). Idempotent: checks out the pinned SHA whether
+# freshly cloned or already present, fetching it first if the local clone doesn't have it.
+# Done BEFORE npm install so node_modules is built against the pinned source.
+if [[ -n "$SHOWDOWN_SHA" ]]; then
+    log "Pinning pokemon-showdown to $SHOWDOWN_SHA ..."
+    pushd "$SHOWDOWN_DIR" > /dev/null
+    if ! git checkout -q "$SHOWDOWN_SHA" 2>/dev/null; then
+        git fetch -q origin "$SHOWDOWN_SHA" 2>/dev/null || git fetch -q origin 2>/dev/null
+        git checkout -q "$SHOWDOWN_SHA" 2>/dev/null \
+            || warn "could not checkout pinned SHA $SHOWDOWN_SHA — the server may differ from the tested version."
+    fi
+    popd > /dev/null
 fi
 
 # npm install (only if node_modules is missing or clearly incomplete)

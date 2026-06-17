@@ -225,3 +225,77 @@ def test_play_chunk_no_timeout_counts_wins():
 
     wins, fin = asyncio.run(G._play_chunk(QuickPlayer(), object(), 3, timeout=10))
     assert (wins, fin) == (3, 3)
+
+
+# ── 3c.7b: team discovery under teams/Champions/ (M-A now, M-B as added) ───────
+def test_discover_teams_spans_regs_and_skips_non_team(tmp_path):
+    import pytest
+    pytest.importorskip("poke_env")
+    import v_dance.play.run_local_battle as R
+
+    (tmp_path / "M-A").mkdir()
+    (tmp_path / "M-B").mkdir()
+    (tmp_path / "M-A" / "TeamAlpha").write_text("paste", encoding="utf-8")
+    (tmp_path / "M-A" / "TeamBeta").write_text("paste", encoding="utf-8")
+    (tmp_path / "M-B" / "TeamGamma").write_text("paste", encoding="utf-8")     # future reg
+    (tmp_path / "M-A" / "README.md").write_text("doc", encoding="utf-8")        # skipped
+    (tmp_path / "M-A" / "known_teams.json").write_text("{}", encoding="utf-8")  # skipped
+    (tmp_path / "M-A" / ".gitkeep").write_text("", encoding="utf-8")            # skipped
+
+    names = sorted(Path(f).name for f in R.discover_teams(root=tmp_path))
+    assert names == ["TeamAlpha", "TeamBeta", "TeamGamma"]      # both regs, no doc/json/hidden
+
+
+def test_discover_teams_real_pool_is_archetype_rich():
+    import pytest
+    pytest.importorskip("poke_env")
+    import v_dance.play.run_local_battle as R
+
+    pool = R.discover_teams()
+    assert len(pool) >= 50                                       # the ~70-team M-A set
+    names = {Path(p).name for p in pool}
+    # sec 12 archetypes the exploration step needs present in the training pool
+    assert {"UB_Perish_trap", "Trickery", "Justified_Mega_Gallade"} <= names
+
+
+def test_resolve_team_path_finds_name_and_repo_relative(tmp_path):
+    import pytest
+    pytest.importorskip("poke_env")
+    import v_dance.play.run_local_battle as R
+
+    by_name = R.resolve_team_path("team1")                       # bare name under Champions
+    assert by_name.exists() and by_name.name == "team1"
+    rel = R.discover_teams()[0]                                  # repo-relative path
+    assert R.resolve_team_path(rel).exists()
+
+
+def test_resolve_team_path_missing_exits(monkeypatch):
+    import pytest
+    pytest.importorskip("poke_env")
+    import v_dance.play.run_local_battle as R
+    with pytest.raises(SystemExit):
+        R.resolve_team_path("definitely_not_a_team_xyz")
+
+
+def test_resolve_train_pool_all_expands_to_full_pool():
+    import pytest
+    pytest.importorskip("poke_env")
+    import v_dance.play.run_local_battle as R
+    from v_dance.selfplay.generation import resolve_train_pool
+
+    assert resolve_train_pool(["all"]) == R.discover_teams()
+    assert len(resolve_train_pool(["all"])) >= 50
+
+
+def test_default_eval_teams_all_resolve_exact_case():
+    """Every curated eval team must resolve to a real file with EXACT casing — guards
+    against typos like 'Perish_Rain' (real file is 'Perish_rain') silently relying on
+    Windows case-insensitivity and then breaking the gate on a case-sensitive FS."""
+    import pytest
+    pytest.importorskip("poke_env")
+    import v_dance.play.run_local_battle as R
+    from v_dance.selfplay.generation import DEFAULT_EVAL_TEAMS
+
+    for name in DEFAULT_EVAL_TEAMS:
+        p = R.resolve_team_path(name)
+        assert p.is_file() and p.name == name, f"{name!r} resolved to {p.name!r}"

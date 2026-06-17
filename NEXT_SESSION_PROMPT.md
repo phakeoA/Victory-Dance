@@ -35,7 +35,33 @@ it points to. **THE RESUME POINTER:**
 - **Checkpoint progress into the `ppo-reward-design-2026-06-16` memory note** when meaningful work lands, so
   a fresh session can always resume. Update `MEMORY.md` index hooks too.
 
-## Where things stand (the catch-up — ALL of 3a/3b + 3c.1–3c.5 DONE, live-verified)
+## ⇐ WHERE WE LEFT OFF (end of 2026-06-17 session) ⇒ NEXT = 3c.7
+**Everything through 3c.6 (the dashboard) + the env PINS is DONE & verified. Full suite 769 pass / 0 skip.
+ALL changes are UNCOMMITTED on `dev` — the user commits manually via GitHub Desktop (suggest logical commit
+groups; do NOT commit yourself).** Code is now the `v_dance/` package: run modules `python -m v_dance.selfplay.<mod>`, tests bare `pytest`.
+
+**THIS SESSION shipped (newest first), all green:**
+- **prereq — env PINNED** (`PINS.md`): poke-env `git@a6e4f67` (requirements.txt), Showdown `@ecf39eef1`
+  (setup.sh `SHOWDOWN_SHA`), full freeze `requirements.lock`. ⚠ **A new Showdown release + NEW VGC
+  REGULATION is due ~2026-06-20 → re-clone + re-pin + re-verify, and reassess format/teams/model**
+  (see [[showdown-reg-update-pending-2026-06]]).
+- **3c.6 dashboard + live + spectate + parser polish — DONE & LIVE-VERIFIED** (user spectated a real battle;
+  gen0 promoted; charts/bar driven by the real run). `data/scripts/dashboard/{dashboard.html,.css,.js}` +
+  `v_dance/selfplay/status.py` (LiveStatus → status.json + live_log.json) + `v_dance/datatools/dashboard_server.py`
+  (Flask). Spectator = an in-dashboard **TURN VIEWER** that parses the live |-log (the local Showdown server only
+  JS-redirects to the psim.us client, so iframing was dropped). **RUN in TWO terminals (the server BLOCKS):**
+  `python -m v_dance.datatools.dashboard_server --port 5175` + the live generation; open http://127.0.0.1:5175/.
+  Dev preview w/o a run: `python scratch/_demo_live_status.py`.
+- **Restructure Stage 2** — `v_dance/` package (pip install -e .), ~120 files moved, 371 imports→absolute,
+  291 sys.path hacks scrubbed, tests→`tests/`, harnesses→`scratch/`, checkpoints stayed at `ai_train_scripts/.../checkpoints/`.
+- **Scrapers** → `data/scripts/scrapers/` (standalone tooling, fixed to run); **foul-play fork leftovers** →
+  `Delete_When_Project_Done/foul_play_legacy/` (see [[foulplay-legacy-cleanup-2026-06-17]]); `teams/`+`data/` now pure-data.
+
+**NEXT = 3c.7 exploration seeding** (full details in the "IMMEDIATE NEXT TASK" section below). Full
+per-sub-problem log + all gotchas = the resume-pointer note [[ppo-reward-design-2026-06-16]].
+
+---
+### Historical (pre-Stage-2 paths below say `local_battle/self_play/` — that code now lives in `v_dance/selfplay/`)
 The full offline RL stack AND the live self-play loop are built and verified end-to-end:
 - **3a.* / 3b.1–3b.7** (data layer, GAE, actor-critic, log-prob, PPO loss, warm-up+collapse-guards,
   value-space, gated PBRS) — all in `local_battle/self_play/`, unit-tested.
@@ -99,7 +125,7 @@ ep-length), updates over time. Then 3c.7 exploration, 3c.8 throughput, v1 TP.
 | 3c.7 | Exploration seeding (KL-to-BC + scripted demos + **archetype injection** incl. Intimidate-vs-Defiant) + collection `tau` | M | **NEXT (P3)** | 3c.2 | ⬜ |
 | 3c.8 | Throughput / hybrid GPU+CPU + **resource caps** (doc §20: max CPU cores/frac, max VRAM GB) | M–L | P4 (after a throughput MEASUREMENT) | 3c.3 | ⬜ |
 | v1.* | TP co-development (alternating best-response, gauntlet-gated) | L | P5 | 3c stable + archetype-competent | ⬜ |
-| prereq | Pin poke-env / Showdown SHA before long runs | S | before long runs | — | ⬜ |
+| prereq | Pin poke-env / Showdown SHA before long runs | S | — | — | ✅ DONE 2026-06-17 (see `PINS.md`: poke-env git@a6e4f67 pinned in requirements.txt; Showdown @ecf39eef1 pinned in setup.sh `SHOWDOWN_SHA`; full freeze `requirements.lock`) |
 | state-rep #A | TP-net ability feature (open-sheet ability → `mon_dex_features`) — from the ability audit | S | batch w/ next re-export+retrain | — | ⬜ |
 | state-rep #B | Split Defiant/Competitive into a dedicated `stat-drop-punish` ability category (layout bump) | S | batch w/ next re-export+retrain | — | ⬜ |
 | optional | Model Choice-lock/Encore in `build_legal_action_mask` for literal 100% model-driven | S | only if it hurts training | — | ⬜ |
@@ -118,6 +144,7 @@ ep-length), updates over time. Then 3c.7 exploration, 3c.8 throughput, v1 TP.
   `python -m v_dance.selfplay.league --demo`, `… generation --dry-run`, `… archive` (writes a sample Type_D + manifest).
 
 ## Gotchas / standing facts
+- **ENV IS PINNED (see `PINS.md`):** poke-env = `hsahovic/poke-env@a6e4f67` (v0.15.0, git — pinned in requirements.txt); Showdown = `smogon/pokemon-showdown@ecf39eef1` (v0.11.10-1271 — pinned in setup.sh `SHOWDOWN_SHA`, checked out before npm install). Full freeze in `requirements.lock`. Both own the battle PROTOCOL — bumping either requires re-verifying the suite + a live smoke. `pokemon-showdown/` is gitignored so its SHA lives ONLY in setup.sh/PINS.md.
 - **STATE_DIM 1854, LAYOUT v3, ACTION_DIM 16, GIMMICK_DIM 2.** Production policy = base BC (v3) at
   `ai_train_scripts/BC_model/checkpoints/bc_best.pt` (value_trained + gimmick_trained, **dropout=0.1** —
   the save-checkpoint must preserve it). Tera = placeholder only.

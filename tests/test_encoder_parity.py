@@ -556,6 +556,59 @@ def test_live_mask_excludes_disabled_moves(clean_log):
     assert action_to_order(3, battle, 0) is not None, "codec dropped an available move"
 
 
+def test_live_mask_choice_lock_and_encore_keep_one_move_but_allow_switch(clean_log):
+    """Choice-lock (Choice item / Gorilla Tactics) and Encore both collapse Showdown's
+    usable-move list to a SINGLE move (poke-env drops the rest from
+    battle.available_moves[slot]) — the SAME gate the Disable test exercises. This pins
+    the two name-checked mechanics explicitly AND the property the generic Disable test
+    does NOT: a Choice-locked / Encored mon can still SWITCH (the lock is on the MOVE,
+    not on switching), so the bench switches must stay legal. A naive 'lock everything'
+    would block the switch and force /choose default — breaking 100%-model-driven self-
+    play. Charter sec 13 masking-confirmation guard."""
+    _repo_root_on_path()
+    from v_dance.play.vgc_base import build_legal_action_mask
+    from v_dance.encoders.state_encoder import NUM_MOVES, SWITCH_OFFSET
+    from poke_env.battle import Pokemon
+
+    user = H.player_usernames(clean_log)["p1"]
+    battle, moves = None, []
+    for tn in (4, 3, 5, 2):
+        battle = H.drive_live_battle_to_turn(clean_log, user, tn)
+        mon0 = battle.active_pokemon[0]
+        if mon0 is not None:
+            moves = list(mon0.moves.values())[:NUM_MOVES]
+            if len(moves) >= 2 and moves[0].id != moves[1].id:
+                break
+    if not moves or len(moves) < 2 or moves[0].id == moves[1].id:
+        pytest.skip("replay did not reveal >=2 distinct moves on the lead")
+
+    # Force a switchable bench mon so we can prove switches survive the move-lock.
+    ghost = Pokemon(gen=9, species="snorlax")
+    ghost.set_hp_status("100/100")
+    battle.team["p1: LockBench"] = ghost
+    battle._available_switches = [[ghost], []]
+
+    def legal():
+        return {i for i, ok in enumerate(build_legal_action_mask(battle, 0)) if ok}
+
+    def has_switch(s):
+        return any(i in s for i in range(SWITCH_OFFSET, SWITCH_OFFSET + 4))
+
+    # CHOICE-LOCK onto move slot 0 → only move 0 usable, but switching stays legal.
+    battle._available_moves = [[moves[0]], [moves[0]]]
+    s = legal()
+    assert any(i in s for i in (0, 1, 2)), "choice-locked move (slot 0) must stay legal"
+    assert not any(i in s for i in (3, 4, 5)), "non-locked move (slot 1) must be dropped"
+    assert has_switch(s), "switch must stay legal under Choice-lock (move is locked, not switching)"
+
+    # ENCORE onto move slot 1 → only move 1 usable; switching still legal (same gate).
+    battle._available_moves = [[moves[1]], [moves[1]]]
+    s = legal()
+    assert not any(i in s for i in (0, 1, 2)), "non-encored move (slot 0) must be dropped"
+    assert any(i in s for i in (3, 4, 5)), "encored move (slot 1) must stay legal"
+    assert has_switch(s), "switch must stay legal under Encore"
+
+
 def test_live_mask_allows_ally_target_for_damaging_moves():
     """The live mask must KEEP the ally bucket legal for a damaging single-target
     move when the ally is alive — intentionally damaging your own teammate is a real

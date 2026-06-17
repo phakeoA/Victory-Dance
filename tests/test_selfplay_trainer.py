@@ -28,6 +28,7 @@ from v_dance.selfplay.reward import place_terminal_reward  # noqa: E402
 from v_dance.selfplay import policy_eval as pe  # noqa: E402
 from v_dance.selfplay.ppo import PPOConfig  # noqa: E402
 from v_dance.selfplay.trainer import PPOTrainer, TrainConfig, explained_variance  # noqa: E402
+from v_dance.selfplay.generation import build_train_configs  # noqa: E402
 
 STATE_DIM, ACTION_DIM, GIMMICK_DIM = get_state_dim(), get_action_dim(), get_gimmick_dim()
 
@@ -170,3 +171,37 @@ def test_optimizer_state_populated_after_update(tmp_path):
     tr.ppo_update(trajs)
     assert tr.actor_opt.state_dict()["state"]      # Adam moments now populated
     assert tr.critic_opt.state_dict()["state"]
+
+
+# ── 3c.7a: BC-prior preservation is ON in the live config builder ──────────────
+def test_build_train_configs_defaults_enable_kl_to_bc():
+    """Regression: the LIVE run must turn KL-to-BC ON by default (sec 12 item 1) — guards
+    against silently reverting kl_coef to 0 (which lets PPO crush the BC prior)."""
+    ppo, train = build_train_configs()
+    assert ppo.kl_coef > 0.0                                  # BC prior preserved
+    assert train.target_kl_from_bc is not None and train.target_kl_from_bc > 0  # collapse guard on
+
+
+def test_build_train_configs_tau_forced_into_ppo():
+    """The PPO log-prob recompute temperature MUST equal the collection temperature."""
+    ppo, _ = build_train_configs(tau=1.3)
+    assert ppo.tau == pytest.approx(1.3)
+
+
+def test_build_train_configs_guards_off_when_nonpositive():
+    ppo, train = build_train_configs(kl_coef=0.0, target_kl_bc=0.0, min_ev=None)
+    assert ppo.kl_coef == 0.0
+    assert train.target_kl_from_bc is None                   # <=0 disables the guard
+    assert train.min_explained_variance is None
+
+
+def test_build_train_configs_drive_a_real_kl_autohalt(tmp_path):
+    """End-to-end: a trainer built from the LIVE config builder actually early-halts on
+    BC-drift — proves the collapse guard is wired through the path the CLI uses, not just
+    settable in isolation."""
+    ac = _fresh_ac(tmp_path)
+    trajs = [_traj(ac, won=True, seed=1), _traj(ac, won=False, seed=2)]
+    ppo, train = build_train_configs(target_kl_bc=1e-9)       # impossibly tight -> must halt
+    train.minibatch_size, train.ppo_epochs, train.actor_lr = 0, 3, 1e-2
+    st = PPOTrainer(ac, ppo_cfg=ppo, train_cfg=train).ppo_update(trajs)
+    assert st["halted"] is True and "kl_from_bc" in st["halt_reason"]

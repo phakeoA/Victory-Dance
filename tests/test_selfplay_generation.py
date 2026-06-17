@@ -16,6 +16,49 @@ from v_dance.selfplay.generation import (GateConfig, GenConfig, GenerationHistor
                                   promotion_gate, aggregate_scripted, run_generation)
 
 
+# ── 3c.7b: training-team-pool resolution (explicit path needs no poke-env) ─────
+def test_resolve_train_pool_explicit_is_verbatim():
+    assert GN.resolve_train_pool(["Trickery", "UB_Perish_trap"]) == ["Trickery", "UB_Perish_trap"]
+
+
+def test_default_eval_pool_is_controlled_curated_set():
+    # sec 15: eval is a controlled CURATED set — well under the full ~71-team pool, no dups
+    n = len(GN.DEFAULT_EVAL_TEAMS)
+    assert 4 <= n < 30
+    assert len(set(GN.DEFAULT_EVAL_TEAMS)) == n          # no duplicate teams
+
+
+def test_resolve_eval_battles_auto_sizes_to_full_coverage():
+    # None => 2x ordered pairs = full both-orientation side-balanced coverage (sec 15/16)
+    assert GN.resolve_eval_battles(None, 6) == 2 * 6 * 5         # 60
+    assert GN.resolve_eval_battles(None, 8) == 2 * 8 * 7         # 112
+    assert GN.resolve_eval_battles(None, 1) == 2                 # degenerate-pool guard
+
+
+def test_resolve_eval_battles_explicit_passthrough():
+    assert GN.resolve_eval_battles(12, 6) == 12                  # fast-smoke override untouched
+
+
+# ── 3c.7c: collection tau exploration anneal ──────────────────────────────────
+def test_tau_for_generation_anneals_linearly():
+    assert GN.tau_for_generation(0, 1.3, 1.0, 12) == pytest.approx(1.3)   # gen0 = start
+    assert GN.tau_for_generation(12, 1.3, 1.0, 12) == pytest.approx(1.0)  # reaches end
+    assert GN.tau_for_generation(24, 1.3, 1.0, 12) == pytest.approx(1.0)  # held after
+    assert GN.tau_for_generation(6, 1.3, 1.0, 12) == pytest.approx(1.15)  # midpoint linear
+
+
+def test_tau_for_generation_flat_when_disabled():
+    assert GN.tau_for_generation(5, 1.3, 1.0, 0) == pytest.approx(1.0)    # anneal off -> end
+    assert GN.tau_for_generation(5, 1.0, 1.0, 12) == pytest.approx(1.0)   # equal endpoints
+
+
+def test_tau_for_generation_monotone_nonincreasing_within_bounds():
+    taus = [GN.tau_for_generation(g, 1.3, 1.0, 10) for g in range(15)]
+    assert taus[0] == pytest.approx(1.3) and taus[-1] == pytest.approx(1.0)
+    assert all(1.0 - 1e-9 <= t <= 1.3 + 1e-9 for t in taus)              # within [end, start]
+    assert all(a >= b - 1e-9 for a, b in zip(taus, taus[1:]))            # never increases
+
+
 # ── promotion gate ────────────────────────────────────────────────────────────
 def test_gate_no_baseline_promotes():
     v, st = promotion_gate(50, 100, 0, 0)
