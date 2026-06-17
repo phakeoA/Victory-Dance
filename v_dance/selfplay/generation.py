@@ -147,7 +147,7 @@ def run_generation(
     actor_critic, trainer, league: OpponentLeague, history: GenerationHistory, *,
     collect_fn: Callable, eval_fn: Callable, save_fn: Callable,
     refresh_phi_fn: Optional[Callable] = None, restore_fn: Optional[Callable] = None,
-    cfg: GenConfig = GenConfig(),
+    status=None, cfg: GenConfig = GenConfig(),
 ) -> dict:
     """Run ONE generation. Injected live steps:
       * ``collect_fn(actor_critic, league, gen) -> (trajectories, source_counts)``
@@ -158,16 +158,24 @@ def run_generation(
     gen = history.generation
 
     trajectories, sources = collect_fn(actor_critic, league, gen)
+    if status is not None:
+        status.phase("updating", generation=gen)
     if gen == 0 and cfg.warmup_updates > 0 and trajectories:
         trainer.warmup_critic(trajectories, cfg.warmup_updates)
     update_stats = trainer.ppo_update(trajectories) if trajectories else {"halted": False}
+    if status is not None:
+        status.set_update(update_stats)
 
     candidate = save_fn(actor_critic, gen)
+    if status is not None:
+        status.phase("evaluating", generation=gen)
     results, elo = eval_fn(candidate)
     sw, sg = aggregate_scripted(results)
 
     verdict, gate_stats = promotion_gate(sw, sg, *history.best_scripted, cfg.gate)
     promoted = verdict == "promote"
+    if status is not None:
+        status.set_update(update_stats, last_verdict=verdict)
     if promoted:
         league.admit(f"gen{gen}", candidate, gen, elo if elo is not None else 1000.0)
         league.latest_path = candidate
@@ -201,7 +209,8 @@ def print_generation_report(rep: dict) -> None:
 async def collect_with_league(actor_critic, league: OpponentLeague, n_games: int, *,
                               team_pool, tau: float = 1.0, seed: int = 0,
                               matchup_seed: int = 0, chunk_size: int = 10,
-                              battle_timeout: Optional[float] = 90.0, team_chooser=None):
+                              battle_timeout: Optional[float] = 90.0, team_chooser=None,
+                              status=None):
     """Collect ``n_games`` self-play games against LEAGUE-sampled opponents (assumes the
     Showdown server is already up — the caller manages it). Each chunk draws one opponent:
       * latest    -> SelfPlayVGCPlayer(ac) on both seats; collect BOTH trajectories (both
@@ -225,12 +234,13 @@ async def collect_with_league(actor_critic, league: OpponentLeague, n_games: int
     source_counts: Counter = Counter()
     showcase_log = None              # raw |-log of one game, for a Type_D replay (3c.5)
     uid = 0
+    games_done = won = decided = 0    # live progress (3c.6e-3)
 
-    def _sp(team, who):
+    def _sp(team, who, status=None):
         nonlocal uid
         uid += 1
         return SelfPlayVGCPlayer(
-            actor_critic, tau=tau, sample_seed=seed + (who * 10_000) + uid,
+            actor_critic, tau=tau, sample_seed=seed + (who * 10_000) + uid, status=status,
             replay_path=_REPO_ROOT / "artifacts" / "replay_buffer" / f"LG{who}_{uid}.jsonl",
             account_configuration=AccountConfiguration(f"LG{who}x{uid}", None),
             battle_format=R.BATTLE_FORMAT, team=team, max_concurrent_battles=1,
@@ -244,7 +254,7 @@ async def collect_with_league(actor_critic, league: OpponentLeague, n_games: int
             remaining -= cn
             spec = league.sample(rng)
             kind = spec[0]
-            our = _sp(ta, 0)
+            our = _sp(ta, 0, status=status)
             if kind == "latest":
                 opp = _sp(tb, 1)
             elif kind == "snapshot":
@@ -266,6 +276,13 @@ async def collect_with_league(actor_critic, league: OpponentLeague, n_games: int
                 source_counts.update(getattr(our, "_source_counts", {}) or {})
                 our_trajs = our.finished_trajectories()
                 trajectories.extend(our_trajs.values())
+                games_done += cn                                 # live progress (3c.6e-3)
+                for _t in our_trajs.values():
+                    if _t.meta.won is not None:
+                        decided += 1
+                        won += 1 if _t.meta.won else 0
+                if status is not None:
+                    status.games(games_done, (won / decided) if decided else None)
                 if kind == "latest":
                     source_counts.update(getattr(opp, "_source_counts", {}) or {})
                     trajectories.extend(opp.finished_trajectories().values())
@@ -321,6 +338,7 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
     from v_dance.selfplay.actor_critic import ActorCritic
     from v_dance.selfplay.trainer import PPOTrainer
     from v_dance.selfplay import resume as RS
+    from v_dance.selfplay.status import LiveStatus
 
     archive = Path(archive_dir)
     archive.mkdir(parents=True, exist_ok=True)
@@ -337,13 +355,17 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
         print(f"[3c.4] resumed from {resume_from} at generation {history.generation} "
               f"(league={len(league.snapshots)})")
     stop = RS.StopController(max_hours=max_hours)
+    status = LiveStatus(archive / "status.json")     # live dashboard feed (3c.6e-3)
+    status.start_run(n_generations, hours=max_hours)
 
     showcase = {"log": None}
 
     def collect_fn(ac_, lg, gen):
+        status.phase("collecting", generation=gen, games_total=gen_cfg.n_games)
         trajs, src, log = asyncio.run(collect_with_league(
             ac_, lg, gen_cfg.n_games, team_pool=team_pool, tau=tau,
-            seed=seed + gen * 1000, matchup_seed=gen, team_chooser=team_chooser))
+            seed=seed + gen * 1000, matchup_seed=gen, team_chooser=team_chooser,
+            status=status))
         showcase["log"] = log
         return trajs, src
 
@@ -371,7 +393,7 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
         while (n_generations is None or done < n_generations) and not stop.should_stop():
             rep = run_generation(ac, trainer, league, history, collect_fn=collect_fn,
                                  eval_fn=eval_fn, save_fn=save_fn, restore_fn=restore_fn,
-                                 cfg=gen_cfg)
+                                 status=status, cfg=gen_cfg)
             print_generation_report(rep)
             us = rep.get("update_stats", {}) or {}
             print(f"        update: loss={us.get('loss', float('nan')):+.4f} "
@@ -386,9 +408,11 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                 tag=f"g{rep['generation']}")
             if "type_d_html" in arts:
                 print(f"        archive: manifest.json + Type_D {Path(arts['type_d_html']).name}")
+            status.phase("idle", generation=rep["generation"])
             reports.append(rep)
             done += 1
     finally:
+        status.finish_run()
         _save()                              # final flush (also on Ctrl-C / exception)
         if server is not None:
             R.stop_showdown(server)

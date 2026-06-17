@@ -137,7 +137,7 @@ class SelfPlayVGCPlayer(VGCPlayer):
     counted in ``_source_counts`` so the Phase-0 MODEL-DRIVEN% reflects them."""
 
     def __init__(self, actor_critic, *, tau: float = 1.0,
-                 sample_seed: Optional[int] = None, **kwargs):
+                 sample_seed: Optional[int] = None, status=None, **kwargs):
         super().__init__(model_path=None, temperature=tau, sample_seed=sample_seed, **kwargs)
         self._ac = actor_critic
         self._model = actor_critic.policy            # drive with the live actor
@@ -145,6 +145,29 @@ class SelfPlayVGCPlayer(VGCPlayer):
         self._tau = float(tau)
         self._collectors: dict = {}                  # battle_tag -> TrajectoryCollector
         self._finished: dict = {}                    # battle_tag -> Trajectory
+        self._status = status                        # optional LiveStatus (dashboard spectate, 3c.6e-3)
+
+    def _report_active(self, battle) -> None:
+        """Publish this battle's room tag + turn to the live status so the dashboard
+        Spectate tab can embed it. No-op when no status is wired."""
+        if self._status is None:
+            return
+        try:
+            players = getattr(battle, "players", None) or []
+            tag = battle.battle_tag
+            turn = getattr(battle, "turn", 0) or 0
+            self._status.set_active_battles([{
+                "tag": tag,
+                "p1": players[0] if len(players) > 0 else getattr(self, "username", "p1"),
+                "p2": players[1] if len(players) > 1 else "opponent",
+                "turn": turn,
+            }])
+            proto = getattr(self, "_proto_log", None)   # growing |-log for the turn viewer (3c.6f)
+            if proto is not None:
+                from v_dance.play.live_vgc_base import _norm_tag
+                self._status.write_live_log(tag, proto.get(_norm_tag(tag)) or [], turn=turn)
+        except Exception:
+            log.debug("status active-battle report failed (non-fatal)", exc_info=True)
 
     def _collector_for(self, battle) -> TrajectoryCollector:
         tag = battle.battle_tag
@@ -155,6 +178,7 @@ class SelfPlayVGCPlayer(VGCPlayer):
         return c
 
     def _record_rl_decision(self, battle, state_vec, a0, a1, g0, g1, source, decision_type):
+        self._report_active(battle)   # live spectate feed: refresh tag + turn every decision
         if source not in _MODEL_SOURCES:
             return  # retry / fallback / escape are not the model's decision
         try:

@@ -11,6 +11,7 @@
     <h1>🏆 Victory-Dance</h1>
     <span class="sub">Self-Play Dashboard</span>
     <span class="src-pill" id="src-pill">demo data</span>
+    <span class="live-badge off" id="live-badge">offline</span>
     <div class="sp"></div>
     <input type="file" id="file-in" accept="application/json,.json" hidden />
     <button class="btn" id="btn-load">📂 Load manifest.json</button>
@@ -30,13 +31,16 @@
     </div>
 
     <div id="main">
+      <div id="live-bar" class="hidden"></div>
       <div id="view-tabs">
         <button class="vtab active" data-tab="overview">Overview</button>
         <button class="vtab" data-tab="health">PPO / Critic Health</button>
+        <button class="vtab" data-tab="spectate">🎬 Spectate</button>
         <button class="vtab" data-tab="detail">Generation Detail</button>
       </div>
       <div id="tab-overview" class="tab-pane"></div>
       <div id="tab-health" class="tab-pane hidden"></div>
+      <div id="tab-spectate" class="tab-pane hidden"></div>
       <div id="tab-detail" class="tab-pane hidden"></div>
     </div>
   </div>

@@ -28,7 +28,9 @@ const DEMO_MANIFEST = {
   ]
 };
 
-const STATE = { m: null, sel: null, tab: "overview", src: "demo data" };
+const STATE = { m: null, sel: null, tab: "overview", src: "demo data",
+                mode: "static", status: null, lastKey: null, lastTags: "", poll: null,
+                liveLog: null, logKey: "", viewTurn: 0, followLatest: true };
 
 // ── tiny helpers ──────────────────────────────────────────────────────────────
 const $ = (id) => document.getElementById(id);
@@ -159,8 +161,15 @@ function deltaTxt(d, asPct) {
 function renderAll() {
   $("src-pill").textContent = STATE.src;
   renderSummary(); renderGenList();
-  renderOverview(); renderHealth(); renderDetail();
+  if (gens().length) { renderOverview(); renderHealth(); renderDetail(); }
+  else { renderEmptyMain(); }
+  renderSpectate(); renderLiveBar(); setLiveBadge();
   switchTab(STATE.tab);
+}
+
+function renderEmptyMain() {
+  $("tab-overview").innerHTML = `<div id="empty"><div class="big">⏳</div><p>Waiting for the first generation to finish…<br/>The charts and notables fill in automatically as the self-play run produces data.</p></div>`;
+  $("tab-health").innerHTML = ""; $("tab-detail").innerHTML = "";
 }
 
 function renderSummary() {
@@ -300,27 +309,236 @@ function selectGen(genNum) {
 function switchTab(tab) {
   STATE.tab = tab;
   document.querySelectorAll(".vtab").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
-  ["overview", "health", "detail"].forEach((t) => $("tab-" + t).classList.toggle("hidden", t !== tab));
+  ["overview", "health", "spectate", "detail"].forEach((t) => $("tab-" + t).classList.toggle("hidden", t !== tab));
 }
 
-function loadManifest(m, src) {
-  if (!m || !Array.isArray(m.generations)) { notify("Not a valid manifest.json", true); return; }
-  STATE.m = m; STATE.src = src; STATE.sel = m.generations.length ? m.generations[m.generations.length - 1].generation : null;
+// ── live badge / status bar / spectate (status-driven) ────────────────────────
+function setLiveBadge() {
+  const b = $("live-badge"), s = STATE.status;
+  if (STATE.mode === "static") { b.className = "live-badge demo"; b.textContent = STATE.src === "demo data" ? "demo" : "file"; return; }
+  if (!s) { b.className = "live-badge off"; b.textContent = "offline"; return; }
+  if (s.live) { b.className = "live-badge live"; b.innerHTML = '<span class="dot"></span>LIVE'; }
+  else { b.className = "live-badge idle"; b.textContent = (s.run && s.run.phase === "done") ? "run finished" : "idle"; }
+}
+
+const PHASE_LABEL = { collecting: "Collecting self-play games", updating: "PPO / critic update",
+  evaluating: "Gauntlet evaluation", starting: "Starting…", idle: "Idle", done: "Run finished" };
+
+function renderLiveBar() {
+  const bar = $("live-bar"), s = STATE.status;
+  if (STATE.mode === "static" || !s || !s.live) { bar.classList.add("hidden"); return; }
+  const r = s.run || {}, done = r.games_done || 0, total = r.games_total || 0;
+  const hasProg = r.phase === "collecting" && total > 0;
+  const w = hasProg ? Math.min(100, (done / total) * 100) : 0;
+  const prog = hasProg
+    ? `<div class="lbar"><div class="lbar-track"><div class="lbar-fill" style="width:${w.toFixed(0)}%"></div></div></div>`
+    : `<div class="lbar"><div class="lbar-track"><div class="lbar-fill lbar-indet"></div></div></div>`;
+  const wr = r.running_p1_winrate;
+  bar.classList.remove("hidden");
+  bar.innerHTML =
+    `<div><div class="lb-phase">Gen ${r.generation ?? "?"} · ${esc(PHASE_LABEL[r.phase] || r.phase || "")}</div>` +
+    `<div class="lb-sub">${hasProg ? done + "/" + total + " games" : "&nbsp;"}${r.n_generations ? " · target " + r.n_generations + " gens" : ""}${r.last_verdict ? " · last gen: " + esc(r.last_verdict) : ""}</div></div>` +
+    prog +
+    `<div class="lb-stat"><div class="v">${wr == null ? "—" : (wr * 100).toFixed(0) + "%"}</div><div class="l">p1 win (running)</div></div>` +
+    `<div class="lb-stat"><div class="v">${(s.active_battles || []).length}</div><div class="l">live battles</div></div>`;
+}
+
+function renderSpectate() {
+  const pane = $("tab-spectate"), s = STATE.status;
+  const battles = (s && s.active_battles) || [];
+  const url = (s && s.showdown_url) || "http://localhost:8000";
+  if (STATE.mode === "static") {
+    pane.innerHTML = `<div class="spec-empty"><div class="big">🎬</div><p>Live spectating is available when the dashboard is served by the dashboard server during a self-play run.</p></div>`;
+    return;
+  }
+  if (!battles.length) {
+    pane.innerHTML = `<div class="spec-empty"><div class="big">🎬</div><p>No live battles right now.<br/>Start a self-play run and its current game shows here, turn by turn.</p></div>`;
+    return;
+  }
+  const watch = battles.map((b) =>
+    `<a class="btn pri" href="${esc(url)}/${esc(b.tag)}" target="_blank" rel="noopener">▶ Watch ${esc(b.p1)} vs ${esc(b.p2)} (animated, new tab)</a>`).join(" ");
+  const note = `<div class="spec-note">Live turn-by-turn view of the current self-play game, rendered from its battle log (no internet needed). <b>▶ Watch</b> opens the full animated Showdown client in a new tab (needs internet).</div>`;
+  pane.innerHTML = note + `<div class="spec-actions">${watch}</div><div id="tv-container"></div>`;
+  renderTurnViewerInto();
+}
+
+function renderTurnViewerInto() {
+  const c = document.getElementById("tv-container");
+  if (c) c.innerHTML = renderTurnViewer(STATE.liveLog);
+}
+
+function renderTurnViewer(parsed) {
+  if (!parsed || !parsed.frames || !parsed.frames.length)
+    return `<div class="spec-empty"><div class="big">⏳</div><p>Waiting for the first turn of the current game…</p></div>`;
+  const n = parsed.frames.length;
+  const idx = STATE.viewTurn = STATE.followLatest ? n - 1 : Math.max(0, Math.min(STATE.viewTurn, n - 1));
+  const fr = parsed.frames[idx], st = fr.state, pl = parsed.players;
+  const pills = [];
+  if (st.field.weather) pills.push(`<span class="fp">${esc(st.field.weather)}</span>`);
+  if (st.field.terrain) pills.push(`<span class="fp">${esc(st.field.terrain)}</span>`);
+  if (st.field.trickRoom) pills.push(`<span class="fp">Trick Room</span>`);
+  const fieldBar = pills.length ? `<div class="tv-field">${pills.join("")}</div>` : "";
+  const panel = (side, cls) =>
+    `<div class="tv-panel"><div class="tv-phdr ${cls}">${esc(pl[side] || side)}</div>` +
+    `<div class="tv-field-row">${monCard(st.active[side].a, "a")}${monCard(st.active[side].b, "b")}</div></div>`;
+  const logRows = (fr.events || []).length
+    ? fr.events.map((e) => `<div class="al-row"><span class="al-evt al-${e.t}">${esc(e.t)}</span><span class="al-text">${esc(e.text)}</span></div>`).join("")
+    : `<div class="al-empty">— leads / setup —</div>`;
+  const win = (idx === n - 1 && parsed.winner) ? `<span class="tv-win">🏆 ${esc(parsed.winner)} won</span>` : "";
+  const label = fr.turn === 0 ? "Leads" : "Turn " + fr.turn;
+  return `
+    <div class="tv-bar">
+      <button class="btn" onclick="stepTurn(-1)">◀</button>
+      <span class="tv-turn">${esc(label)} <span class="tv-of">${idx + 1}/${n}</span></span>
+      <input id="tv-scrub" type="range" min="0" max="${n - 1}" value="${idx}" oninput="setViewTurn(this.value)" />
+      <button class="btn" onclick="stepTurn(1)">▶</button>
+      <button class="btn ${STATE.followLatest ? "pri" : ""}" onclick="toggleFollow()">${STATE.followLatest ? "● LIVE" : "○ follow"}</button>
+      ${win}
+    </div>
+    ${fieldBar}
+    <div class="tv-board">${panel("p1", "p1h")}${panel("p2", "p2h")}</div>
+    <div class="tv-log"><h4>${esc(label)} events</h4>${logRows}</div>`;
+}
+
+function monCard(mon, slot) {
+  if (!mon) return `<div class="tv-mon empty"><span class="tv-slot">${slot.toUpperCase()}</span><span class="tv-none">empty</span></div>`;
+  const hp = mon.fainted ? 0 : (mon.hp == null ? 100 : mon.hp);
+  const hpcls = hp <= 35 ? "hp-lo" : hp <= 70 ? "hp-mid" : "hp-hi";
+  const boosts = Object.entries(mon.boosts || {}).filter(([, v]) => v)
+    .map(([k, v]) => `<span class="boost-pip ${v > 0 ? "boost-pos" : "boost-neg"}">${v > 0 ? "+" : ""}${v} ${esc(k)}</span>`).join("");
+  const status = mon.status ? `<span class="tv-status">${esc(mon.status)}</span>` : "";
+  const tera = mon.tera ? `<span class="tv-tera">tera ${esc(mon.tera)}</span>` : "";
+  return `<div class="tv-mon ${mon.fainted ? "fainted" : ""}">` +
+    `<div class="tv-mon-top"><span class="tv-slot">${slot.toUpperCase()}</span><span class="tv-species">${esc(mon.species)}</span>${tera}${status}</div>` +
+    `<div class="tv-hp"><div class="tv-hp-fill ${hpcls}" style="width:${Math.max(0, Math.min(100, hp))}%"></div></div>` +
+    `<div class="tv-hp-num">${mon.fainted ? "fainted" : hp + "%"}</div>` +
+    `<div class="tv-boosts">${boosts}</div></div>`;
+}
+
+// Parse a Showdown |-protocol log into per-turn frames (board state + events). Not a
+// full engine — enough for a turn-by-turn board: active mon per slot, HP%, status, boosts.
+function parseBattleLog(lines) {
+  const players = { p1: "p1", p2: "p2" };
+  const active = { p1: { a: null, b: null }, p2: { a: null, b: null } };
+  const field = { weather: null, terrain: null, trickRoom: false };
+  const frames = []; let curTurn = 0, events = [], winner = null, fmt = "";
+  const snap = () => JSON.parse(JSON.stringify({ active, field }));
+  const push = () => frames.push({ turn: curTurn, state: snap(), events: events.slice() });
+  const who = (ref) => { const m = /^(p[12])([ab]?): ?(.*)$/.exec(ref || ""); return m ? { side: m[1], slot: m[2] || "a", nick: m[3] } : null; };
+  const hpOf = (s) => { if (!s) return null; if (/fnt/.test(s)) return 0; const m = /^(\d+)(?:\/(\d+))?/.exec(String(s).trim()); return m ? (m[2] ? Math.round((+m[1] / +m[2]) * 100) : +m[1]) : null; };
+  const sp = (m) => (m ? ((active[m.side][m.slot] && active[m.side][m.slot].species) || m.nick) : "?");
+  for (const raw of lines) {
+    const p = String(raw).split("|"); const cmd = p[1];
+    if (cmd === "player") { if (p[2] && p[3]) players[p[2]] = p[3]; }
+    else if (cmd === "tier") fmt = p[2] || fmt;
+    else if (cmd === "turn") { push(); curTurn = parseInt(p[2], 10) || curTurn + 1; events = []; }
+    else if (cmd === "switch" || cmd === "drag" || cmd === "replace") {
+      const w = who(p[2]); if (!w) continue;
+      const species = (p[3] || "").split(",")[0].trim();
+      active[w.side][w.slot] = { species, nick: w.nick, hp: hpOf(p[4]), status: null, boosts: {}, fainted: false };
+      if (cmd !== "replace") events.push({ t: "switch", side: w.side, text: `${species} switched in (${w.side})` });
+    }
+    else if (cmd === "move") { const w = who(p[2]), tg = who(p[4]); events.push({ t: "move", side: w && w.side, text: `${sp(w)} used ${p[3]}${tg ? " → " + sp(tg) : ""}` }); }
+    else if (cmd === "-damage" || cmd === "-heal") {
+      const w = who(p[2]); if (!w) continue;
+      const now = hpOf(p[3]); if (active[w.side][w.slot]) active[w.side][w.slot].hp = now;
+      events.push({ t: cmd === "-damage" ? "damage" : "heal", side: w.side, text: `${sp(w)} ${cmd === "-damage" ? "↓" : "↑"} HP → ${now == null ? "?" : now}%` });
+    }
+    else if (cmd === "faint") { const w = who(p[2]); if (w && active[w.side][w.slot]) { active[w.side][w.slot].fainted = true; active[w.side][w.slot].hp = 0; events.push({ t: "faint", side: w.side, text: `${sp(w)} fainted` }); } }
+    else if (cmd === "-boost" || cmd === "-unboost") { const w = who(p[2]); if (w && active[w.side][w.slot]) { const amt = (cmd === "-boost" ? 1 : -1) * (parseInt(p[4], 10) || 0); const b = active[w.side][w.slot].boosts; b[p[3]] = (b[p[3]] || 0) + amt; events.push({ t: "boost", side: w.side, text: `${sp(w)} ${amt > 0 ? "+" : ""}${amt} ${p[3]}` }); } }
+    else if (cmd === "-status") { const w = who(p[2]); if (w && active[w.side][w.slot]) active[w.side][w.slot].status = p[3]; }
+    else if (cmd === "-curestatus") { const w = who(p[2]); if (w && active[w.side][w.slot]) active[w.side][w.slot].status = null; }
+    else if (cmd === "-weather") field.weather = (p[2] && p[2] !== "none") ? p[2] : null;
+    else if (cmd === "-fieldstart") { if (/trick room/i.test(p[2] || "")) field.trickRoom = true; else field.terrain = (p[2] || "").replace(/move: /i, ""); }
+    else if (cmd === "-fieldend") { if (/trick room/i.test(p[2] || "")) field.trickRoom = false; else field.terrain = null; }
+    else if (cmd === "-terastallize") { const w = who(p[2]); if (w && active[w.side][w.slot]) { active[w.side][w.slot].tera = p[3]; events.push({ t: "tera", side: w.side, text: `${sp(w)} Terastallized → ${p[3]}` }); } }
+    else if (cmd === "detailschange" || cmd === "-formechange") { const w = who(p[2]); if (w && active[w.side][w.slot]) { active[w.side][w.slot].species = (p[3] || "").split(",")[0].trim(); events.push({ t: "mega", side: w.side, text: `${sp(w)} → ${active[w.side][w.slot].species}` }); } }
+    else if (cmd === "-mega") { const w = who(p[2]); events.push({ t: "mega", side: w && w.side, text: `${sp(w)} Mega-Evolved` }); }
+    else if (cmd === "swap") { const w = who(p[2]); if (w) { const s = active[w.side]; [s.a, s.b] = [s.b, s.a]; events.push({ t: "switch", side: w.side, text: `Ally Switch (${w.side})` }); } }   // doubles slot swap
+    else if (cmd === "-ability") { const w = who(p[2]); if (w) events.push({ t: "boost", side: w.side, text: `${sp(w)} ability: ${p[3]}` }); }
+    else if (cmd === "cant") { const w = who(p[2]); if (w) events.push({ t: "damage", side: w.side, text: `${sp(w)} couldn't move${p[3] ? " (" + p[3] + ")" : ""}` }); }
+    else if (cmd === "win") winner = p[2] || null;
+  }
+  push();
+  return { players, fmt, frames, winner };
+}
+
+function setViewTurn(v) { STATE.viewTurn = parseInt(v, 10) || 0; STATE.followLatest = !!(STATE.liveLog && STATE.viewTurn >= STATE.liveLog.frames.length - 1); renderTurnViewerInto(); }
+function stepTurn(d) { if (!STATE.liveLog) return; STATE.viewTurn = Math.max(0, Math.min(STATE.viewTurn + d, STATE.liveLog.frames.length - 1)); STATE.followLatest = STATE.viewTurn >= STATE.liveLog.frames.length - 1; renderTurnViewerInto(); }
+function toggleFollow() { STATE.followLatest = !STATE.followLatest; if (STATE.followLatest && STATE.liveLog) STATE.viewTurn = STATE.liveLog.frames.length - 1; renderTurnViewerInto(); }
+
+// ── apply incoming data ─────────────────────────────────────────────────────────
+function manifestKey(m) { const g = m.generations || []; return `${m.n_generations}|${g.length ? JSON.stringify(g[g.length - 1]) : ""}`; }
+
+function applyManifest(m, src) {
+  if (!m || !Array.isArray(m.generations)) { notify("Not a valid manifest.json", true); return false; }
+  STATE.m = m; STATE.src = src;
+  const ids = m.generations.map((g) => g.generation);
+  if (STATE.sel == null || !ids.includes(STATE.sel)) STATE.sel = ids.length ? ids[ids.length - 1] : null;  // keep the user's selection across live updates
   renderAll();
-  notify(`Loaded ${m.n_generations} generations from ${src}`);
+  return true;
 }
 
-function init() {
-  $("btn-demo").addEventListener("click", () => { STATE.tab = "overview"; loadManifest(JSON.parse(JSON.stringify(DEMO_MANIFEST)), "demo data"); });
+function applyStatus(s) {
+  STATE.status = s;
+  setLiveBadge(); renderLiveBar();
+  const tags = ((s && s.active_battles) || []).map((b) => b.tag).join(",");
+  if (tags !== STATE.lastTags) { STATE.lastTags = tags; renderSpectate(); }   // only rebuild iframes when the room set changes (don't reload mid-battle)
+}
+
+// ── live polling ──────────────────────────────────────────────────────────────
+async function fetchJSON(url) { const r = await fetch(url, { cache: "no-store" }); if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }
+
+async function pollOnce() {
+  let s;
+  try { s = await fetchJSON("status.json"); } catch (e) { return false; }     // not served (file://) or server down
+  applyStatus(s);
+  try {
+    const m = await fetchJSON("manifest.json");
+    const key = manifestKey(m);
+    if (key !== STATE.lastKey) { STATE.lastKey = key; applyManifest(m, "live"); }   // re-render charts only when a generation actually changes
+  } catch (e) { /* manifest may not exist until gen 0 finishes */ }
+  try { applyLiveLog(await fetchJSON("live_log.json")); } catch (e) { /* no live log yet */ }
+  return true;
+}
+
+function applyLiveLog(lg) {
+  const key = ((lg && lg.tag) || "") + ":" + ((lg && lg.n_lines) || 0);
+  if (key === STATE.logKey) return;                               // unchanged since last poll
+  STATE.logKey = key;
+  const newTag = lg && lg.tag;
+  const sameBattle = STATE.liveLog && STATE.liveLog.tag === newTag;
+  if (!sameBattle) { STATE.followLatest = true; STATE.viewTurn = 0; }   // new battle -> follow live
+  STATE.liveLog = (lg && lg.log && lg.log.length) ? parseBattleLog(lg.log) : null;
+  if (STATE.liveLog) STATE.liveLog.tag = newTag;
+  if (STATE.tab === "spectate") renderTurnViewerInto();           // live-tail the viewer
+}
+function stopPolling() { if (STATE.poll) { clearInterval(STATE.poll); STATE.poll = null; } }
+
+function loadStatic(m, src) {                       // demo / file-picker → leave live mode
+  stopPolling(); STATE.mode = "static"; STATE.status = null; STATE.lastTags = "__static__";
+  if (STATE.tab === "spectate") STATE.tab = "overview";
+  if (applyManifest(m, src)) notify(`Loaded ${m.n_generations} generations from ${src}`);
+}
+
+async function init() {
+  $("btn-demo").addEventListener("click", () => loadStatic(JSON.parse(JSON.stringify(DEMO_MANIFEST)), "demo data"));
   $("btn-load").addEventListener("click", () => $("file-in").click());
   $("file-in").addEventListener("change", (e) => {
     const f = e.target.files[0]; if (!f) return;
     const r = new FileReader();
-    r.onload = () => { try { loadManifest(JSON.parse(r.result), f.name); } catch (err) { notify("Failed to parse JSON: " + err.message, true); } };
+    r.onload = () => { try { loadStatic(JSON.parse(r.result), f.name); } catch (err) { notify("Failed to parse JSON: " + err.message, true); } };
     r.readAsText(f);
   });
   document.querySelectorAll(".vtab").forEach((b) => b.addEventListener("click", () => switchTab(b.dataset.tab)));
-  loadManifest(JSON.parse(JSON.stringify(DEMO_MANIFEST)), "demo data");
+  // Try the served live feeds; fall back to the embedded demo (e.g. opened via file://).
+  STATE.mode = "live";
+  const ok = await pollOnce();
+  if (ok) STATE.poll = setInterval(pollOnce, 2000);
+  else loadStatic(JSON.parse(JSON.stringify(DEMO_MANIFEST)), "demo data");
 }
 window.selectGen = selectGen;
+window.setViewTurn = setViewTurn;
+window.stepTurn = stepTurn;
+window.toggleFollow = toggleFollow;
 document.addEventListener("DOMContentLoaded", init);

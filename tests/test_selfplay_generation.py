@@ -148,6 +148,20 @@ def test_regression_reverts_to_best():
     assert len(league.snapshots) == 1
 
 
+def test_run_generation_writes_live_status(tmp_path):
+    from v_dance.selfplay.status import LiveStatus, read_status
+    ac, league, history, calls, fns = _harness([0.55])
+    tr = _FakeTrainer()
+    ls = LiveStatus(tmp_path / "status.json")
+    rep = run_generation(ac, tr, league, history, status=ls,
+                         cfg=GenConfig(warmup_updates=0), **fns)
+    s = read_status(ls.path)
+    assert s["run"]["phase"] == "evaluating"                 # last phase run_generation sets
+    assert s["run"]["generation"] == 0
+    assert s["update"]["loss"] == pytest.approx(0.1) and s["update"]["halted"] == 0.0
+    assert s["run"]["last_verdict"] == rep["verdict"]        # verdict captured after the gate
+
+
 def test_dry_run_smoke(capsys):
     GN._dry_run(n_generations=6)
     out = capsys.readouterr().out
