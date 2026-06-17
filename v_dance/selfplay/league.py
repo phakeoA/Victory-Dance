@@ -28,13 +28,14 @@ DEFAULT_SCRIPTED = ("random", "max_damage", "heuristic")
 
 @dataclass
 class LeagueSnapshot:
-    """A frozen, gauntlet-accepted past checkpoint in the pool."""
+    """A frozen past checkpoint in the pool."""
     snapshot_id: str
     path: str
     generation: int
     elo: float = 1000.0
     wins_vs_latest: int = 0     # the LATEST policy's wins against this snapshot (PFSP signal)
     games_vs_latest: int = 0
+    is_champion: bool = False   # was this gen an accepted CHAMPION? (never evicted — anti-cycle memory)
 
     def latest_winrate(self) -> float:
         """The latest policy's win-rate vs this snapshot (0.5 prior with no games)."""
@@ -44,14 +45,16 @@ class LeagueSnapshot:
         return {"snapshot_id": self.snapshot_id, "path": self.path,
                 "generation": int(self.generation), "elo": float(self.elo),
                 "wins_vs_latest": int(self.wins_vs_latest),
-                "games_vs_latest": int(self.games_vs_latest)}
+                "games_vs_latest": int(self.games_vs_latest),
+                "is_champion": bool(self.is_champion)}
 
     @classmethod
     def from_obj(cls, d: dict) -> "LeagueSnapshot":
         return cls(snapshot_id=d["snapshot_id"], path=d["path"],
                    generation=int(d.get("generation", 0)), elo=float(d.get("elo", 1000.0)),
                    wins_vs_latest=int(d.get("wins_vs_latest", 0)),
-                   games_vs_latest=int(d.get("games_vs_latest", 0)))
+                   games_vs_latest=int(d.get("games_vs_latest", 0)),
+                   is_champion=bool(d.get("is_champion", False)))
 
 
 @dataclass
@@ -117,11 +120,39 @@ class OpponentLeague:
         return ("latest", self.latest_path)   # degenerate: no scripted, no snapshots
 
     # ── mutation (admission / promotion / result recording) ───────────────────
-    def admit(self, snapshot_id: str, path: str, generation: int, elo: float = 1000.0) -> LeagueSnapshot:
-        """Add a gauntlet-accepted checkpoint to the pool (3c.3 calls this on promotion)."""
-        snap = LeagueSnapshot(snapshot_id, path, generation, elo)
+    def admit(self, snapshot_id: str, path: str, generation: int, elo: float = 1000.0,
+              is_champion: bool = False) -> LeagueSnapshot:
+        """Add a frozen checkpoint to the pool. Sec 16: admission is DECOUPLED from champion
+        promotion — every COMPETENT gen is admitted (so PFSP diversity grows even while the
+        champion holds), with ``is_champion`` marking the accepted champions (never evicted)."""
+        snap = LeagueSnapshot(snapshot_id, path, generation, elo, is_champion=is_champion)
         self.snapshots.append(snap)
         return snap
+
+    def prune(self, max_snapshots: int, keep_recent: int = 6) -> List[LeagueSnapshot]:
+        """Bound the pool to ``max_snapshots``, DIVERSITY-aware (sec 16). ALWAYS keep champion
+        snapshots (the anti-cycle memory) + the most-recent ``keep_recent``. From the remaining
+        OLD non-champion snapshots, keep a generation-STRIDED spread so early-gen archetypes
+        aren't all dropped (a naive 'drop oldest' would lose the most-distinct counters). Returns
+        the EVICTED snapshots so the caller can delete their checkpoint files. Champions + recent
+        are kept even if that exceeds the cap (a soft cap — never evict a protected snapshot).
+
+        MUST be called only BETWEEN generations (never mid-collection): ``record_result`` /
+        in-flight chunks look snapshots up by id, so removing one mid-collection would silently
+        drop PFSP data."""
+        n = len(self.snapshots)
+        if max_snapshots <= 0 or n <= max_snapshots:
+            return []
+        keep = {i for i, s in enumerate(self.snapshots) if s.is_champion}     # champions
+        keep |= set(range(max(0, n - keep_recent), n))                        # most-recent
+        remaining = [i for i in range(n) if i not in keep]
+        budget = max_snapshots - len(keep)
+        if budget > 0 and remaining:                                          # strided spread
+            step = len(remaining) / budget
+            keep |= {remaining[min(len(remaining) - 1, int(k * step))] for k in range(budget)}
+        evicted = [s for i, s in enumerate(self.snapshots) if i not in keep]
+        self.snapshots = [s for i, s in enumerate(self.snapshots) if i in keep]
+        return evicted
 
     def promote_latest(self, new_path: str, *, demote_old_as: Optional[str] = None,
                        generation: int = 0, elo: float = 1000.0) -> None:
@@ -132,6 +163,17 @@ class OpponentLeague:
             self.admit(demote_old_as, self.latest_path, generation, elo)
         self.latest_path = new_path
         for s in self.snapshots:           # new latest hasn't faced the pool yet
+            s.wins_vs_latest = s.games_vs_latest = 0
+
+    def reset_pfsp(self) -> None:
+        """Zero every snapshot's latest-vs-snapshot tally.  MUST be called whenever the
+        LATEST policy changes (promote / revert) — otherwise wins_vs_latest accumulates
+        outcomes from MANY different past 'latest' policies and pfsp_weights()
+        ((1-latest_winrate)^power) targets the hard counters of an ANCESTOR, not the
+        current latest, silently breaking the anti-collapse 'train against what you lose
+        to' guarantee.  (promote_latest already resets; this is for the live loop, which
+        sets latest_path directly.)"""
+        for s in self.snapshots:
             s.wins_vs_latest = s.games_vs_latest = 0
 
     def record_result(self, snapshot_id: str, latest_won: bool) -> None:

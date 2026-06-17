@@ -789,6 +789,13 @@ class VGCPlayerBase(Player):
         taken = _switch_order_target(order_s0)
         order_s1 = self._safe_order(action_s1, battle, slot=1, gimmick=g1,
                                     taken_switch_targets={taken} if taken else None)
+        # _safe_order returns None when an ACTIVE, non-fainted slot has no representable
+        # legal order (its only codec action — a switch — collides with the ally's,
+        # leaving only an inexpressible forced move).  Passing it is illegal, so resolve
+        # the whole turn via /choose default — the cross-slot variant of the empty-mask
+        # escape above, which the per-slot mask can't see until both orders are built.
+        if order_s0 is None or order_s1 is None:
+            return DefaultBattleOrder()
         return DoubleBattleOrder(order_s0, order_s1)
 
     # ── Internal helpers ──────────────────────────────────────────────────────
@@ -937,15 +944,20 @@ class VGCPlayerBase(Player):
     def _safe_order(self, action: int, battle: DoubleBattle, slot: int,
                     gimmick: int = GIMMICK_NONE,
                     opp_present_recon: Optional[dict] = None,
-                    taken_switch_targets: Optional[set] = None) -> SingleBattleOrder:
+                    taken_switch_targets: Optional[set] = None) -> Optional[SingleBattleOrder]:
         """
-        Convert action int → SingleBattleOrder, with two fallback levels:
+        Convert action int → SingleBattleOrder, with these fallback levels:
           1. Try the given action (with the model's ``gimmick`` decision and the
              gap-#6 reconstructed opponent occupancy for deliberate targeting).
-          2. Try a fresh random legal action (no gimmick — an emergency legal
-             order, never speculatively mega'd).
-          3. PassBattleOrder (slot has nothing to do this turn).
-        DoubleBattleOrder never accepts None, so Pass is the correct no-op.
+          2. Scan EVERY other legal action for one the codec can express.
+          3a. PassBattleOrder — the correct no-op for a FAINTED / empty slot.
+          3b. ``None`` — an ACTIVE, non-fainted slot for which NO legal action
+              decodes (its only codec action is a switch the OTHER slot is taking,
+              leaving only a forced move the 16-action codec can't express, e.g.
+              Struggle).  Passing such a slot is ILLEGAL ("must make a move/switch"),
+              so the caller resolves the whole turn via ``/choose default`` instead.
+        DoubleBattleOrder never accepts None, so the callers convert the 3b None to
+        a DefaultBattleOrder (the same escape ``_active_empty_mask`` uses).
 
         ``taken_switch_targets`` (the OTHER slot's ``/choose switch`` command, if it
         switched) is threaded into BOTH the primary decode AND the level-2 scan so
@@ -991,10 +1003,18 @@ class VGCPlayerBase(Player):
                          f"mask_legal={sum(1 for x in mask if x)}")
             except Exception:
                 _diag = "(diag unavailable)"
-            log.warning("_safe_order: slot %d would PASS an ACTIVE mon (Showdown rejects "
-                        "'must make a move/switch') — mask/codec desync. %s", slot, _diag)
-        else:
-            log.debug("_safe_order: slot %d has no decodable legal action — sending Pass.", slot)
+            # An ACTIVE, non-fainted slot whose ONLY codec-expressible legal action is
+            # unusable this turn — typically its sole legal switch collides with the
+            # ally's (one bench mon both slots want), leaving only a forced move
+            # (Struggle / recharge / a live move-id != mon.moves) the 16-action codec
+            # can't express.  Passing it is ILLEGAL ("must make a move/switch"); return
+            # None so the caller resolves the whole turn with /choose default instead of
+            # sending a Pass Showdown rejects (the retry-storm the user's live run hit).
+            log.warning("_safe_order: slot %d has NO representable legal order for an ACTIVE "
+                        "mon (forced move / cross-slot switch collision) — resolving the turn "
+                        "via /choose default. %s", slot, _diag)
+            return None
+        log.debug("_safe_order: slot %d has no decodable legal action — sending Pass.", slot)
         return PassBattleOrder()
 
     @staticmethod

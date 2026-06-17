@@ -278,6 +278,17 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
         order_s1 = self._safe_order(action_s1, battle, slot=1, gimmick=g1,
                                     opp_present_recon=opp_present_recon,
                                     taken_switch_targets={taken} if taken else None)
+        # _safe_order returns None when an ACTIVE, non-fainted slot has no representable
+        # legal order (its only codec action — a switch — collides with the ally's, so
+        # only a forced move the 16-action codec can't express remains, e.g. Struggle).
+        # Passing it is illegal ("must make a move/switch") and would trigger the
+        # retry-storm + a rejected order (the Sneasler desync the user's live run hit);
+        # resolve the whole turn via /choose default instead — the cross-slot variant of
+        # the empty-mask escape above.  The model did NOT drive this turn → drop the step.
+        if order_s0 is None or order_s1 is None:
+            self._source_counts["forced_default"] += 1
+            self._discard_rl_decision(battle, "turn")
+            return DefaultBattleOrder()
         return DoubleBattleOrder(order_s0, order_s1)
 
     @staticmethod

@@ -111,6 +111,54 @@ def test_admit_and_record_result():
     assert s.latest_winrate() == pytest.approx(0.5)
 
 
+def test_prune_keeps_champions_recent_and_a_strided_spread():
+    """Bounded league (sec 16): prune keeps ALL champions + the most-recent ``keep_recent`` +
+    a generation-strided spread of the rest; never evicts a champion; returns the evicted."""
+    lg = OpponentLeague(latest_path="x")
+    for g in range(20):
+        lg.admit(f"g{g}", f"{g}.pt", g, is_champion=(g in (2, 5, 11)))   # 3 champions
+    evicted = lg.prune(max_snapshots=10, keep_recent=4)
+    kept = lg.snapshots
+    assert len(kept) <= 10
+    assert all(s.snapshot_id in {sn.snapshot_id for sn in kept} for s in kept)
+    # every champion survives
+    for cid in ("g2", "g5", "g11"):
+        assert any(s.snapshot_id == cid for s in kept)
+    # the most-recent 4 survive
+    for rid in ("g16", "g17", "g18", "g19"):
+        assert any(s.snapshot_id == rid for s in kept)
+    # eviction actually happened and the evicted are gone from the pool
+    assert evicted and all(s not in kept for s in evicted)
+    assert {s.snapshot_id for s in evicted}.isdisjoint({s.snapshot_id for s in kept})
+    # a strided spread keeps SOME old snapshots (not just the recent tail)
+    assert any(int(s.snapshot_id[1:]) < 12 and not s.is_champion for s in kept)
+
+
+def test_prune_never_evicts_a_champion_even_over_cap():
+    lg = OpponentLeague(latest_path="x")
+    for g in range(15):
+        lg.admit(f"g{g}", f"{g}.pt", g, is_champion=True)        # ALL champions
+    evicted = lg.prune(max_snapshots=5, keep_recent=2)
+    assert evicted == []                                          # nothing evictable
+    assert len(lg.snapshots) == 15                                # soft cap: champions kept
+
+
+def test_prune_noop_under_cap():
+    lg = _league([("g1", 1, 0, 0), ("g2", 2, 0, 0)])
+    assert lg.prune(max_snapshots=10) == [] and len(lg.snapshots) == 2
+
+
+def test_reset_pfsp_zeros_all_snapshot_tallies():
+    """reset_pfsp() must zero every snapshot's wins/games_vs_latest — the live loop
+    changes latest_path directly (not via promote_latest), so this is how the PFSP
+    hard-counter signal is kept aligned to the CURRENT latest on a champion change."""
+    lg = _league([("g1", 1, 80, 100), ("g2", 2, 30, 100)])
+    assert any(s.games_vs_latest > 0 for s in lg.snapshots)
+    lg.reset_pfsp()
+    assert all(s.wins_vs_latest == 0 and s.games_vs_latest == 0 for s in lg.snapshots)
+    assert all(s.latest_winrate() == pytest.approx(0.5) for s in lg.snapshots)   # back to prior
+
+
 def test_promote_latest_demotes_and_resets_pfsp():
     lg = _league([("g1", 1, 80, 100)])
     lg.promote_latest("gen5.pt", demote_old_as="g4", generation=4)

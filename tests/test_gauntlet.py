@@ -12,6 +12,28 @@ _REPO = Path(__file__).resolve().parents[1]
 import v_dance.eval.gauntlet as G  # noqa: E402
 
 
+# ── gauntlet_eval forwards the v2 mirror-battles override ─────────────────────
+def test_gauntlet_eval_forwards_mirror_battles(monkeypatch):
+    """The champion MIRROR runs more battles than the scripted ladder for the v2 gate's 70% bar.
+    gauntlet_eval must forward ``mirror_battles`` to run_gauntlet while ``battles`` stays the
+    scripted count."""
+    import v_dance.play.model_io as MIO
+    from v_dance.selfplay.generation import gauntlet_eval
+    monkeypatch.setattr(MIO, "load_bc_policy", lambda p: None)   # skip the real checkpoint load
+    captured = {}
+
+    async def fake_run_gauntlet(**kw):
+        captured.update(kw)
+        return {"random": (5, 10), "max_damage": (5, 10), "heuristic": (5, 10),
+                "prev_best": (7, 10)}, {}
+    monkeypatch.setattr(G, "run_gauntlet", fake_run_gauntlet)
+
+    gauntlet_eval("cand.pt", teams=["A", "B"], team_chooser="tc.pt", battles=60,
+                  prev_best_path="champ.pt", mirror_battles=240)
+    assert captured["mirror_battles"] == 240          # mirror bumped
+    assert captured["battles_per_opponent"] == 60     # scripted ladder unchanged
+
+
 # ── Elo ───────────────────────────────────────────────────────────────────────
 def test_expected_score_symmetry_and_monotonicity():
     assert abs(G.expected_score(1500, 1500) - 0.5) < 1e-9

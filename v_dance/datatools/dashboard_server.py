@@ -34,6 +34,8 @@ _ALLOWED = {"dashboard.html", "dashboard.css", "dashboard.js", "demo_manifest.js
 
 _EMPTY_MANIFEST = {"n_generations": 0, "best_path": None, "best_generation": None,
                    "best_win_rate": None, "best_elo": None, "n_promotions": 0,
+                   "champion_path": None, "champion_generation": None, "champion_elo": None,
+                   "best_scripted_generation": None, "best_scripted_win_rate": None,
                    "league": [], "generations": []}
 _IDLE_STATUS = {"live": False, "updated_at": None, "showdown_url": "http://localhost:8000",
                 "run": {"phase": "idle", "generation": 0, "n_generations": None,

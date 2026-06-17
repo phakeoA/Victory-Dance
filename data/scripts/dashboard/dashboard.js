@@ -128,10 +128,12 @@ function computeNotables() {
       title: improved ? "Net improvement over the run" : "No net improvement yet",
       desc: `Gen 0 → Gen ${last.generation}: ${eloGain != null ? (eloGain >= 0 ? "+" : "") + eloGain.toFixed(0) + " Elo" : "—"}, ${wrGain != null ? (wrGain >= 0 ? "+" : "") + (wrGain * 100).toFixed(1) + "% scripted win-rate" : "—"}.` });
   }
-  // best so far
-  const best = gs.find((g) => g.generation === m.best_generation);
-  if (best) out.push({ kind: "good", ico: "🏆", title: `Best generation: Gen ${best.generation}`,
-    desc: `${pct(best.scripted_win_rate)} win-rate, Elo ${num(best.model_elo)} — current league anchor (${esc(m.best_path || "?")}).` });
+  // current champion (the gate-accepted best = latest promoted; sec 16). The scripted Elo
+  // saturates, so feature the non-saturating CHAMPION-LINEAGE Elo when present.
+  const champGen = m.champion_generation != null ? m.champion_generation : m.best_generation;
+  const champ = gs.find((g) => g.generation === champGen);
+  if (champ) out.push({ kind: "good", ico: "🏆", title: `Champion: Gen ${champ.generation}`,
+    desc: `${pct(champ.scripted_win_rate)} scripted win-rate${m.champion_elo != null ? `, lineage Elo ${num(m.champion_elo)}` : ""} — the accepted champion (${esc(m.champion_path || m.best_path || "?")}).` });
   // biggest single-gen jump
   const jumps = gs.filter((g) => g.win_rate_delta != null);
   if (jumps.length) {
@@ -176,8 +178,9 @@ function renderSummary() {
   const m = STATE.m;
   $("gen-count").textContent = `(${m.n_generations})`;
   $("run-summary").innerHTML = [
-    ["Best Elo", num(m.best_elo), `gen ${m.best_generation ?? "—"}`],
-    ["Best win-rate", pct(m.best_win_rate), `gen ${m.best_generation ?? "—"}`],
+    ["Champion Elo", m.champion_elo != null ? num(m.champion_elo) : num(m.best_elo),
+     `gen ${m.champion_generation ?? m.best_generation ?? "—"} (lineage)`],
+    ["Champion win-rate", pct(m.best_win_rate), `gen ${m.champion_generation ?? m.best_generation ?? "—"}`],
     ["Generations", m.n_generations, `${m.n_promotions} promoted`],
     ["League pool", (m.league || []).length, "snapshots"],
   ].map(([l, v, s]) => `<div class="mini"><div class="mv">${esc(v)}</div><div class="ml">${esc(l)}</div><div class="ms">${esc(s)}</div></div>`).join("");
@@ -199,13 +202,17 @@ function renderGenList() {
 function renderOverview() {
   const m = STATE.m, gs = gens(), last = gs[gs.length - 1];
   const cards = [
-    ["c-yellow", num(m.best_elo), "Best Elo", `gen ${m.best_generation}`],
-    ["c-green", pct(m.best_win_rate), "Best scripted win-rate", `gen ${m.best_generation}`],
+    ["c-yellow", m.champion_elo != null ? num(m.champion_elo) : num(m.best_elo), "Champion Elo (lineage)", `gen ${m.champion_generation ?? m.best_generation}`],
+    ["c-green", pct(m.best_win_rate), "Best scripted win-rate", `gen ${m.best_scripted_generation ?? m.best_generation}`],
     ["c-accent", `${m.n_promotions}/${m.n_generations}`, "Generations promoted", "passed the gate"],
     ["c-purple", pct(last.scripted_win_rate), `Latest (gen ${last.generation})`, `${last.verdict} ${last.win_rate_delta != null ? deltaTxt(last.win_rate_delta, true) : ""}`],
   ].map(([c, v, l, s]) => `<div class="scard ${c}"><div class="v">${esc(v)}</div><div class="l">${esc(l)}</div><div class="s">${esc(s)}</div></div>`).join("");
 
-  const eloChart = lineChart({ data: series("Elo", (g) => g.model_elo, (v) => "Elo " + v.toFixed(0)), color: "var(--yellow)",
+  // champion-lineage Elo (non-saturating) is the headline progress curve; scripted model Elo
+  // saturates once the policy crushes the scripts (red-team observability fix, sec 16).
+  const hasChampElo = gs.some((g) => g.champion_elo != null);
+  const eloChart = lineChart({ data: series(hasChampElo ? "Champion Elo" : "Elo",
+      (g) => hasChampElo ? g.champion_elo : g.model_elo, (v) => "Elo " + v.toFixed(0)), color: "var(--yellow)",
     fmtY: (v) => v.toFixed(0), yTicks: 4 });
   const wrChart = lineChart({ data: series("win-rate", (g) => g.scripted_win_rate, (v) => (v * 100).toFixed(1) + "% win-rate"), color: "var(--green)",
     yMin: 0, yMax: 1, refLine: 0.5, refLabel: "50% (even vs scripted)", fmtY: (v) => (v * 100).toFixed(0) + "%", yTicks: 4 });

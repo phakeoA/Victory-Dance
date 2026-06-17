@@ -5,10 +5,10 @@ One GENERATION = collect a self-play batch (league opponents) -> a PPO update (c
 warm-up on the first) -> evaluate the candidate on the gauntlet (>=4 teams, side-balanced)
 -> a STATISTICAL promotion gate (docs/ppo_reward_design.md sec 16: admit only when the
 candidate beats the current best by MORE than noise) -> on pass: league.admit + best
-pointer + frozen-Phi refresh; on a significant regression: revert (collapse recovery).
+pointer; on a significant regression: revert (collapse recovery, optimisers reset too).
 
 The orchestration (``run_generation``) takes the live steps as INJECTED callables
-(``collect_fn`` / ``eval_fn`` / ``save_fn`` / ``refresh_phi_fn`` / ``restore_fn``), so the
+(``collect_fn`` / ``eval_fn`` / ``save_fn`` / ``restore_fn``), so the
 WHOLE loop — gate, promotion, league admission, history, Elo curve — is unit-tested
 offline with fakes, while the real wiring (``collect_with_league`` over the validated
 runner, ``gauntlet_eval`` over ``gauntlet.run_gauntlet``) is exercised by the live smoke.
@@ -28,10 +28,17 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 from v_dance.selfplay.league import OpponentLeague
+# The GATE + history bookkeeping live in gate.py (pure, offline-tested). Re-exported here so
+# existing `from ...generation import promotion_gate / GenerationHistory / GateConfig / ...`
+# imports keep working unchanged after the split (sec 16).
+from v_dance.selfplay.gate import (  # noqa: F401,E402
+    SCRIPTED_OPPONENTS, _two_prop_se, wilson_lower_bound,
+    GateConfig, promotion_gate, is_plateau, GateConfigV2, promotion_gate_v2,
+    aggregate_scripted, aggregate_prev_best, operator_alert,
+    GenerationRecord, GenerationHistory, GenConfig,
+)
 
 log = logging.getLogger(__name__)
-
-SCRIPTED_OPPONENTS = ("random", "max_damage", "heuristic")
 
 # Controlled, side-balanced EVAL pool (sec 15): the gauntlet gate judges on THESE so a
 # generation's measured strength isn't confounded by the random training team draw. This is
@@ -45,168 +52,11 @@ DEFAULT_EVAL_TEAMS = (
 )
 
 
-# ── promotion gate (pure stats) ───────────────────────────────────────────────
-@dataclass
-class GateConfig:
-    z: float = 1.0               # one-sided significance band (1.0 ~84%, 1.645 ~95%)
-    min_delta: float = 0.0       # require at least this absolute win-rate improvement
-    revert_on_regression: bool = True
-
-
-def _two_prop_se(p1: float, n1: int, p2: float, n2: int) -> float:
-    return math.sqrt(p1 * (1 - p1) / max(n1, 1) + p2 * (1 - p2) / max(n2, 1))
-
-
-def promotion_gate(new_wins: int, new_games: int, base_wins: int, base_games: int,
-                   cfg: GateConfig = GateConfig(),
-                   prevbest_wins: Optional[int] = None,
-                   prevbest_games: int = 0) -> Tuple[str, dict]:
-    """Decide promote / hold / revert.
-
-    The SCRIPTED ladder (candidate vs the accepted best's scripted win-rate) is the
-    primary signal — BUT it SATURATES once the policy crushes the scripted opponents
-    (gen N ≈ gen N+1 ≈ 98% → delta ≈ 0 → "hold" forever, a false plateau; ``model_elo``
-    is scripted-only so it saturates too).  So a NON-SATURATING, cycle-safe bar is
-    added: a head-to-head vs ``prev_best`` — the current accepted BEST, NOT gen N-1
-    (gating on the immediate predecessor lets a non-transitive RPS cycle A→B→C→A
-    promote forever with no real progress).  Beating your strongest past self by a
-    significant margin is a bar that only RISES, so the gate keeps making progress
-    after the scripted ladder goes blind.
-
-      * promote  if scripted improves significantly OR the candidate beats prev_best
-                 head-to-head significantly (>50% by the z-band);
-      * revert   only on a real scripted COLLAPSE (regression below the best);
-      * hold     otherwise.
-
-    No baseline (first generation) → auto-promote.  No prev_best data
-    (``prevbest_games<=0``) → reduces EXACTLY to the original scripted-only gate."""
-    if base_games <= 0:
-        return "promote", {"reason": "no_baseline", "p_new": (new_wins / new_games)
-                           if new_games else None}
-    p_new = new_wins / new_games if new_games else 0.0
-    p_base = base_wins / base_games
-    delta = p_new - p_base
-    se = _two_prop_se(p_new, new_games, p_base, base_games)
-    lo, hi = delta - cfg.z * se, delta + cfg.z * se
-    if lo > cfg.min_delta:
-        scripted_verdict = "promote"
-    elif cfg.revert_on_regression and hi < -cfg.min_delta:
-        scripted_verdict = "revert"
-    else:
-        scripted_verdict = "hold"
-    stats = {"p_new": p_new, "p_base": p_base, "delta": delta, "se": se,
-             "ci": (lo, hi), "z": cfg.z, "scripted_verdict": scripted_verdict}
-
-    # Non-saturating best-self anchor: did the candidate beat prev_best head-to-head?
-    beats_best = False
-    if prevbest_wins is not None and prevbest_games > 0:
-        p_h2h = prevbest_wins / prevbest_games
-        se_h2h = _two_prop_se(p_h2h, prevbest_games, 0.5, prevbest_games)
-        margin_lo = (p_h2h - 0.5) - cfg.z * se_h2h
-        beats_best = margin_lo > cfg.min_delta
-        stats["prevbest"] = {"p": p_h2h, "n": prevbest_games,
-                             "margin_lo": margin_lo, "beats_best": beats_best}
-
-    # Collapse safety FIRST: a real scripted regression reverts even if the candidate
-    # edges prev_best (which would be noise in a genuinely-collapsed policy).
-    if scripted_verdict == "revert":
-        verdict, reason = "revert", "scripted_collapse"
-    elif scripted_verdict == "promote":
-        verdict, reason = "promote", "scripted"
-    elif beats_best:
-        verdict, reason = "promote", "beats_prev_best"   # non-saturating bar
-    else:
-        verdict, reason = "hold", "hold"
-    stats["verdict_reason"] = reason
-    return verdict, stats
-
-
-def aggregate_scripted(results: Dict[str, Tuple[int, int]]) -> Tuple[int, int]:
-    """Sum (wins, games) over the scripted-anchor opponents in a gauntlet result dict."""
-    w = g = 0
-    for name, (wins, n) in results.items():
-        if name in SCRIPTED_OPPONENTS:
-            w += wins
-            g += n
-    return w, g
-
-
-def aggregate_prev_best(results: Dict[str, Tuple[int, int]]) -> Tuple[int, int]:
-    """(wins, games) of the candidate's head-to-head vs the prev_best mirror, or
-    (0, 0) when the eval did not run it (gen 0 / no accepted best yet)."""
-    w, g = results.get("prev_best", (0, 0))
-    return int(w), int(g)
-
-
-# ── generation history (pure, persistable for 3c.4) ───────────────────────────
-@dataclass
-class GenerationRecord:
-    generation: int
-    n_trajectories: int
-    scripted_wins: int
-    scripted_games: int
-    model_elo: Optional[float]
-    verdict: str
-    promoted: bool
-    update_stats: dict = field(default_factory=dict)
-
-    def to_obj(self) -> dict:
-        return {"generation": self.generation, "n_trajectories": self.n_trajectories,
-                "scripted_wins": self.scripted_wins, "scripted_games": self.scripted_games,
-                "model_elo": self.model_elo, "verdict": self.verdict,
-                "promoted": self.promoted,
-                "update_stats": {k: v for k, v in self.update_stats.items()
-                                 if isinstance(v, (int, float))}}
-
-    @classmethod
-    def from_obj(cls, d: dict) -> "GenerationRecord":
-        return cls(generation=int(d["generation"]), n_trajectories=int(d.get("n_trajectories", 0)),
-                   scripted_wins=int(d.get("scripted_wins", 0)),
-                   scripted_games=int(d.get("scripted_games", 0)),
-                   model_elo=d.get("model_elo"), verdict=d.get("verdict", "hold"),
-                   promoted=bool(d.get("promoted", False)),
-                   update_stats=d.get("update_stats", {}))
-
-
-@dataclass
-class GenerationHistory:
-    records: List[GenerationRecord] = field(default_factory=list)
-    best_path: Optional[str] = None
-    best_scripted: Tuple[int, int] = (0, 0)   # (wins, games) of the accepted best
-
-    @property
-    def generation(self) -> int:
-        return len(self.records)
-
-    def add(self, rec: GenerationRecord) -> None:
-        self.records.append(rec)
-
-    def elo_curve(self) -> List[Tuple[int, Optional[float]]]:
-        return [(r.generation, r.model_elo) for r in self.records]
-
-    def to_obj(self) -> dict:
-        return {"records": [r.to_obj() for r in self.records], "best_path": self.best_path,
-                "best_scripted": list(self.best_scripted)}
-
-    @classmethod
-    def from_obj(cls, d: dict) -> "GenerationHistory":
-        return cls(records=[GenerationRecord.from_obj(r) for r in d.get("records", [])],
-                   best_path=d.get("best_path"),
-                   best_scripted=tuple(d.get("best_scripted", (0, 0))))
-
-
-# ── generation config + orchestration ─────────────────────────────────────────
-@dataclass
-class GenConfig:
-    n_games: int = 300            # self-play games collected per generation
-    warmup_updates: int = 5       # critic-only warm-up updates on the FIRST generation
-    gate: GateConfig = field(default_factory=GateConfig)
-
-
+# ── generation orchestration ──────────────────────────────────────────────────
 def run_generation(
     actor_critic, trainer, league: OpponentLeague, history: GenerationHistory, *,
     collect_fn: Callable, eval_fn: Callable, save_fn: Callable,
-    refresh_phi_fn: Optional[Callable] = None, restore_fn: Optional[Callable] = None,
+    restore_fn: Optional[Callable] = None, cleanup_fn: Optional[Callable] = None,
     status=None, cfg: GenConfig = GenConfig(),
 ) -> dict:
     """Run ONE generation. Injected live steps:
@@ -215,8 +65,10 @@ def run_generation(
       * ``eval_fn(candidate_path, prev_best_path) -> (results{opp:(wins,n)}, model_elo)``
         (``prev_best_path`` is None at gen 0; when given, the eval adds a ``"prev_best"``
         head-to-head so the gate has the non-saturating best-self anchor)
-      * ``refresh_phi_fn(actor_critic)`` (on promote) / ``restore_fn(actor_critic, best_path)`` (on revert)
-    Returns a generation report dict; appends to ``history``; mutates ``league`` on promote."""
+      * ``restore_fn(actor_critic, best_path)`` (on a collapse REVERT)
+    The KL-to-BC anchor stays STATIC at gen-0 BC (preserves rare tactics, docs sec 12); the
+    old ``refresh_phi_fn`` promote-hook is removed — it was never wired into the live run and
+    moving the anchor would weaken that preservation. Returns a report; appends to ``history``."""
     gen = history.generation
 
     trajectories, sources = collect_fn(actor_critic, league, gen)
@@ -231,32 +83,61 @@ def run_generation(
     candidate = save_fn(actor_critic, gen)
     if status is not None:
         status.phase("evaluating", generation=gen)
-    results, elo = eval_fn(candidate, history.best_path)   # prev_best = current accepted best
+    # The v2 frozen-champion gate's PRIMARY signal is the head-to-head vs the FROZEN champion
+    # (sec 16), so the mirror runs whenever there's a champion to beat (None at gen 0).
+    # --no-prev-best skips it → the gate can then only hold/collapse (a 'freeze past gen 0' mode).
+    pb_path = history.best_path if cfg.gate.use_prev_best else None
+    results, elo = eval_fn(candidate, pb_path)
     sw, sg = aggregate_scripted(results)
     pbw, pbg = aggregate_prev_best(results)
+    mirror_rate = (pbw / pbg) if pbg else None
+    have_champion = history.best_path is not None
 
-    verdict, gate_stats = promotion_gate(
-        sw, sg, *history.best_scripted, cfg.gate,
-        prevbest_wins=(pbw if pbg else None), prevbest_games=pbg)
+    # Record this gen's observed mirror win-rate BEFORE the gate so the plateau detector's
+    # window INCLUDES the current generation (advance_champion / revert reset it below).
+    history.record_h2h(mirror_rate)
+
+    verdict, gate_stats = promotion_gate_v2(
+        scripted_wins=sw, scripted_games=sg, high_water=history.scripted_high_water,
+        mirror_wins=pbw, mirror_games=pbg, h2h_history=history.h2h_history,
+        have_champion=have_champion, cfg=cfg.gate_v2)
     promoted = verdict == "promote"
     if status is not None:
         status.set_update(update_stats, last_verdict=verdict)
+    # Admission is DECOUPLED from champion promotion (sec 16): admit EVERY COMPETENT gen as a
+    # frozen league opponent (not just promotes) so PFSP diversity keeps growing while the
+    # champion holds — but NOT a collapsed/reverted policy (gate on competence). Champions are
+    # tagged so the diversity-aware eviction never drops them.
+    if verdict != "revert":
+        league.admit(f"gen{gen}", candidate, gen, elo if elo is not None else 1000.0,
+                     is_champion=promoted)
     if promoted:
-        league.admit(f"gen{gen}", candidate, gen, elo if elo is not None else 1000.0)
         league.latest_path = candidate
-        history.best_path = candidate
-        history.best_scripted = (sw, sg)
-        if refresh_phi_fn is not None:
-            refresh_phi_fn(actor_critic)        # frozen-Phi snapshot refresh (sec 4/6)
+        league.reset_pfsp()                     # latest changed → reset stale PFSP weighting
+        # raise Wilson high-water; reset h2h; step the champion-lineage Elo by the mirror gain
+        history.advance_champion(candidate, (sw, sg), mirror_rate=mirror_rate,
+                                 base_elo=elo if elo is not None else 1000.0)
     elif verdict == "revert" and restore_fn is not None and history.best_path is not None:
-        restore_fn(actor_critic, history.best_path)   # collapse recovery
+        restore_fn(actor_critic, history.best_path)   # collapse recovery (optimisers reset too)
+        league.reset_pfsp()
+        history.h2h_history = []                 # abandon the climb (restored policy == champion)
+
+    # Bound the league (between gens — safe vs in-flight chunk id lookups); cleanup_fn (live
+    # only) deletes the evicted checkpoint files (champions are kept, so the rollback target
+    # and the manifest/resume references survive).
+    evicted = league.prune(cfg.league_cap, cfg.keep_recent)
+    if cleanup_fn is not None and evicted:
+        cleanup_fn(evicted)
 
     rec = GenerationRecord(generation=gen, n_trajectories=len(trajectories),
                            scripted_wins=sw, scripted_games=sg, model_elo=elo,
-                           verdict=verdict, promoted=promoted, update_stats=update_stats)
+                           verdict=verdict, promoted=promoted, update_stats=update_stats,
+                           champion_elo=history.champion_elo)
     history.add(rec)
     return {"generation": gen, "verdict": verdict, "promoted": promoted,
+            "reason": gate_stats.get("reason"),
             "scripted_win_rate": (sw / sg) if sg else None, "model_elo": elo,
+            "champion_elo": history.champion_elo, "mirror_win_rate": mirror_rate,
             "league_size": len(league.snapshots), "gate": gate_stats,
             "n_trajectories": len(trajectories), "update_stats": update_stats}
 
@@ -265,8 +146,14 @@ def print_generation_report(rep: dict) -> None:
     wr = rep["scripted_win_rate"]
     wr_s = f"{wr*100:.1f}%" if wr is not None else "n/a"
     elo_s = f"{rep['model_elo']:.0f}" if rep["model_elo"] is not None else "n/a"
+    mwr = rep.get("mirror_win_rate")
+    mwr_s = f" | h2h {mwr*100:.0f}%" if mwr is not None else ""
+    celo = rep.get("champion_elo")
+    celo_s = f" champElo {celo:.0f}" if celo is not None else ""
+    reason = rep.get("reason")
+    reason_s = f" ({reason})" if reason and reason != "hold" else ""
     print(f"  gen {rep['generation']:>2} | {rep['n_trajectories']:>4} trajs | "
-          f"scripted {wr_s:>6} | Elo {elo_s:>5} | {rep['verdict'].upper():7s} | "
+          f"scripted {wr_s:>6}{mwr_s} | Elo {elo_s:>5}{celo_s} | {rep['verdict'].upper():7s}{reason_s} | "
           f"league={rep['league_size']}")
 
 
@@ -411,7 +298,8 @@ async def collect_with_league(actor_critic, league: OpponentLeague, n_games: int
 def gauntlet_eval(candidate_path, *, teams, team_chooser, battles: int = 30,
                   matchup_seed: int = 0, battle_timeout: Optional[float] = 90.0,
                   manage_server: bool = False, n_workers: int = 1,
-                  prev_best_path: Optional[str] = None):
+                  prev_best_path: Optional[str] = None,
+                  mirror_battles: Optional[int] = None):
     """Evaluate a saved checkpoint on the scripted gauntlet (>=4 teams, side-balanced).
     Returns ``(results{opp:(wins,n)}, model_elo)``. ``n_workers`` (3c.8c) parallelises the
     eval the same way as collection so the promotion gate isn't the throughput bottleneck.
@@ -435,12 +323,15 @@ def gauntlet_eval(candidate_path, *, teams, team_chooser, battles: int = 30,
         battles_per_opponent=battles, ckpt=Path(candidate_path),
         prev_best_ckpt=Path(prev_best_path) if prev_best_path else None,
         team_chooser=Path(team_chooser), manage_server=manage_server,
-        matchup_seed=matchup_seed, battle_timeout=battle_timeout, n_workers=n_workers))
+        matchup_seed=matchup_seed, battle_timeout=battle_timeout, n_workers=n_workers,
+        mirror_battles=mirror_battles))
     return results, GA.model_elo(results)
 
 
 def build_train_configs(*, kl_coef: float = 0.5, target_kl_bc: Optional[float] = 0.15,
-                        tau: float = 1.0, min_ev: Optional[float] = None):
+                        tau: float = 1.0, min_ev: Optional[float] = None,
+                        target_kl_relax_per_gen: float = 0.0,
+                        target_kl_max: Optional[float] = None):
     """Build the (PPOConfig, TrainConfig) for a live run with BC-prior PRESERVATION ON
     (task 3c.7a / docs sec 12 exploration-seeding item 1):
 
@@ -459,7 +350,9 @@ def build_train_configs(*, kl_coef: float = 0.5, target_kl_bc: Optional[float] =
     from v_dance.selfplay.trainer import TrainConfig
     tkl = target_kl_bc if (target_kl_bc is not None and target_kl_bc > 0) else None
     ppo = PPOConfig(kl_coef=float(kl_coef), tau=float(tau))
-    train = TrainConfig(target_kl_from_bc=tkl, min_explained_variance=min_ev)
+    train = TrainConfig(target_kl_from_bc=tkl, min_explained_variance=min_ev,
+                        target_kl_relax_per_gen=float(target_kl_relax_per_gen),
+                        target_kl_max=target_kl_max)
     return ppo, train
 
 
@@ -491,6 +384,21 @@ def tau_for_generation(gen: int, tau_start: float, tau_end: float,
     return float(tau_start + (tau_end - tau_start) * frac)
 
 
+def target_kl_for_generation(gen: int, base: Optional[float], relax_per_gen: float = 0.0,
+                             cap: Optional[float] = None) -> Optional[float]:
+    """KL-to-BC early-halt threshold for generation ``gen`` (sec 12). The KL anchor stays
+    STATIC at gen-0 BC, so as a genuinely-stronger champion drifts further from the human
+    prior its KL-to-BC grows; a FIXED threshold would eventually halt good generations. This
+    relaxes the bar LINEARLY: ``base + relax_per_gen*gen`` (optionally capped). The default
+    ``relax_per_gen=0`` returns ``base`` unchanged — no behaviour change unless opted into.
+    ``base is None`` (guard off) stays None. The relaxed bar still rises SLOWLY, so a sudden
+    collapse spike in KL-to-BC stays above it and still halts."""
+    if base is None:
+        return None
+    t = float(base) + max(0.0, float(relax_per_gen)) * max(0, int(gen))
+    return min(t, float(cap)) if cap is not None else t
+
+
 def resolve_eval_battles(eval_battles, n_eval_teams: int) -> int:
     """Auto-size the gauntlet eval budget when unset (task 3c.7b). ``None`` => 2x the ordered
     team-pairs, i.e. FULL both-orientation side-balanced coverage with each matchup sampled
@@ -507,7 +415,7 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                          gen_cfg: GenConfig = GenConfig(), ppo_cfg=None,
                          train_cfg=None, tau_start: float = 1.3, tau_end: float = 1.0,
                          tau_anneal_gens: int = 12, seed: int = 0,
-                         eval_battles=None, manage_server: bool = True,
+                         eval_battles=None, mirror_battles: int = 240, manage_server: bool = True,
                          device: str = "cpu", n_workers: int = 1, collect_workers=None,
                          resume_from=None, snapshot_path=None, max_hours=None) -> dict:
     """Run real generations end-to-end (collect via the league -> PPO update -> gauntlet
@@ -554,6 +462,8 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
     # uses a CPU inference-copy (see collect_fn). Resume maps the snapshot onto `device` too.
     ac = ActorCritic.from_bc_checkpoint(ckpt, device=device)
     trainer = PPOTrainer(ac, ppo_cfg, train_cfg, seed=seed, device=device)
+    # Base KL-to-BC early-halt threshold (the relax schedule rises from this each gen; sec 12).
+    _base_target_kl = trainer.tcfg.target_kl_from_bc
     league = OpponentLeague(latest_path=str(ckpt))
     history = GenerationHistory()
     if resume_from and Path(resume_from).exists():
@@ -572,6 +482,10 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
         # 3c.7c: one tau drives BOTH collection AND this gen's PPO recompute (3c.7a invariant).
         tau_gen = tau_for_generation(gen, tau_start, tau_end, tau_anneal_gens)
         trainer.cfg.tau = tau_gen
+        # sec 12: relax this gen's KL-to-BC early-halt bar from its base (static BC anchor's
+        # KL grows as a stronger champion drifts; default relax=0 → unchanged).
+        trainer.tcfg.target_kl_from_bc = target_kl_for_generation(
+            gen, _base_target_kl, trainer.tcfg.target_kl_relax_per_gen, trainer.tcfg.target_kl_max)
         # 3c.8b: collection runs on CPU (sec 20) — use a CPU inference-copy when the trainer
         # lives on the GPU; the copy reflects the latest trained weights (remade each gen).
         coll_ac = ac_.inference_copy("cpu") if device != "cpu" else ac_
@@ -603,9 +517,14 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
 
     def eval_fn(path, prev_best_path=None):
         t0 = _time.perf_counter()
+        # Vary the eval matchup seed per generation (was the default 0 every gen, making the
+        # 6-team pool a STATIC target a champion-exploiter overfits and locking fixed-pool
+        # matchup luck into the win-rate). Keyed to the generation so it stays deterministic
+        # / resumable while averaging the fixed-pool luck out across gens (red-team finding).
         out = gauntlet_eval(path, teams=_eval_pool, team_chooser=team_chooser,
                             battles=eval_battles, manage_server=False, n_workers=n_workers,
-                            prev_best_path=prev_best_path)
+                            prev_best_path=prev_best_path, mirror_battles=mirror_battles,
+                            matchup_seed=seed + history.generation)
         dt = _time.perf_counter() - t0
         n_eval = sum(g for _w, g in out[0].values())     # total finished eval battles
         gpm = n_eval / dt * 60.0 if dt > 0 else float("nan")
@@ -616,7 +535,22 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
         return out
 
     def restore_fn(ac_, path):
-        ac_.restore_from(path)
+        ac_.restore_from(path)        # reload champion policy + critic (collapse recovery)
+        trainer.reset_optimizers()    # clear the stale Adam moments that drove the collapse,
+                                      # so the next update doesn't re-shove the restored policy
+
+    def cleanup_fn(evicted):
+        # Delete the checkpoint files of league snapshots that eviction dropped (sec 16) so the
+        # archive doesn't grow without bound. Only OUR archived gen files, never a champion (those
+        # aren't in `evicted`) or the base ckpt — and only after prune + before the resume save,
+        # so nothing still references them.
+        for s in evicted:
+            try:
+                fp = Path(s.path)
+                if fp.exists() and fp.parent.resolve() == archive.resolve():
+                    fp.unlink()
+            except Exception:
+                log.debug("evicted-snapshot file cleanup failed (non-fatal)", exc_info=True)
 
     def _save():
         RS.save_snapshot(snap_path, actor_critic=ac, trainer=trainer, league=league,
@@ -630,8 +564,11 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
         while (n_generations is None or done < n_generations) and not stop.should_stop():
             rep = run_generation(ac, trainer, league, history, collect_fn=collect_fn,
                                  eval_fn=eval_fn, save_fn=save_fn, restore_fn=restore_fn,
-                                 status=status, cfg=gen_cfg)
+                                 cleanup_fn=cleanup_fn, status=status, cfg=gen_cfg)
             print_generation_report(rep)
+            _alert = operator_alert(history)        # unattended-run watchdog (sec 16)
+            if _alert:
+                print(f"        ⚠ {_alert}")
             us = rep.get("update_stats", {}) or {}
             print(f"        update: loss={us.get('loss', float('nan')):+.4f} "
                   f"kl_to_bc={us.get('kl_to_bc', float('nan')):.3e} "
@@ -677,11 +614,14 @@ def _dry_run(n_generations: int = 6, seed: int = 0) -> None:
         def ppo_update(self, trajs): return {"loss": 0.1, "halted": False, "kl_to_bc": 0.01}
     trainer = _Trainer()
 
-    # synthetic scripted win-rates per generation (rise, plateau-with-noise, then a
-    # collapse) — sized so the gate clearly promotes / holds / reverts at z=1.
-    scripted_wr = [0.48, 0.56, 0.63, 0.64, 0.63, 0.55][:n_generations]
-    eval_games = 400
-    calls = {"refresh": 0, "restore": 0}
+    # Synthetic per-gen (scripted, head-to-head-vs-champion) win-rates that drive the v2
+    # frozen-champion gate through every verdict: gen0 auto-promote, climb-then-clear the 70%
+    # bar (beat_champion), hold while below it, a scripted dip → collapse REVERT, then a
+    # plateau → backstop re-anchor. Mirror runs at 240 games (>= min_h2h_games) so the bar can fire.
+    scripted_wr = [0.55, 0.60, 0.62, 0.63, 0.30, 0.58, 0.58, 0.58][:n_generations]
+    mirror_wr = [None, 0.55, 0.72, 0.55, 0.50, 0.58, 0.58, 0.58][:n_generations]
+    eval_games, mirror_games = 400, 240
+    calls = {"restore": 0}
 
     def collect_fn(ac, league, gen):
         return [object()] * 200, {"model": 4000}     # 200 fake trajectories
@@ -691,27 +631,29 @@ def _dry_run(n_generations: int = 6, seed: int = 0) -> None:
 
     def eval_fn(path, prev_best_path=None):
         gen = len(history.records)
-        wr = scripted_wr[min(gen, len(scripted_wr) - 1)]
-        wins = round(wr * eval_games)
+        scr = scripted_wr[min(gen, len(scripted_wr) - 1)]
+        wins = round(scr * eval_games)
         results = {"random": (wins // 3, eval_games // 3),
                    "max_damage": (wins // 3, eval_games // 3),
                    "heuristic": (wins - 2 * (wins // 3), eval_games - 2 * (eval_games // 3))}
-        return results, 1000 + (wr - 0.5) * 800
+        mir = mirror_wr[min(gen, len(mirror_wr) - 1)]
+        if prev_best_path is not None and mir is not None:        # the mirror vs the champion
+            results["prev_best"] = (round(mir * mirror_games), mirror_games)
+        return results, 1000 + (scr - 0.5) * 800
 
-    def refresh_phi_fn(ac): calls["refresh"] += 1
     def restore_fn(ac, path): calls["restore"] += 1
 
     print("== Generation-loop dry run (no server) =====================")
     print(f"  synthetic scripted win-rate per gen: {scripted_wr}")
-    print("  gate: promote if win-rate beats the accepted best beyond noise; "
-          "revert on a real regression\n")
+    print(f"  synthetic mirror   win-rate per gen: {mirror_wr}")
+    print("  v2 gate: keep the champion frozen until the candidate clears the 70% bar vs it OR "
+          "the climb plateaus; revert on a scripted collapse\n")
     for _ in range(n_generations):
         rep = run_generation(ac, trainer, league, history, collect_fn=collect_fn,
-                             eval_fn=eval_fn, save_fn=save_fn, refresh_phi_fn=refresh_phi_fn,
+                             eval_fn=eval_fn, save_fn=save_fn,
                              restore_fn=restore_fn, cfg=GenConfig(warmup_updates=3))
         print_generation_report(rep)
-    print(f"\n  Phi refreshes (on promote): {calls['refresh']}   "
-          f"reverts (on regression): {calls['restore']}")
+    print(f"\n  reverts (on regression): {calls['restore']}")
     print(f"  league snapshots admitted : {len(league.snapshots)}  "
           f"({[s.snapshot_id for s in league.snapshots]})")
     print(f"  Elo curve                 : "
@@ -744,7 +686,9 @@ def _launch_live(args):
         sys.exit(2)
     ppo_cfg, train_cfg = build_train_configs(
         kl_coef=args.kl_coef, target_kl_bc=args.target_kl_bc,
-        tau=args.tau_start, min_ev=args.min_ev)   # gen-0 tau; collect_fn re-sets per gen
+        tau=args.tau_start, min_ev=args.min_ev,
+        target_kl_relax_per_gen=args.target_kl_relax,
+        target_kl_max=args.target_kl_max)         # gen-0 tau; collect_fn re-sets per gen
     # train = full archetype-rich pool; eval = controlled set (sec 15). --teams (deprecated)
     # overrides BOTH with an explicit list.
     train_pool = resolve_train_pool(args.teams if args.teams else args.train_teams)
@@ -762,6 +706,8 @@ def _launch_live(args):
     print(f"   exploration (sec 12): KL-to-BC coef={args.kl_coef} "
           f"target_kl_bc={'off' if args.target_kl_bc <= 0 else args.target_kl_bc} "
           f"min_ev={'off' if args.min_ev is None else args.min_ev} {_tau_desc}")
+    print(f"   gate (sec 16): prev_best head-to-head bar = "
+          f"{'ON' if args.prev_best else 'OFF (pure scripted ladder)'}")
     _cw = args.collect_workers if args.collect_workers else _rb["workers"]
     print(f"   resources (sec 20): {summarize(_rb)}")
     _upd = "PPO update on GPU (VRAM capped)" if _rb["device"] == "cuda" else "CPU PPO update"
@@ -771,10 +717,11 @@ def _launch_live(args):
         Path(args.ckpt), n_generations=n_gen, team_pool=train_pool,
         eval_team_pool=eval_pool,
         team_chooser=args.team_chooser, archive_dir=args.archive,
-        gen_cfg=GenConfig(n_games=args.games, warmup_updates=args.warmup),
+        gen_cfg=GenConfig(n_games=args.games, warmup_updates=args.warmup,
+                          gate=GateConfig(use_prev_best=args.prev_best)),
         ppo_cfg=ppo_cfg, train_cfg=train_cfg,
         tau_start=args.tau_start, tau_end=args.tau, tau_anneal_gens=args.tau_anneal_gens,
-        seed=args.seed, eval_battles=args.eval_battles,
+        seed=args.seed, eval_battles=args.eval_battles, mirror_battles=args.mirror_battles,
         device=_rb["device"], n_workers=_rb["workers"], collect_workers=args.collect_workers,
         manage_server=not args.no_server, resume_from=args.resume,
         snapshot_path=args.snapshot, max_hours=args.hours)
@@ -827,6 +774,8 @@ def _wizard(ap):
                                "12 to use collection's CPU headroom; blank = cap", int)
     args.max_vram_gb = ask("Max VRAM GB for the GPU update", None,
                            "4 (of 8 GB); blank = uncapped", float)
+    args.prev_best = ask_yn("Use the prev_best head-to-head promotion bar? "
+                            "(promotes past a scripted plateau; N = pure scripted ladder)", True)
     if ask_yn("Resume the previous run (continue training)?", False):
         snap = Path(args.archive) / "resume.pt"
         if snap.exists():
@@ -849,6 +798,8 @@ def _wizard(ap):
         parts.append(f"--collect-workers {args.collect_workers}")
     if args.max_vram_gb is not None:
         parts.append(f"--max-vram-gb {args.max_vram_gb}")
+    if not args.prev_best:
+        parts.append("--no-prev-best")
     if args.resume:
         parts.append(f"--resume {args.resume}")
     if args.verbose:
@@ -880,6 +831,10 @@ if __name__ == "__main__":
                          "team-pairs). DEFAULT auto-sizes to 2*N*(N-1) = full both-orientation "
                          "side-balanced coverage of the eval pool (6 teams => 60/opp, ~180 "
                          "games/gen). Pass a small int (e.g. 12) for a fast UI smoke.")
+    ap.add_argument("--mirror-battles", type=int, default=240,
+                    help="head-to-head battles vs the CHAMPION for the v2 gate's 70%% bar (sec 16). "
+                         "Default 240 (>= the gate's min_h2h_games=200 noise floor; gate_sim). The "
+                         "scripted ladder stays at --eval-battles; only the mirror is bumped.")
     ap.add_argument("--warmup", type=int, default=5, help="critic-only warm-up updates (gen 0)")
     ap.add_argument("--ckpt", default=str(_REPO_ROOT / "ai_train_scripts" / "BC_model"
                                           / "checkpoints" / "bc_best.pt"))
@@ -908,6 +863,12 @@ if __name__ == "__main__":
     ap.add_argument("--target-kl-bc", type=float, default=0.15,
                     help="early-halt a generation if mean KL(BC||new) exceeds this "
                          "(warm-start-collapse guard); <=0 disables")
+    ap.add_argument("--target-kl-relax", type=float, default=0.0,
+                    help="relax --target-kl-bc by this much PER GENERATION (sec 12: the static "
+                         "BC anchor's KL grows as a stronger champion drifts, so a fixed bar "
+                         "would eventually halt good gens; 0 = fixed, the default)")
+    ap.add_argument("--target-kl-max", type=float, default=None,
+                    help="cap for the relaxed --target-kl-bc threshold (default uncapped)")
     ap.add_argument("--min-ev", type=float, default=None,
                     help="early-halt if critic explained-variance falls below this "
                          "(value-collapse guard; default off)")
@@ -933,6 +894,10 @@ if __name__ == "__main__":
                     help="resume-snapshot path to write (default <archive>/resume.pt)")
     ap.add_argument("--hours", type=float, default=None,
                     help="stop cleanly after ~this many wall-clock hours (between gens)")
+    ap.add_argument("--prev-best", action=argparse.BooleanOptionalAction, default=True,
+                    help="use the prev_best head-to-head promotion bar (sec 16: lets a gen "
+                         "promote past a scripted plateau by beating the accepted-best mirror). "
+                         "--no-prev-best = pure scripted gate (also skips the mirror's eval games)")
     ap.add_argument("--no-server", action="store_true")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()

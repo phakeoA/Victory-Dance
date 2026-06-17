@@ -326,6 +326,7 @@ async def run_gauntlet(
     battle_timeout: Optional[float] = 90.0,
     spectate: bool = False,
     n_workers: int = 1,
+    mirror_battles: Optional[int] = None,
 ) -> Dict[str, Tuple[int, int]]:
     """Play the model vs each opponent over the rotating team pool and return
     ``{opponent_name: (model_wins, n_finished)}``.
@@ -347,8 +348,12 @@ async def run_gauntlet(
     descriptors = []
     uid = 0
     for kind in opponents:
+        # The prev_best/champion MIRROR can run more battles than the scripted anchors
+        # (the v2 gate's 70% bar needs >=200 games to be reliable; gate_sim), while the cheap
+        # scripted ladder stays small — mirror_battles overrides just that opponent's count.
+        nb = mirror_battles if (kind == "prev_best" and mirror_battles) else battles_per_opponent
         for model_team_name, opp_team_name, n in team_matchups(
-                team_pool, battles_per_opponent, seed=matchup_seed):
+                team_pool, nb, seed=matchup_seed):
             uid += 1
             descriptors.append({"kind": kind, "mt": model_team_name,
                                 "ot": opp_team_name, "n": n, "uid": uid})

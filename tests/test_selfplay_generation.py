@@ -59,6 +59,19 @@ def test_tau_for_generation_monotone_nonincreasing_within_bounds():
     assert all(a >= b - 1e-9 for a, b in zip(taus, taus[1:]))            # never increases
 
 
+def test_target_kl_for_generation_relax_and_cap():
+    # default relax=0 -> the bar is the base, unchanged at every gen (no behaviour change)
+    assert GN.target_kl_for_generation(0, 0.15) == pytest.approx(0.15)
+    assert GN.target_kl_for_generation(50, 0.15) == pytest.approx(0.15)
+    # linear relaxation per gen
+    assert GN.target_kl_for_generation(0, 0.15, 0.01) == pytest.approx(0.15)
+    assert GN.target_kl_for_generation(10, 0.15, 0.01) == pytest.approx(0.25)
+    # cap clamps the relaxed bar
+    assert GN.target_kl_for_generation(100, 0.15, 0.01, cap=0.30) == pytest.approx(0.30)
+    # base None (guard off) stays off regardless of relax
+    assert GN.target_kl_for_generation(10, None, 0.01) is None
+
+
 # ── 3c.8c: parallel-collection chunk planner ──────────────────────────────────
 def test_build_collection_chunks_plans_all_games_unique_uids():
     from v_dance.selfplay.league import OpponentLeague
@@ -148,7 +161,7 @@ def _harness(win_rates, eval_games=400):
     ac = object()
     league = OpponentLeague(latest_path="bc_best.pt")
     history = GenerationHistory()
-    calls = {"refresh": 0, "restore": [], "saved": []}
+    calls = {"restore": [], "saved": []}
 
     def collect_fn(ac, lg, gen):
         return [object()] * 10, {"model": 100}
@@ -163,15 +176,11 @@ def _harness(win_rates, eval_games=400):
         wr = win_rates[gen]
         return {"random": (round(wr * eval_games), eval_games)}, 1000 + (wr - 0.5) * 800
 
-    def refresh_phi_fn(ac):
-        calls["refresh"] += 1
-
     def restore_fn(ac, path):
         calls["restore"].append(path)
 
     return ac, league, history, calls, dict(
-        collect_fn=collect_fn, save_fn=save_fn, eval_fn=eval_fn,
-        refresh_phi_fn=refresh_phi_fn, restore_fn=restore_fn)
+        collect_fn=collect_fn, save_fn=save_fn, eval_fn=eval_fn, restore_fn=restore_fn)
 
 
 def test_first_generation_warms_up_and_promotes():
@@ -181,7 +190,7 @@ def test_first_generation_warms_up_and_promotes():
     assert tr.warmups == 1 and tr.updates == 1                  # warm-up only on gen 0
     assert rep["verdict"] == "promote" and rep["promoted"]
     assert len(league.snapshots) == 1 and league.latest_path == "gen0.pt"
-    assert history.best_path == "gen0.pt" and calls["refresh"] == 1
+    assert history.best_path == "gen0.pt"
 
 
 def test_second_generation_no_warmup():
@@ -192,15 +201,50 @@ def test_second_generation_no_warmup():
     assert tr.warmups == 1 and tr.updates == 2                  # NO warm-up on gen 1
 
 
-def test_hold_does_not_admit_or_refresh():
+def test_hold_admits_snapshot_but_keeps_champion():
+    """Decoupled admission (sec 16): a HELD (competent) gen is still admitted as a league
+    opponent for PFSP diversity — but it is NOT marked champion, so the champion pointer and
+    high-water are unchanged and there's no revert."""
     ac, league, history, calls, fns = _harness([0.55, 0.555])   # gen1 within noise of gen0
     tr = _FakeTrainer()
     run_generation(ac, tr, league, history, **fns)              # gen0 promote
     rep = run_generation(ac, tr, league, history, **fns)        # gen1 hold
     assert rep["verdict"] == "hold" and not rep["promoted"]
-    assert len(league.snapshots) == 1                           # no new admit
-    assert calls["refresh"] == 1 and calls["restore"] == []     # no refresh, no revert
-    assert history.best_path == "gen0.pt"                       # best unchanged
+    assert len(league.snapshots) == 2                           # gen1 ADMITTED (decoupled)
+    assert sum(s.is_champion for s in league.snapshots) == 1    # only gen0 is the champion
+    assert calls["restore"] == []                               # no revert
+    assert history.best_path == "gen0.pt"                       # champion unchanged
+
+
+def test_decoupled_admission_prunes_and_cleans_up(monkeypatch):
+    """Over many held gens the league admits every competent gen but stays BOUNDED by prune,
+    and cleanup_fn is handed the evicted snapshots (so the live runner can delete their files).
+    A reverted/collapsed gen is NOT admitted."""
+    from v_dance.selfplay.generation import run_generation, GenConfig, GenerationHistory
+    from v_dance.selfplay.league import OpponentLeague
+    league = OpponentLeague(latest_path="bc.pt")
+    history = GenerationHistory()
+    history.best_path = "champ.pt"
+    history.best_scripted = (180, 200)
+    history.scripted_high_water = 0.60
+    evicted_seen = []
+
+    def eval_fn(path, prev_best_path):
+        # healthy scripted + a flat 55% mirror (below the 70% bar, not a collapse) → mostly HOLD
+        return ({"random": (60, 67), "max_damage": (60, 67), "heuristic": (60, 66),
+                 "prev_best": (132, 240)}, 1500.0)
+
+    cfg = GenConfig(league_cap=5, keep_recent=2)
+    for i in range(12):
+        run_generation(object(), _FakeTrainer(), league, history,
+                       collect_fn=lambda ac, lg, gen: ([], {}), eval_fn=eval_fn,
+                       save_fn=lambda ac, gen: f"g{len(history.records)}.pt",
+                       cleanup_fn=lambda ev: evicted_seen.extend(ev), cfg=cfg)
+
+    assert len(league.snapshots) <= 5            # bounded by the cap despite 12 admits
+    assert evicted_seen                          # eviction happened and cleanup_fn was called
+    # the champion (a plateau re-anchor will have occurred) survives in the pool
+    assert any(s.is_champion for s in league.snapshots)
 
 
 def test_regression_reverts_to_best():

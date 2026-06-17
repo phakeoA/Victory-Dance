@@ -82,6 +82,23 @@ def test_manifest_enriched_health_deltas_and_summary():
     assert m["best_elo"] == pytest.approx(1080.0) and m["n_promotions"] == 2
 
 
+def test_manifest_stars_the_champion_not_argmax_scripted():
+    """The dashboard star must follow the gate's CHAMPION (latest promoted), NOT the argmax
+    scripted-win-rate gen — those diverge once scripted saturates (red-team observability fix)."""
+    h = GenerationHistory()
+    h.add(GenerationRecord(0, 0, 50, 100, 1000.0, "promote", True, champion_elo=1000.0))
+    h.add(GenerationRecord(1, 0, 65, 100, 1100.0, "hold", False, champion_elo=1000.0))   # max scripted wr
+    h.add(GenerationRecord(2, 0, 60, 100, 1080.0, "promote", True, champion_elo=1164.0))  # the champion
+    h.best_path, h.best_scripted, h.champion_elo = "gen2.pt", (60, 100), 1164.0
+    m = AR.build_manifest(h)
+    assert m["champion_generation"] == 2 and m["champion_path"] == "gen2.pt"
+    assert m["champion_elo"] == pytest.approx(1164.0)
+    assert m["best_generation"] == 2                       # star = champion (gen2), not gen1
+    assert m["best_scripted_generation"] == 1              # argmax-scripted tracked separately
+    assert m["generations"][2]["is_champion"] and not m["generations"][1]["is_champion"]
+    assert m["generations"][2]["champion_elo"] == pytest.approx(1164.0)
+
+
 # ── Type_D = standard Showdown replay format ──────────────────────────────────
 def test_render_replay_is_showdown_format():
     h = AR.render_replay_html(_LOG)

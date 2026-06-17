@@ -79,6 +79,25 @@ def test_explained_variance():
     assert math.isnan(explained_variance(np.array([]), np.array([])))
 
 
+# ── collapse-revert: optimiser reset ──────────────────────────────────────────
+def test_reset_optimizers_clears_adam_moments(tmp_path):
+    """On a collapse REVERT the champion WEIGHTS are restored but the Adam first/second-
+    moment estimates that drove the collapse must NOT persist (they'd re-apply large steps
+    and re-collapse). reset_optimizers() rebuilds fresh optimisers with empty state and the
+    configured LRs."""
+    ac = _fresh_ac(tmp_path)
+    trajs = [_traj(ac, won=True, seed=1), _traj(ac, won=False, seed=2)]
+    tr = PPOTrainer(ac, train_cfg=TrainConfig(minibatch_size=0))
+    tr.ppo_update(trajs)                                   # populates Adam moment buffers
+    assert len(tr.actor_opt.state) > 0 or len(tr.critic_opt.state) > 0
+    old_actor_opt = tr.actor_opt
+    tr.reset_optimizers()
+    assert tr.actor_opt is not old_actor_opt              # fresh optimiser objects
+    assert len(tr.actor_opt.state) == 0 and len(tr.critic_opt.state) == 0   # no stale moments
+    assert tr.actor_opt.param_groups[0]["lr"] == pytest.approx(tr.tcfg.actor_lr)
+    assert tr.critic_opt.param_groups[0]["lr"] == pytest.approx(tr.tcfg.critic_lr)
+
+
 # ── warm-up ───────────────────────────────────────────────────────────────────
 def test_warmup_freezes_actor_moves_critic(tmp_path):
     ac = _fresh_ac(tmp_path)

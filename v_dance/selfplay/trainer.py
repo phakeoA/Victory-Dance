@@ -64,6 +64,8 @@ class TrainConfig:
     gamma: float = DEFAULT_GAMMA    # sec 13 FLOOR
     lam: float = DEFAULT_LAM
     target_kl_from_bc: Optional[float] = None       # early-halt guard (None = off)
+    target_kl_relax_per_gen: float = 0.0            # relax that guard by this per gen (0 = off)
+    target_kl_max: Optional[float] = None           # cap for the relaxed guard (None = uncapped)
     min_explained_variance: Optional[float] = None  # post-update halt guard (None = off)
     assert_value_space: bool = True                 # 3b.6 value_pm backstop each update
 
@@ -82,6 +84,16 @@ class PPOTrainer:
         self.rng = np.random.default_rng(seed)
         self.updates = 0
         self.warmups = 0
+
+    def reset_optimizers(self) -> None:
+        """Re-initialise the Adam optimisers, clearing the first/second-moment estimates.
+        Called on a collapse REVERT: restoring the champion WEIGHTS while keeping the stale
+        Adam moments that DROVE the collapse would re-apply large momentum steps and shove
+        the just-restored policy back off the same cliff. Fresh moments let recovery start
+        clean at the configured LRs (the champion checkpoint also carries critic_state, so
+        ``restore_from`` reloads a matching critic — value baseline + policy stay aligned)."""
+        self.actor_opt = torch.optim.Adam(self.ac.actor_parameters(), lr=self.tcfg.actor_lr)
+        self.critic_opt = torch.optim.Adam(self.ac.critic_parameters(), lr=self.tcfg.critic_lr)
 
     # ── batch helpers ─────────────────────────────────────────────────────────
     def _flatten(self, trajectories):

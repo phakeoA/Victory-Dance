@@ -78,23 +78,30 @@ def build_manifest(history, league=None) -> dict:
     deltas vs the prior gen, and whether this gen is the best win-rate so far). The
     top level carries a summary (best gen/Elo/win-rate, promotion count)."""
     recs = history.records
+    # THE CHAMPION is the latest-PROMOTED gen (the gate's accepted best), NOT the argmax-scripted
+    # gen — those diverge once scripted saturates and the v2 head-to-head ladder takes over, so the
+    # dashboard must star the real champion (red-team observability fix, sec 16).
+    champ_gen = history.champion_generation() if hasattr(history, "champion_generation") else None
     gens = []
     prev_elo = prev_wr = best_wr_so_far = None
     for r in recs:
         wr = (r.scripted_wins / r.scripted_games) if r.scripted_games else None
         elo_delta = (r.model_elo - prev_elo) if (r.model_elo is not None and prev_elo is not None) else None
         wr_delta = (wr - prev_wr) if (wr is not None and prev_wr is not None) else None
-        is_best = wr is not None and (best_wr_so_far is None or wr >= best_wr_so_far)
+        best_wr_so_far = wr if (wr is not None and best_wr_so_far is None) else best_wr_so_far
         gens.append({
             "generation": r.generation,
             "checkpoint": f"gen{r.generation}.pt",
             "scripted_win_rate": wr,
-            "model_elo": r.model_elo, "verdict": r.verdict, "promoted": r.promoted,
+            "model_elo": r.model_elo,
+            "champion_elo": getattr(r, "champion_elo", None),     # non-saturating lineage Elo curve
+            "verdict": r.verdict, "promoted": r.promoted,
             "n_trajectories": r.n_trajectories,
             "update_stats": _numeric_stats(r.update_stats),
             "elo_delta": elo_delta,
             "win_rate_delta": wr_delta,
-            "is_best": is_best,
+            "is_best": wr is not None and (best_wr_so_far is None or wr >= best_wr_so_far),
+            "is_champion": (champ_gen is not None and r.generation == champ_gen),
         })
         if r.model_elo is not None:
             prev_elo = r.model_elo
@@ -103,13 +110,20 @@ def build_manifest(history, league=None) -> dict:
             best_wr_so_far = wr if best_wr_so_far is None else max(best_wr_so_far, wr)
 
     wr_pts = [(g["generation"], g["scripted_win_rate"]) for g in gens if g["scripted_win_rate"] is not None]
-    elo_pts = [(g["generation"], g["model_elo"]) for g in gens if g["model_elo"] is not None]
     best_gen, best_wr = max(wr_pts, key=lambda t: t[1]) if wr_pts else (None, None)
-    best_elo = max((e for _, e in elo_pts), default=None)
+    best_elo = max((g["model_elo"] for g in gens if g["model_elo"] is not None), default=None)
     return {
         "n_generations": history.generation,
+        # the real CHAMPION (gate-accepted = latest promoted), first-class:
+        "champion_path": history.best_path,
+        "champion_generation": champ_gen,
+        "champion_elo": getattr(history, "champion_elo", None),   # non-saturating progress metric
         "best_path": history.best_path,
-        "best_generation": best_gen,
+        # the best SCRIPTED-win-rate gen (a secondary stat; saturates — NOT the champion):
+        "best_scripted_generation": best_gen,
+        "best_scripted_win_rate": best_wr,
+        # back-compat summary (dashboard reads these): star follows the CHAMPION, not argmax-scripted.
+        "best_generation": champ_gen if champ_gen is not None else best_gen,
         "best_win_rate": best_wr,
         "best_elo": best_elo,
         "n_promotions": sum(1 for r in recs if r.promoted),

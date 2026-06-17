@@ -84,8 +84,13 @@ class _FakeLeague:
     def __init__(self):
         self.snapshots = []
         self.latest_path = None
-    def admit(self, sid, path, gen, elo):
-        self.snapshots.append((sid, path, gen, elo))
+        self.pfsp_resets = 0
+    def admit(self, sid, path, gen, elo, is_champion=False):
+        self.snapshots.append((sid, path, gen, elo, is_champion))
+    def reset_pfsp(self):
+        self.pfsp_resets += 1
+    def prune(self, cap, keep_recent=6):
+        return []
 
 
 class _FakeTrainer:
@@ -95,33 +100,105 @@ class _FakeTrainer:
         return {"halted": False}
 
 
-def test_run_generation_passes_best_path_and_promotes_on_saturated_beat():
+def test_run_generation_passes_champion_path_and_promotes_on_bar_clear():
+    """run_generation (v2 gate) passes the CHAMPION (best_path) to the eval as the mirror anchor,
+    and promotes (beat_champion) when the candidate clears the 70% bar over >= 200 mirror games —
+    advancing the champion and resetting the head-to-head history."""
+    from v_dance.selfplay.generation import run_generation, GenConfig, GenerationHistory
+    league = _FakeLeague()
+    history = GenerationHistory()
+    history.best_path = "gen0.pt"          # the current accepted CHAMPION (mirror anchor)
+    history.best_scripted = (140, 200)
+
+    seen = {}
+
+    def eval_fn(path, prev_best_path):
+        seen["prev_best_path"] = prev_best_path
+        # healthy scripted + the candidate beats the champion 180/240 (>=70%, >=min_h2h_games)
+        return ({"random": (60, 67), "max_damage": (60, 67), "heuristic": (60, 66),
+                 "prev_best": (180, 240)}, 1500.0)
+
+    rep = run_generation(object(), _FakeTrainer(), league, history,
+                         collect_fn=lambda ac, lg, gen: ([], {}),
+                         eval_fn=eval_fn, save_fn=lambda ac, gen: "candidate.pt",
+                         cfg=GenConfig())
+
+    assert seen["prev_best_path"] == "gen0.pt"          # the CHAMPION is the mirror anchor
+    assert rep["verdict"] == "promote" and rep["reason"] == "beat_champion"
+    assert league.pfsp_resets == 1                       # latest changed → PFSP reset
+    assert history.best_path == "candidate.pt"          # champion advanced to the candidate
+    assert history.h2h_history == []                    # reset on champion advance
+
+
+def test_h2h_se_is_null_anchored_not_two_proportion():
+    """The head-to-head bar tests the candidate's mirror win-rate against the FIXED 0.5
+    null, so SE = sqrt(0.25/n) — NOT the inflated two-proportion sqrt(p(1-p)/n + 0.25/n).
+    A 60/100 mirror at z=1.645 clears the corrected bar (margin_lo>0) but FAILED under the
+    old sqrt(2)-inflated SE — i.e. the fix loosens the head-to-head to what z/min_delta mean."""
+    import math
+    v, st = promotion_gate(196, 200, 196, 200, GateConfig(z=1.645),
+                           prevbest_wins=60, prevbest_games=100)
+    assert st["prevbest"]["se"] == pytest.approx(math.sqrt(0.25 / 100))   # 0.05, null-anchored
+    assert st["prevbest"]["beats_best"] is True
+    assert v == "promote" and st["verdict_reason"] == "beats_prev_best"
+    # the OLD inflated SE (~0.07) would have given margin_lo<0 → a (wrong) HOLD here:
+    old_se = math.sqrt(0.6 * 0.4 / 100 + 0.25 / 100)
+    assert (0.60 - 0.5) - 1.645 * old_se < 0
+
+
+def test_run_generation_use_prev_best_false_skips_mirror_and_holds():
+    """--no-prev-best (GateConfig.use_prev_best=False): run_generation passes prev_best_path=None
+    so the head-to-head mirror NEVER runs. With no bar (no mirror games), no plateau history, and
+    no scripted collapse, the v2 gate HOLDS — the champion stays frozen ('freeze past gen 0')."""
     from v_dance.selfplay.generation import (
         run_generation, GenConfig, GenerationHistory,
     )
     league = _FakeLeague()
     history = GenerationHistory()
-    history.best_path = "gen0.pt"          # an already-accepted best (the prev_best)
-    history.best_scripted = (196, 200)     # saturated scripted baseline (0.98)
+    history.best_path = "gen0.pt"          # a champion EXISTS, but the mirror is disabled
+    history.best_scripted = (196, 200)
 
     seen = {}
 
-    def collect_fn(ac, lg, gen):
-        return [], {}
-
-    def save_fn(ac, gen):
-        return f"gen{gen}.pt"
-
     def eval_fn(path, prev_best_path):
         seen["prev_best_path"] = prev_best_path
-        # scripted saturated (≈0.98) + candidate beats prev_best 70/100
-        return ({"random": (65, 66), "max_damage": (65, 66), "heuristic": (66, 68),
-                 "prev_best": (70, 100)}, 1500.0)
+        results = {"random": (65, 66), "max_damage": (65, 66), "heuristic": (66, 68)}
+        if prev_best_path is not None:      # the mirror only runs when the bar is ON
+            results["prev_best"] = (180, 240)
+        return results, 1500.0
 
     rep = run_generation(object(), _FakeTrainer(), league, history,
-                         collect_fn=collect_fn, eval_fn=eval_fn, save_fn=save_fn,
-                         cfg=GenConfig(gate=GateConfig(z=1.0)))
+                         collect_fn=lambda ac, lg, gen: ([], {}),
+                         eval_fn=eval_fn, save_fn=lambda ac, gen: f"gen{gen}.pt",
+                         cfg=GenConfig(gate=GateConfig(use_prev_best=False)))
 
-    assert seen["prev_best_path"] == "gen0.pt"          # the BEST, not gen N-1
-    assert rep["verdict"] == "promote"
-    assert rep["gate"]["verdict_reason"] == "beats_prev_best"
+    assert seen["prev_best_path"] is None               # mirror skipped → no head-to-head games
+    assert rep["verdict"] == "hold" and rep["reason"] == "hold"   # no bar, no collapse → hold
+    assert league.pfsp_resets == 0                      # no champion change → no PFSP reset
+
+
+def test_run_generation_plateau_backstop_fires_and_resets_history():
+    """Multi-gen v2 wiring: a flat ~58% mirror (below the 70% bar, not losing) eventually trips
+    the PLATEAU backstop — validating that run_generation records each gen's h2h BEFORE the gate
+    (so the window fills) and RESETS the history when the champion re-anchors."""
+    from v_dance.selfplay.generation import run_generation, GenConfig, GenerationHistory
+    league = _FakeLeague()
+    history = GenerationHistory()
+    history.best_path = "champ.pt"
+    history.best_scripted = (180, 200)
+    history.scripted_high_water = 0.60      # floor set; a flat 58% mirror won't collapse
+
+    def eval_fn(path, prev_best_path):
+        return ({"random": (60, 67), "max_damage": (60, 67), "heuristic": (60, 66),
+                 "prev_best": (round(0.58 * 240), 240)}, 1500.0)   # flat ~58%, >= min_h2h_games
+
+    reasons = []
+    for _ in range(12):
+        rep = run_generation(object(), _FakeTrainer(), league, history,
+                             collect_fn=lambda ac, lg, gen: ([], {}), eval_fn=eval_fn,
+                             save_fn=lambda ac, gen: f"g{gen}.pt", cfg=GenConfig())
+        reasons.append(rep["reason"])
+
+    assert "plateau_reanchor" in reasons                 # the backstop fired on the flat climb
+    assert reasons[:9] == ["hold"] * 9                   # held while the window filled (< 2*window)
+    assert history.h2h_history == [] or len(history.h2h_history) < 10   # reset on the re-anchor
