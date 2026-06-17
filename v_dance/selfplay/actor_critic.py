@@ -188,3 +188,15 @@ class ActorCritic(nn.Module):
         self.policy.load_state_dict(ck["model_state"])
         if "critic_state" in ck:
             self.critic.load_state_dict(ck["critic_state"])
+
+    # ── hybrid CPU-collection / GPU-update (3c.8b, sec 20) ─────────────────────
+    def inference_copy(self, device: str = "cpu") -> "ActorCritic":
+        """A DETACHED, eval-mode deep-copy on ``device`` for COLLECTION. Per sec 20 the
+        update lives on the GPU but collection runs the (tiny) model on the CPU — games are
+        async so per-turn forwards can't be batched and the CPU<->GPU transfer per single
+        sample would make collection slower. This copy has its OWN parameter tensors, so
+        collection never touches the persistent actor-critic / optimiser graph; remake it
+        each generation so it reflects the latest trained weights."""
+        copyac = copy.deepcopy(self).to(device)
+        copyac.eval()
+        return copyac

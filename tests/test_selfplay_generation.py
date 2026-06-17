@@ -59,6 +59,28 @@ def test_tau_for_generation_monotone_nonincreasing_within_bounds():
     assert all(a >= b - 1e-9 for a, b in zip(taus, taus[1:]))            # never increases
 
 
+# ── 3c.8c: parallel-collection chunk planner ──────────────────────────────────
+def test_build_collection_chunks_plans_all_games_unique_uids():
+    from v_dance.selfplay.league import OpponentLeague
+    lg = OpponentLeague(latest_path="x")                     # no snapshots -> latest/scripted
+    pool = [f"T{i}" for i in range(71)]
+    chunks = GN.build_collection_chunks(lg, pool, 12, chunk_size=10, matchup_seed=0, seed=0)
+    assert sum(c["cn"] for c in chunks) == 12                # plans exactly n_games battles
+    assert len({c["uid"] for c in chunks}) == len(chunks)    # unique uids (no account clash)
+    assert all(c["cn"] == 1 for c in chunks)                 # big pool -> 1 battle/pairing
+    assert all(c["spec"][0] in ("latest", "snapshot", "scripted") for c in chunks)
+
+
+def test_build_collection_chunks_seed_reproducible():
+    from v_dance.selfplay.league import OpponentLeague
+    lg = OpponentLeague(latest_path="x")
+    pool = [f"T{i}" for i in range(8)]
+    key = lambda cs: [(c["team_a"], c["team_b"], c["cn"], c["spec"][0]) for c in cs]
+    a = GN.build_collection_chunks(lg, pool, 20, chunk_size=10, matchup_seed=1, seed=2)
+    b = GN.build_collection_chunks(lg, pool, 20, chunk_size=10, matchup_seed=1, seed=2)
+    assert key(a) == key(b)                                  # deterministic plan (resumable)
+
+
 # ── promotion gate ────────────────────────────────────────────────────────────
 def test_gate_no_baseline_promotes():
     v, st = promotion_gate(50, 100, 0, 0)

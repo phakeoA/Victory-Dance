@@ -217,9 +217,34 @@ def print_generation_report(rep: dict) -> None:
 
 
 # ── live wiring (reuses the validated runner + gauntlet; USER runs the smoke) ──
+def build_collection_chunks(league, team_pool, n_games, *, chunk_size, matchup_seed, seed):
+    """Plan collection as a FLAT list of independent chunk descriptors (3c.8c) — one per
+    (team-matchup, league-opponent) battle group, each with a unique ``uid`` for
+    collision-free account names. Built sequentially (league sampling + uid assignment are
+    race-free here) so the chunks can then run with BOUNDED CONCURRENCY. With a large team
+    pool ``team_matchups`` yields one battle per matchup, so each chunk is ~1 battle and the
+    parallelism is ACROSS pairings (the real lever) — NOT within a single pairing. Pure (no
+    poke-env)."""
+    import numpy as np
+    from v_dance.eval.gauntlet import team_matchups
+    rng = np.random.default_rng(seed)
+    chunks = []
+    uid = 0
+    for team_a, team_b, n in team_matchups(team_pool, n_games, seed=matchup_seed):
+        remaining = n
+        while remaining > 0:
+            cn = min(chunk_size, remaining)
+            remaining -= cn
+            uid += 1
+            chunks.append({"team_a": team_a, "team_b": team_b, "cn": cn,
+                           "spec": league.sample(rng), "uid": uid})
+    return chunks
+
+
 async def collect_with_league(actor_critic, league: OpponentLeague, n_games: int, *,
                               team_pool, tau: float = 1.0, seed: int = 0,
                               matchup_seed: int = 0, chunk_size: int = 10,
+                              n_workers: int = 1,
                               battle_timeout: Optional[float] = 90.0, team_chooser=None,
                               status=None):
     """Collect ``n_games`` self-play games against LEAGUE-sampled opponents (assumes the
@@ -229,52 +254,56 @@ async def collect_with_league(actor_critic, league: OpponentLeague, n_games: int
       * snapshot  -> our recorder vs a FROZEN checkpoint player; collect OUR trajectory only
                      and record the latest-vs-snapshot outcome for PFSP;
       * scripted  -> our recorder vs a gauntlet anchor; collect OUR trajectory only.
+    ``n_workers`` (3c.8c) sets ``max_concurrent_battles`` on every player so poke-env runs
+    that many battles of a chunk in PARALLEL — the dominant throughput lever (sec 20); the
+    chunk size is raised to at least ``n_workers`` so each chunk fills the concurrency.
     Returns ``(trajectories, source_counts)`` — a flat list ready for the trainer."""
     import asyncio
     import logging as _logging
     from collections import Counter
 
-    import numpy as np
     import v_dance.play.run_local_battle as R
     from poke_env import AccountConfiguration
-    from v_dance.eval.gauntlet import team_matchups, _make_opponent
+    from v_dance.eval.gauntlet import _make_opponent
     from v_dance.selfplay.game_runner import SelfPlayVGCPlayer
 
-    rng = np.random.default_rng(seed)
+    workers = max(1, int(n_workers))
+    chunks = build_collection_chunks(league, team_pool, n_games, chunk_size=chunk_size,
+                                     matchup_seed=matchup_seed, seed=seed)
+    sem = asyncio.Semaphore(workers)     # 3c.8c: run up to `workers` distinct pairings at once
     trajectories: list = []
     source_counts: Counter = Counter()
-    showcase_log = None              # raw |-log of one game, for a Type_D replay (3c.5)
-    uid = 0
-    games_done = won = decided = 0    # live progress (3c.6e-3)
+    showcase = {"log": None}             # raw |-log of one game, for a Type_D replay (3c.5)
+    prog = {"games": 0, "won": 0, "decided": 0}    # live progress (3c.6e-3)
 
-    def _sp(team, who, status=None):
-        nonlocal uid
-        uid += 1
+    def _sp(team, who, uid, cn, status=None):
         return SelfPlayVGCPlayer(
             actor_critic, tau=tau, sample_seed=seed + (who * 10_000) + uid, status=status,
             replay_path=_REPO_ROOT / "artifacts" / "replay_buffer" / f"LG{who}_{uid}.jsonl",
             account_configuration=AccountConfiguration(f"LG{who}x{uid}", None),
-            battle_format=R.BATTLE_FORMAT, team=team, max_concurrent_battles=1,
+            battle_format=R.BATTLE_FORMAT, team=team, max_concurrent_battles=max(1, cn),
             log_level=_logging.WARNING)
 
-    for team_a, team_b, n in team_matchups(team_pool, n_games, seed=matchup_seed):
-        ta, tb = R.load_team(R.resolve_team_path(team_a)), R.load_team(R.resolve_team_path(team_b))
-        remaining = n
-        while remaining > 0:
-            cn = min(chunk_size, remaining)
-            remaining -= cn
-            spec = league.sample(rng)
+    async def _run_chunk(d):
+        # The semaphore bounds CONCURRENT chunks to `workers` (the dominant lever, sec 20):
+        # distinct (matchup, opponent) battles overlap so each one's websocket round-trips
+        # hide the others' — collection is latency/Node-bound, not compute-bound. Shared-state
+        # mutations below run synchronously in `finally` (no await between them), so they're
+        # atomic under asyncio interleaving.
+        async with sem:
+            ta = R.load_team(R.resolve_team_path(d["team_a"]))
+            tb = R.load_team(R.resolve_team_path(d["team_b"]))
+            cn, spec, uid = d["cn"], d["spec"], d["uid"]
             kind = spec[0]
-            our = _sp(ta, 0, status=status)
+            our = _sp(ta, 0, uid, cn, status=status)
             if kind == "latest":
-                opp = _sp(tb, 1)
+                opp = _sp(tb, 1, uid, cn)
             elif kind == "snapshot":
-                uid += 1
                 opp = R.make_player(f"LGsx{uid}", tb, model_path=spec[1].path,
-                                    team_chooser_path=team_chooser)
+                                    team_chooser_path=team_chooser, max_concurrent_battles=max(1, cn))
             else:   # scripted
-                uid += 1
-                opp = _make_opponent(spec[1], f"LGc{spec[1][:3]}{uid}", tb)
+                opp = _make_opponent(spec[1], f"LGc{spec[1][:3]}{uid}", tb,
+                                     max_concurrent_battles=max(1, cn))
             try:
                 coro = our.battle_against(opp, n_battles=cn)
                 if battle_timeout and battle_timeout > 0:
@@ -283,17 +312,19 @@ async def collect_with_league(actor_critic, league: OpponentLeague, n_games: int
                     await coro
             except asyncio.TimeoutError:
                 log.warning("league collect WATCHDOG fired (%d games vs %s) — continuing.", cn, kind)
+            except Exception:
+                log.warning("league collect chunk failed (vs %s) — continuing.", kind, exc_info=True)
             finally:
                 source_counts.update(getattr(our, "_source_counts", {}) or {})
                 our_trajs = our.finished_trajectories()
                 trajectories.extend(our_trajs.values())
-                games_done += cn                                 # live progress (3c.6e-3)
+                prog["games"] += cn
                 for _t in our_trajs.values():
                     if _t.meta.won is not None:
-                        decided += 1
-                        won += 1 if _t.meta.won else 0
+                        prog["decided"] += 1
+                        prog["won"] += 1 if _t.meta.won else 0
                 if status is not None:
-                    status.games(games_done, (won / decided) if decided else None)
+                    status.games(prog["games"], (prog["won"] / prog["decided"]) if prog["decided"] else None)
                 if kind == "latest":
                     source_counts.update(getattr(opp, "_source_counts", {}) or {})
                     trajectories.extend(opp.finished_trajectories().values())
@@ -301,23 +332,29 @@ async def collect_with_league(actor_critic, league: OpponentLeague, n_games: int
                     for traj in our_trajs.values():
                         if traj.meta.won is not None:
                             league.record_result(spec[1].snapshot_id, bool(traj.meta.won))
-                if showcase_log is None:                  # grab one game's raw |-log
+                if showcase["log"] is None:               # grab one game's raw |-log
                     for _lines in (getattr(our, "_proto_log", {}) or {}).values():
                         if _lines:
-                            showcase_log = list(_lines)
+                            showcase["log"] = list(_lines)
                             break
-                await our.ps_client.stop_listening()
-                await opp.ps_client.stop_listening()
+                try:
+                    await our.ps_client.stop_listening()
+                    await opp.ps_client.stop_listening()
+                except Exception:
+                    pass
                 our.close()
                 opp.close()
-    return trajectories, dict(source_counts), showcase_log
+
+    await asyncio.gather(*[_run_chunk(d) for d in chunks])
+    return trajectories, dict(source_counts), showcase["log"]
 
 
 def gauntlet_eval(candidate_path, *, teams, team_chooser, battles: int = 30,
                   matchup_seed: int = 0, battle_timeout: Optional[float] = 90.0,
-                  manage_server: bool = False):
+                  manage_server: bool = False, n_workers: int = 1):
     """Evaluate a saved checkpoint on the scripted gauntlet (>=4 teams, side-balanced).
-    Returns ``(results{opp:(wins,n)}, model_elo)``."""
+    Returns ``(results{opp:(wins,n)}, model_elo)``. ``n_workers`` (3c.8c) parallelises the
+    eval the same way as collection so the promotion gate isn't the throughput bottleneck."""
     import asyncio
 
     import v_dance.eval.gauntlet as GA
@@ -329,7 +366,7 @@ def gauntlet_eval(candidate_path, *, teams, team_chooser, battles: int = 30,
         opponents=list(SCRIPTED_OPPONENTS), team_pool=list(teams),
         battles_per_opponent=battles, ckpt=Path(candidate_path),
         team_chooser=Path(team_chooser), manage_server=manage_server,
-        matchup_seed=matchup_seed, battle_timeout=battle_timeout))
+        matchup_seed=matchup_seed, battle_timeout=battle_timeout, n_workers=n_workers))
     return results, GA.model_elo(results)
 
 
@@ -402,6 +439,7 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                          train_cfg=None, tau_start: float = 1.3, tau_end: float = 1.0,
                          tau_anneal_gens: int = 12, seed: int = 0,
                          eval_battles=None, manage_server: bool = True,
+                         device: str = "cpu", n_workers: int = 1, collect_workers=None,
                          resume_from=None, snapshot_path=None, max_hours=None) -> dict:
     """Run real generations end-to-end (collect via the league -> PPO update -> gauntlet
     eval -> promotion gate -> admit/refresh/revert), RESUMABLY (3c.4): a snapshot is
@@ -414,6 +452,7 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
     CONTROLLED, side-balanced set the gauntlet gate judges on — so a generation's measured
     strength isn't 'got lucky with the team draw' (sec 15)."""
     import asyncio
+    import time as _time
 
     import v_dance.play.run_local_battle as R
     from v_dance.selfplay.actor_critic import ActorCritic
@@ -427,6 +466,11 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
     _eval_pool = list(eval_team_pool) if eval_team_pool else list(team_pool)
     _eval_pairs = len(_eval_pool) * (len(_eval_pool) - 1)
     eval_battles = resolve_eval_battles(eval_battles, len(_eval_pool))
+    # 3c.8c: collection is latency-bound (light CPU) so it can run MORE concurrent battles
+    # than the cap-derived `n_workers`; eval is heavier (fast scripted battles) so it stays at
+    # n_workers. collect_workers defaults to n_workers (no change unless the user opts in).
+    cw = max(1, int(collect_workers)) if collect_workers else n_workers
+    print(f"   workers: collect={cw}  eval={n_workers}")
     print(f"   teams: TRAIN pool={len(team_pool)} (archetype draw, sec 15)  "
           f"EVAL pool={len(_eval_pool)} ({_eval_pairs} pairs)  "
           f"eval-battles={eval_battles}/opp (~{3 * eval_battles} games/gen)")
@@ -437,12 +481,15 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
 
     # Build from the base ckpt (architecture + frozen-BC reference), THEN overlay the
     # resume snapshot's trained state if present (sec 17 — ref/arch re-derived, not stored).
-    ac = ActorCritic.from_bc_checkpoint(ckpt)
-    trainer = PPOTrainer(ac, ppo_cfg, train_cfg, seed=seed)
+    # 3c.8b: the actor-critic + optimisers live on `device` (cuda => GPU PPO update); collection
+    # uses a CPU inference-copy (see collect_fn). Resume maps the snapshot onto `device` too.
+    ac = ActorCritic.from_bc_checkpoint(ckpt, device=device)
+    trainer = PPOTrainer(ac, ppo_cfg, train_cfg, seed=seed, device=device)
     league = OpponentLeague(latest_path=str(ckpt))
     history = GenerationHistory()
     if resume_from and Path(resume_from).exists():
-        league, history, _snap = RS.load_into(resume_from, actor_critic=ac, trainer=trainer)
+        league, history, _snap = RS.load_into(resume_from, actor_critic=ac, trainer=trainer,
+                                              device=device)
         print(f"[3c.4] resumed from {resume_from} at generation {history.generation} "
               f"(league={len(league.snapshots)})")
     stop = RS.StopController(max_hours=max_hours)
@@ -450,19 +497,33 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
     status.start_run(n_generations, hours=max_hours)
 
     showcase = {"log": None}
+    thru = {"games": 0, "secs": 0.0}     # 3c.8a throughput measurement (sec 20: measure first)
 
     def collect_fn(ac_, lg, gen):
         # 3c.7c: one tau drives BOTH collection AND this gen's PPO recompute (3c.7a invariant).
         tau_gen = tau_for_generation(gen, tau_start, tau_end, tau_anneal_gens)
         trainer.cfg.tau = tau_gen
+        # 3c.8b: collection runs on CPU (sec 20) — use a CPU inference-copy when the trainer
+        # lives on the GPU; the copy reflects the latest trained weights (remade each gen).
+        coll_ac = ac_.inference_copy("cpu") if device != "cpu" else ac_
         status.phase("collecting", generation=gen, games_total=gen_cfg.n_games)
         if tau_anneal_gens > 0 and tau_start != tau_end:
             print(f"   collect: tau={tau_gen:.3f} (gen {gen}; anneal {tau_start}->{tau_end} "
                   f"over {tau_anneal_gens} gens)")
+        t0 = _time.perf_counter()
         trajs, src, log = asyncio.run(collect_with_league(
-            ac_, lg, gen_cfg.n_games, team_pool=team_pool, tau=tau_gen,
+            coll_ac, lg, gen_cfg.n_games, team_pool=team_pool, tau=tau_gen,
             seed=seed + gen * 1000, matchup_seed=gen, team_chooser=team_chooser,
-            status=status))
+            n_workers=cw, status=status))
+        dt = _time.perf_counter() - t0
+        thru["games"] += gen_cfg.n_games
+        thru["secs"] += dt
+        gpm = gen_cfg.n_games / dt * 60.0 if dt > 0 else float("nan")
+        avg = thru["games"] / thru["secs"] * 60.0 if thru["secs"] > 0 else float("nan")
+        # sec 20 throughput readout: games/min this gen + running avg (sizes generations to
+        # wall-clock; the measurement that gates the 3c.8b/c optimisations).
+        print(f"   throughput: {gen_cfg.n_games} games in {dt:.1f}s = {gpm:.1f} games/min "
+              f"(avg {avg:.1f}/min, {len(trajs)} trajs)")
         showcase["log"] = log
         return trajs, src
 
@@ -472,8 +533,15 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
         return str(p)
 
     def eval_fn(path):
-        return gauntlet_eval(path, teams=_eval_pool, team_chooser=team_chooser,
-                             battles=eval_battles, manage_server=False)
+        t0 = _time.perf_counter()
+        out = gauntlet_eval(path, teams=_eval_pool, team_chooser=team_chooser,
+                            battles=eval_battles, manage_server=False, n_workers=n_workers)
+        dt = _time.perf_counter() - t0
+        n_eval = sum(g for _w, g in out[0].values())     # total finished eval battles
+        gpm = n_eval / dt * 60.0 if dt > 0 else float("nan")
+        print(f"   eval throughput: {n_eval} games in {dt:.1f}s = {gpm:.1f} games/min "
+              f"({n_workers} workers)")
+        return out
 
     def restore_fn(ac_, path):
         ac_.restore_from(path)
@@ -579,15 +647,160 @@ def _dry_run(n_generations: int = 6, seed: int = 0) -> None:
     print("============================================================")
 
 
+def _launch_live(args):
+    """Apply the resource budget + build the configs and run the live generation loop for a
+    parsed ``args`` namespace. Shared by ``--live`` and the ``--wizard`` interactive launcher."""
+    import logging as _logging
+    _logging.basicConfig(level=_logging.DEBUG if args.verbose else _logging.WARNING)
+    if not args.verbose:
+        _logging.getLogger("poke_env").setLevel(_logging.WARNING)
+        _logging.getLogger("websockets").setLevel(_logging.WARNING)
+    if not Path(args.ckpt).exists():
+        print(f"[gen] checkpoint not found: {args.ckpt}", file=sys.stderr)
+        sys.exit(2)
+    n_gen = None if args.generations <= 0 else args.generations   # 0 => run until stopped
+    # Resource caps (sec 20 / 3c.8): CPU thread cap + parallel-collection worker count
+    # (3c.8c) + the GPU PPO-update device & VRAM cap (3c.8b) — all enforced here.
+    from v_dance.selfplay.resources import ResourceBudget, apply_resource_budget, summarize
+    try:
+        _rb = apply_resource_budget(
+            ResourceBudget(max_cpu_fraction=args.max_cpu_fraction, max_cores=args.max_cores,
+                           max_vram_gb=args.max_vram_gb, device=args.device),
+            set_threads=True, enforce_vram=True)
+    except ValueError as e:
+        print(f"[gen] resource budget error: {e}", file=sys.stderr)
+        sys.exit(2)
+    ppo_cfg, train_cfg = build_train_configs(
+        kl_coef=args.kl_coef, target_kl_bc=args.target_kl_bc,
+        tau=args.tau_start, min_ev=args.min_ev)   # gen-0 tau; collect_fn re-sets per gen
+    # train = full archetype-rich pool; eval = controlled set (sec 15). --teams (deprecated)
+    # overrides BOTH with an explicit list.
+    train_pool = resolve_train_pool(args.teams if args.teams else args.train_teams)
+    eval_pool = list(args.teams) if args.teams else list(args.eval_teams)
+    if not train_pool:
+        print("[gen] no training teams found under teams/Champions/ — add team files "
+              "or pass --train-teams <names>", file=sys.stderr)
+        sys.exit(2)
+    print(f"== Live generation run: {n_gen if n_gen else 'until-stop'} gen x "
+          f"{args.games} games (eval {args.eval_battles if args.eval_battles is not None else 'auto'}/opp"
+          f"{f', max {args.hours}h' if args.hours else ''}) ==")
+    _tau_desc = (f"tau {args.tau_start}->{args.tau} over {args.tau_anneal_gens} gens"
+                 if args.tau_anneal_gens > 0 and args.tau_start != args.tau
+                 else f"tau={args.tau} (flat)")
+    print(f"   exploration (sec 12): KL-to-BC coef={args.kl_coef} "
+          f"target_kl_bc={'off' if args.target_kl_bc <= 0 else args.target_kl_bc} "
+          f"min_ev={'off' if args.min_ev is None else args.min_ev} {_tau_desc}")
+    _cw = args.collect_workers if args.collect_workers else _rb["workers"]
+    print(f"   resources (sec 20): {summarize(_rb)}")
+    _upd = "PPO update on GPU (VRAM capped)" if _rb["device"] == "cuda" else "CPU PPO update"
+    print(f"   hybrid (3c.8): {_upd}; collection on CPU, {_cw} parallel battles "
+          f"(eval {_rb['workers']}).")
+    run_live_generations(
+        Path(args.ckpt), n_generations=n_gen, team_pool=train_pool,
+        eval_team_pool=eval_pool,
+        team_chooser=args.team_chooser, archive_dir=args.archive,
+        gen_cfg=GenConfig(n_games=args.games, warmup_updates=args.warmup),
+        ppo_cfg=ppo_cfg, train_cfg=train_cfg,
+        tau_start=args.tau_start, tau_end=args.tau, tau_anneal_gens=args.tau_anneal_gens,
+        seed=args.seed, eval_battles=args.eval_battles,
+        device=_rb["device"], n_workers=_rb["workers"], collect_workers=args.collect_workers,
+        manage_server=not args.no_server, resume_from=args.resume,
+        snapshot_path=args.snapshot, max_hours=args.hours)
+
+
+def _wizard(ap):
+    """Interactive launcher so you don't have to memorise the flags: prompts for the key run
+    parameters (with examples), echoes the equivalent command for next time, and returns the
+    args namespace (everything not prompted keeps its default). Triggered by ``--wizard`` or by
+    running the module with NO arguments in a terminal."""
+    args = ap.parse_args(["--live"])     # start from all defaults, with live=True
+
+    def _read(prompt):
+        try:
+            return input(prompt)
+        except EOFError:                     # no interactive input -> don't hang / don't auto-launch
+            print("\n  (no input available; run with explicit flags, e.g. "
+                  "--live --generations 0 --hours 8 --max-vram-gb 4)")
+            sys.exit(0)
+
+    def ask(label, default, example=None, cast=str):
+        shown = "auto/none" if default is None else default
+        ex = f"   (e.g. {example})" if example is not None else ""
+        raw = _read(f"  {label} [{shown}]{ex}: ").strip()
+        if raw == "":
+            return default
+        try:
+            return cast(raw)
+        except Exception:
+            print(f"    ! couldn't parse {raw!r}; keeping {shown}")
+            return default
+
+    def ask_yn(label, default=False):
+        raw = _read(f"  {label} [{'Y/n' if default else 'y/N'}]: ").strip().lower()
+        return default if raw == "" else raw in ("y", "yes")
+
+    print("\n=== Victory-Dance self-play launcher ===")
+    print("Press Enter to accept the [default]. Overnight = Generations 0 + an Hours cap.\n")
+    args.generations = ask("Generations (0 = run until you press Ctrl-C)", 0,
+                           "5 for a fixed count, 0 for overnight", int)
+    args.hours = ask("Hour cap (stops cleanly between gens)", None,
+                     "8 for an 8-hour overnight; blank = no cap", float)
+    args.games = ask("Self-play games per generation", 300,
+                     "300 normal, 50 for a quick test (sec 16)", int)
+    args.eval_battles = ask("Eval battles per scripted opponent", None,
+                            "blank = auto full coverage (60/opp); 12 for a fast test", int)
+    args.max_cpu_fraction = ask("Max CPU fraction (of physical cores)", 0.5,
+                                "0.5 = half your cores", float)
+    args.collect_workers = ask("Collection workers (concurrent battles)", None,
+                               "12 to use collection's CPU headroom; blank = cap", int)
+    args.max_vram_gb = ask("Max VRAM GB for the GPU update", None,
+                           "4 (of 8 GB); blank = uncapped", float)
+    if ask_yn("Resume the previous run (continue training)?", False):
+        snap = Path(args.archive) / "resume.pt"
+        if snap.exists():
+            args.resume = str(snap)
+        else:
+            print(f"    ! no snapshot at {snap} — starting FRESH from base BC.")
+            args.resume = None
+    else:
+        args.resume = None
+    args.verbose = ask_yn("Verbose (-v) logging?", True)
+
+    parts = ["python -m v_dance.selfplay.generation --live",
+             f"--generations {args.generations}", f"--games {args.games}",
+             f"--max-cpu-fraction {args.max_cpu_fraction}"]
+    if args.hours:
+        parts.append(f"--hours {args.hours}")
+    if args.eval_battles is not None:
+        parts.append(f"--eval-battles {args.eval_battles}")
+    if args.collect_workers:
+        parts.append(f"--collect-workers {args.collect_workers}")
+    if args.max_vram_gb is not None:
+        parts.append(f"--max-vram-gb {args.max_vram_gb}")
+    if args.resume:
+        parts.append(f"--resume {args.resume}")
+    if args.verbose:
+        parts.append("-v")
+    print("\n  Equivalent command (copy this to skip the wizard next time):")
+    print("    " + " ".join(parts) + " 2> artifacts/logs/gen.log\n")
+    if not ask_yn("Start now?", True):
+        print("Aborted - no run started.")
+        sys.exit(0)
+    print()
+    return args
+
+
 if __name__ == "__main__":
     import argparse
-    import logging as _logging
 
     ap = argparse.ArgumentParser(description="Generation loop (3c.3)")
     ap.add_argument("--dry-run", action="store_true",
                     help="simulate the loop with synthetic eval (no server / model)")
     ap.add_argument("--live", action="store_true",
                     help="run REAL generations on the local Showdown server")
+    ap.add_argument("--wizard", action="store_true",
+                    help="interactive launcher — prompts for the run parameters with examples "
+                         "(also the default when you run the module with NO arguments in a terminal)")
     ap.add_argument("--generations", type=int, default=6)
     ap.add_argument("--games", type=int, default=100, help="self-play games per generation")
     ap.add_argument("--eval-battles", type=int, default=None,
@@ -626,6 +839,21 @@ if __name__ == "__main__":
     ap.add_argument("--min-ev", type=float, default=None,
                     help="early-halt if critic explained-variance falls below this "
                          "(value-collapse guard; default off)")
+    # ── resource budget (sec 20 / 3c.8) ───────────────────────────────────────
+    ap.add_argument("--max-cpu-fraction", type=float, default=0.5,
+                    help="cap CPU to this fraction of PHYSICAL cores (sec 20): sets torch "
+                         "threads now + the parallel-collection worker count (3c.8c). Default 0.5")
+    ap.add_argument("--max-cores", type=int, default=None,
+                    help="explicit worker/thread count (overrides --max-cpu-fraction)")
+    ap.add_argument("--collect-workers", type=int, default=None,
+                    help="concurrent COLLECTION battles (3c.8c); defaults to the CPU-cap "
+                         "worker count. Collection is latency-bound (~30%% CPU at 6) so you "
+                         "can set this HIGHER (e.g. 12) to use the headroom; eval stays capped.")
+    ap.add_argument("--max-vram-gb", type=float, default=None,
+                    help="GPU memory ceiling for the PPO update (enforced via "
+                         "set_per_process_memory_fraction; allocations beyond it fail loudly)")
+    ap.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"],
+                    help="PPO-update device (auto=GPU if present, else CPU; collection always CPU)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--resume", default=None,
                     help="resume snapshot to continue from (3c.4); use the SAME --ckpt")
@@ -639,44 +867,11 @@ if __name__ == "__main__":
 
     if args.dry_run:
         _dry_run(args.generations, args.seed)
+    elif args.wizard:
+        _launch_live(_wizard(ap))
     elif args.live:
-        _logging.basicConfig(level=_logging.DEBUG if args.verbose else _logging.WARNING)
-        if not args.verbose:
-            _logging.getLogger("poke_env").setLevel(_logging.WARNING)
-            _logging.getLogger("websockets").setLevel(_logging.WARNING)
-        if not Path(args.ckpt).exists():
-            print(f"[gen] checkpoint not found: {args.ckpt}", file=sys.stderr)
-            sys.exit(2)
-        n_gen = None if args.generations <= 0 else args.generations   # 0 => run until stopped
-        ppo_cfg, train_cfg = build_train_configs(
-            kl_coef=args.kl_coef, target_kl_bc=args.target_kl_bc,
-            tau=args.tau_start, min_ev=args.min_ev)   # gen-0 tau; collect_fn re-sets per gen
-        # train = full archetype-rich pool; eval = controlled set (sec 15). --teams (deprecated)
-        # overrides BOTH with an explicit list.
-        train_pool = resolve_train_pool(args.teams if args.teams else args.train_teams)
-        eval_pool = list(args.teams) if args.teams else list(args.eval_teams)
-        if not train_pool:
-            print("[gen] no training teams found under teams/Champions/ — add team files "
-                  "or pass --train-teams <names>", file=sys.stderr)
-            sys.exit(2)
-        print(f"== Live generation run: {n_gen if n_gen else 'until-stop'} gen x "
-              f"{args.games} games (eval {args.eval_battles if args.eval_battles is not None else 'auto'}/opp"
-              f"{f', max {args.hours}h' if args.hours else ''}) ==")
-        _tau_desc = (f"tau {args.tau_start}->{args.tau} over {args.tau_anneal_gens} gens"
-                     if args.tau_anneal_gens > 0 and args.tau_start != args.tau
-                     else f"tau={args.tau} (flat)")
-        print(f"   exploration (sec 12): KL-to-BC coef={args.kl_coef} "
-              f"target_kl_bc={'off' if args.target_kl_bc <= 0 else args.target_kl_bc} "
-              f"min_ev={'off' if args.min_ev is None else args.min_ev} {_tau_desc}")
-        run_live_generations(
-            Path(args.ckpt), n_generations=n_gen, team_pool=train_pool,
-            eval_team_pool=eval_pool,
-            team_chooser=args.team_chooser, archive_dir=args.archive,
-            gen_cfg=GenConfig(n_games=args.games, warmup_updates=args.warmup),
-            ppo_cfg=ppo_cfg, train_cfg=train_cfg,
-            tau_start=args.tau_start, tau_end=args.tau, tau_anneal_gens=args.tau_anneal_gens,
-            seed=args.seed, eval_battles=args.eval_battles,
-            manage_server=not args.no_server, resume_from=args.resume,
-            snapshot_path=args.snapshot, max_hours=args.hours)
+        _launch_live(args)
+    elif len(sys.argv) == 1 and sys.stdin.isatty():
+        _launch_live(_wizard(ap))          # bare `python -m …generation` in a terminal -> wizard
     else:
         ap.print_help()

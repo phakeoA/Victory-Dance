@@ -244,24 +244,28 @@ def team_matchups(team_pool: Sequence[str], n_battles: int,
 # Async orchestrator (reuses run_local_battle) — exercised by the live smoke
 # ══════════════════════════════════════════════════════════════════════════════
 def _make_opponent(kind: str, username: str, team: str, model_path=None,
-                   team_chooser_path=None):
-    """Construct one opponent player of the given ``kind``."""
+                   team_chooser_path=None, max_concurrent_battles: int = 1):
+    """Construct one opponent player of the given ``kind``. ``max_concurrent_battles`` > 1
+    enables parallel battles vs this opponent (3c.8c)."""
     import v_dance.play.run_local_battle as R
     from poke_env import AccountConfiguration
     if kind == "random":
-        return R.make_player(username, team, model_path=None)
+        return R.make_player(username, team, model_path=None,
+                             max_concurrent_battles=max_concurrent_battles)
     if kind in ("max_damage", "heuristic"):
         from v_dance.eval.eval_opponents import MaxDamageVGCPlayer, HeuristicVGCPlayer
         cls = MaxDamageVGCPlayer if kind == "max_damage" else HeuristicVGCPlayer
         return cls(
             replay_path=_REPO_ROOT / "artifacts" / "replay_buffer" / f"{username}.jsonl",
             account_configuration=AccountConfiguration(username, None),
-            battle_format=R.BATTLE_FORMAT, team=team, max_concurrent_battles=1,
+            battle_format=R.BATTLE_FORMAT, team=team,
+            max_concurrent_battles=max_concurrent_battles,
             log_level=logging.WARNING,
         )
     if kind == "prev_best":
         return R.make_player(username, team, model_path=model_path,
-                             team_chooser_path=team_chooser_path)
+                             team_chooser_path=team_chooser_path,
+                             max_concurrent_battles=max_concurrent_battles)
     raise ValueError(f"unknown opponent kind: {kind}")
 
 
@@ -321,49 +325,72 @@ async def run_gauntlet(
     matchup_seed: int = 0,
     battle_timeout: Optional[float] = 90.0,
     spectate: bool = False,
+    n_workers: int = 1,
 ) -> Dict[str, Tuple[int, int]]:
     """Play the model vs each opponent over the rotating team pool and return
-    ``{opponent_name: (model_wins, n_finished)}``."""
+    ``{opponent_name: (model_wins, n_finished)}``.
+
+    ``n_workers`` (3c.8c) runs up to that many (opponent, team-pairing) CHUNKS concurrently
+    via a semaphore, so the eval gate isn't the throughput bottleneck once collection is
+    parallel. Each chunk keeps the player at max_concurrent_battles=1, so the total in-flight
+    battle count == ``n_workers`` (respects the CPU cap). The per-kind (wins, finished)
+    accumulation + the source tally run synchronously in ``finally`` (no await between the
+    reads/writes), so they're atomic under asyncio interleaving."""
     import v_dance.play.run_local_battle as R
     server = R.start_showdown() if manage_server else None
-    results: Dict[str, Tuple[int, int]] = {}
+    workers = max(1, int(n_workers))
+    sem = asyncio.Semaphore(workers)
+    acc: Dict[str, list] = {kind: [0, 0] for kind in opponents}   # kind -> [wins, finished]
     source_totals: Counter = Counter()      # model vs retry/default/forfeit fallbacks
+    spect = {"open": bool(spectate)}        # open the spectator on the FIRST chunk only
+
+    descriptors = []
     uid = 0
-    spectated = False
-    try:
-        for kind in opponents:
-            wins = fin = 0
-            for model_team_name, opp_team_name, n in team_matchups(
-                    team_pool, battles_per_opponent, seed=matchup_seed):
-                model_team = R.load_team(R.resolve_team_path(model_team_name))
-                opp_team = R.load_team(R.resolve_team_path(opp_team_name))
-                uid += 1
-                model_player = R.make_player(
-                    f"BC{uid}", model_team, model_path=ckpt, team_chooser_path=team_chooser)
-                opp = _make_opponent(
-                    kind, f"OP{kind[:4]}{uid}", opp_team,
-                    model_path=prev_best_ckpt, team_chooser_path=team_chooser)
-                if spectate and not spectated:
-                    spectated = True
-                    asyncio.ensure_future(_open_spectator(model_player))
+    for kind in opponents:
+        for model_team_name, opp_team_name, n in team_matchups(
+                team_pool, battles_per_opponent, seed=matchup_seed):
+            uid += 1
+            descriptors.append({"kind": kind, "mt": model_team_name,
+                                "ot": opp_team_name, "n": n, "uid": uid})
+
+    async def _run(d):
+        async with sem:
+            kind, n, uid = d["kind"], d["n"], d["uid"]
+            model_team = R.load_team(R.resolve_team_path(d["mt"]))
+            opp_team = R.load_team(R.resolve_team_path(d["ot"]))
+            model_player = R.make_player(
+                f"BC{uid}", model_team, model_path=ckpt, team_chooser_path=team_chooser)
+            opp = _make_opponent(
+                kind, f"OP{kind[:4]}{uid}", opp_team,
+                model_path=prev_best_ckpt, team_chooser_path=team_chooser)
+            if spect["open"]:                 # atomic check+clear (no await between)
+                spect["open"] = False
+                asyncio.ensure_future(_open_spectator(model_player))
+            try:
+                chunk_timeout = (battle_timeout * n) if battle_timeout else None
+                w, f = await _play_chunk(model_player, opp, n, timeout=chunk_timeout)
+                acc[kind][0] += w
+                acc[kind][1] += f
+            finally:
+                source_totals.update(getattr(model_player, "_source_counts", {}) or {})
+                for k, v in (getattr(model_player, "_tp_source", {}) or {}).items():
+                    source_totals[f"tp_{k}"] += v          # team-preview tally (#4)
                 try:
-                    chunk_timeout = (battle_timeout * n) if battle_timeout else None
-                    w, f = await _play_chunk(model_player, opp, n, timeout=chunk_timeout)
-                    wins += w
-                    fin += f
-                finally:
-                    source_totals.update(getattr(model_player, "_source_counts", {}) or {})
-                    for k, v in (getattr(model_player, "_tp_source", {}) or {}).items():
-                        source_totals[f"tp_{k}"] += v          # team-preview tally (#4)
                     await model_player.ps_client.stop_listening()
                     await opp.ps_client.stop_listening()
-                    model_player.close()
-                    opp.close()
-            results[kind] = (wins, fin)
-            log.info("vs %s: %d/%d", kind, wins, fin)
+                except Exception:
+                    pass
+                model_player.close()
+                opp.close()
+
+    try:
+        await asyncio.gather(*[_run(d) for d in descriptors])
     finally:
         if server is not None:
             R.stop_showdown(server)
+    results = {kind: (acc[kind][0], acc[kind][1]) for kind in opponents}
+    for kind in opponents:
+        log.info("vs %s: %d/%d", kind, *results[kind])
     return results, source_totals
 
 
@@ -396,6 +423,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                          "abandoned and the gauntlet continues (0 = no timeout; "
                          "default 90).")
     ap.add_argument("--no-server", action="store_true")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="run this many (opponent, team-pairing) chunks concurrently "
+                         "(3c.8c); total in-flight battles == workers. Default 1 (sequential)")
     ap.add_argument("--spectate", action="store_true",
                     help="open a browser tab spectating the first battle (live view)")
     ap.add_argument("--verbose", "-v", action="store_true",
@@ -430,6 +460,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         matchup_seed=args.matchup_seed,
         battle_timeout=args.battle_timeout,
         spectate=args.spectate,
+        n_workers=args.workers,
     ))
 
     row = build_run_row(results, ckpt=str(ckpt), run_id=run_id, timestamp=timestamp,

@@ -221,8 +221,11 @@ def make_player(
     *,
     model_path: Path = _REPO_ROOT / "ai_train_scripts" / "BC_model" / "checkpoints" / "bc_best.pt",
     team_chooser_path: Path = _REPO_ROOT / "ai_train_scripts" / "teamPreview_model" / "checkpoints" / "teampreview_best.pt",
+    max_concurrent_battles: int = 1,
 ) -> VGCPlayer:
-    """Build a (gap-#6 spliced) player.  model_path=None → random fallback."""
+    """Build a (gap-#6 spliced) player.  model_path=None → random fallback.
+    ``max_concurrent_battles`` > 1 lets poke-env run that many battles of this player
+    in parallel (3c.8c CPU-parallel collection)."""
     replay_path = _REPO_ROOT / "artifacts" / "replay_buffer" / f"{username}.jsonl"
     if model_path is None:
         return RandomVGCPlayer(
@@ -230,7 +233,7 @@ def make_player(
             account_configuration=AccountConfiguration(username, None),
             battle_format=BATTLE_FORMAT,
             team=team,
-            max_concurrent_battles=1,
+            max_concurrent_battles=max_concurrent_battles,
             log_level=logging.WARNING,
         )
     return VGCPlayer(
@@ -241,7 +244,7 @@ def make_player(
         account_configuration=AccountConfiguration(username, None),
         battle_format=BATTLE_FORMAT,
         team=team,
-        max_concurrent_battles=1,
+        max_concurrent_battles=max_concurrent_battles,
         log_level=logging.WARNING,
     )
 

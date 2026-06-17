@@ -195,6 +195,41 @@ def test_build_train_configs_guards_off_when_nonpositive():
     assert train.min_explained_variance is None
 
 
+# ── 3c.8b: CPU inference-copy for the hybrid (collection on CPU, update on GPU) ─
+def test_inference_copy_independent_cpu_eval(tmp_path):
+    """The collection copy must have its OWN weights (mutating it can't touch the persistent
+    actor-critic / optimiser graph), be on the requested device, and be in eval mode."""
+    ac = _fresh_ac(tmp_path)
+    cp = ac.inference_copy("cpu")
+    a0 = next(ac.policy.parameters())
+    c0 = next(cp.policy.parameters())
+    assert torch.equal(a0.detach().cpu(), c0.detach().cpu())     # starts identical
+    assert not cp.training and not cp.policy.training            # eval mode
+    with torch.no_grad():
+        c0.add_(1.0)                                             # mutate the COPY
+    assert not torch.equal(a0.detach().cpu(), c0.detach().cpu())  # original untouched
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA device")
+def test_hybrid_ppo_update_on_cuda_with_cpu_collection_copy(tmp_path):
+    """3c.8b hybrid END-TO-END on a real GPU: build the actor-critic + trainer on cuda (the
+    GPU PPO update), collect through a CPU inference-copy (sec 20), then run a real PPO
+    update on the GPU. Catches any cpu<->cuda tensor-mismatch in the device threading and
+    confirms the AC stays on the GPU + the optimisers actually step."""
+    ckpt = _write_ckpt(tmp_path / "bc.pt")
+    ac = ActorCritic.from_bc_checkpoint(ckpt, device="cuda")
+    assert next(ac.policy.parameters()).is_cuda
+    coll = ac.inference_copy("cpu")                          # collection runs on CPU
+    assert not next(coll.policy.parameters()).is_cuda
+    trajs = [_traj(coll, won=True, seed=1), _traj(coll, won=False, seed=2)]
+    tr = PPOTrainer(ac, train_cfg=TrainConfig(minibatch_size=0, ppo_epochs=2), device="cuda")
+    before = next(ac.policy.parameters()).detach().clone()
+    st = tr.ppo_update(trajs)
+    assert st["halted"] is False and st["n_steps"] == 8
+    assert next(ac.policy.parameters()).is_cuda             # stayed on GPU
+    assert not torch.equal(before, next(ac.policy.parameters()))  # actually updated
+
+
 def test_build_train_configs_drive_a_real_kl_autohalt(tmp_path):
     """End-to-end: a trainer built from the LIVE config builder actually early-halts on
     BC-drift — proves the collapse guard is wired through the path the CLI uses, not just

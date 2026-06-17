@@ -194,6 +194,49 @@ def test_run_gauntlet_aggregates_over_team_rotation(monkeypatch):
     assert all(p.closed for p in made["model"] + made["opp"])
 
 
+def test_run_gauntlet_parallel_aggregates_same(monkeypatch):
+    """3c.8c: with n_workers>1 the gauntlet runs chunks concurrently — the per-kind (wins,
+    finished) accumulation + source tally must still aggregate correctly (atomic finally)."""
+    import asyncio
+    import types as _t
+    import pytest
+    pytest.importorskip("poke_env")
+    import v_dance.play.run_local_battle as R
+
+    class FakePlayer:
+        def __init__(self, wr=0.0):
+            self.n_won_battles = 0
+            self.n_finished_battles = 0
+            self._wr = wr
+            self.closed = False
+            async def _stop():
+                return None
+            self.ps_client = _t.SimpleNamespace(stop_listening=_stop)
+
+        async def battle_against(self, opp, n_battles):
+            self.n_finished_battles += n_battles
+            self.n_won_battles += int(round(self._wr * n_battles))
+
+        def close(self):
+            self.closed = True
+
+    made = []
+    monkeypatch.setattr(R, "start_showdown", lambda: None)
+    monkeypatch.setattr(R, "stop_showdown", lambda p: None)
+    monkeypatch.setattr(R, "make_player",
+                        lambda u, t, **kw: made.append("m") or FakePlayer(wr=1.0))
+    monkeypatch.setattr(R, "load_team", lambda p: "T")
+    monkeypatch.setattr(R, "resolve_team_path", lambda n: n)
+    monkeypatch.setattr(G, "_make_opponent", lambda *a, **kw: FakePlayer(wr=0.0))
+
+    results, _sources = asyncio.run(G.run_gauntlet(
+        opponents=["random", "max_damage"], team_pool=["A", "B", "C"],
+        battles_per_opponent=6, ckpt=Path("bc.pt"), team_chooser=Path("tc.pt"),
+        manage_server=True, n_workers=4))
+    assert results == {"random": (6, 6), "max_damage": (6, 6)}   # model wins all; agg correct
+    assert len(made) == 12                                       # 2 opps × 6 pairings
+
+
 def test_play_chunk_watchdog_abandons_hung_battle():
     """A battle that never resolves must NOT hang the gauntlet — the watchdog
     abandons the chunk and returns promptly (the 3-hour-hang guarantee)."""
@@ -285,6 +328,29 @@ def test_resolve_train_pool_all_expands_to_full_pool():
 
     assert resolve_train_pool(["all"]) == R.discover_teams()
     assert len(resolve_train_pool(["all"])) >= 50
+
+
+def test_make_opponent_threads_max_concurrent_battles(monkeypatch):
+    """3c.8c: the worker count must reach the opponent constructors so poke-env actually
+    runs battles in parallel (a min over BOTH players' max_concurrent_battles)."""
+    import pytest
+    pytest.importorskip("poke_env")
+    import v_dance.play.run_local_battle as R
+    import v_dance.eval.eval_opponents as EO
+    import v_dance.eval.gauntlet as Gmod
+
+    rec = {}
+    monkeypatch.setattr(R, "make_player",
+                        lambda u, t, **kw: rec.update({"random_mcb": kw.get("max_concurrent_battles")}))
+    Gmod._make_opponent("random", "u", "team", max_concurrent_battles=6)
+    assert rec["random_mcb"] == 6
+
+    class _FakeScripted:
+        def __init__(self, **kw):
+            rec["scripted_mcb"] = kw.get("max_concurrent_battles")
+    monkeypatch.setattr(EO, "MaxDamageVGCPlayer", _FakeScripted)
+    Gmod._make_opponent("max_damage", "u", "team", max_concurrent_battles=5)
+    assert rec["scripted_mcb"] == 5
 
 
 def test_default_eval_teams_all_resolve_exact_case():
