@@ -241,6 +241,12 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
             source=source,
         )
 
+        # Self-play collection hook (3c.1): records this decision into an RL
+        # trajectory. A NO-OP in the base — zero behaviour change for live/gauntlet
+        # play; only SelfPlayVGCPlayer overrides it.
+        self._record_rl_decision(battle, state_vec, action_s0, action_s1,
+                                 g0, g1, source, "turn")
+
         order_s0 = self._safe_order(action_s0, battle, slot=0, gimmick=g0,
                                     opp_present_recon=opp_present_recon)
         order_s1 = self._safe_order(action_s1, battle, slot=1, gimmick=g1,
@@ -349,6 +355,9 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
             order_s0 = self._replacement_order(battle, 0, a0)
             order_s1 = self._replacement_order(battle, 1, a1)
             self._source_counts[source] += 1
+            # Self-play collection hook (3c.1) — replacement decision. No-op in base.
+            self._record_rl_decision(battle, state_vec, a0, a1,
+                                     GIMMICK_NONE, GIMMICK_NONE, source, "replacement")
             try:
                 self._replay.record(
                     battle_id=battle.battle_tag, turn=battle.turn, state=state_vec,
@@ -377,6 +386,15 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
         # Use the BUILDER (not _handle_force_switch) so the loop guard isn't
         # double-counted — we already called it at the top of this method.
         return super()._build_force_switch_order(battle)
+
+    def _record_rl_decision(self, battle, state_vec, action_s0, action_s1,
+                            gimmick_s0, gimmick_s1, source, decision_type):
+        """Self-play collection hook (3c.1). Called with the FINAL decision each
+        normal turn ("turn") and each model-driven forced replacement ("replacement").
+        NO-OP in the base so live / gauntlet play is byte-identical; SelfPlayVGCPlayer
+        overrides it to record the step (state, actions, gimmicks, masks, log-prob,
+        value) into a TrajectoryCollector."""
+        return None
 
     def _select_replacement_actions(self, battle: DoubleBattle, state_vec):
         """Hook: return ``(a0, a1, source)`` — switch action indices (12..15) for the

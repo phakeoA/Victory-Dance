@@ -1,0 +1,177 @@
+"""Task 3b.4: PPO training loop — critic-only warm-up + collapse guards.
+
+Covers explained_variance, the warm-up freezing the actor while improving the critic,
+a full PPO update moving both nets, and the two collapse guards (KL-from-BC and
+explained-variance auto-halt).
+"""
+from __future__ import annotations
+
+import math
+import sys
+from pathlib import Path
+
+import pytest
+
+pytest.importorskip("torch")
+pytest.importorskip("numpy")
+import numpy as np
+import torch
+
+_REPO = Path(__file__).resolve().parents[3]
+for _p in (str(_REPO / "local_battle"), str(_REPO / "data" / "scripts"),
+           str(_REPO / "ai_train_scripts" / "BC_model"), str(_REPO)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from state_encoder import (get_state_dim, get_action_dim, get_gimmick_dim,  # noqa: E402
+                           get_state_layout_version)
+from bc_model import BCPolicy  # noqa: E402
+from self_play.actor_critic import ActorCritic  # noqa: E402
+from self_play.schema import Transition, PASS_ACTION  # noqa: E402
+from self_play.collector import TrajectoryCollector  # noqa: E402
+from self_play.reward import place_terminal_reward  # noqa: E402
+from self_play import policy_eval as pe  # noqa: E402
+from self_play.ppo import PPOConfig  # noqa: E402
+from self_play.trainer import PPOTrainer, TrainConfig, explained_variance  # noqa: E402
+
+STATE_DIM, ACTION_DIM, GIMMICK_DIM = get_state_dim(), get_action_dim(), get_gimmick_dim()
+
+
+def _write_ckpt(path):
+    torch.manual_seed(3)
+    model = BCPolicy(state_dim=STATE_DIM, action_dim=ACTION_DIM,
+                     hidden_dims=(8, 4), dropout=0.0, gimmick_dim=GIMMICK_DIM)
+    torch.save({"model_state": model.state_dict(), "config": {
+        "state_dim": STATE_DIM, "action_dim": ACTION_DIM, "hidden_dims": (8, 4),
+        "dropout": 0.0, "heads": ("our_a", "our_b"), "gimmick_dim": GIMMICK_DIM,
+        "gimmick_trained": True, "value_trained": True,
+        "state_layout_version": get_state_layout_version()}}, path)
+    return path
+
+
+def _fresh_ac(tmp_path, name="bc.pt"):
+    return ActorCritic.from_bc_checkpoint(_write_ckpt(tmp_path / name))
+
+
+def _traj(ac, won=True, n=4, seed=0):
+    """An on-policy trajectory: old logprob/value are this ac's own current outputs."""
+    c = TrajectoryCollector(f"g{seed}", "p1")
+    rng = np.random.default_rng(seed)
+    for t in range(n):
+        st = Transition(state=rng.standard_normal(STATE_DIM).astype(np.float32),
+                        action_s0=t % ACTION_DIM, action_s1=PASS_ACTION, mask_s0=[1] * ACTION_DIM)
+        lp, _, v = pe.evaluate_actions(ac, [st])
+        c.add_step(state=st.state, action_s0=t % ACTION_DIM, action_s1=PASS_ACTION,
+                   mask_s0=[1] * ACTION_DIM, logprob=float(lp[0].detach()),
+                   value=float(v[0].detach()), turn=t + 1)
+    tr = c.finish(own_team=["a"] * 6, opp_team=["b"] * 6, tp_bring=[0, 1, 2, 3],
+                  tp_leads=[0, 1], won=won, terminal_type="win" if won else "loss")
+    place_terminal_reward(tr)
+    return tr
+
+
+def _params(it):
+    return [p.detach().clone() for p in it]
+
+
+# ── explained variance ────────────────────────────────────────────────────────
+def test_explained_variance():
+    r = np.array([1.0, -1.0, 0.5, -0.5])
+    assert explained_variance(r, r) == pytest.approx(1.0)               # perfect
+    assert explained_variance(np.full_like(r, r.mean()), r) == pytest.approx(0.0, abs=1e-9)
+    assert explained_variance(np.array([5.0]), np.array([5.0])) == 0.0  # constant returns
+    assert math.isnan(explained_variance(np.array([]), np.array([])))
+
+
+# ── warm-up ───────────────────────────────────────────────────────────────────
+def test_warmup_freezes_actor_moves_critic(tmp_path):
+    ac = _fresh_ac(tmp_path)
+    trajs = [_traj(ac, won=True, seed=1), _traj(ac, won=False, seed=2)]
+    tr = PPOTrainer(ac, ppo_cfg=PPOConfig(value_loss_mode="huber"),
+                    train_cfg=TrainConfig(minibatch_size=0))
+    actor_before = _params(ac.actor_parameters())
+    critic_before = _params(ac.critic_parameters())
+    tr.warmup_critic(trajs, n_updates=3)
+    assert all(torch.equal(b, p) for b, p in zip(actor_before, ac.actor_parameters()))  # frozen
+    assert any(not torch.equal(b, p) for b, p in zip(critic_before, ac.critic_parameters()))
+
+
+def test_warmup_improves_explained_variance(tmp_path):
+    ac = _fresh_ac(tmp_path)
+    trajs = [_traj(ac, won=True, seed=1), _traj(ac, won=False, seed=2)]
+    tr = PPOTrainer(ac, ppo_cfg=PPOConfig(value_loss_mode="huber"),
+                    train_cfg=TrainConfig(minibatch_size=0, critic_lr=1e-2))
+    txns, _, ret = tr._flatten(trajs)
+    pre_ev = tr._critic_ev(txns, ret)
+    stats = tr.warmup_critic(trajs, n_updates=60)
+    assert math.isfinite(stats["value_loss"])
+    assert stats["explained_variance"] > pre_ev                        # critic learned the returns
+
+
+def test_warmup_migrates_critic_to_return_scale(tmp_path):
+    """Regression: the warm-up must move V ONTO the return scale (it runs value-clip-OFF).
+    A decisively-won game has returns ~+1 while the cold critic sits near value_pm 0; after
+    warm-up the critic's mean value must land CLOSE to the mean return. (With the value-clip
+    bug it throttles ~0.13 short; the clip-free warm-up lands within ~0.03.)"""
+    ac = _fresh_ac(tmp_path)
+    trajs = [_traj(ac, won=True, n=5, seed=1)]                          # returns ~ +1
+    tr = PPOTrainer(ac, ppo_cfg=PPOConfig(value_clip=0.2),
+                    train_cfg=TrainConfig(minibatch_size=0, critic_lr=1e-2))
+    txns, _, ret = tr._flatten(trajs)
+    tr.warmup_critic(trajs, n_updates=300)
+    with torch.no_grad():
+        v = ac.value_pm(tr._states(txns)).cpu().numpy()
+    assert abs(float(v.mean()) - float(ret.mean())) < 0.1, (
+        f"critic did not reach the return scale: mean v={v.mean():.3f} vs return {ret.mean():.3f}")
+
+
+# ── full PPO update ───────────────────────────────────────────────────────────
+def test_ppo_update_moves_both_nets(tmp_path):
+    ac = _fresh_ac(tmp_path)
+    trajs = [_traj(ac, won=True, seed=1), _traj(ac, won=False, seed=2)]
+    tr = PPOTrainer(ac, train_cfg=TrainConfig(minibatch_size=0, ppo_epochs=2))
+    a_before, c_before = _params(ac.actor_parameters()), _params(ac.critic_parameters())
+    st = tr.ppo_update(trajs)
+    assert any(not torch.equal(b, p) for b, p in zip(a_before, ac.actor_parameters()))
+    assert any(not torch.equal(b, p) for b, p in zip(c_before, ac.critic_parameters()))
+    assert st["halted"] is False
+    assert st["n_steps"] == 8 and tr.updates == 1
+    for k in ("loss", "policy_loss", "value_loss", "entropy", "explained_variance"):
+        assert math.isfinite(st[k])
+
+
+def test_ppo_update_empty_batch(tmp_path):
+    ac = _fresh_ac(tmp_path)
+    st = PPOTrainer(ac).ppo_update([])
+    assert st["halted"] is False and st["n_steps"] == 0
+
+
+# ── collapse guards ───────────────────────────────────────────────────────────
+def test_kl_from_bc_autohalt(tmp_path):
+    ac = _fresh_ac(tmp_path)
+    trajs = [_traj(ac, won=True, seed=1), _traj(ac, won=False, seed=2)]
+    tr = PPOTrainer(ac, train_cfg=TrainConfig(
+        minibatch_size=0, ppo_epochs=3, actor_lr=1e-2, target_kl_from_bc=1e-9))
+    st = tr.ppo_update(trajs)
+    assert st["halted"] is True
+    assert "kl_from_bc" in st["halt_reason"]
+
+
+def test_explained_variance_autohalt(tmp_path):
+    ac = _fresh_ac(tmp_path)
+    trajs = [_traj(ac, won=True, seed=1), _traj(ac, won=False, seed=2)]
+    tr = PPOTrainer(ac, train_cfg=TrainConfig(
+        minibatch_size=0, ppo_epochs=1, min_explained_variance=2.0))  # impossible floor
+    st = tr.ppo_update(trajs)
+    assert st["halted"] is True
+    assert "explained_variance" in st["halt_reason"]
+
+
+# ── optimiser state (3c.4 resumability foundation) ────────────────────────────
+def test_optimizer_state_populated_after_update(tmp_path):
+    ac = _fresh_ac(tmp_path)
+    trajs = [_traj(ac, won=True, seed=1), _traj(ac, won=False, seed=2)]
+    tr = PPOTrainer(ac, train_cfg=TrainConfig(minibatch_size=0, ppo_epochs=1))
+    tr.ppo_update(trajs)
+    assert tr.actor_opt.state_dict()["state"]      # Adam moments now populated
+    assert tr.critic_opt.state_dict()["state"]

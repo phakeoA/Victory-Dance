@@ -423,6 +423,10 @@ co-development; pin-deps is a prerequisite for long runs.**
   **engineering-fallback=draw(0)+DISCARD**; **MODEL-DRIVEN% hard-fail (<99%)** on the corpus.
 - 3a.4 **Type-C ReplayBuffer -> training-schema converter** (the named first brick) + **no-reward-
   wrapper assert** + **masking-confirmation startup test** (edge-case moves/targets stay legal, sec 13).
+  *(IMPLEMENTED as a standalone `local_battle/self_play/store.py` Trajectory-jsonl store — NOT a
+  `vgc_base.ReplayBuffer` extension, which is left untouched for the BC path. The env-build
+  no-VecNormalize assert + the live masking-confirmation test were MOVED to 3c (runtime checks needing
+  the env/player); store.py carries a data-level `assert_terminal_rewards_clean` instead.)*
 - 3a.5 Record TP decision + outcome + per-bring/per-matchup win-rate diagnostic (sec 14).
 - 3a.6 Phase-0 validation harness: >=200 games clean/legal/symmetric, p1/p2 ~50+-5%, terminal-space
   asserts.
