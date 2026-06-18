@@ -233,34 +233,35 @@ def test_print_phase0_report_runs(capsys):
 
 # ── 3c.6e-3: live spectate feed (player publishes its active battle room) ───────
 def test_report_active_publishes_battle_room(tmp_path):
-    import types
-    from v_dance.selfplay.status import LiveStatus, read_status
-    ls = LiveStatus(tmp_path / "status.json")
-    fake = types.SimpleNamespace(_status=ls, username="LG0x1")
-    battle = types.SimpleNamespace(battle_tag="battle-gen9-77", players=["LG0x1", "LG1x2"], turn=5)
-    G.SelfPlayVGCPlayer._report_active(fake, battle)          # unbound, fake self (no live Player)
-    s = read_status(ls.path)
-    assert s["active_battles"] == [{"tag": "battle-gen9-77", "p1": "LG0x1", "p2": "LG1x2", "turn": 5}]
-
-
-def test_report_active_noop_without_status():
-    import types
-    battle = types.SimpleNamespace(battle_tag="battle-x", players=[], turn=1)
-    # no status wired -> returns cleanly, nothing to assert beyond "does not raise"
-    G.SelfPlayVGCPlayer._report_active(types.SimpleNamespace(_status=None), battle)
-
-
-def test_report_active_writes_live_log(tmp_path):
     import json
     import types
-    from v_dance.selfplay.status import LiveStatus
-    ls = LiveStatus(tmp_path / "status.json")
-    fake = types.SimpleNamespace(_status=ls, username="LG0x1",
+    from v_dance.selfplay.status import LiveBattles
+    lb = LiveBattles(tmp_path)                                # #18: file-per-battle spectate feed
+    fake = types.SimpleNamespace(_live=lb, username="LG0x1", _proto_log={})
+    battle = types.SimpleNamespace(battle_tag="battle-gen9-77", players=["LG0x1", "LG1x2"], turn=5)
+    G.SelfPlayVGCPlayer._report_active(fake, battle)          # unbound, fake self (no live Player)
+    b = json.loads((tmp_path / "battle-gen9-77.json").read_text(encoding="utf-8"))
+    assert b["tag"] == "battle-gen9-77" and b["p1"] == "LG0x1" and b["p2"] == "LG1x2" and b["turn"] == 5
+
+
+def test_report_active_noop_without_live_dir():
+    import types
+    battle = types.SimpleNamespace(battle_tag="battle-x", players=[], turn=1)
+    # no live_dir wired -> returns cleanly, nothing to assert beyond "does not raise"
+    G.SelfPlayVGCPlayer._report_active(types.SimpleNamespace(_live=None), battle)
+
+
+def test_report_active_writes_battle_log(tmp_path):
+    import json
+    import types
+    from v_dance.selfplay.status import LiveBattles
+    lb = LiveBattles(tmp_path)
+    fake = types.SimpleNamespace(_live=lb, username="LG0x1",
                                  _proto_log={"battle-gen9-77": ["|turn|1", "|move|p1a: A|Tackle|p2a: B"]})
     battle = types.SimpleNamespace(battle_tag="battle-gen9-77", players=["LG0x1", "LG1x2"], turn=1)
     G.SelfPlayVGCPlayer._report_active(fake, battle)
-    d = json.loads((tmp_path / "live_log.json").read_text(encoding="utf-8"))
-    assert d["tag"] == "battle-gen9-77" and d["n_lines"] == 2 and d["log"][0] == "|turn|1"
+    b = json.loads((tmp_path / "battle-gen9-77.json").read_text(encoding="utf-8"))
+    assert b["tag"] == "battle-gen9-77" and b["n_lines"] == 2 and b["log"][0] == "|turn|1"
 
 
 # ── run_self_play_games parallel refactor (task #13) ──────────────────────────

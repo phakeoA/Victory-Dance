@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<meta charset="utf-8" />
+<!-- version 1 -->
+<title>battle-gen9championsvgc2026regma-14050</title>
+<style>
+    html,
+    body {
+        font-family: Verdana, sans-serif;
+        font-size: 10pt;
+        margin: 0;
+        padding: 0;
+    }
+
+    body {
+        padding: 12px 0;
+    }
+
+    .battle-log {
+        font-family: Verdana, sans-serif;
+        font-size: 10pt;
+    }
+
+    .battle-log-inline {
+        border: 1px solid #AAAAAA;
+        background: #EEF2F5;
+        color: black;
+        max-width: 640px;
+        margin: 0 auto 80px;
+        padding-bottom: 5px;
+    }
+
+    .battle-log .inner {
+        padding: 4px 8px 0px 8px;
+    }
+
+    .battle-log .inner-preempt {
+        padding: 0 8px 4px 8px;
+    }
+
+    .battle-log .inner-after {
+        margin-top: 0.5em;
+    }
+
+    .battle-log h2 {
+        margin: 0.5em -8px;
+        padding: 4px 8px;
+        border: 1px solid #AAAAAA;
+        background: #E0E7EA;
+        border-left: 0;
+        border-right: 0;
+        font-family: Verdana, sans-serif;
+        font-size: 13pt;
+    }
+
+    .backprop {
+        top: 0;
+    }
+
+    .battle-log .chat {
+        vertical-align: middle;
+        padding: 3px 0 3px 0;
+        font-size: 8pt;
+    }
+
+    .battle-log .chat strong {
+        color: #40576A;
+    }
+
+    .battle-log .chat em {
+        padding: 1px 4px 1px 3px;
+        color: #000000;
+        font-style: normal;
+    }
+
+    .chat.mine {
+        background: rgba(0, 0, 0, 0.05);
+        margin-left: -8px;
+        margin-right: -8px;
+        padding-left: 8px;
+        padding-right: 8px;
+    }
+
+    .spoiler {
+        color: #BBBBBB;
+        background: #BBBBBB;
+        padding: 0px 3px;
+    }
+
+    .spoiler:hover,
+    .spoiler:active,
+    .spoiler-shown {
+        color: #000000;
+        background: #E2E2E2;
+        padding: 0px 3px;
+    }
+
+    .spoiler a {
+        color: #BBBBBB;
+    }
+
+    .spoiler:hover a,
+    .spoiler:active a,
+    .spoiler-shown a {
+        color: #2288CC;
+    }
+
+    .chat code,
+    .chat .spoiler:hover code,
+    .chat .spoiler:active code,
+    .chat .spoiler-shown code {
+        border: 1px solid #C0C0C0;
+        background: #EEEEEE;
+        color: black;
+        padding: 0 2px;
+    }
+
+    .chat .spoiler code {
+        border: 1px solid #CCCCCC;
+        background: #CCCCCC;
+        color: #CCCCCC;
+    }
+
+    .battle-log .rated {
+        padding: 3px 4px;
+    }
+
+    .battle-log .rated strong {
+        color: white;
+        background: #89A;
+        padding: 1px 4px;
+        border-radius: 4px;
+    }
+
+    .spacer {
+        margin-top: 0.5em;
+    }
+
+    .message-announce {
+        background: #6688AA;
+        color: white;
+        padding: 1px 4px 2px;
+    }
+
+    .message-announce a,
+    .broadcast-green a,
+    .broadcast-blue a,
+    .broadcast-red a {
+        color: #DDEEFF;
+    }
+
+    .broadcast-green {
+        background-color: #559955;
+        color: white;
+        padding: 2px 4px;
+    }
+
+    .broadcast-blue {
+        background-color: #6688AA;
+        color: white;
+        padding: 2px 4px;
+    }
+
+    .infobox {
+        border: 1px solid #6688AA;
+        padding: 2px 4px;
+    }
+
+    .infobox-limited {
+        max-height: 200px;
+        overflow: auto;
+        overflow-x: hidden;
+    }
+
+    .broadcast-red {
+        background-color: #AA5544;
+        color: white;
+        padding: 2px 4px;
+    }
+
+    .message-learn-canlearn {
+        font-weight: bold;
+        color: #228822;
+        text-decoration: underline;
+    }
+
+    .message-learn-cannotlearn {
+        font-weight: bold;
+        color: #CC2222;
+        text-decoration: underline;
+    }
+
+    .message-effect-weak {
+        font-weight: bold;
+        color: #CC2222;
+    }
+
+    .message-effect-resist {
+        font-weight: bold;
+        color: #6688AA;
+    }
+
+    .message-effect-immune {
+        font-weight: bold;
+        color: #666666;
+    }
+
+    .message-learn-list {
+        margin-top: 0;
+        margin-bottom: 0;
+    }
+
+    .message-throttle-notice,
+    .message-error {
+        color: #992222;
+    }
+
+    .message-overflow,
+    .chat small.message-overflow {
+        font-size: 0pt;
+    }
+
+    .message-overflow::before {
+        font-size: 9pt;
+        content: '...';
+    }
+
+    .subtle {
+        color: #3A4A66;
+    }
+</style>
+<div class="wrapper replay-wrapper" style="max-width:1180px;margin:0 auto">
+    <input type="hidden" name="replayid" value="unregisteredserver-gen8randombattle-320064" />
+    <div class="battle"></div>
+    <div class="battle-log"></div>
+    <div class="replay-controls"></div>
+    <div class="replay-controls-2"></div>
+    <h1 style="font-weight:normal;text-align:center"><strong>poke-env battle replay</strong><br />battle-gen9championsvgc2026regma-14050<br /><a
+            href="http://pokemonshowdown.com/users/randomplayer1" class="subtle" target="_blank">BC10</a>
+        vs. <a href="http://pokemonshowdown.com/users/randomplayer2" class="subtle"
+            target="_blank">OPheur10</a></h1>
+    <script type="text/plain" class="battle-log-data">
+    >battle-gen9championsvgc2026regma-14050
+|init|battle
+|title|BC10 vs. OPheur10
+|j|☆BC10
+|j|☆OPheur10
+|gametype|doubles
+|player|p1|BC10|1|
+|player|p2|OPheur10|102|
+|gen|9
+|tier|[Gen 9 Champions] VGC 2026 Reg M-A
+|rule|Species Clause: Limit one of each Pokémon
+|rule|Item Clause: Limit 1 of each item
+|clearpoke
+|poke|p1|Dragonite, L50, M|
+|poke|p1|Maushold, L50|
+|poke|p1|Archaludon, L50, F|
+|poke|p1|Pelipper, L50, F|
+|poke|p1|Scizor, L50, M|
+|poke|p1|Basculegion, L50, M|
+|poke|p2|Sneasler, L50, M|
+|poke|p2|Charizard, L50, F|
+|poke|p2|Whimsicott, L50, M|
+|poke|p2|Basculegion, L50, M|
+|poke|p2|Zoroark-Hisui, L50, F|
+|poke|p2|Corviknight, L50, F|
+|teampreview|4
+|uhtml|otsrequest|<button name="send" value="/acceptopenteamsheets" class="button" style="margin-right: 10px;"><strong>Accept Open Team Sheets</strong></button><button name="send" value="/rejectopenteamsheets" class="button" style="margin-top: 10px"><strong>Deny Open Team Sheets</strong></button>
+|
+|teamsize|p1|4
+|teamsize|p2|4
+|start
+|switch|p1a: Maushold|Maushold, L50|181/181
+|switch|p1b: Scizor|Scizor, L50, M|177/177
+|switch|p2a: Sneasler|Sneasler, L50, M|100/100
+|switch|p2b: Charizard|Charizard, L50, F|100/100
+|turn|1
+|
+|detailschange|p1b: Scizor|Scizor-Mega, L50, M
+|-mega|p1b: Scizor|Scizor|Scizorite
+|move|p1a: Maushold|Protect|p1a: Maushold
+|-singleturn|p1a: Maushold|Protect
+|move|p2a: Sneasler|Close Combat|p1a: Maushold
+|-activate|p1a: Maushold|move: Protect
+|move|p2b: Charizard|Heat Wave|p1b: Scizor|[spread] p1b
+|-activate|p1a: Maushold|move: Protect
+|-supereffective|p1b: Scizor|2
+|-damage|p1b: Scizor|30/177
+|-status|p1b: Scizor|brn
+|move|p1b: Scizor|Close Combat|p2a: Sneasler
+|-resisted|p2a: Sneasler|1
+|-damage|p2a: Sneasler|78/100
+|-unboost|p1b: Scizor|def|1
+|-unboost|p1b: Scizor|spd|1
+|
+|-damage|p1b: Scizor|19/177 brn|[from] brn
+|upkeep
+|turn|2
+|
+|switch|p1b: Archaludon|Archaludon, L50, F|197/197
+|move|p1a: Maushold|Protect||[still]
+|-fail|p1a: Maushold
+|move|p2a: Sneasler|Close Combat|p1a: Maushold
+|-supereffective|p1a: Maushold|1
+|-enditem|p1a: Maushold|Focus Sash
+|-damage|p1a: Maushold|1/181
+|-unboost|p2a: Sneasler|def|1
+|-unboost|p2a: Sneasler|spd|1
+|-enditem|p2a: Sneasler|White Herb
+|-clearnegativeboost|p2a: Sneasler|[silent]
+|move|p2b: Charizard|Heat Wave|p1b: Archaludon|[spread] p1a,p1b
+|-damage|p1a: Maushold|0 fnt
+|-damage|p1b: Archaludon|154/197
+|-ability|p1b: Archaludon|Stamina|boost
+|-boost|p1b: Archaludon|def|1
+|faint|p1a: Maushold
+|
+|-heal|p1b: Archaludon|166/197|[from] item: Leftovers
+|upkeep
+|
+|switch|p1a: Pelipper|Pelipper, L50, F|164/164
+|-weather|RainDance|[from] ability: Drizzle|[of] p1a: Pelipper
+|turn|3
+|
+|move|p2a: Sneasler|Close Combat|p1b: Archaludon
+|-supereffective|p1b: Archaludon|1
+|-damage|p1b: Archaludon|46/197
+|-unboost|p2a: Sneasler|def|1
+|-unboost|p2a: Sneasler|spd|1
+|-ability|p1b: Archaludon|Stamina|boost
+|-boost|p1b: Archaludon|def|1
+|move|p2b: Charizard|Solar Beam||[still]
+|-prepare|p2b: Charizard|Solar Beam
+|move|p1b: Archaludon|Dragon Pulse|p2a: Sneasler
+|-damage|p2a: Sneasler|1/100
+|move|p1a: Pelipper|Hurricane|p2a: Sneasler
+|-supereffective|p2a: Sneasler|1
+|-damage|p2a: Sneasler|0 fnt
+|faint|p2a: Sneasler
+|
+|-weather|RainDance|[upkeep]
+|-heal|p1b: Archaludon|58/197|[from] item: Leftovers
+|upkeep
+|
+|switch|p2a: Basculegion|Basculegion, L50, M|100/100
+|turn|4
+|
+|move|p1a: Pelipper|Wide Guard|p1a: Pelipper
+|-singleturn|p1a: Pelipper|Wide Guard
+|move|p2b: Charizard|Solar Beam|p1a: Pelipper|[from] lockedmove
+|-damage|p1a: Pelipper|129/164
+|move|p2a: Basculegion|Wave Crash|p1b: Archaludon
+|-resisted|p1b: Archaludon|1
+|-damage|p1b: Archaludon|7/197
+|-ability|p1b: Archaludon|Stamina|boost
+|-boost|p1b: Archaludon|def|1
+|-damage|p2a: Basculegion|91/100|[from] Recoil
+|move|p1b: Archaludon|Dragon Pulse|p2a: Basculegion
+|-damage|p2a: Basculegion|47/100
+|
+|-weather|RainDance|[upkeep]
+|-heal|p1b: Archaludon|19/197|[from] item: Leftovers
+|upkeep
+|turn|5
+|
+|move|p1a: Pelipper|Wide Guard|p1a: Pelipper
+|-singleturn|p1a: Pelipper|Wide Guard
+|move|p2b: Charizard|Solar Beam||[still]
+|-prepare|p2b: Charizard|Solar Beam
+|move|p2a: Basculegion|Wave Crash|p1b: Archaludon
+|-resisted|p1b: Archaludon|1
+|-damage|p1b: Archaludon|0 fnt
+|faint|p1b: Archaludon
+|-damage|p2a: Basculegion|44/100|[from] Recoil
+|
+|-weather|RainDance|[upkeep]
+|upkeep
+|
+|switch|p1b: Scizor|Scizor-Mega, L50, M|19/177 brn
+|turn|6
+|
+|move|p1a: Pelipper|Wide Guard|p1a: Pelipper
+|-singleturn|p1a: Pelipper|Wide Guard
+|move|p1b: Scizor|Bullet Punch|p2a: Basculegion
+|-resisted|p2a: Basculegion|1
+|-damage|p2a: Basculegion|31/100
+|move|p2b: Charizard|Solar Beam|p1a: Pelipper|[from] lockedmove
+|-damage|p1a: Pelipper|95/164
+|move|p2a: Basculegion|Wave Crash|p1b: Scizor
+|-damage|p1b: Scizor|0 fnt
+|faint|p1b: Scizor
+|-damage|p2a: Basculegion|28/100|[from] Recoil
+|
+|-weather|RainDance|[upkeep]
+|upkeep
+|turn|7
+|
+|move|p1a: Pelipper|Wide Guard|p1a: Pelipper
+|-singleturn|p1a: Pelipper|Wide Guard
+|move|p2b: Charizard|Solar Beam||[still]
+|-prepare|p2b: Charizard|Solar Beam
+|move|p2a: Basculegion|Wave Crash|p1a: Pelipper
+|-resisted|p1a: Pelipper|1
+|-damage|p1a: Pelipper|0 fnt
+|faint|p1a: Pelipper
+|-damage|p2a: Basculegion|13/100|[from] Recoil
+|
+|win|OPheur10
+    </script>
+</div>
+
+<div class="battle-log battle-log-inline" style="display:none"></div>
+
+<script>
+    let daily = Math.floor(Date.now() / 1000 / 60 / 60 / 24); document.write('<script src="https://play.pokemonshowdown.com/js/replay-embed.js?version' + daily + '"></' + 'script>');
+</script>
+
+<p style="text-align:center"> Replay created by <a href="https://github.com/hsahovic/poke-env">poke-env</a>, with code from <a
+        href="https://github.com/smogon/pokemon-showdown"> pokemon-showdown</a>. If something goes wrong, don't hesitate
+    to open an <a href="https://github.com/hsahovic/poke-env/issues">issue!</a></p>

@@ -139,7 +139,7 @@ class _FakePlayer:
         self.closed = True
 
 
-def _fake_build_players(ac, spec, tau, seed, tc):
+def _fake_build_players(ac, spec, tau, seed, tc, live_dir=None, save_replays=False):
     our = _FakePlayer(trajs={f"b{spec.uid}": _FakeTraj(True)}, sources={"model": 5})
     if spec.kind == "latest":
         opp = _FakePlayer(trajs={f"b{spec.uid}o": _FakeTraj(False)}, sources={"model": 3})
@@ -413,7 +413,7 @@ def test_worker_ac_loads_the_trained_critic_not_the_bc_clone(tmp_path):
 
 def test_collect_specs_build_error_skips_only_that_chunk():
     """14b.3 review: a transient player-build error skips THAT chunk, not the whole worker batch."""
-    def build(ac, spec, tau, seed, tc):
+    def build(ac, spec, tau, seed, tc, live_dir=None, save_replays=False):
         if spec.uid == 2:
             raise RuntimeError("team resolve failed")
         return _fake_build_players(ac, spec, tau, seed, tc)

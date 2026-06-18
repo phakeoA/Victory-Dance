@@ -76,3 +76,21 @@ def test_live_log_default_and_served(client):
         {"tag": "battle-z-1", "turn": 3, "n_lines": 2, "log": ["|turn|1", "|move|x"]}), encoding="utf-8")
     j = c.get("/live_log.json").get_json()
     assert j["tag"] == "battle-z-1" and len(j["log"]) == 2
+
+
+def test_live_battles_default_empty_and_aggregates(client):
+    """#18 multi-battle spectate: /live_battles.json aggregates the file-per-battle feed."""
+    _, c, arch = client
+    j = c.get("/live_battles.json").get_json()
+    assert j["n"] == 0 and j["battles"] == []                  # default when no run
+    from v_dance.selfplay.status import LiveBattles
+    live = arch / "live"
+    live.mkdir()
+    lb = LiveBattles(live)
+    lb.update("battle-a-1", p1="SP1", p2="SP2", turn=2, log=["|turn|2"])
+    lb.update("battle-b-2", p1="SP3", p2="SP4", turn=5, log=["|turn|5"])
+    j = c.get("/live_battles.json").get_json()
+    assert j["n"] == 2
+    tags = sorted(b["tag"] for b in j["battles"])
+    assert tags == ["battle-a-1", "battle-b-2"]                # SEVERAL concurrent battles
+    assert "no-store" in c.get("/live_battles.json").headers.get("Cache-Control", "")

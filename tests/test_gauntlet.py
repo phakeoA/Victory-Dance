@@ -184,12 +184,12 @@ def test_run_gauntlet_aggregates_over_team_rotation(monkeypatch):
 
     made = {"model": [], "opp": []}
 
-    def fake_make_player(username, team, *, model_path=None, team_chooser_path=None):
+    def fake_make_player(username, team, *, model_path=None, team_chooser_path=None, **kwargs):
         p = FakePlayer(win_rate=1.0)               # the model wins every battle
         made["model"].append(p)
         return p
 
-    def fake_make_opponent(kind, username, team, model_path=None, team_chooser_path=None):
+    def fake_make_opponent(kind, username, team, model_path=None, team_chooser_path=None, **kwargs):
         p = FakePlayer(win_rate=0.0)
         made["opp"].append(p)
         return p

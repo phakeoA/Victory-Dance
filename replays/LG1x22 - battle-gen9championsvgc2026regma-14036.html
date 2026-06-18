@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<meta charset="utf-8" />
+<!-- version 1 -->
+<title>battle-gen9championsvgc2026regma-14036</title>
+<style>
+    html,
+    body {
+        font-family: Verdana, sans-serif;
+        font-size: 10pt;
+        margin: 0;
+        padding: 0;
+    }
+
+    body {
+        padding: 12px 0;
+    }
+
+    .battle-log {
+        font-family: Verdana, sans-serif;
+        font-size: 10pt;
+    }
+
+    .battle-log-inline {
+        border: 1px solid #AAAAAA;
+        background: #EEF2F5;
+        color: black;
+        max-width: 640px;
+        margin: 0 auto 80px;
+        padding-bottom: 5px;
+    }
+
+    .battle-log .inner {
+        padding: 4px 8px 0px 8px;
+    }
+
+    .battle-log .inner-preempt {
+        padding: 0 8px 4px 8px;
+    }
+
+    .battle-log .inner-after {
+        margin-top: 0.5em;
+    }
+
+    .battle-log h2 {
+        margin: 0.5em -8px;
+        padding: 4px 8px;
+        border: 1px solid #AAAAAA;
+        background: #E0E7EA;
+        border-left: 0;
+        border-right: 0;
+        font-family: Verdana, sans-serif;
+        font-size: 13pt;
+    }
+
+    .backprop {
+        top: 0;
+    }
+
+    .battle-log .chat {
+        vertical-align: middle;
+        padding: 3px 0 3px 0;
+        font-size: 8pt;
+    }
+
+    .battle-log .chat strong {
+        color: #40576A;
+    }
+
+    .battle-log .chat em {
+        padding: 1px 4px 1px 3px;
+        color: #000000;
+        font-style: normal;
+    }
+
+    .chat.mine {
+        background: rgba(0, 0, 0, 0.05);
+        margin-left: -8px;
+        margin-right: -8px;
+        padding-left: 8px;
+        padding-right: 8px;
+    }
+
+    .spoiler {
+        color: #BBBBBB;
+        background: #BBBBBB;
+        padding: 0px 3px;
+    }
+
+    .spoiler:hover,
+    .spoiler:active,
+    .spoiler-shown {
+        color: #000000;
+        background: #E2E2E2;
+        padding: 0px 3px;
+    }
+
+    .spoiler a {
+        color: #BBBBBB;
+    }
+
+    .spoiler:hover a,
+    .spoiler:active a,
+    .spoiler-shown a {
+        color: #2288CC;
+    }
+
+    .chat code,
+    .chat .spoiler:hover code,
+    .chat .spoiler:active code,
+    .chat .spoiler-shown code {
+        border: 1px solid #C0C0C0;
+        background: #EEEEEE;
+        color: black;
+        padding: 0 2px;
+    }
+
+    .chat .spoiler code {
+        border: 1px solid #CCCCCC;
+        background: #CCCCCC;
+        color: #CCCCCC;
+    }
+
+    .battle-log .rated {
+        padding: 3px 4px;
+    }
+
+    .battle-log .rated strong {
+        color: white;
+        background: #89A;
+        padding: 1px 4px;
+        border-radius: 4px;
+    }
+
+    .spacer {
+        margin-top: 0.5em;
+    }
+
+    .message-announce {
+        background: #6688AA;
+        color: white;
+        padding: 1px 4px 2px;
+    }
+
+    .message-announce a,
+    .broadcast-green a,
+    .broadcast-blue a,
+    .broadcast-red a {
+        color: #DDEEFF;
+    }
+
+    .broadcast-green {
+        background-color: #559955;
+        color: white;
+        padding: 2px 4px;
+    }
+
+    .broadcast-blue {
+        background-color: #6688AA;
+        color: white;
+        padding: 2px 4px;
+    }
+
+    .infobox {
+        border: 1px solid #6688AA;
+        padding: 2px 4px;
+    }
+
+    .infobox-limited {
+        max-height: 200px;
+        overflow: auto;
+        overflow-x: hidden;
+    }
+
+    .broadcast-red {
+        background-color: #AA5544;
+        color: white;
+        padding: 2px 4px;
+    }
+
+    .message-learn-canlearn {
+        font-weight: bold;
+        color: #228822;
+        text-decoration: underline;
+    }
+
+    .message-learn-cannotlearn {
+        font-weight: bold;
+        color: #CC2222;
+        text-decoration: underline;
+    }
+
+    .message-effect-weak {
+        font-weight: bold;
+        color: #CC2222;
+    }
+
+    .message-effect-resist {
+        font-weight: bold;
+        color: #6688AA;
+    }
+
+    .message-effect-immune {
+        font-weight: bold;
+        color: #666666;
+    }
+
+    .message-learn-list {
+        margin-top: 0;
+        margin-bottom: 0;
+    }
+
+    .message-throttle-notice,
+    .message-error {
+        color: #992222;
+    }
+
+    .message-overflow,
+    .chat small.message-overflow {
+        font-size: 0pt;
+    }
+
+    .message-overflow::before {
+        font-size: 9pt;
+        content: '...';
+    }
+
+    .subtle {
+        color: #3A4A66;
+    }
+</style>
+<div class="wrapper replay-wrapper" style="max-width:1180px;margin:0 auto">
+    <input type="hidden" name="replayid" value="unregisteredserver-gen8randombattle-320064" />
+    <div class="battle"></div>
+    <div class="battle-log"></div>
+    <div class="replay-controls"></div>
+    <div class="replay-controls-2"></div>
+    <h1 style="font-weight:normal;text-align:center"><strong>poke-env battle replay</strong><br />battle-gen9championsvgc2026regma-14036<br /><a
+            href="http://pokemonshowdown.com/users/randomplayer1" class="subtle" target="_blank">LG1x22</a>
+        vs. <a href="http://pokemonshowdown.com/users/randomplayer2" class="subtle"
+            target="_blank">LG0x22</a></h1>
+    <script type="text/plain" class="battle-log-data">
+    >battle-gen9championsvgc2026regma-14036
+|init|battle
+|title|LG0x22 vs. LG1x22
+|j|☆LG0x22
+|j|☆LG1x22
+|gametype|doubles
+|player|p1|LG0x22|2|
+|player|p2|LG1x22|1|
+|gen|9
+|tier|[Gen 9 Champions] VGC 2026 Reg M-A
+|rule|Species Clause: Limit one of each Pokémon
+|rule|Item Clause: Limit 1 of each item
+|clearpoke
+|poke|p1|Sneasler, L50, F|
+|poke|p1|Incineroar, L50, M|
+|poke|p1|Kingambit, L50, F|
+|poke|p1|Palafin, L50, F|
+|poke|p1|Floette-Eternal, L50, F|
+|poke|p1|Talonflame, L50, M|
+|poke|p2|Hawlucha, L50, M|
+|poke|p2|Excadrill, L50, M|
+|poke|p2|Kingambit, L50, F|
+|poke|p2|Whimsicott, L50, M|
+|poke|p2|Weavile, L50, M|
+|poke|p2|Tyranitar, L50, F|
+|teampreview|4
+|uhtml|otsrequest|<button name="send" value="/acceptopenteamsheets" class="button" style="margin-right: 10px;"><strong>Accept Open Team Sheets</strong></button><button name="send" value="/rejectopenteamsheets" class="button" style="margin-top: 10px"><strong>Deny Open Team Sheets</strong></button>
+|
+|teamsize|p1|4
+|teamsize|p2|4
+|start
+|switch|p1a: Sneasler|Sneasler, L50, F|100/100
+|switch|p1b: Incineroar|Incineroar, L50, M|100/100
+|switch|p2a: Hawlucha|Hawlucha, L50, M|185/185
+|switch|p2b: Excadrill|Excadrill, L50, M|185/185
+|-ability|p2b: Excadrill|Mold Breaker
+|-ability|p1b: Incineroar|Intimidate|boost
+|-unboost|p2a: Hawlucha|atk|1
+|-unboost|p2b: Excadrill|atk|1
+|turn|1
+|
+|move|p2b: Excadrill|Protect|p2b: Excadrill
+|-singleturn|p2b: Excadrill|Protect
+|move|p1a: Sneasler|Fake Out|p2b: Excadrill
+|-activate|p2b: Excadrill|move: Protect
+|move|p1b: Incineroar|Fake Out|p2b: Excadrill
+|-activate|p2b: Excadrill|move: Protect
+|move|p2a: Hawlucha|Entrainment|p1b: Incineroar
+|-ability|p1b: Incineroar|Limber|Intimidate|[from] move: Entrainment|[of] p2a: Hawlucha
+|
+|upkeep
+|turn|2
+|
+|move|p2a: Hawlucha|Protect|p2a: Hawlucha
+|-singleturn|p2a: Hawlucha|Protect
+|move|p1a: Sneasler|Close Combat|p2a: Hawlucha
+|-activate|p2a: Hawlucha|move: Protect
+|move|p2b: Excadrill|Horn Drill|p1a: Sneasler|[miss]
+|-miss|p2b: Excadrill|p1a: Sneasler
+|move|p1b: Incineroar|Throat Chop|p2b: Excadrill
+|-damage|p2b: Excadrill|97/185
+|-start|p2b: Excadrill|Throat Chop|[silent]
+|
+|upkeep
+|turn|3
+|
+|switch|p1b: Palafin|Palafin, L50, F|100/100
+|move|p2b: Excadrill|Protect|p2b: Excadrill
+|-singleturn|p2b: Excadrill|Protect
+|move|p1a: Sneasler|Dire Claw|p2b: Excadrill
+|-activate|p2b: Excadrill|move: Protect
+|move|p2a: Hawlucha|Close Combat|p1a: Sneasler
+|-resisted|p1a: Sneasler|1
+|-damage|p1a: Sneasler|77/100
+|-unboost|p2a: Hawlucha|def|1
+|-unboost|p2a: Hawlucha|spd|1
+|
+|-end|p2b: Excadrill|Throat Chop|[silent]
+|upkeep
+|turn|4
+|
+|switch|p1a: Incineroar|Incineroar, L50, M|100/100
+|-ability|p1a: Incineroar|Intimidate|boost
+|-unboost|p2a: Hawlucha|atk|1
+|-unboost|p2b: Excadrill|atk|1
+|switch|p2a: Kingambit|Kingambit, L50, F|192/192
+|move|p2b: Excadrill|Horn Drill|p1a: Incineroar|[miss]
+|-miss|p2b: Excadrill|p1a: Incineroar
+|move|p1b: Palafin|Wave Crash|p2b: Excadrill
+|-supereffective|p2b: Excadrill|1
+|-damage|p2b: Excadrill|0 fnt
+|faint|p2b: Excadrill
+|-damage|p1b: Palafin|84/100|[from] Recoil
+|
+|-heal|p1b: Palafin|90/100|[from] item: Leftovers
+|upkeep
+|
+|switch|p2b: Hawlucha|Hawlucha, L50, M|185/185
+|turn|5
+|
+|detailschange|p2b: Hawlucha|Hawlucha-Mega, L50, M
+|-mega|p2b: Hawlucha|Hawlucha|Hawluchanite
+|move|p1a: Incineroar|Fake Out|p2a: Kingambit
+|-resisted|p2a: Kingambit|1
+|-damage|p2a: Kingambit|184/192
+|move|p2b: Hawlucha|Entrainment||[still]
+|-fail|p2b: Hawlucha
+|move|p1b: Palafin|Wave Crash|p2a: Kingambit
+|-damage|p2a: Kingambit|114/192
+|-damage|p1b: Palafin|79/100|[from] Recoil
+|cant|p2a: Kingambit|flinch
+|
+|-heal|p1b: Palafin|85/100|[from] item: Leftovers
+|upkeep
+|turn|6
+|
+|switch|p2b: Whimsicott|Whimsicott, L50, M|167/167
+|move|p1b: Palafin|Protect|p1b: Palafin
+|-singleturn|p1b: Palafin|Protect
+|move|p2a: Kingambit|Kowtow Cleave|p1b: Palafin
+|-activate|p1b: Palafin|move: Protect
+|move|p1a: Incineroar|Parting Shot|p2a: Kingambit
+|-unboost|p2a: Kingambit|atk|1
+|-ability|p2a: Kingambit|Defiant|boost
+|-boost|p2a: Kingambit|atk|2
+|-unboost|p2a: Kingambit|spa|1
+|-ability|p2a: Kingambit|Defiant|boost
+|-boost|p2a: Kingambit|atk|2
+|
+|switch|p1a: Sneasler|Sneasler, L50, F|77/100|[from] Parting Shot
+|
+|-heal|p1b: Palafin|90/100|[from] item: Leftovers
+|upkeep
+|turn|7
+|
+|move|p1a: Sneasler|Protect|p1a: Sneasler
+|-singleturn|p1a: Sneasler|Protect
+|move|p1b: Palafin|Protect||[still]
+|-fail|p1b: Palafin
+|move|p2b: Whimsicott|Tailwind|p2b: Whimsicott
+|-sidestart|p2: LG1x22|move: Tailwind
+|move|p2a: Kingambit|Sucker Punch||[still]
+|-fail|p2a: Kingambit
+|
+|-heal|p1b: Palafin|96/100|[from] item: Leftovers
+|upkeep
+|turn|8
+|
+|detailschange|p1b: Palafin|Palafin-Hero, L50, F
+|switch|p1b: Incineroar|Incineroar, L50, M|100/100
+|-ability|p1b: Incineroar|Intimidate|boost
+|-unboost|p2a: Kingambit|atk|1
+|-ability|p2a: Kingambit|Defiant|boost
+|-boost|p2a: Kingambit|atk|2
+|-unboost|p2b: Whimsicott|atk|1
+|move|p2b: Whimsicott|Light Screen|p2b: Whimsicott
+|-sidestart|p2: LG1x22|move: Light Screen
+|move|p2a: Kingambit|Sucker Punch||[still]
+|-fail|p2a: Kingambit
+|move|p1a: Sneasler|Dire Claw|p2b: Whimsicott
+|-supereffective|p2b: Whimsicott|2
+|-damage|p2b: Whimsicott|0 fnt
+|faint|p2b: Whimsicott
+|
+|upkeep
+|
+|switch|p2b: Hawlucha|Hawlucha-Mega, L50, M|185/185
+|turn|9
+|
+|switch|p1a: Kingambit|Kingambit, L50, F|100/100
+|move|p1b: Incineroar|Fake Out|p2a: Kingambit
+|-resisted|p2a: Kingambit|1
+|-damage|p2a: Kingambit|107/192
+|move|p2b: Hawlucha|Entrainment|p1a: Kingambit
+|-ability|p1a: Kingambit|No Guard|Defiant|[from] move: Entrainment|[of] p2b: Hawlucha
+|cant|p2a: Kingambit|flinch
+|
+|upkeep
+|turn|10
+|
+|switch|p1b: Palafin|Palafin-Hero, L50, F|96/100
+|-activate|p1b: Palafin|ability: Zero to Hero
+|move|p2a: Kingambit|Protect|p2a: Kingambit
+|-singleturn|p2a: Kingambit|Protect
+|move|p2b: Hawlucha|Entrainment||[still]
+|-fail|p2b: Hawlucha
+|move|p1a: Kingambit|Swords Dance|p1a: Kingambit
+|-boost|p1a: Kingambit|atk|2
+|
+|-heal|p1b: Palafin|100/100|[from] item: Leftovers
+|-sideend|p2: LG1x22|move: Tailwind
+|upkeep
+|turn|11
+|
+|move|p2b: Hawlucha|Entrainment||[still]
+|-fail|p2b: Hawlucha
+|move|p1b: Palafin|Bulk Up|p1b: Palafin
+|-boost|p1b: Palafin|atk|1
+|-boost|p1b: Palafin|def|1
+|move|p2a: Kingambit|Kowtow Cleave|p1b: Palafin
+|-damage|p1b: Palafin|0 fnt
+|faint|p1b: Palafin
+|move|p1a: Kingambit|Kowtow Cleave|p2b: Hawlucha
+|-resisted|p2b: Hawlucha|1
+|-damage|p2b: Hawlucha|86/185
+|
+|upkeep
+|
+|switch|p1b: Incineroar|Incineroar, L50, M|100/100
+|-ability|p1b: Incineroar|Intimidate|boost
+|-unboost|p2a: Kingambit|atk|1
+|-ability|p2a: Kingambit|Defiant|boost
+|-boost|p2a: Kingambit|atk|2
+|-unboost|p2b: Hawlucha|atk|1
+|turn|12
+|
+|move|p2b: Hawlucha|Protect|p2b: Hawlucha
+|-singleturn|p2b: Hawlucha|Protect
+|move|p2a: Kingambit|Guillotine|p1a: Kingambit
+|-damage|p1a: Kingambit|0 fnt
+|faint|p1a: Kingambit
+|-ohko
+|move|p1b: Incineroar|Throat Chop|p2b: Hawlucha
+|-activate|p2b: Hawlucha|move: Protect
+|
+|-sideend|p2: LG1x22|move: Light Screen
+|upkeep
+|
+|switch|p1a: Sneasler|Sneasler, L50, F|77/100
+|turn|13
+|
+|move|p2b: Hawlucha|Protect||[still]
+|-fail|p2b: Hawlucha
+|move|p1a: Sneasler|Dire Claw|p2a: Kingambit
+|-immune|p2a: Kingambit
+|move|p2a: Kingambit|Guillotine|p1a: Sneasler
+|-damage|p1a: Sneasler|0 fnt
+|faint|p1a: Sneasler
+|-ohko
+|move|p1b: Incineroar|Throat Chop|p2a: Kingambit
+|-resisted|p2a: Kingambit|1
+|-damage|p2a: Kingambit|86/192
+|-start|p2a: Kingambit|Throat Chop|[silent]
+|
+|upkeep
+|turn|14
+|
+|move|p2b: Hawlucha|Protect|p2b: Hawlucha
+|-singleturn|p2b: Hawlucha|Protect
+|move|p2a: Kingambit|Guillotine|p1b: Incineroar|[miss]
+|-miss|p2a: Kingambit|p1b: Incineroar
+|move|p1b: Incineroar|Parting Shot|p2b: Hawlucha
+|-activate|p2b: Hawlucha|move: Protect
+|
+|-end|p2a: Kingambit|Throat Chop|[silent]
+|upkeep
+|turn|15
+|
+|move|p2a: Kingambit|Sucker Punch|p1b: Incineroar
+|-resisted|p1b: Incineroar|1
+|-damage|p1b: Incineroar|38/100
+|-enditem|p1b: Incineroar|Sitrus Berry|[eat]
+|-heal|p1b: Incineroar|63/100|[from] item: Sitrus Berry
+|move|p2b: Hawlucha|Brave Bird|p1b: Incineroar
+|-damage|p1b: Incineroar|34/100
+|-damage|p2b: Hawlucha|67/185|[from] Recoil
+|move|p1b: Incineroar|Throat Chop|p2b: Hawlucha
+|-resisted|p2b: Hawlucha|1
+|-damage|p2b: Hawlucha|37/185
+|-start|p2b: Hawlucha|Throat Chop|[silent]
+|
+|upkeep
+|turn|16
+|
+|move|p2b: Hawlucha|Brave Bird|p2a: Kingambit
+|-resisted|p2a: Kingambit|1
+|-crit|p2a: Kingambit
+|-damage|p2a: Kingambit|20/192
+|-damage|p2b: Hawlucha|15/185|[from] Recoil
+|move|p2a: Kingambit|Kowtow Cleave|p1b: Incineroar
+|-resisted|p1b: Incineroar|1
+|-damage|p1b: Incineroar|0 fnt
+|faint|p1b: Incineroar
+|
+|win|LG1x22
+    </script>
+</div>
+
+<div class="battle-log battle-log-inline" style="display:none"></div>
+
+<script>
+    let daily = Math.floor(Date.now() / 1000 / 60 / 60 / 24); document.write('<script src="https://play.pokemonshowdown.com/js/replay-embed.js?version' + daily + '"></' + 'script>');
+</script>
+
+<p style="text-align:center"> Replay created by <a href="https://github.com/hsahovic/poke-env">poke-env</a>, with code from <a
+        href="https://github.com/smogon/pokemon-showdown"> pokemon-showdown</a>. If something goes wrong, don't hesitate
+    to open an <a href="https://github.com/hsahovic/poke-env/issues">issue!</a></p>

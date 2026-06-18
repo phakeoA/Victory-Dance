@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<meta charset="utf-8" />
+<!-- version 1 -->
+<title>battle-gen9championsvgc2026regma-14019</title>
+<style>
+    html,
+    body {
+        font-family: Verdana, sans-serif;
+        font-size: 10pt;
+        margin: 0;
+        padding: 0;
+    }
+
+    body {
+        padding: 12px 0;
+    }
+
+    .battle-log {
+        font-family: Verdana, sans-serif;
+        font-size: 10pt;
+    }
+
+    .battle-log-inline {
+        border: 1px solid #AAAAAA;
+        background: #EEF2F5;
+        color: black;
+        max-width: 640px;
+        margin: 0 auto 80px;
+        padding-bottom: 5px;
+    }
+
+    .battle-log .inner {
+        padding: 4px 8px 0px 8px;
+    }
+
+    .battle-log .inner-preempt {
+        padding: 0 8px 4px 8px;
+    }
+
+    .battle-log .inner-after {
+        margin-top: 0.5em;
+    }
+
+    .battle-log h2 {
+        margin: 0.5em -8px;
+        padding: 4px 8px;
+        border: 1px solid #AAAAAA;
+        background: #E0E7EA;
+        border-left: 0;
+        border-right: 0;
+        font-family: Verdana, sans-serif;
+        font-size: 13pt;
+    }
+
+    .backprop {
+        top: 0;
+    }
+
+    .battle-log .chat {
+        vertical-align: middle;
+        padding: 3px 0 3px 0;
+        font-size: 8pt;
+    }
+
+    .battle-log .chat strong {
+        color: #40576A;
+    }
+
+    .battle-log .chat em {
+        padding: 1px 4px 1px 3px;
+        color: #000000;
+        font-style: normal;
+    }
+
+    .chat.mine {
+        background: rgba(0, 0, 0, 0.05);
+        margin-left: -8px;
+        margin-right: -8px;
+        padding-left: 8px;
+        padding-right: 8px;
+    }
+
+    .spoiler {
+        color: #BBBBBB;
+        background: #BBBBBB;
+        padding: 0px 3px;
+    }
+
+    .spoiler:hover,
+    .spoiler:active,
+    .spoiler-shown {
+        color: #000000;
+        background: #E2E2E2;
+        padding: 0px 3px;
+    }
+
+    .spoiler a {
+        color: #BBBBBB;
+    }
+
+    .spoiler:hover a,
+    .spoiler:active a,
+    .spoiler-shown a {
+        color: #2288CC;
+    }
+
+    .chat code,
+    .chat .spoiler:hover code,
+    .chat .spoiler:active code,
+    .chat .spoiler-shown code {
+        border: 1px solid #C0C0C0;
+        background: #EEEEEE;
+        color: black;
+        padding: 0 2px;
+    }
+
+    .chat .spoiler code {
+        border: 1px solid #CCCCCC;
+        background: #CCCCCC;
+        color: #CCCCCC;
+    }
+
+    .battle-log .rated {
+        padding: 3px 4px;
+    }
+
+    .battle-log .rated strong {
+        color: white;
+        background: #89A;
+        padding: 1px 4px;
+        border-radius: 4px;
+    }
+
+    .spacer {
+        margin-top: 0.5em;
+    }
+
+    .message-announce {
+        background: #6688AA;
+        color: white;
+        padding: 1px 4px 2px;
+    }
+
+    .message-announce a,
+    .broadcast-green a,
+    .broadcast-blue a,
+    .broadcast-red a {
+        color: #DDEEFF;
+    }
+
+    .broadcast-green {
+        background-color: #559955;
+        color: white;
+        padding: 2px 4px;
+    }
+
+    .broadcast-blue {
+        background-color: #6688AA;
+        color: white;
+        padding: 2px 4px;
+    }
+
+    .infobox {
+        border: 1px solid #6688AA;
+        padding: 2px 4px;
+    }
+
+    .infobox-limited {
+        max-height: 200px;
+        overflow: auto;
+        overflow-x: hidden;
+    }
+
+    .broadcast-red {
+        background-color: #AA5544;
+        color: white;
+        padding: 2px 4px;
+    }
+
+    .message-learn-canlearn {
+        font-weight: bold;
+        color: #228822;
+        text-decoration: underline;
+    }
+
+    .message-learn-cannotlearn {
+        font-weight: bold;
+        color: #CC2222;
+        text-decoration: underline;
+    }
+
+    .message-effect-weak {
+        font-weight: bold;
+        color: #CC2222;
+    }
+
+    .message-effect-resist {
+        font-weight: bold;
+        color: #6688AA;
+    }
+
+    .message-effect-immune {
+        font-weight: bold;
+        color: #666666;
+    }
+
+    .message-learn-list {
+        margin-top: 0;
+        margin-bottom: 0;
+    }
+
+    .message-throttle-notice,
+    .message-error {
+        color: #992222;
+    }
+
+    .message-overflow,
+    .chat small.message-overflow {
+        font-size: 0pt;
+    }
+
+    .message-overflow::before {
+        font-size: 9pt;
+        content: '...';
+    }
+
+    .subtle {
+        color: #3A4A66;
+    }
+</style>
+<div class="wrapper replay-wrapper" style="max-width:1180px;margin:0 auto">
+    <input type="hidden" name="replayid" value="unregisteredserver-gen8randombattle-320064" />
+    <div class="battle"></div>
+    <div class="battle-log"></div>
+    <div class="replay-controls"></div>
+    <div class="replay-controls-2"></div>
+    <h1 style="font-weight:normal;text-align:center"><strong>poke-env battle replay</strong><br />battle-gen9championsvgc2026regma-14019<br /><a
+            href="http://pokemonshowdown.com/users/randomplayer1" class="subtle" target="_blank">LG0x4</a>
+        vs. <a href="http://pokemonshowdown.com/users/randomplayer2" class="subtle"
+            target="_blank">LG1x4</a></h1>
+    <script type="text/plain" class="battle-log-data">
+    >battle-gen9championsvgc2026regma-14019
+|init|battle
+|title|LG0x4 vs. LG1x4
+|j|☆LG0x4
+|j|☆LG1x4
+|gametype|doubles
+|player|p1|LG0x4|101|
+|player|p2|LG1x4|169|
+|gen|9
+|tier|[Gen 9 Champions] VGC 2026 Reg M-A
+|rule|Species Clause: Limit one of each Pokémon
+|rule|Item Clause: Limit 1 of each item
+|clearpoke
+|poke|p1|Sylveon, L50, M|
+|poke|p1|Scovillain, L50, F|
+|poke|p1|Pelipper, L50, F|
+|poke|p1|Espathra, L50, F|
+|poke|p1|Sinistcha, L50|
+|poke|p1|Archaludon, L50, F|
+|poke|p2|Delphox, L50, F|
+|poke|p2|Basculegion, L50, M|
+|poke|p2|Clefable, L50, F|
+|poke|p2|Kingambit, L50, M|
+|poke|p2|Dragonite, L50, F|
+|poke|p2|Sneasler, L50, M|
+|teampreview|4
+|uhtml|otsrequest|<button name="send" value="/acceptopenteamsheets" class="button" style="margin-right: 10px;"><strong>Accept Open Team Sheets</strong></button><button name="send" value="/rejectopenteamsheets" class="button" style="margin-top: 10px"><strong>Deny Open Team Sheets</strong></button>
+|
+|teamsize|p1|4
+|teamsize|p2|4
+|start
+|switch|p1a: Sylveon|Sylveon, L50, M|187/187
+|switch|p1b: Scovillain|Scovillain, L50, F|169/169
+|switch|p2a: Delphox|Delphox, L50, F|100/100
+|switch|p2b: Basculegion|Basculegion, L50, M|100/100
+|turn|1
+|
+|switch|p1a: Pelipper|Pelipper, L50, F|166/166
+|-weather|RainDance|[from] ability: Drizzle|[of] p1a: Pelipper
+|detailschange|p2a: Delphox|Delphox-Mega, L50, F
+|-mega|p2a: Delphox|Delphox|Delphoxite
+|detailschange|p1b: Scovillain|Scovillain-Mega, L50, F
+|-mega|p1b: Scovillain|Scovillain|Scovillainite
+|move|p2a: Delphox|Protect|p2a: Delphox
+|-singleturn|p2a: Delphox|Protect
+|move|p1b: Scovillain|Protect|p1b: Scovillain
+|-singleturn|p1b: Scovillain|Protect
+|move|p2b: Basculegion|Wave Crash|p1b: Scovillain
+|-activate|p1b: Scovillain|move: Protect
+|
+|-weather|RainDance|[upkeep]
+|upkeep
+|turn|2
+|
+|switch|p1a: Espathra|Espathra, L50, F|202/202
+|move|p2a: Delphox|Substitute|p2a: Delphox
+|-start|p2a: Delphox|Substitute
+|-damage|p2a: Delphox|75/100
+|move|p2b: Basculegion|Wave Crash|p1b: Scovillain
+|-damage|p1b: Scovillain|0 fnt
+|-status|p2b: Basculegion|brn|[from] ability: Spicy Spray|[of] p1b: Scovillain
+|faint|p1b: Scovillain
+|-damage|p2b: Basculegion|71/100 brn|[from] Recoil
+|
+|-weather|RainDance|[upkeep]
+|-damage|p2b: Basculegion|65/100 brn|[from] brn
+|upkeep
+|
+|switch|p1b: Pelipper|Pelipper, L50, F|166/166
+|turn|3
+|
+|move|p2a: Delphox|Heat Wave|p1a: Espathra|[spread] p1a,p1b
+|-resisted|p1b: Pelipper|1
+|-damage|p1a: Espathra|148/202
+|-damage|p1b: Pelipper|145/166
+|move|p2b: Basculegion|Wave Crash|p1b: Pelipper
+|-resisted|p1b: Pelipper|1
+|-damage|p1b: Pelipper|93/166
+|-damage|p2b: Basculegion|56/100 brn|[from] Recoil
+|move|p1a: Espathra|Calm Mind|p1a: Espathra
+|-boost|p1a: Espathra|spa|1
+|-boost|p1a: Espathra|spd|1
+|move|p1b: Pelipper|Hurricane|p2a: Delphox
+|-end|p2a: Delphox|Substitute
+|
+|-weather|RainDance|[upkeep]
+|-damage|p2b: Basculegion|50/100g brn|[from] brn
+|-ability|p1a: Espathra|Speed Boost|boost
+|-boost|p1a: Espathra|spe|1
+|upkeep
+|turn|4
+|
+|switch|p2b: Clefable|Clefable, L50, F|100/100
+|move|p1a: Espathra|Baton Pass|p1a: Espathra
+|
+|switch|p1a: Sylveon|Sylveon, L50, M|187/187|[from] Baton Pass
+|move|p2a: Delphox|Heat Wave|p1b: Pelipper|[spread] p1a
+|-miss|p2a: Delphox|p1b: Pelipper
+|-damage|p1a: Sylveon|166/187
+|move|p1b: Pelipper|Weather Ball|p2b: Clefable
+|-damage|p2b: Clefable|43/100
+|-enditem|p2b: Clefable|Sitrus Berry|[eat]
+|-heal|p2b: Clefable|68/100|[from] item: Sitrus Berry
+|
+|-weather|RainDance|[upkeep]
+|upkeep
+|turn|5
+|
+|move|p2b: Clefable|Protect|p2b: Clefable
+|-singleturn|p2b: Clefable|Protect
+|move|p1a: Sylveon|Quick Attack|p2a: Delphox
+|-resisted|p2a: Delphox|1
+|-damage|p2a: Delphox|65/100
+|move|p2a: Delphox|Substitute|p2a: Delphox
+|-start|p2a: Delphox|Substitute
+|-damage|p2a: Delphox|40/100
+|move|p1b: Pelipper|Hurricane|p2a: Delphox
+|-end|p2a: Delphox|Substitute
+|
+|-weather|none
+|upkeep
+|turn|6
+|
+|move|p2b: Clefable|Protect||[still]
+|-fail|p2b: Clefable
+|move|p1a: Sylveon|Quick Attack|p2a: Delphox
+|-resisted|p2a: Delphox|1
+|-damage|p2a: Delphox|30/100
+|move|p2a: Delphox|Heat Wave|p1b: Pelipper|[spread] p1a,p1b
+|-resisted|p1b: Pelipper|1
+|-damage|p1a: Sylveon|124/187
+|-damage|p1b: Pelipper|53/166
+|-enditem|p1b: Pelipper|Sitrus Berry|[eat]
+|-heal|p1b: Pelipper|94/166|[from] item: Sitrus Berry
+|move|p1b: Pelipper|Weather Ball|p1a: Sylveon
+|-damage|p1a: Sylveon|112/187
+|
+|upkeep
+|turn|7
+|
+|switch|p2b: Basculegion|Basculegion, L50, M|50/100g brn
+|move|p1b: Pelipper|Wide Guard|p1b: Pelipper
+|-singleturn|p1b: Pelipper|Wide Guard
+|move|p2a: Delphox|Psychic|p1a: Sylveon
+|-damage|p1a: Sylveon|63/187
+|move|p1a: Sylveon|Hyper Voice|p2a: Delphox|[spread] p2a,p2b
+|-resisted|p2a: Delphox|1
+|-damage|p2a: Delphox|0 fnt
+|-damage|p2b: Basculegion|0 fnt
+|faint|p2a: Delphox
+|faint|p2b: Basculegion
+|
+|upkeep
+|
+|switch|p2a: Kingambit|Kingambit, L50, M|100/100
+|switch|p2b: Clefable|Clefable, L50, F|68/100
+|turn|8
+|
+|switch|p1a: Espathra|Espathra, L50, F|148/202
+|move|p2a: Kingambit|Sucker Punch||[still]
+|-fail|p2a: Kingambit
+|move|p1b: Pelipper|Weather Ball|p2b: Clefable
+|-damage|p2b: Clefable|55/100
+|move|p2b: Clefable|Moonblast|p1b: Pelipper
+|-damage|p1b: Pelipper|30/166
+|
+|upkeep
+|turn|9
+|
+|switch|p1b: Sylveon|Sylveon, L50, M|63/187
+|move|p1a: Espathra|Protect|p1a: Espathra
+|-singleturn|p1a: Espathra|Protect
+|move|p2b: Clefable|Protect|p2b: Clefable
+|-singleturn|p2b: Clefable|Protect
+|move|p2a: Kingambit|Protect||[still]
+|-fail|p2a: Kingambit
+|
+|-ability|p1a: Espathra|Speed Boost|boost
+|-boost|p1a: Espathra|spe|1
+|upkeep
+|turn|10
+|
+|move|p1b: Sylveon|Detect|p1b: Sylveon
+|-singleturn|p1b: Sylveon|Protect
+|move|p1a: Espathra|Lumina Crash|p2a: Kingambit
+|-immune|p2a: Kingambit
+|move|p2b: Clefable|Moonblast|p1a: Espathra
+|-damage|p1a: Espathra|69/202
+|move|p2a: Kingambit|Swords Dance|p2a: Kingambit
+|-boost|p2a: Kingambit|atk|2
+|
+|-ability|p1a: Espathra|Speed Boost|boost
+|-boost|p1a: Espathra|spe|1
+|upkeep
+|turn|11
+|
+|switch|p1b: Pelipper|Pelipper, L50, F|30/166
+|-weather|RainDance|[from] ability: Drizzle|[of] p1b: Pelipper
+|move|p1a: Espathra|Baton Pass|p1a: Espathra
+|
+|switch|p1a: Sylveon|Sylveon, L50, M|63/187|[from] Baton Pass
+|move|p2b: Clefable|Moonblast|p1b: Pelipper
+|-damage|p1b: Pelipper|0 fnt
+|faint|p1b: Pelipper
+|move|p2a: Kingambit|Kowtow Cleave|p1a: Sylveon
+|-resisted|p1a: Sylveon|1
+|-damage|p1a: Sylveon|0 fnt
+|faint|p1a: Sylveon
+|
+|-weather|RainDance|[upkeep]
+|upkeep
+|
+|switch|p1a: Espathra|Espathra, L50, F|69/202
+|turn|12
+|
+|move|p2b: Clefable|Protect|p2b: Clefable
+|-singleturn|p2b: Clefable|Protect
+|move|p2a: Kingambit|Sucker Punch||[still]
+|-fail|p2a: Kingambit
+|move|p1a: Espathra|Baton Pass||[still]
+|-fail|p1a: Espathra
+|
+|-weather|RainDance|[upkeep]
+|-ability|p1a: Espathra|Speed Boost|boost
+|-boost|p1a: Espathra|spe|1
+|upkeep
+|turn|13
+|
+|move|p2b: Clefable|Follow Me|p2b: Clefable
+|-singleturn|p2b: Clefable|move: Follow Me
+|move|p1a: Espathra|Lumina Crash|p2b: Clefable
+|-damage|p2b: Clefable|27/100
+|-unboost|p2b: Clefable|spd|2
+|move|p2a: Kingambit|Swords Dance|p2a: Kingambit
+|-boost|p2a: Kingambit|atk|2
+|
+|-weather|RainDance|[upkeep]
+|-ability|p1a: Espathra|Speed Boost|boost
+|-boost|p1a: Espathra|spe|1
+|upkeep
+|turn|14
+|
+|move|p1a: Espathra|Calm Mind|p1a: Espathra
+|-boost|p1a: Espathra|spa|1
+|-boost|p1a: Espathra|spd|1
+|move|p2b: Clefable|Moonblast|p1a: Espathra
+|-damage|p1a: Espathra|0 fnt
+|faint|p1a: Espathra
+|
+|win|LG1x4
+    </script>
+</div>
+
+<div class="battle-log battle-log-inline" style="display:none"></div>
+
+<script>
+    let daily = Math.floor(Date.now() / 1000 / 60 / 60 / 24); document.write('<script src="https://play.pokemonshowdown.com/js/replay-embed.js?version' + daily + '"></' + 'script>');
+</script>
+
+<p style="text-align:center"> Replay created by <a href="https://github.com/hsahovic/poke-env">poke-env</a>, with code from <a
+        href="https://github.com/smogon/pokemon-showdown"> pokemon-showdown</a>. If something goes wrong, don't hesitate
+    to open an <a href="https://github.com/hsahovic/poke-env/issues">issue!</a></p>

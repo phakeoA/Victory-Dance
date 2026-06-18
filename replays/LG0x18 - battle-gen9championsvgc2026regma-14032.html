@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<meta charset="utf-8" />
+<!-- version 1 -->
+<title>battle-gen9championsvgc2026regma-14032</title>
+<style>
+    html,
+    body {
+        font-family: Verdana, sans-serif;
+        font-size: 10pt;
+        margin: 0;
+        padding: 0;
+    }
+
+    body {
+        padding: 12px 0;
+    }
+
+    .battle-log {
+        font-family: Verdana, sans-serif;
+        font-size: 10pt;
+    }
+
+    .battle-log-inline {
+        border: 1px solid #AAAAAA;
+        background: #EEF2F5;
+        color: black;
+        max-width: 640px;
+        margin: 0 auto 80px;
+        padding-bottom: 5px;
+    }
+
+    .battle-log .inner {
+        padding: 4px 8px 0px 8px;
+    }
+
+    .battle-log .inner-preempt {
+        padding: 0 8px 4px 8px;
+    }
+
+    .battle-log .inner-after {
+        margin-top: 0.5em;
+    }
+
+    .battle-log h2 {
+        margin: 0.5em -8px;
+        padding: 4px 8px;
+        border: 1px solid #AAAAAA;
+        background: #E0E7EA;
+        border-left: 0;
+        border-right: 0;
+        font-family: Verdana, sans-serif;
+        font-size: 13pt;
+    }
+
+    .backprop {
+        top: 0;
+    }
+
+    .battle-log .chat {
+        vertical-align: middle;
+        padding: 3px 0 3px 0;
+        font-size: 8pt;
+    }
+
+    .battle-log .chat strong {
+        color: #40576A;
+    }
+
+    .battle-log .chat em {
+        padding: 1px 4px 1px 3px;
+        color: #000000;
+        font-style: normal;
+    }
+
+    .chat.mine {
+        background: rgba(0, 0, 0, 0.05);
+        margin-left: -8px;
+        margin-right: -8px;
+        padding-left: 8px;
+        padding-right: 8px;
+    }
+
+    .spoiler {
+        color: #BBBBBB;
+        background: #BBBBBB;
+        padding: 0px 3px;
+    }
+
+    .spoiler:hover,
+    .spoiler:active,
+    .spoiler-shown {
+        color: #000000;
+        background: #E2E2E2;
+        padding: 0px 3px;
+    }
+
+    .spoiler a {
+        color: #BBBBBB;
+    }
+
+    .spoiler:hover a,
+    .spoiler:active a,
+    .spoiler-shown a {
+        color: #2288CC;
+    }
+
+    .chat code,
+    .chat .spoiler:hover code,
+    .chat .spoiler:active code,
+    .chat .spoiler-shown code {
+        border: 1px solid #C0C0C0;
+        background: #EEEEEE;
+        color: black;
+        padding: 0 2px;
+    }
+
+    .chat .spoiler code {
+        border: 1px solid #CCCCCC;
+        background: #CCCCCC;
+        color: #CCCCCC;
+    }
+
+    .battle-log .rated {
+        padding: 3px 4px;
+    }
+
+    .battle-log .rated strong {
+        color: white;
+        background: #89A;
+        padding: 1px 4px;
+        border-radius: 4px;
+    }
+
+    .spacer {
+        margin-top: 0.5em;
+    }
+
+    .message-announce {
+        background: #6688AA;
+        color: white;
+        padding: 1px 4px 2px;
+    }
+
+    .message-announce a,
+    .broadcast-green a,
+    .broadcast-blue a,
+    .broadcast-red a {
+        color: #DDEEFF;
+    }
+
+    .broadcast-green {
+        background-color: #559955;
+        color: white;
+        padding: 2px 4px;
+    }
+
+    .broadcast-blue {
+        background-color: #6688AA;
+        color: white;
+        padding: 2px 4px;
+    }
+
+    .infobox {
+        border: 1px solid #6688AA;
+        padding: 2px 4px;
+    }
+
+    .infobox-limited {
+        max-height: 200px;
+        overflow: auto;
+        overflow-x: hidden;
+    }
+
+    .broadcast-red {
+        background-color: #AA5544;
+        color: white;
+        padding: 2px 4px;
+    }
+
+    .message-learn-canlearn {
+        font-weight: bold;
+        color: #228822;
+        text-decoration: underline;
+    }
+
+    .message-learn-cannotlearn {
+        font-weight: bold;
+        color: #CC2222;
+        text-decoration: underline;
+    }
+
+    .message-effect-weak {
+        font-weight: bold;
+        color: #CC2222;
+    }
+
+    .message-effect-resist {
+        font-weight: bold;
+        color: #6688AA;
+    }
+
+    .message-effect-immune {
+        font-weight: bold;
+        color: #666666;
+    }
+
+    .message-learn-list {
+        margin-top: 0;
+        margin-bottom: 0;
+    }
+
+    .message-throttle-notice,
+    .message-error {
+        color: #992222;
+    }
+
+    .message-overflow,
+    .chat small.message-overflow {
+        font-size: 0pt;
+    }
+
+    .message-overflow::before {
+        font-size: 9pt;
+        content: '...';
+    }
+
+    .subtle {
+        color: #3A4A66;
+    }
+</style>
+<div class="wrapper replay-wrapper" style="max-width:1180px;margin:0 auto">
+    <input type="hidden" name="replayid" value="unregisteredserver-gen8randombattle-320064" />
+    <div class="battle"></div>
+    <div class="battle-log"></div>
+    <div class="replay-controls"></div>
+    <div class="replay-controls-2"></div>
+    <h1 style="font-weight:normal;text-align:center"><strong>poke-env battle replay</strong><br />battle-gen9championsvgc2026regma-14032<br /><a
+            href="http://pokemonshowdown.com/users/randomplayer1" class="subtle" target="_blank">LG0x18</a>
+        vs. <a href="http://pokemonshowdown.com/users/randomplayer2" class="subtle"
+            target="_blank">LG1x18</a></h1>
+    <script type="text/plain" class="battle-log-data">
+    >battle-gen9championsvgc2026regma-14032
+|init|battle
+|title|LG0x18 vs. LG1x18
+|j|☆LG0x18
+|j|☆LG1x18
+|gametype|doubles
+|player|p1|LG0x18|265|
+|player|p2|LG1x18|102|
+|gen|9
+|tier|[Gen 9 Champions] VGC 2026 Reg M-A
+|rule|Species Clause: Limit one of each Pokémon
+|rule|Item Clause: Limit 1 of each item
+|clearpoke
+|poke|p1|Talonflame, L50, F|
+|poke|p1|Rotom-Wash, L50|
+|poke|p1|Ninetales-Alola, L50, F|
+|poke|p1|Glimmora, L50, M|
+|poke|p1|Kingambit, L50, F|
+|poke|p1|Garchomp, L50, M|
+|poke|p2|Floette-Eternal, L50, F|
+|poke|p2|Ceruledge, L50, F|
+|poke|p2|Kommo-o, L50, F|
+|poke|p2|Milotic, L50, M|
+|poke|p2|Serperior, L50, M|
+|poke|p2|Wyrdeer, L50, M|
+|teampreview|4
+|uhtml|otsrequest|<button name="send" value="/acceptopenteamsheets" class="button" style="margin-right: 10px;"><strong>Accept Open Team Sheets</strong></button><button name="send" value="/rejectopenteamsheets" class="button" style="margin-top: 10px"><strong>Deny Open Team Sheets</strong></button>
+|
+|teamsize|p1|4
+|teamsize|p2|4
+|start
+|switch|p1a: Talonflame|Talonflame, L50, F|155/155
+|switch|p1b: Rotom|Rotom-Wash, L50|157/157
+|switch|p2a: Floette|Floette-Eternal, L50, F|100/100
+|switch|p2b: Ceruledge|Ceruledge, L50, F|100/100
+|turn|1
+|
+|detailschange|p2a: Floette|Floette-Mega, L50, F
+|-mega|p2a: Floette|Floette|Floettite
+|-ability|p2a: Floette|Fairy Aura
+|move|p1a: Talonflame|Acrobatics|p1b: Rotom
+|-resisted|p1b: Rotom|1
+|-damage|p1b: Rotom|124/157
+|move|p2a: Floette|Dazzling Gleam|p1a: Talonflame|[spread] p1a,p1b
+|-resisted|p1a: Talonflame|1
+|-crit|p1a: Talonflame
+|-damage|p1a: Talonflame|85/155
+|-damage|p1b: Rotom|57/157
+|move|p1b: Rotom|Will-O-Wisp|p2b: Ceruledge
+|-start|p2b: Ceruledge|ability: Flash Fire
+|move|p2b: Ceruledge|Bitter Blade|p1b: Rotom
+|-resisted|p1b: Rotom|1
+|-damage|p1b: Rotom|0 fnt
+|faint|p1b: Rotom
+|
+|upkeep
+|
+|switch|p1b: Ninetales|Ninetales-Alola, L50, F|161/161
+|-weather|Snowscape|[from] ability: Snow Warning|[of] p1b: Ninetales
+|turn|2
+|
+|move|p2b: Ceruledge|Shadow Sneak|p2a: Floette
+|-damage|p2a: Floette|81/100
+|move|p1a: Talonflame|Acrobatics|p2b: Ceruledge
+|-damage|p2b: Ceruledge|56/100
+|move|p1b: Ninetales|Blizzard|p2a: Floette|[spread] p2a,p2b
+|-resisted|p2b: Ceruledge|1
+|-damage|p2a: Floette|59/100
+|-damage|p2b: Ceruledge|40/100
+|move|p2a: Floette|Dazzling Gleam|p1b: Ninetales|[spread] p1a,p1b
+|-resisted|p1a: Talonflame|1
+|-damage|p1a: Talonflame|35/155
+|-damage|p1b: Ninetales|86/161
+|
+|-weather|Snowscape|[upkeep]
+|upkeep
+|turn|3
+|
+|switch|p1a: Glimmora|Glimmora, L50, M|173/173
+|switch|p2a: Milotic|Milotic, L50, M|100/100
+|move|p1b: Ninetales|Encore||[still]
+|-fail|p1b: Ninetales
+|move|p2b: Ceruledge|Bulk Up|p2b: Ceruledge
+|-boost|p2b: Ceruledge|atk|1
+|-boost|p2b: Ceruledge|def|1
+|
+|-weather|Snowscape|[upkeep]
+|upkeep
+|turn|4
+|
+|detailschange|p1a: Glimmora|Glimmora-Mega, L50, M
+|-mega|p1a: Glimmora|Glimmora|Glimmoranite
+|move|p1b: Ninetales|Encore||[still]
+|-fail|p1b: Ninetales
+|move|p1a: Glimmora|Earth Power|p2a: Milotic
+|-damage|p2a: Milotic|78/100
+|move|p2b: Ceruledge|Bitter Blade|p1a: Glimmora
+|-resisted|p1a: Glimmora|1
+|-crit|p1a: Glimmora
+|-damage|p1a: Glimmora|31/173
+|-heal|p2b: Ceruledge|79/100|[from] drain|[of] p1a: Glimmora
+|move|p2a: Milotic|Coil|p2a: Milotic
+|-boost|p2a: Milotic|atk|1
+|-boost|p2a: Milotic|def|1
+|-boost|p2a: Milotic|accuracy|1
+|
+|-weather|Snowscape|[upkeep]
+|-heal|p2a: Milotic|84/100|[from] item: Leftovers
+|upkeep
+|turn|5
+|
+|move|p1b: Ninetales|Blizzard|p2a: Milotic|[spread] p2a,p2b
+|-resisted|p2a: Milotic|1
+|-crit|p2a: Milotic
+|-resisted|p2b: Ceruledge|1
+|-damage|p2a: Milotic|67/100
+|-damage|p2b: Ceruledge|64/100
+|move|p1a: Glimmora|Sludge Bomb|p2a: Milotic
+|-damage|p2a: Milotic|16/100
+|-status|p2a: Milotic|psn
+|move|p2b: Ceruledge|Bulk Up|p2b: Ceruledge
+|-boost|p2b: Ceruledge|atk|1
+|-boost|p2b: Ceruledge|def|1
+|move|p2a: Milotic|Muddy Water|p1b: Ninetales|[spread] p1a,p1b
+|-supereffective|p1a: Glimmora|1
+|-damage|p1a: Glimmora|0 fnt
+|-damage|p1b: Ninetales|44/161
+|-unboost|p1b: Ninetales|accuracy|1
+|faint|p1a: Glimmora
+|
+|-weather|Snowscape|[upkeep]
+|-heal|p2a: Milotic|22/100 psn|[from] item: Leftovers
+|-damage|p2a: Milotic|10/100 psn|[from] psn
+|upkeep
+|
+|switch|p1a: Talonflame|Talonflame, L50, F|35/155
+|turn|6
+|
+|move|p1a: Talonflame|Acrobatics|p2b: Ceruledge
+|-damage|p2b: Ceruledge|44/100
+|move|p1b: Ninetales|Encore|p2b: Ceruledge
+|-start|p2b: Ceruledge|Encore
+|move|p2b: Ceruledge|Bulk Up|p2b: Ceruledge
+|-boost|p2b: Ceruledge|atk|1
+|-boost|p2b: Ceruledge|def|1
+|move|p2a: Milotic|Muddy Water|p1a: Talonflame|[spread] p1a,p1b
+|-supereffective|p1a: Talonflame|1
+|-damage|p1a: Talonflame|0 fnt
+|-damage|p1b: Ninetales|0 fnt
+|faint|p1a: Talonflame
+|faint|p1b: Ninetales
+|
+|win|LG1x18
+    </script>
+</div>
+
+<div class="battle-log battle-log-inline" style="display:none"></div>
+
+<script>
+    let daily = Math.floor(Date.now() / 1000 / 60 / 60 / 24); document.write('<script src="https://play.pokemonshowdown.com/js/replay-embed.js?version' + daily + '"></' + 'script>');
+</script>
+
+<p style="text-align:center"> Replay created by <a href="https://github.com/hsahovic/poke-env">poke-env</a>, with code from <a
+        href="https://github.com/smogon/pokemon-showdown"> pokemon-showdown</a>. If something goes wrong, don't hesitate
+    to open an <a href="https://github.com/hsahovic/poke-env/issues">issue!</a></p>

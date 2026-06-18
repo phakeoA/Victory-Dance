@@ -199,7 +199,7 @@ async def collect_with_league(actor_critic, league: OpponentLeague, n_games: int
                               matchup_seed: int = 0, chunk_size: int = 10,
                               n_workers: int = 1, stop_check=None,
                               battle_timeout: Optional[float] = 90.0, team_chooser=None,
-                              status=None):
+                              status=None, live_dir=None, save_replays: bool = False):
     """Collect ``n_games`` self-play games against LEAGUE-sampled opponents (assumes the
     Showdown server is already up — the caller manages it). Each chunk draws one opponent:
       * latest    -> SelfPlayVGCPlayer(ac) on both seats; collect BOTH trajectories (both
@@ -228,9 +228,10 @@ async def collect_with_league(actor_critic, league: OpponentLeague, n_games: int
     showcase = {"log": None}             # raw |-log of one game, for a Type_D replay (3c.5)
     prog = {"games": 0, "won": 0, "decided": 0}    # live progress (3c.6e-3)
 
-    def _sp(team, who, uid, cn, status=None):
+    def _sp(team, who, uid, cn, live=None):
         return SelfPlayVGCPlayer(
-            actor_critic, tau=tau, sample_seed=seed + (who * 10_000) + uid, status=status,
+            actor_critic, tau=tau, sample_seed=seed + (who * 10_000) + uid, live_dir=live,
+            save_replays=save_replays,
             replay_path=_REPO_ROOT / "artifacts" / "replay_buffer" / f"LG{who}_{uid}.jsonl",
             account_configuration=AccountConfiguration(f"LG{who}x{uid}", None),
             battle_format=R.BATTLE_FORMAT, team=team, max_concurrent_battles=max(1, cn),
@@ -246,9 +247,9 @@ async def collect_with_league(actor_critic, league: OpponentLeague, n_games: int
         tb = R.load_team(R.resolve_team_path(d["team_b"]))
         cn, spec, uid = d["cn"], d["spec"], d["uid"]
         kind = spec[0]
-        our = _sp(ta, 0, uid, cn, status=status)
+        our = _sp(ta, 0, uid, cn, live=live_dir)         # #18: our recorder publishes the room+log
         if kind == "latest":
-            opp = _sp(tb, 1, uid, cn)
+            opp = _sp(tb, 1, uid, cn)                     # opp shares the same battle_tag; one writer is enough
         elif kind == "snapshot":
             opp = R.make_player(f"LGsx{uid}", tb, model_path=spec[1].path,
                                 team_chooser_path=team_chooser, max_concurrent_battles=max(1, cn))
@@ -296,7 +297,8 @@ def gauntlet_eval(candidate_path, *, teams, team_chooser, battles: int = 30,
                   matchup_seed: int = 0, battle_timeout: Optional[float] = 90.0,
                   manage_server: bool = False, n_workers: int = 1,
                   prev_best_path: Optional[str] = None,
-                  mirror_battles: Optional[int] = None, stop_check=None):
+                  mirror_battles: Optional[int] = None, stop_check=None,
+                  live_dir=None, save_replays: bool = False):
     """Evaluate a saved checkpoint on the scripted gauntlet (>=4 teams, side-balanced).
     Returns ``(results{opp:(wins,n)}, model_elo)``. ``n_workers`` (3c.8c) parallelises the
     eval the same way as collection so the promotion gate isn't the throughput bottleneck.
@@ -321,7 +323,8 @@ def gauntlet_eval(candidate_path, *, teams, team_chooser, battles: int = 30,
         prev_best_ckpt=Path(prev_best_path) if prev_best_path else None,
         team_chooser=Path(team_chooser), manage_server=manage_server,
         matchup_seed=matchup_seed, battle_timeout=battle_timeout, n_workers=n_workers,
-        mirror_battles=mirror_battles, stop_check=stop_check))
+        mirror_battles=mirror_battles, stop_check=stop_check,
+        live_dir=live_dir, save_replays=save_replays))
     return results, GA.model_elo(results)
 
 
@@ -415,12 +418,17 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                          eval_battles=None, mirror_battles: int = 360, manage_server: bool = True,
                          device: str = "cpu", n_workers: int = 1, collect_workers=None,
                          collect_procs: int = 1, collect_async_per_proc: int = 3,
-                         resume_from=None, snapshot_path=None, max_hours=None) -> dict:
+                         resume_from=None, resume_gen=None, keep_snapshots: int = 25,
+                         save_replays: bool = False,
+                         snapshot_path=None, max_hours=None) -> dict:
     """Run real generations end-to-end (collect via the league -> PPO update -> gauntlet
-    eval -> promotion gate -> admit/refresh/revert), RESUMABLY (3c.4): a snapshot is
-    written after every generation, ``resume_from`` continues exactly, and the run stops
-    cleanly on Ctrl-C or after ``max_hours``. ``n_generations=None`` => run until stopped.
-    The Showdown server is started ONCE and reused across collect + eval.
+    eval -> promotion gate -> admit/refresh/revert), RESUMABLY (3c.4 / #20): a PER-GENERATION
+    snapshot (``snap_gen{N}.pt`` in ``archive``) is written after every generation, so a later run
+    can ``resume_gen`` from ANY kept generation (an int N continues at N+1; ``"latest"`` = the
+    newest; ``None`` = fresh from ``--ckpt``). ``resume_from`` is the legacy explicit-file path.
+    ``keep_snapshots`` bounds how many per-gen snapshots are retained (0 = all). The run stops
+    cleanly on Ctrl-C or after ``max_hours``; ``n_generations=None`` => run until stopped. The
+    Showdown server is started ONCE and reused across collect + eval.
 
     ``team_pool`` is the TRAINING pool (sec 15: draw both sides from the full archetype-rich
     set for pilot/counter exposure); ``eval_team_pool`` (default = ``team_pool``) is the
@@ -438,7 +446,13 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
 
     archive = Path(archive_dir)
     archive.mkdir(parents=True, exist_ok=True)
-    snap_path = Path(snapshot_path) if snapshot_path else (archive / "resume.pt")
+    # #18b spectate: a per-RUN folder live/<start-stamp>/gen_<N>/{replays,eval}. In-flight battles
+    # write there; on finish they're SAVED (save_replays) or deleted. Each run = a fresh folder, so
+    # no clearing needed; the dashboard recursively globs live/ for the currently-live battles.
+    from v_dance.selfplay.status import run_stamp as _run_stamp, gen_kind_dir as _gen_kind_dir
+    live_run_dir = archive / "live" / _run_stamp()
+    print(f"   spectate: live/{live_run_dir.name}/gen_*/<replays|eval>  "
+          f"({'SAVING replays' if save_replays else 'live-only (deleted on finish)'})")
     _eval_pool = list(eval_team_pool) if eval_team_pool else list(team_pool)
     _eval_pairs = len(_eval_pool) * (len(_eval_pool) - 1)
     eval_battles = resolve_eval_battles(eval_battles, len(_eval_pool))
@@ -477,11 +491,22 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
     _base_target_kl = trainer.tcfg.target_kl_from_bc
     league = OpponentLeague(latest_path=str(ckpt))
     history = GenerationHistory()
-    if resume_from and Path(resume_from).exists():
-        league, history, _snap = RS.load_into(resume_from, actor_critic=ac, trainer=trainer,
+    try:
+        _resume_path = RS.resolve_resume(archive, resume_gen=resume_gen, explicit_path=resume_from)
+    except (ValueError, TypeError):
+        print(f"[resume] invalid --resume-gen {resume_gen!r} (use an int or 'latest')",
+              file=sys.stderr)
+        sys.exit(2)
+    if _resume_path is not None:
+        if not Path(_resume_path).exists():
+            avail = [g for g, _ in RS.list_snapshots(archive)]
+            print(f"[resume] snapshot not found: {_resume_path}  (available generations: "
+                  f"{avail if avail else 'none'})", file=sys.stderr)
+            sys.exit(2)
+        league, history, _snap = RS.load_into(_resume_path, actor_critic=ac, trainer=trainer,
                                               device=device)
-        print(f"[3c.4] resumed from {resume_from} at generation {history.generation} "
-              f"(league={len(league.snapshots)})")
+        print(f"[resume] loaded {Path(_resume_path).name} — continuing at generation "
+              f"{history.generation} (league={len(league.snapshots)})")
     stop = RS.StopController(max_hours=max_hours)
     status = LiveStatus(archive / "status.json", min_interval=0.5)   # live feed; throttled (3c.8c)
     status.start_run(n_generations, hours=max_hours)
@@ -511,6 +536,7 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
             # gen's batch runs to completion (bounded by mp throughput, ~tens of seconds), then the
             # loop exits. The finer per-chunk drain is the asyncio path's (stop_check → run_jobs).
             _ckpt = MP.mp_ckpt_path(archive, gen)
+            _coll_live = _gen_kind_dir(live_run_dir, gen, "replays")
             try:
                 trajs, src, log = MP.collect_with_pool(
                     ac_, lg, gen_cfg.n_games, team_pool=team_pool, ckpt_path=_ckpt,
@@ -518,7 +544,8 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                     save_ckpt_fn=lambda a, p, _g=gen: MP.save_inference_ckpt(a, p, generation=_g),
                     n_procs=int(collect_procs), async_per_proc=int(collect_async_per_proc),
                     tau=tau_gen, seed=seed + gen * 1000, matchup_seed=gen,
-                    team_chooser=team_chooser, status=status)
+                    team_chooser=team_chooser, status=status, live_dir=_coll_live,
+                    save_replays=save_replays)
             finally:
                 # ALWAYS drop the per-gen ckpt — even if collection raised (Ctrl-C lands inside the
                 # blocking submit) — else a full-weight file orphans each crashed gen (review fix).
@@ -531,7 +558,8 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
             trajs, src, log = asyncio.run(collect_with_league(
                 coll_ac, lg, gen_cfg.n_games, team_pool=team_pool, tau=tau_gen,
                 seed=seed + gen * 1000, matchup_seed=gen, team_chooser=team_chooser,
-                n_workers=cw, stop_check=stop.should_stop, status=status))
+                n_workers=cw, stop_check=stop.should_stop, status=status,
+                live_dir=_gen_kind_dir(live_run_dir, gen, "replays"), save_replays=save_replays))
         dt = _time.perf_counter() - t0
         thru["games"] += gen_cfg.n_games
         thru["secs"] += dt
@@ -554,6 +582,7 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
         # The eval matchup seed varies per generation (keyed to the gen) so the fixed 6-team pool
         # isn't a static target a champion-exploiter overfits — deterministic/resumable, averaging
         # the fixed-pool matchup luck out across gens (red-team finding).
+        _eval_live = _gen_kind_dir(live_run_dir, history.generation, "eval")   # #18b: eval spectate dir
         if pool is not None:
             # #19: multiprocess EVAL on the SAME pool — fan the gauntlet descriptors across the
             # collection worker processes (the GIL win applied to eval). model_elo stays in main.
@@ -564,14 +593,16 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                 path, opponents=opps, team_pool=_eval_pool, battles_per_opponent=eval_battles,
                 team_chooser=team_chooser, submit_fn=pool.submit, prev_best=prev_best_path,
                 mirror_battles=mirror_battles, matchup_seed=seed + history.generation,
-                n_procs=int(collect_procs), async_per_proc=int(collect_async_per_proc))
+                n_procs=int(collect_procs), async_per_proc=int(collect_async_per_proc),
+                live_dir=_eval_live, save_replays=save_replays)
             out = (results, GA.model_elo(results))
             _eval_label = f"{int(collect_procs)} procs"
         else:
             out = gauntlet_eval(path, teams=_eval_pool, team_chooser=team_chooser,
                                 battles=eval_battles, manage_server=False, n_workers=n_workers,
                                 prev_best_path=prev_best_path, mirror_battles=mirror_battles,
-                                matchup_seed=seed + history.generation, stop_check=stop.should_stop)
+                                matchup_seed=seed + history.generation, stop_check=stop.should_stop,
+                                live_dir=_eval_live, save_replays=save_replays)
             _eval_label = f"{n_workers} workers"
         dt = _time.perf_counter() - t0
         n_eval = sum(g for _w, g in out[0].values())     # total finished eval battles
@@ -616,9 +647,16 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                 log.debug("evicted-snapshot file cleanup failed (non-fatal)", exc_info=True)
 
     def _save():
-        RS.save_snapshot(snap_path, actor_critic=ac, trainer=trainer, league=league,
-                         history=history, ppo_cfg=trainer.cfg, train_cfg=trainer.tcfg,
+        # Per-gen snapshot named by the LAST COMPLETED generation (history.generation-1), so a
+        # later run can --resume-gen any kept generation (task #20). Nothing to save until a gen
+        # has completed (an interrupted gen 0 just restarts fresh). Prune to bound disk (~21MB ea).
+        completed = history.generation - 1
+        if completed < 0:
+            return
+        RS.save_snapshot(RS.snapshot_path_for(archive, completed), actor_critic=ac, trainer=trainer,
+                         league=league, history=history, ppo_cfg=trainer.cfg, train_cfg=trainer.tcfg,
                          gen_cfg=gen_cfg, seed=seed)
+        RS.prune_snapshots(archive, keep_snapshots)
 
     server = R.start_showdown() if manage_server else None
     reports = []
@@ -669,10 +707,13 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
             MP.sweep_mp_ckpts(archive)       # reclaim any per-gen worker ckpt left by a crashed gen
         if server is not None:
             R.stop_showdown(server)
-    print(f"\n  ran {done} generation(s); snapshot -> {snap_path}")
+    _latest = RS.latest_snapshot(archive)
+    print(f"\n  ran {done} generation(s); latest snapshot -> "
+          f"{_latest.name if _latest else '(none)'}  (resume with --resume-gen latest)")
     print(f"  Elo curve: {[(g, round(e) if e else None) for g, e in history.elo_curve()]}")
     print(f"  league   : {[s.snapshot_id for s in league.snapshots]}")
-    return {"history": history, "league": league, "reports": reports, "snapshot": str(snap_path)}
+    return {"history": history, "league": league, "reports": reports,
+            "snapshot": str(_latest) if _latest else None}
 
 
 # ── offline dry-run demo (no server): the loop logic over synthetic generations ─
@@ -829,6 +870,8 @@ def _launch_live(args):
         device=_rb["device"], n_workers=_rb["workers"], collect_workers=args.collect_workers,
         collect_procs=args.collect_procs, collect_async_per_proc=args.collect_async,
         manage_server=not args.no_server, resume_from=args.resume,
+        resume_gen=args.resume_gen, keep_snapshots=args.keep_snapshots,
+        save_replays=args.save_replays,
         snapshot_path=args.snapshot, max_hours=args.hours)
 
 
@@ -879,6 +922,8 @@ def _wizard(ap):
                                "12 to use collection's CPU headroom; blank = cap", int)
     args.collect_procs = ask("Collection PROCESSES (multicore; 1 = single-process asyncio)", 1,
                              "4-6 to bypass the GIL (~5x, probe 14a); ~0.6GB RAM each", int)
+    args.save_replays = ask_yn("Save spectator replays? (keep each battle's log under "
+                               "live/<stamp>/gen_N/{replays,eval}; N = deleted on finish)", False)
     args.max_vram_gb = ask("Max VRAM GB for the GPU update", None,
                            "4 (of 8 GB); blank = uncapped", float)
     args.mirror_battles = ask("Mirror battles vs the champion (the 0.55 beat_champion bar)", 360,
@@ -891,14 +936,17 @@ def _wizard(ap):
         args.hof_champions = ask("  How many past champions must the candidate beat", 5,
                                  "5 (cap ~8); excludes the current champion the mirror tests", int)
     if ask_yn("Resume the previous run (continue training)?", False):
-        snap = Path(args.archive) / "resume.pt"
-        if snap.exists():
-            args.resume = str(snap)
+        from v_dance.selfplay import resume as RS
+        avail = [g for g, _ in RS.list_snapshots(args.archive)]
+        if avail:
+            print(f"    available generations: {avail}")
+            args.resume_gen = ask("  From which generation (blank = latest)", "latest",
+                                  f"{avail[-1]} = latest; an earlier one rolls back", str)
         else:
-            print(f"    ! no snapshot at {snap} — starting FRESH from base BC.")
-            args.resume = None
+            print(f"    ! no per-gen snapshots in {args.archive} — starting FRESH from base BC.")
+            args.resume_gen = None
     else:
-        args.resume = None
+        args.resume_gen = None
     args.verbose = ask_yn("Verbose (-v) logging?", True)
 
     parts = ["python -m v_dance.selfplay.generation --live",
@@ -914,6 +962,8 @@ def _wizard(ap):
         parts.append(f"--collect-workers {args.collect_workers}")
     if args.collect_procs and args.collect_procs > 1:
         parts.append(f"--collect-procs {args.collect_procs}")
+    if args.save_replays:
+        parts.append("--save-replays")
     if args.max_vram_gb is not None:
         parts.append(f"--max-vram-gb {args.max_vram_gb}")
     if not args.prev_best:
@@ -922,7 +972,9 @@ def _wizard(ap):
         parts.append("--no-hof")
     elif args.hof_champions != 5:
         parts.append(f"--hof-champions {args.hof_champions}")
-    if args.resume:
+    if args.resume_gen:
+        parts.append(f"--resume-gen {args.resume_gen}")
+    elif args.resume:
         parts.append(f"--resume {args.resume}")
     if args.verbose:
         parts.append("-v")
@@ -1020,9 +1072,21 @@ if __name__ == "__main__":
                     help="PPO-update device (auto=GPU if present, else CPU; collection always CPU)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--resume", default=None,
-                    help="resume snapshot to continue from (3c.4); use the SAME --ckpt")
+                    help="resume from an EXPLICIT snapshot file (legacy/power-user); prefer "
+                         "--resume-gen. Use the SAME --ckpt as the original run.")
+    ap.add_argument("--resume-gen", default=None,
+                    help="resume from a GENERATION's snapshot in <archive> (#20): an int N loads "
+                         "snap_gen{N}.pt and continues at N+1; 'latest' = the newest; omitted = "
+                         "FRESH from --ckpt BC. (Snapshots are kept per generation.)")
+    ap.add_argument("--keep-snapshots", type=int, default=25,
+                    help="keep only the last N per-gen snapshots (~21 MB each; default 25 ≈ 525 MB "
+                         "of rollback). 0 = keep ALL.")
+    ap.add_argument("--save-replays", action="store_true",
+                    help="SAVE spectator replays (#18b) under artifacts/.../live/<start-stamp>/"
+                         "gen_<N>/{replays,eval}/<tag>.json instead of deleting them on finish "
+                         "(the dashboard turn-viewer can re-open them; default off = live-only).")
     ap.add_argument("--snapshot", default=None,
-                    help="resume-snapshot path to write (default <archive>/resume.pt)")
+                    help="(deprecated; ignored) snapshots are now per-gen snap_gen{N}.pt in <archive>")
     ap.add_argument("--hours", type=float, default=None,
                     help="stop cleanly after ~this many wall-clock hours (between gens)")
     ap.add_argument("--prev-best", action=argparse.BooleanOptionalAction, default=True,

@@ -10,7 +10,7 @@ Uses Crawl4AI (v0.8.x) AsyncWebCrawler — no BeautifulSoup, no requests lib.
 OUTPUT SCHEMA
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 {
-  "format":     "gen9championsvgc2026regma",
+  "format":     "gen9championsvgc2026regmb",
   "scraped_at": "2026-06-09T...",
   "pokemon": {
     "Kingambit": {
@@ -80,7 +80,7 @@ from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 from crawl4ai import JsonCssExtractionStrategy
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-FORMAT_SLUG  = "gen9championsvgc2026regma"
+FORMAT_SLUG  = "gen9championsvgc2026regmb"
 BASE_URL     = "https://www.pikalytics.com"
 INDEX_URL    = f"{BASE_URL}/pokedex/{FORMAT_SLUG}"
 

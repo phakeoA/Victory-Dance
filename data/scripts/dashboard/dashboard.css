@@ -165,6 +165,18 @@ body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); co
 /* ── Spectate ── */
 .spec-note { font-size: 11px; color: var(--text2); margin-bottom: 13px; padding: 9px 12px; background: var(--bg2); border: 1px solid var(--bdr); border-left: 3px solid var(--blue); border-radius: var(--rad); line-height: 1.5; }
 .spec-note b { color: var(--text); }
+/* #18 multi-battle spectate: one chip per concurrent battle, click to follow it */
+.spec-chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+.spec-chip { background: var(--surf2); border: 1px solid var(--bdr2); color: var(--text2); padding: 5px 10px; border-radius: var(--rad); font-size: 11px; cursor: pointer; transition: background .12s, border-color .12s, color .12s; display: inline-flex; align-items: center; gap: 5px; }
+.spec-chip:hover { background: var(--bg3); border-color: var(--blue); color: var(--text); }
+.spec-chip.sel { background: var(--accent); border-color: var(--accent); color: #fff; }
+.spec-chip .vs { opacity: .55; font-size: 10px; }
+.spec-kind { font-size: 9px; text-transform: uppercase; letter-spacing: .03em; padding: 1px 5px; border-radius: 999px; margin-right: 2px; font-weight: 600; }
+.spec-kind.k-self { background: rgba(80,140,255,.18); color: var(--blue); }
+.spec-kind.k-eval { background: rgba(120,200,120,.18); color: #6fcf6f; }
+.spec-chip.sel .spec-kind { background: rgba(255,255,255,.2); color: #fff; }
+.spec-chip .spec-turn { font-variant-numeric: tabular-nums; opacity: .7; font-size: 10px; padding-left: 3px; }
+.spec-chip.sel .vs, .spec-chip.sel .spec-turn { opacity: .85; }
 .spec-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
 
 /* ── Turn viewer (in-dashboard live battle, parsed from the |-log) ── */

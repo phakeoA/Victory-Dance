@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<meta charset="utf-8" />
+<!-- version 1 -->
+<title>battle-gen9championsvgc2026regma-14023</title>
+<style>
+    html,
+    body {
+        font-family: Verdana, sans-serif;
+        font-size: 10pt;
+        margin: 0;
+        padding: 0;
+    }
+
+    body {
+        padding: 12px 0;
+    }
+
+    .battle-log {
+        font-family: Verdana, sans-serif;
+        font-size: 10pt;
+    }
+
+    .battle-log-inline {
+        border: 1px solid #AAAAAA;
+        background: #EEF2F5;
+        color: black;
+        max-width: 640px;
+        margin: 0 auto 80px;
+        padding-bottom: 5px;
+    }
+
+    .battle-log .inner {
+        padding: 4px 8px 0px 8px;
+    }
+
+    .battle-log .inner-preempt {
+        padding: 0 8px 4px 8px;
+    }
+
+    .battle-log .inner-after {
+        margin-top: 0.5em;
+    }
+
+    .battle-log h2 {
+        margin: 0.5em -8px;
+        padding: 4px 8px;
+        border: 1px solid #AAAAAA;
+        background: #E0E7EA;
+        border-left: 0;
+        border-right: 0;
+        font-family: Verdana, sans-serif;
+        font-size: 13pt;
+    }
+
+    .backprop {
+        top: 0;
+    }
+
+    .battle-log .chat {
+        vertical-align: middle;
+        padding: 3px 0 3px 0;
+        font-size: 8pt;
+    }
+
+    .battle-log .chat strong {
+        color: #40576A;
+    }
+
+    .battle-log .chat em {
+        padding: 1px 4px 1px 3px;
+        color: #000000;
+        font-style: normal;
+    }
+
+    .chat.mine {
+        background: rgba(0, 0, 0, 0.05);
+        margin-left: -8px;
+        margin-right: -8px;
+        padding-left: 8px;
+        padding-right: 8px;
+    }
+
+    .spoiler {
+        color: #BBBBBB;
+        background: #BBBBBB;
+        padding: 0px 3px;
+    }
+
+    .spoiler:hover,
+    .spoiler:active,
+    .spoiler-shown {
+        color: #000000;
+        background: #E2E2E2;
+        padding: 0px 3px;
+    }
+
+    .spoiler a {
+        color: #BBBBBB;
+    }
+
+    .spoiler:hover a,
+    .spoiler:active a,
+    .spoiler-shown a {
+        color: #2288CC;
+    }
+
+    .chat code,
+    .chat .spoiler:hover code,
+    .chat .spoiler:active code,
+    .chat .spoiler-shown code {
+        border: 1px solid #C0C0C0;
+        background: #EEEEEE;
+        color: black;
+        padding: 0 2px;
+    }
+
+    .chat .spoiler code {
+        border: 1px solid #CCCCCC;
+        background: #CCCCCC;
+        color: #CCCCCC;
+    }
+
+    .battle-log .rated {
+        padding: 3px 4px;
+    }
+
+    .battle-log .rated strong {
+        color: white;
+        background: #89A;
+        padding: 1px 4px;
+        border-radius: 4px;
+    }
+
+    .spacer {
+        margin-top: 0.5em;
+    }
+
+    .message-announce {
+        background: #6688AA;
+        color: white;
+        padding: 1px 4px 2px;
+    }
+
+    .message-announce a,
+    .broadcast-green a,
+    .broadcast-blue a,
+    .broadcast-red a {
+        color: #DDEEFF;
+    }
+
+    .broadcast-green {
+        background-color: #559955;
+        color: white;
+        padding: 2px 4px;
+    }
+
+    .broadcast-blue {
+        background-color: #6688AA;
+        color: white;
+        padding: 2px 4px;
+    }
+
+    .infobox {
+        border: 1px solid #6688AA;
+        padding: 2px 4px;
+    }
+
+    .infobox-limited {
+        max-height: 200px;
+        overflow: auto;
+        overflow-x: hidden;
+    }
+
+    .broadcast-red {
+        background-color: #AA5544;
+        color: white;
+        padding: 2px 4px;
+    }
+
+    .message-learn-canlearn {
+        font-weight: bold;
+        color: #228822;
+        text-decoration: underline;
+    }
+
+    .message-learn-cannotlearn {
+        font-weight: bold;
+        color: #CC2222;
+        text-decoration: underline;
+    }
+
+    .message-effect-weak {
+        font-weight: bold;
+        color: #CC2222;
+    }
+
+    .message-effect-resist {
+        font-weight: bold;
+        color: #6688AA;
+    }
+
+    .message-effect-immune {
+        font-weight: bold;
+        color: #666666;
+    }
+
+    .message-learn-list {
+        margin-top: 0;
+        margin-bottom: 0;
+    }
+
+    .message-throttle-notice,
+    .message-error {
+        color: #992222;
+    }
+
+    .message-overflow,
+    .chat small.message-overflow {
+        font-size: 0pt;
+    }
+
+    .message-overflow::before {
+        font-size: 9pt;
+        content: '...';
+    }
+
+    .subtle {
+        color: #3A4A66;
+    }
+</style>
+<div class="wrapper replay-wrapper" style="max-width:1180px;margin:0 auto">
+    <input type="hidden" name="replayid" value="unregisteredserver-gen8randombattle-320064" />
+    <div class="battle"></div>
+    <div class="battle-log"></div>
+    <div class="replay-controls"></div>
+    <div class="replay-controls-2"></div>
+    <h1 style="font-weight:normal;text-align:center"><strong>poke-env battle replay</strong><br />battle-gen9championsvgc2026regma-14023<br /><a
+            href="http://pokemonshowdown.com/users/randomplayer1" class="subtle" target="_blank">LG1x6</a>
+        vs. <a href="http://pokemonshowdown.com/users/randomplayer2" class="subtle"
+            target="_blank">LG0x6</a></h1>
+    <script type="text/plain" class="battle-log-data">
+    >battle-gen9championsvgc2026regma-14023
+|init|battle
+|title|LG0x6 vs. LG1x6
+|j|☆LG0x6
+|j|☆LG1x6
+|gametype|doubles
+|player|p1|LG0x6|169|
+|player|p2|LG1x6|1|
+|gen|9
+|tier|[Gen 9 Champions] VGC 2026 Reg M-A
+|rule|Species Clause: Limit one of each Pokémon
+|rule|Item Clause: Limit 1 of each item
+|clearpoke
+|poke|p1|Charizard, L50, F|
+|poke|p1|Kingambit, L50, F|
+|poke|p1|Rotom-Wash, L50|
+|poke|p1|Sinistcha, L50|
+|poke|p1|Sneasler, L50, M|
+|poke|p1|Ninetales-Alola, L50, F|
+|poke|p2|Froslass, L50, F|
+|poke|p2|Kingambit, L50, M|
+|poke|p2|Meowscarada, L50, F|
+|poke|p2|Rotom-Wash, L50|
+|poke|p2|Talonflame, L50, M|
+|poke|p2|Garchomp, L50, M|
+|teampreview|4
+|uhtml|otsrequest|<button name="send" value="/acceptopenteamsheets" class="button" style="margin-right: 10px;"><strong>Accept Open Team Sheets</strong></button><button name="send" value="/rejectopenteamsheets" class="button" style="margin-top: 10px"><strong>Deny Open Team Sheets</strong></button>
+|
+|teamsize|p1|4
+|teamsize|p2|4
+|start
+|switch|p1a: Charizard|Charizard, L50, F|100/100
+|switch|p1b: Kingambit|Kingambit, L50, F|100/100
+|switch|p2a: Froslass|Froslass, L50, F|165/165
+|switch|p2b: Kingambit|Kingambit, L50, M|196/196
+|turn|1
+|
+|detailschange|p2a: Froslass|Froslass-Mega, L50, F
+|-mega|p2a: Froslass|Froslass|Froslassite
+|-weather|Snowscape|[from] ability: Snow Warning|[of] p2a: Froslass
+|detailschange|p1a: Charizard|Charizard-Mega-X, L50, F
+|-mega|p1a: Charizard|Charizard|Charizardite X
+|move|p2b: Kingambit|Sucker Punch|p1b: Kingambit
+|-resisted|p1b: Kingambit|1
+|-damage|p1b: Kingambit|85/100
+|move|p2a: Froslass|Blizzard|p1b: Kingambit|[spread] p1a,p1b
+|-resisted|p1b: Kingambit|1
+|-damage|p1a: Charizard|57/100
+|-damage|p1b: Kingambit|67/100
+|move|p1a: Charizard|Dragon Dance|p1a: Charizard
+|-boost|p1a: Charizard|atk|1
+|-boost|p1a: Charizard|spe|1
+|move|p1b: Kingambit|Iron Head|p2b: Kingambit
+|-resisted|p2b: Kingambit|1
+|-damage|p2b: Kingambit|163/196
+|
+|-weather|Snowscape|[upkeep]
+|upkeep
+|turn|2
+|
+|switch|p2b: Meowscarada|Meowscarada, L50, F|151/151
+|move|p1b: Kingambit|Sucker Punch|p2a: Froslass
+|-supereffective|p2a: Froslass|1
+|-crit|p2a: Froslass
+|-damage|p2a: Froslass|7/165
+|move|p1a: Charizard|Dragon Claw|p2a: Froslass
+|-damage|p2a: Froslass|0 fnt
+|faint|p2a: Froslass
+|
+|-weather|Snowscape|[upkeep]
+|upkeep
+|
+|switch|p2a: Rotom|Rotom-Wash, L50|149/149
+|turn|3
+|
+|switch|p1a: Sinistcha|Sinistcha, L50|100/100
+|-heal|p1b: Kingambit|92/100|[from] ability: Hospitality|[of] p1a: Sinistcha
+|move|p1b: Kingambit|Protect|p1b: Kingambit
+|-singleturn|p1b: Kingambit|Protect
+|move|p2b: Meowscarada|Triple Axel|p1a: Sinistcha
+|-start|p2b: Meowscarada|typechange|Ice|[from] ability: Protean
+|-supereffective|p1a: Sinistcha|1
+|-damage|p1a: Sinistcha|83/100
+|-supereffective|p1a: Sinistcha|1
+|-damage|p1a: Sinistcha|52/100
+|-supereffective|p1a: Sinistcha|1
+|-damage|p1a: Sinistcha|7/100
+|-hitcount|p1a: Sinistcha|3
+|move|p2a: Rotom|Thunderbolt|p1a: Sinistcha
+|-resisted|p1a: Sinistcha|1
+|-damage|p1a: Sinistcha|0 fnt
+|faint|p1a: Sinistcha
+|
+|-weather|Snowscape|[upkeep]
+|upkeep
+|
+|switch|p1a: Rotom|Rotom-Wash, L50|100/100
+|turn|4
+|
+|move|p2b: Meowscarada|Triple Axel|p1b: Kingambit
+|-resisted|p1b: Kingambit|1
+|-damage|p1b: Kingambit|87/100
+|-resisted|p1b: Kingambit|1
+|-damage|p1b: Kingambit|80/100
+|-resisted|p1b: Kingambit|1
+|-damage|p1b: Kingambit|68/100
+|-hitcount|p1b: Kingambit|3
+|move|p2a: Rotom|Thunderbolt|p1b: Kingambit
+|-damage|p1b: Kingambit|28/100
+|move|p1a: Rotom|Volt Switch|p2a: Rotom
+|-crit|p2a: Rotom
+|-damage|p2a: Rotom|82/149
+|
+|switch|p1a: Charizard|Charizard-Mega-X, L50, F|57/100|[from] Volt Switch
+|move|p1b: Kingambit|Iron Head|p2a: Rotom
+|-resisted|p2a: Rotom|2
+|-damage|p2a: Rotom|64/149
+|-enditem|p2a: Rotom|Sitrus Berry|[eat]
+|-heal|p2a: Rotom|101/149|[from] item: Sitrus Berry
+|
+|-weather|Snowscape|[upkeep]
+|upkeep
+|turn|5
+|
+|switch|p2a: Kingambit|Kingambit, L50, M|163/196
+|move|p1a: Charizard|Protect|p1a: Charizard
+|-singleturn|p1a: Charizard|Protect
+|move|p2b: Meowscarada|Triple Axel|p1a: Charizard
+|-activate|p1a: Charizard|move: Protect
+|move|p1b: Kingambit|Kowtow Cleave|p2b: Meowscarada
+|-damage|p2b: Meowscarada|67/151
+|
+|-weather|none
+|upkeep
+|turn|6
+|
+|switch|p2b: Rotom|Rotom-Wash, L50|101/149
+|switch|p1b: Rotom|Rotom-Wash, L50|100/100
+|move|p2a: Kingambit|Protect|p2a: Kingambit
+|-singleturn|p2a: Kingambit|Protect
+|move|p1a: Charizard|Flare Blitz|p2a: Kingambit
+|-activate|p2a: Kingambit|move: Protect
+|
+|upkeep
+|turn|7
+|
+|switch|p1b: Kingambit|Kingambit, L50, F|28/100
+|move|p2a: Kingambit|Sucker Punch||[still]
+|-fail|p2a: Kingambit
+|move|p1a: Charizard|Flare Blitz|p2a: Kingambit
+|-supereffective|p2a: Kingambit|1
+|-enditem|p2a: Kingambit|Occa Berry|[eat]
+|-enditem|p2a: Kingambit|Occa Berry|[weaken]
+|-damage|p2a: Kingambit|45/196
+|-damage|p1a: Charizard|36/100|[from] Recoil
+|move|p2b: Rotom|Hydro Pump|p1b: Kingambit
+|-damage|p1b: Kingambit|0 fnt
+|faint|p1b: Kingambit
+|
+|upkeep
+|
+|switch|p1b: Rotom|Rotom-Wash, L50|100/100
+|turn|8
+|
+|move|p1a: Charizard|Protect|p1a: Charizard
+|-singleturn|p1a: Charizard|Protect
+|move|p2a: Kingambit|Sucker Punch||[still]
+|-fail|p2a: Kingambit
+|move|p1b: Rotom|Will-O-Wisp|p2b: Rotom
+|-status|p2b: Rotom|brn
+|move|p2b: Rotom|Thunderbolt|p1b: Rotom
+|-damage|p1b: Rotom|66/100
+|
+|-damage|p2b: Rotom|92/149 brn|[from] brn
+|upkeep
+|turn|9
+|
+|move|p2a: Kingambit|Protect|p2a: Kingambit
+|-singleturn|p2a: Kingambit|Protect
+|move|p1a: Charizard|Flare Blitz|p2a: Kingambit
+|-activate|p2a: Kingambit|move: Protect
+|move|p1b: Rotom|Hydro Pump|p2b: Rotom
+|-resisted|p2b: Rotom|1
+|-damage|p2b: Rotom|59/149 brn
+|move|p2b: Rotom|Thunderbolt|p1b: Rotom
+|-damage|p1b: Rotom|31/100
+|-enditem|p1b: Rotom|Sitrus Berry|[eat]
+|-heal|p1b: Rotom|56/100|[from] item: Sitrus Berry
+|
+|-damage|p2b: Rotom|50/149 brn|[from] brn
+|upkeep
+|turn|10
+|
+|move|p1a: Charizard|Protect|p1a: Charizard
+|-singleturn|p1a: Charizard|Protect
+|move|p2b: Rotom|Thunderbolt|p1b: Rotom
+|-damage|p1b: Rotom|25/100
+|move|p1b: Rotom|Thunderbolt|p2a: Kingambit
+|-damage|p2a: Kingambit|0 fnt
+|faint|p2a: Kingambit
+|
+|-damage|p2b: Rotom|41/149 brn|[from] brn
+|upkeep
+|
+|switch|p2a: Meowscarada|Meowscarada, L50, F|67/151
+|turn|11
+|
+|move|p2a: Meowscarada|Knock Off|p1a: Charizard
+|-start|p2a: Meowscarada|typechange|Dark|[from] ability: Protean
+|-damage|p1a: Charizard|10/100
+|move|p1a: Charizard|Dragon Dance|p1a: Charizard
+|-boost|p1a: Charizard|atk|1
+|-boost|p1a: Charizard|spe|1
+|move|p2b: Rotom|Thunderbolt|p1a: Charizard
+|-resisted|p1a: Charizard|1
+|-damage|p1a: Charizard|0 fnt
+|faint|p1a: Charizard
+|move|p1b: Rotom|Hydro Pump|p2a: Meowscarada
+|-damage|p2a: Meowscarada|0 fnt
+|faint|p2a: Meowscarada
+|
+|-damage|p2b: Rotom|32/149 brn|[from] brn
+|upkeep
+|turn|12
+|
+|move|p2b: Rotom|Will-O-Wisp|p1b: Rotom
+|-status|p1b: Rotom|brn
+|move|p1b: Rotom|Hydro Pump|p2b: Rotom|[miss]
+|-miss|p1b: Rotom|p2b: Rotom
+|
+|-damage|p2b: Rotom|23/149 brn|[from] brn
+|-damage|p1b: Rotom|19/100 brn|[from] brn
+|upkeep
+|turn|13
+|
+|move|p2b: Rotom|Protect|p2b: Rotom
+|-singleturn|p2b: Rotom|Protect
+|move|p1b: Rotom|Thunderbolt|p2b: Rotom
+|-activate|p2b: Rotom|move: Protect
+|
+|-damage|p2b: Rotom|14/149 brn|[from] brn
+|-damage|p1b: Rotom|14/100 brn|[from] brn
+|upkeep
+|turn|14
+|
+|move|p2b: Rotom|Protect||[still]
+|-fail|p2b: Rotom
+|move|p1b: Rotom|Volt Switch|p2b: Rotom
+|-damage|p2b: Rotom|0 fnt
+|faint|p2b: Rotom
+|
+|win|LG0x6
+    </script>
+</div>
+
+<div class="battle-log battle-log-inline" style="display:none"></div>
+
+<script>
+    let daily = Math.floor(Date.now() / 1000 / 60 / 60 / 24); document.write('<script src="https://play.pokemonshowdown.com/js/replay-embed.js?version' + daily + '"></' + 'script>');
+</script>
+
+<p style="text-align:center"> Replay created by <a href="https://github.com/hsahovic/poke-env">poke-env</a>, with code from <a
+        href="https://github.com/smogon/pokemon-showdown"> pokemon-showdown</a>. If something goes wrong, don't hesitate
+    to open an <a href="https://github.com/hsahovic/poke-env/issues">issue!</a></p>

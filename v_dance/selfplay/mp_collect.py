@@ -132,7 +132,8 @@ def merge_results(results) -> WorkerResult:
 # ── collection dispatch (injected player factory → offline-testable) ───────────
 async def _collect_specs(ac, specs: List[ChunkSpec], *, tau: float, seed: int,
                          team_chooser, battle_timeout: Optional[float], async_workers: int,
-                         build_players: Callable, status=None) -> WorkerResult:
+                         build_players: Callable, live_dir=None, save_replays: bool = False,
+                         status=None) -> WorkerResult:
     """Play every ChunkSpec in ``specs`` (bounded to ``async_workers`` concurrent battles within
     this process), collecting trajectories + source counts + PFSP outcomes + a showcase log.
     ``build_players(ac, spec, tau, seed, team_chooser) -> (our, opp)`` is INJECTED so the per-kind
@@ -147,7 +148,7 @@ async def _collect_specs(ac, specs: List[ChunkSpec], *, tau: float, seed: int,
 
     async def _run(spec: ChunkSpec):
         try:
-            our, opp = build_players(ac, spec, tau, seed, team_chooser)
+            our, opp = build_players(ac, spec, tau, seed, team_chooser, live_dir, save_replays)
         except Exception:
             # 14b.3 review: a transient build error (team resolve/load) skips THIS chunk only —
             # otherwise it bubbles out of run_jobs and drops the whole worker's batch (~1/n_procs).
@@ -181,11 +182,12 @@ async def _collect_specs(ac, specs: List[ChunkSpec], *, tau: float, seed: int,
     return WorkerResult(trajectories, dict(source_counts), pfsp, showcase["log"], games["n"])
 
 
-def _build_players_real(ac, spec: ChunkSpec, tau: float, seed: int, team_chooser):
+def _build_players_real(ac, spec: ChunkSpec, tau: float, seed: int, team_chooser, live_dir=None,
+                        save_replays: bool = False):
     """The real per-kind player factory (poke-env). Mirrors ``collect_with_league._sp`` /
     opponent construction exactly, so multiprocess collection is byte-equivalent to the asyncio
     path — only the global ``uid`` (assigned in ``build_chunk_specs``) keeps account names unique
-    across workers."""
+    across workers. ``live_dir`` (#18) is the shared spectate dir each worker writes its battles to."""
     import logging as _logging
     import v_dance.play.run_local_battle as R
     from poke_env import AccountConfiguration
@@ -196,15 +198,16 @@ def _build_players_real(ac, spec: ChunkSpec, tau: float, seed: int, team_chooser
     tb = R.load_team(R.resolve_team_path(spec.team_b))
     rb = _REPO_ROOT / "artifacts" / "replay_buffer"
 
-    def _sp(team, who):
+    def _sp(team, who, live=None):
         return SelfPlayVGCPlayer(
-            ac, tau=tau, sample_seed=seed + who * 10_000 + uid,
+            ac, tau=tau, sample_seed=seed + who * 10_000 + uid, live_dir=live,
+            save_replays=save_replays,
             replay_path=rb / f"LG{who}_{uid}.jsonl",
             account_configuration=AccountConfiguration(f"LG{who}x{uid}", None),
             battle_format=R.BATTLE_FORMAT, team=team, max_concurrent_battles=max(1, cn),
             log_level=_logging.WARNING)
 
-    our = _sp(ta, 0)
+    our = _sp(ta, 0, live=live_dir)                   # #18: worker publishes its battle to live_dir
     if spec.kind == "latest":
         opp = _sp(tb, 1)
     elif spec.kind == "snapshot":
@@ -251,12 +254,12 @@ def worker_collect(payload):
     torch.set_num_threads(1)                      # avoid N×all-cores oversubscription
     _logging.getLogger("poke_env").setLevel(_logging.ERROR)
     _logging.getLogger("websockets").setLevel(_logging.ERROR)
-    ckpt, specs, tau, seed, team_chooser, battle_timeout, async_workers = payload
+    ckpt, specs, tau, seed, team_chooser, battle_timeout, async_workers, live_dir, save_replays = payload
     ac = _worker_ac(ckpt)
     return asyncio.run(_collect_specs(
         ac, specs, tau=tau, seed=seed, team_chooser=team_chooser,
         battle_timeout=battle_timeout, async_workers=async_workers,
-        build_players=_build_players_real))
+        build_players=_build_players_real, live_dir=live_dir, save_replays=save_replays))
 
 
 # ── real process-pool backend (task #14b.2b) ───────────────────────────────────
@@ -391,7 +394,8 @@ def collect_with_pool(ac, league, n_games: int, *, team_pool, ckpt_path,
                       submit_fn: Callable, save_ckpt_fn: Callable,
                       n_procs: int = 4, async_per_proc: int = 3, tau: float = 1.0,
                       seed: int = 0, matchup_seed: int = 0, chunk_size: int = 10,
-                      team_chooser=None, battle_timeout: Optional[float] = 90.0, status=None):
+                      team_chooser=None, battle_timeout: Optional[float] = 90.0, status=None,
+                      live_dir=None, save_replays: bool = False):
     """Multiprocess analogue of ``generation.collect_with_league`` (task #14b.2).
 
     Plans the batch + samples the league in the MAIN process (race-free), freezes the current
@@ -408,8 +412,9 @@ def collect_with_pool(ac, league, n_games: int, *, team_pool, ckpt_path,
     specs = build_chunk_specs(league, team_pool, n_games, chunk_size=chunk_size,
                               matchup_seed=matchup_seed, seed=seed)
     batches = partition_specs(specs, n_procs)
-    payloads = [(str(ckpt_path), batch, tau, seed, team_chooser, battle_timeout, async_per_proc)
-                for batch in batches]
+    _ld = str(live_dir) if live_dir else None
+    payloads = [(str(ckpt_path), batch, tau, seed, team_chooser, battle_timeout, async_per_proc,
+                 _ld, bool(save_replays)) for batch in batches]
     merged = merge_results(submit_fn(payloads))
     for snapshot_id, won in merged.pfsp:                 # PFSP update in MAIN (league stays here)
         league.record_result(snapshot_id, won)

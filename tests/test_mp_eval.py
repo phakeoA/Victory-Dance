@@ -59,7 +59,7 @@ class _FakeEvalPlayer:
         self.closed = True
 
 
-def _build(candidate, prev_best, tc, spec):
+def _build(candidate, prev_best, tc, spec, live_dir=None, save_replays=False):
     return _FakeEvalPlayer(wr=1.0), _FakeEvalPlayer(wr=0.0)   # model wins every battle
 
 
@@ -76,7 +76,7 @@ def test_eval_specs_tallies_wins_per_opponent_kind():
 
 
 def test_eval_specs_build_error_skips_only_that_chunk():
-    def build(candidate, prev_best, tc, spec):
+    def build(candidate, prev_best, tc, spec, live_dir=None, save_replays=False):
         if spec.uid == 2:
             raise RuntimeError("team resolve failed")
         return _build(candidate, prev_best, tc, spec)

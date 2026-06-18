@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import List, Optional
@@ -201,3 +202,124 @@ def read_status(path) -> Optional[dict]:
         return json.loads(p.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+
+
+# ── multi-battle spectate: file-per-active-battle (#18) ────────────────────────
+def _safe_tag(tag: str) -> str:
+    """Filesystem-safe filename stem from a battle tag (``battle-gen9...-123`` → same, but any
+    odd char → ``_``)."""
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", str(tag)) or "battle"
+
+
+# ── structured saved-replay layout (#18b): live/<run-stamp>/gen_<N>/{replays,eval} ─────────────
+_GEN_RE = re.compile(r"^gen_(\d+)$")
+
+
+def run_stamp(dt=None) -> str:
+    """Timestamp for a run's spectate folder (``2026-06-18_14-30-05``). ``dt`` is injectable for
+    tests; the live loop stamps it once at training start."""
+    import datetime as _dt
+    return (dt or _dt.datetime.now()).strftime("%Y-%m-%d_%H-%M-%S")
+
+
+def gen_kind_dir(run_dir, generation: int, kind: str) -> Path:
+    """Per-generation spectate dir ``<run_dir>/gen_<N>/<kind>`` where ``kind`` is ``"replays"``
+    (collection self-play) or ``"eval"`` (eval matches)."""
+    assert kind in ("replays", "eval"), f"unknown kind {kind!r}"
+    return Path(run_dir) / f"gen_{int(generation)}" / kind
+
+
+def _gen_from_path(p: Path):
+    for part in p.parts:
+        m = _GEN_RE.match(part)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+class LiveBattles:
+    """File-per-active-battle spectate feed (#18). Each CONCURRENT battle writes its own
+    ``<live_dir>/<tag>.json`` ({tag, p1, p2, turn, updated_at, n_lines, log}), so the dashboard
+    can show SEVERAL battles at once — and, crucially, battles from SEPARATE worker processes
+    (multiprocess collection #14) land in the same dir with NO shared in-memory state. Crash-proof
+    + per-battle throttled like ``LiveStatus`` (the feed is cosmetic — never crash collection)."""
+
+    def __init__(self, live_dir, clock=time.time, min_interval: float = 0.0):
+        self.dir = Path(live_dir)
+        self.clock = clock
+        self.min_interval = float(min_interval)
+        self._last: dict = {}        # tag -> last write time (per-battle throttle)
+
+    def update(self, tag: str, *, p1: str = "p1", p2: str = "p2", turn: int = 0, log=None,
+               done: bool = False) -> None:
+        """Publish/refresh one battle's room + growing ``|``-log. Throttled per battle.
+        ``done`` marks a finished (saved) replay so it drops out of the LIVE list."""
+        if not tag:
+            return
+        now = self.clock()
+        if self.min_interval > 0 and (now - self._last.get(tag, 0.0)) < self.min_interval:
+            return
+        self._last[tag] = now
+        data = {"tag": str(tag), "p1": str(p1), "p2": str(p2), "turn": int(turn or 0),
+                "updated_at": now, "n_lines": len(log or []), "log": list(log or []),
+                "done": bool(done)}
+        _atomic_write(self.dir / f"{_safe_tag(tag)}.json", json.dumps(data))
+
+    def finalize(self, tag: str, *, p1: str = "p1", p2: str = "p2", turn: int = 0, log=None) -> None:
+        """Write the battle's FINAL snapshot with ``done=True`` (a SAVED replay) — bypasses the
+        throttle so the last write always lands. Used instead of ``remove()`` when saving."""
+        self._last.pop(tag, None)            # clear throttle so the final write isn't skipped
+        self.update(tag, p1=p1, p2=p2, turn=turn, log=log, done=True)
+
+    def remove(self, tag: str) -> None:
+        """Drop a finished battle's file so it stops showing (used when NOT saving)."""
+        try:
+            (self.dir / f"{_safe_tag(tag)}.json").unlink()
+        except OSError:
+            pass
+        self._last.pop(tag, None)
+
+
+def current_live_dir(live_root):
+    """The CURRENT run's LATEST-generation spectate dir — the only place live battles are. The
+    dashboard scans THIS (≈ one generation of files) instead of rglob-ing every saved replay ever
+    written under ``live/`` (review #18b: with --save-replays the tree grows without bound, so a
+    full-tree scan every poll is a stat-storm). Falls back to ``live_root`` when there's no
+    ``<stamp>/gen_<N>`` structure yet (nothing collected, or a flat layout)."""
+    root = Path(live_root)
+    if not root.is_dir():
+        return root
+    runs = sorted(p for p in root.iterdir() if p.is_dir())   # run-stamps sort chronologically
+    if not runs:
+        return root
+    run = runs[-1]
+    gens = sorted((p for p in run.iterdir() if p.is_dir() and _GEN_RE.match(p.name)),
+                  key=lambda p: int(_GEN_RE.match(p.name).group(1)))
+    return gens[-1] if gens else run
+
+
+def read_live_battles(live_dir, *, stale_after: float = 45.0, clock=time.time) -> List[dict]:
+    """Currently-LIVE battles under ``live_dir`` (RECURSIVELY — the structured tree
+    ``<run>/gen_<N>/<replays|eval>/<tag>.json``). A cheap ``mtime`` pre-filter skips the (possibly
+    thousands of) finished SAVED replays without parsing them; the rest are read, ``done`` ones
+    (saved, not live) are dropped, and each is annotated with its ``gen`` + ``kind`` (replays/eval)
+    from the path. Used by the dashboard server."""
+    d = Path(live_dir)
+    if not d.is_dir():
+        return []
+    now = clock()
+    out: List[dict] = []
+    for p in d.rglob("*.json"):
+        try:
+            if stale_after and (now - p.stat().st_mtime) > stale_after:   # cheap stat; skip saved/old
+                continue
+            b = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if b.get("done"):                                # finished (saved) replay — not live
+            continue
+        b["gen"] = _gen_from_path(p)
+        b["kind"] = p.parent.name if p.parent.name in ("replays", "eval") else None
+        out.append(b)
+    out.sort(key=lambda b: ((b.get("kind") or ""), str(b.get("tag", ""))))
+    return out

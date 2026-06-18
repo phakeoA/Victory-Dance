@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<meta charset="utf-8" />
+<!-- version 1 -->
+<title>battle-gen9championsvgc2026regma-14018</title>
+<style>
+    html,
+    body {
+        font-family: Verdana, sans-serif;
+        font-size: 10pt;
+        margin: 0;
+        padding: 0;
+    }
+
+    body {
+        padding: 12px 0;
+    }
+
+    .battle-log {
+        font-family: Verdana, sans-serif;
+        font-size: 10pt;
+    }
+
+    .battle-log-inline {
+        border: 1px solid #AAAAAA;
+        background: #EEF2F5;
+        color: black;
+        max-width: 640px;
+        margin: 0 auto 80px;
+        padding-bottom: 5px;
+    }
+
+    .battle-log .inner {
+        padding: 4px 8px 0px 8px;
+    }
+
+    .battle-log .inner-preempt {
+        padding: 0 8px 4px 8px;
+    }
+
+    .battle-log .inner-after {
+        margin-top: 0.5em;
+    }
+
+    .battle-log h2 {
+        margin: 0.5em -8px;
+        padding: 4px 8px;
+        border: 1px solid #AAAAAA;
+        background: #E0E7EA;
+        border-left: 0;
+        border-right: 0;
+        font-family: Verdana, sans-serif;
+        font-size: 13pt;
+    }
+
+    .backprop {
+        top: 0;
+    }
+
+    .battle-log .chat {
+        vertical-align: middle;
+        padding: 3px 0 3px 0;
+        font-size: 8pt;
+    }
+
+    .battle-log .chat strong {
+        color: #40576A;
+    }
+
+    .battle-log .chat em {
+        padding: 1px 4px 1px 3px;
+        color: #000000;
+        font-style: normal;
+    }
+
+    .chat.mine {
+        background: rgba(0, 0, 0, 0.05);
+        margin-left: -8px;
+        margin-right: -8px;
+        padding-left: 8px;
+        padding-right: 8px;
+    }
+
+    .spoiler {
+        color: #BBBBBB;
+        background: #BBBBBB;
+        padding: 0px 3px;
+    }
+
+    .spoiler:hover,
+    .spoiler:active,
+    .spoiler-shown {
+        color: #000000;
+        background: #E2E2E2;
+        padding: 0px 3px;
+    }
+
+    .spoiler a {
+        color: #BBBBBB;
+    }
+
+    .spoiler:hover a,
+    .spoiler:active a,
+    .spoiler-shown a {
+        color: #2288CC;
+    }
+
+    .chat code,
+    .chat .spoiler:hover code,
+    .chat .spoiler:active code,
+    .chat .spoiler-shown code {
+        border: 1px solid #C0C0C0;
+        background: #EEEEEE;
+        color: black;
+        padding: 0 2px;
+    }
+
+    .chat .spoiler code {
+        border: 1px solid #CCCCCC;
+        background: #CCCCCC;
+        color: #CCCCCC;
+    }
+
+    .battle-log .rated {
+        padding: 3px 4px;
+    }
+
+    .battle-log .rated strong {
+        color: white;
+        background: #89A;
+        padding: 1px 4px;
+        border-radius: 4px;
+    }
+
+    .spacer {
+        margin-top: 0.5em;
+    }
+
+    .message-announce {
+        background: #6688AA;
+        color: white;
+        padding: 1px 4px 2px;
+    }
+
+    .message-announce a,
+    .broadcast-green a,
+    .broadcast-blue a,
+    .broadcast-red a {
+        color: #DDEEFF;
+    }
+
+    .broadcast-green {
+        background-color: #559955;
+        color: white;
+        padding: 2px 4px;
+    }
+
+    .broadcast-blue {
+        background-color: #6688AA;
+        color: white;
+        padding: 2px 4px;
+    }
+
+    .infobox {
+        border: 1px solid #6688AA;
+        padding: 2px 4px;
+    }
+
+    .infobox-limited {
+        max-height: 200px;
+        overflow: auto;
+        overflow-x: hidden;
+    }
+
+    .broadcast-red {
+        background-color: #AA5544;
+        color: white;
+        padding: 2px 4px;
+    }
+
+    .message-learn-canlearn {
+        font-weight: bold;
+        color: #228822;
+        text-decoration: underline;
+    }
+
+    .message-learn-cannotlearn {
+        font-weight: bold;
+        color: #CC2222;
+        text-decoration: underline;
+    }
+
+    .message-effect-weak {
+        font-weight: bold;
+        color: #CC2222;
+    }
+
+    .message-effect-resist {
+        font-weight: bold;
+        color: #6688AA;
+    }
+
+    .message-effect-immune {
+        font-weight: bold;
+        color: #666666;
+    }
+
+    .message-learn-list {
+        margin-top: 0;
+        margin-bottom: 0;
+    }
+
+    .message-throttle-notice,
+    .message-error {
+        color: #992222;
+    }
+
+    .message-overflow,
+    .chat small.message-overflow {
+        font-size: 0pt;
+    }
+
+    .message-overflow::before {
+        font-size: 9pt;
+        content: '...';
+    }
+
+    .subtle {
+        color: #3A4A66;
+    }
+</style>
+<div class="wrapper replay-wrapper" style="max-width:1180px;margin:0 auto">
+    <input type="hidden" name="replayid" value="unregisteredserver-gen8randombattle-320064" />
+    <div class="battle"></div>
+    <div class="battle-log"></div>
+    <div class="replay-controls"></div>
+    <div class="replay-controls-2"></div>
+    <h1 style="font-weight:normal;text-align:center"><strong>poke-env battle replay</strong><br />battle-gen9championsvgc2026regma-14018<br /><a
+            href="http://pokemonshowdown.com/users/randomplayer1" class="subtle" target="_blank">LG1x3</a>
+        vs. <a href="http://pokemonshowdown.com/users/randomplayer2" class="subtle"
+            target="_blank">LG0x3</a></h1>
+    <script type="text/plain" class="battle-log-data">
+    >battle-gen9championsvgc2026regma-14018
+|init|battle
+|title|LG0x3 vs. LG1x3
+|j|☆LG0x3
+|j|☆LG1x3
+|gametype|doubles
+|player|p1|LG0x3|266|
+|player|p2|LG1x3|102|
+|gen|9
+|tier|[Gen 9 Champions] VGC 2026 Reg M-A
+|rule|Species Clause: Limit one of each Pokémon
+|rule|Item Clause: Limit 1 of each item
+|clearpoke
+|poke|p1|Charizard, L50, F|
+|poke|p1|Toxapex, L50, F|
+|poke|p1|Sneasler, L50, F|
+|poke|p1|Mamoswine, L50, F|
+|poke|p1|Hydreigon, L50, F|
+|poke|p1|Incineroar, L50, F|
+|poke|p2|Sneasler, L50, F|
+|poke|p2|Sinistcha, L50|
+|poke|p2|Talonflame, L50, F|
+|poke|p2|Steelix, L50, M|
+|poke|p2|Rotom-Wash, L50|
+|poke|p2|Tyranitar, L50, F|
+|teampreview|4
+|uhtml|otsrequest|<button name="send" value="/acceptopenteamsheets" class="button" style="margin-right: 10px;"><strong>Accept Open Team Sheets</strong></button><button name="send" value="/rejectopenteamsheets" class="button" style="margin-top: 10px"><strong>Deny Open Team Sheets</strong></button>
+|
+|teamsize|p1|4
+|teamsize|p2|4
+|start
+|switch|p1a: Charizard|Charizard, L50, F|100/100
+|switch|p1b: Toxapex|Toxapex, L50, F|100/100
+|switch|p2a: Sneasler|Sneasler, L50, F|155/155
+|switch|p2b: Sinistcha|Sinistcha, L50|146/146
+|turn|1
+|
+|detailschange|p1a: Charizard|Charizard-Mega-Y, L50, F
+|-mega|p1a: Charizard|Charizard|Charizardite Y
+|-weather|SunnyDay|[from] ability: Drought|[of] p1a: Charizard
+|move|p2a: Sneasler|Fake Out|p1a: Charizard
+|-damage|p1a: Charizard|85/100
+|cant|p1a: Charizard|flinch
+|move|p2b: Sinistcha|Matcha Gotcha|p1a: Charizard|[spread] p1a,p1b
+|-resisted|p1a: Charizard|2
+|-crit|p1b: Toxapex
+|-damage|p1a: Charizard|78/100
+|-damage|p1b: Toxapex|65/100
+|move|p1b: Toxapex|Infestation|p2a: Sneasler
+|-resisted|p2a: Sneasler|2
+|-damage|p2a: Sneasler|154/155
+|-activate|p2a: Sneasler|move: Infestation|[of] p1b: Toxapex
+|
+|-weather|SunnyDay|[upkeep]
+|-heal|p1b: Toxapex|71/100|[from] item: Leftovers
+|-damage|p2a: Sneasler|135/155|[from] move: Infestation|[partiallytrapped]
+|upkeep
+|turn|2
+|
+|move|p1a: Charizard|Protect|p1a: Charizard
+|-singleturn|p1a: Charizard|Protect
+|move|p2a: Sneasler|Dire Claw|p2b: Sinistcha
+|-damage|p2b: Sinistcha|89/146
+|move|p1b: Toxapex|Toxic|p2b: Sinistcha
+|-status|p2b: Sinistcha|tox
+|move|p2b: Sinistcha|Trick Room|p2b: Sinistcha
+|-fieldstart|move: Trick Room|[of] p2b: Sinistcha
+|
+|-weather|SunnyDay|[upkeep]
+|-heal|p1b: Toxapex|77/100|[from] item: Leftovers
+|-damage|p2b: Sinistcha|80/146 tox|[from] psn
+|-damage|p2a: Sneasler|116/155|[from] move: Infestation|[partiallytrapped]
+|upkeep
+|turn|3
+|
+|move|p1b: Toxapex|Toxic|p2a: Sneasler
+|-immune|p2a: Sneasler
+|move|p2a: Sneasler|Close Combat|p2b: Sinistcha
+|-immune|p2b: Sinistcha
+|move|p1a: Charizard|Heat Wave|p2a: Sneasler|[spread] p2a,p2b
+|-supereffective|p2b: Sinistcha|1
+|-damage|p2a: Sneasler|0 fnt
+|-damage|p2b: Sinistcha|0 fnt
+|faint|p2a: Sneasler
+|faint|p2b: Sinistcha
+|
+|-weather|SunnyDay|[upkeep]
+|-heal|p1b: Toxapex|82/100|[from] item: Leftovers
+|upkeep
+|
+|switch|p2b: Steelix|Steelix, L50, M|150/150
+|switch|p2a: Talonflame|Talonflame, L50, F|153/153
+|turn|4
+|
+|detailschange|p2b: Steelix|Steelix-Mega, L50, M
+|-mega|p2b: Steelix|Steelix|Steelixite
+|move|p2b: Steelix|Protect|p2b: Steelix
+|-singleturn|p2b: Steelix|Protect
+|move|p2a: Talonflame|Protect|p2a: Talonflame
+|-singleturn|p2a: Talonflame|Protect
+|move|p1b: Toxapex|Infestation|p2a: Talonflame
+|-activate|p2a: Talonflame|move: Protect
+|move|p1a: Charizard|Weather Ball|p2a: Talonflame
+|-activate|p2a: Talonflame|move: Protect
+|
+|-weather|SunnyDay|[upkeep]
+|-heal|p1b: Toxapex|88/100|[from] item: Leftovers
+|upkeep
+|turn|5
+|
+|switch|p1a: Sneasler|Sneasler, L50, F|100/100
+|move|p2b: Steelix|Protect||[still]
+|-fail|p2b: Steelix
+|move|p2a: Talonflame|Brave Bird|p1a: Sneasler
+|-supereffective|p1a: Sneasler|1
+|-damage|p1a: Sneasler|0 fnt
+|faint|p1a: Sneasler
+|-damage|p2a: Talonflame|101/153|[from] Recoil
+|move|p1b: Toxapex|Infestation|p2a: Talonflame
+|-resisted|p2a: Talonflame|2
+|-damage|p2a: Talonflame|99/153
+|-activate|p2a: Talonflame|move: Infestation|[of] p1b: Toxapex
+|
+|-weather|none
+|-heal|p1b: Toxapex|94/100|[from] item: Leftovers
+|-damage|p2a: Talonflame|80/153|[from] move: Infestation|[partiallytrapped]
+|upkeep
+|
+|switch|p1a: Mamoswine|Mamoswine, L50, F|100/100
+|turn|6
+|
+|move|p2b: Steelix|Protect|p2b: Steelix
+|-singleturn|p2b: Steelix|Protect
+|move|p1a: Mamoswine|Ice Shard|p2a: Talonflame
+|-damage|p2a: Talonflame|29/153
+|move|p1b: Toxapex|Toxic|p2b: Steelix
+|-activate|p2b: Steelix|move: Protect
+|move|p2a: Talonflame|Brave Bird|p1a: Mamoswine
+|-damage|p1a: Mamoswine|48/100
+|-damage|p2a: Talonflame|0 fnt|[from] Recoil
+|faint|p2a: Talonflame
+|
+|-heal|p1b: Toxapex|100/100|[from] item: Leftovers
+|-fieldend|move: Trick Room
+|upkeep
+|turn|7
+|
+|move|p1b: Toxapex|Baneful Bunker|p1b: Toxapex
+|-singleturn|p1b: Toxapex|move: Protect
+|move|p1a: Mamoswine|Earthquake|p2b: Steelix|[spread] p2b
+|-activate|p1b: Toxapex|move: Protect
+|-supereffective|p2b: Steelix|1
+|-damage|p2b: Steelix|78/150
+|move|p2b: Steelix|Heavy Slam|p1b: Toxapex
+|-activate|p1b: Toxapex|move: Protect
+|
+|upkeep
+|turn|8
+|
+|switch|p1b: Charizard|Charizard-Mega-Y, L50, F|78/100
+|-weather|SunnyDay|[from] ability: Drought|[of] p1b: Charizard
+|move|p1a: Mamoswine|Protect|p1a: Mamoswine
+|-singleturn|p1a: Mamoswine|Protect
+|move|p2b: Steelix|Protect||[still]
+|-fail|p2b: Steelix
+|
+|-weather|SunnyDay|[upkeep]
+|upkeep
+|turn|9
+|
+|move|p1a: Mamoswine|Ice Shard|p2b: Steelix
+|-damage|p2b: Steelix|59/150
+|move|p1b: Charizard|Solar Beam||[still]
+|-prepare|p1b: Charizard|Solar Beam
+|-anim|p1b: Charizard|Solar Beam|p2b: Steelix
+|-damage|p2b: Steelix|0 fnt
+|faint|p2b: Steelix
+|
+|win|LG0x3
+    </script>
+</div>
+
+<div class="battle-log battle-log-inline" style="display:none"></div>
+
+<script>
+    let daily = Math.floor(Date.now() / 1000 / 60 / 60 / 24); document.write('<script src="https://play.pokemonshowdown.com/js/replay-embed.js?version' + daily + '"></' + 'script>');
+</script>
+
+<p style="text-align:center"> Replay created by <a href="https://github.com/hsahovic/poke-env">poke-env</a>, with code from <a
+        href="https://github.com/smogon/pokemon-showdown"> pokemon-showdown</a>. If something goes wrong, don't hesitate
+    to open an <a href="https://github.com/hsahovic/poke-env/issues">issue!</a></p>

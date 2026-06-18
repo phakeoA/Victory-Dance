@@ -347,31 +347,52 @@ function renderLiveBar() {
     `<div class="lb-sub">${hasProg ? done + "/" + total + " games" : "&nbsp;"}${r.n_generations ? " · target " + r.n_generations + " gens" : ""}${r.last_verdict ? " · last gen: " + esc(r.last_verdict) : ""}</div></div>` +
     prog +
     `<div class="lb-stat"><div class="v">${wr == null ? "—" : (wr * 100).toFixed(0) + "%"}</div><div class="l">p1 win (running)</div></div>` +
-    `<div class="lb-stat"><div class="v">${(s.active_battles || []).length}</div><div class="l">live battles</div></div>`;
+    `<div class="lb-stat"><div class="v">${liveBattleList().length}</div><div class="l">live battles</div></div>`;
+}
+
+// #18 multi-battle spectate: STATE.liveBattles maps tag -> {tag,p1,p2,turn,n_lines,parsed}.
+function liveBattleList() {
+  const m = STATE.liveBattles || {};
+  return Object.keys(m).sort().map((t) => m[t]);
 }
 
 function renderSpectate() {
   const pane = $("tab-spectate"), s = STATE.status;
-  const battles = (s && s.active_battles) || [];
   const url = (s && s.showdown_url) || "http://localhost:8000";
   if (STATE.mode === "static") {
     pane.innerHTML = `<div class="spec-empty"><div class="big">🎬</div><p>Live spectating is available when the dashboard is served by the dashboard server during a self-play run.</p></div>`;
     return;
   }
+  const battles = liveBattleList();
   if (!battles.length) {
-    pane.innerHTML = `<div class="spec-empty"><div class="big">🎬</div><p>No live battles right now.<br/>Start a self-play run and its current game shows here, turn by turn.</p></div>`;
+    pane.innerHTML = `<div class="spec-empty"><div class="big">🎬</div><p>No live battles right now.<br/>Start a self-play run and its current games show here, turn by turn.</p></div>`;
     return;
   }
-  const watch = battles.map((b) =>
-    `<a class="btn pri" href="${esc(url)}/${esc(b.tag)}" target="_blank" rel="noopener">▶ Watch ${esc(b.p1)} vs ${esc(b.p2)} (animated, new tab)</a>`).join(" ");
-  const note = `<div class="spec-note">Live turn-by-turn view of the current self-play game, rendered from its battle log (no internet needed). <b>▶ Watch</b> opens the full animated Showdown client in a new tab (needs internet).</div>`;
-  pane.innerHTML = note + `<div class="spec-actions">${watch}</div><div id="tv-container"></div>`;
+  if (!battles.some((b) => b.tag === STATE.specSel)) STATE.specSel = battles[0].tag;   // keep/repair selection
+  const kindBadge = (b) => b.kind
+    ? `<span class="spec-kind ${b.kind === "eval" ? "k-eval" : "k-self"}">${b.kind === "eval" ? "eval" : "self"}${b.gen != null ? " g" + b.gen : ""}</span>` : "";
+  const chips = battles.map((b) =>
+    `<button class="spec-chip ${b.tag === STATE.specSel ? "sel" : ""}" onclick="selectBattle('${esc(b.tag)}')">` +
+    `${kindBadge(b)}${esc(b.p1)} <span class="vs">vs</span> ${esc(b.p2)} <span class="spec-turn">T${b.turn || 0}</span></button>`).join("");
+  const sel = battles.find((b) => b.tag === STATE.specSel) || battles[0];
+  const watch = `<a class="btn pri" href="${esc(url)}/${esc(sel.tag)}" target="_blank" rel="noopener">▶ Watch ${esc(sel.p1)} vs ${esc(sel.p2)} (animated, new tab)</a>`;
+  const note = `<div class="spec-note">${battles.length} live battle${battles.length === 1 ? "" : "s"} — click one to follow it turn by turn (rendered from its log, no internet). <b>▶ Watch</b> opens the animated Showdown client (needs internet).</div>`;
+  pane.innerHTML = note + `<div class="spec-chips">${chips}</div><div class="spec-actions">${watch}</div><div id="tv-container"></div>`;
   renderTurnViewerInto();
 }
 
 function renderTurnViewerInto() {
   const c = document.getElementById("tv-container");
-  if (c) c.innerHTML = renderTurnViewer(STATE.liveLog);
+  if (!c) return;
+  const sel = (STATE.liveBattles || {})[STATE.specSel];
+  c.innerHTML = renderTurnViewer(sel ? sel.parsed : null);
+}
+
+function selectBattle(tag) {
+  if (tag === STATE.specSel) return;
+  STATE.specSel = tag;
+  STATE.followLatest = true; STATE.viewTurn = 0;     // new selection -> follow live
+  renderSpectate();
 }
 
 function renderTurnViewer(parsed) {
@@ -488,9 +509,7 @@ function applyManifest(m, src) {
 
 function applyStatus(s) {
   STATE.status = s;
-  setLiveBadge(); renderLiveBar();
-  const tags = ((s && s.active_battles) || []).map((b) => b.tag).join(",");
-  if (tags !== STATE.lastTags) { STATE.lastTags = tags; renderSpectate(); }   // only rebuild iframes when the room set changes (don't reload mid-battle)
+  setLiveBadge(); renderLiveBar();        // spectate is driven by applyLiveBattles (#18), not status
 }
 
 // ── live polling ──────────────────────────────────────────────────────────────
@@ -505,25 +524,32 @@ async function pollOnce() {
     const key = manifestKey(m);
     if (key !== STATE.lastKey) { STATE.lastKey = key; applyManifest(m, "live"); }   // re-render charts only when a generation actually changes
   } catch (e) { /* manifest may not exist until gen 0 finishes */ }
-  try { applyLiveLog(await fetchJSON("live_log.json")); } catch (e) { /* no live log yet */ }
+  try { applyLiveBattles(await fetchJSON("live_battles.json")); } catch (e) { /* no live battles yet */ }
   return true;
 }
 
-function applyLiveLog(lg) {
-  const key = ((lg && lg.tag) || "") + ":" + ((lg && lg.n_lines) || 0);
-  if (key === STATE.logKey) return;                               // unchanged since last poll
-  STATE.logKey = key;
-  const newTag = lg && lg.tag;
-  const sameBattle = STATE.liveLog && STATE.liveLog.tag === newTag;
-  if (!sameBattle) { STATE.followLatest = true; STATE.viewTurn = 0; }   // new battle -> follow live
-  STATE.liveLog = (lg && lg.log && lg.log.length) ? parseBattleLog(lg.log) : null;
-  if (STATE.liveLog) STATE.liveLog.tag = newTag;
-  if (STATE.tab === "spectate") renderTurnViewerInto();           // live-tail the viewer
+function applyLiveBattles(data) {
+  const incoming = (data && data.battles) || [];
+  const tags = incoming.map((b) => b.tag).sort().join(",");
+  const prev = STATE.liveBattles || {};
+  const next = {};
+  for (const b of incoming) {
+    const old = prev[b.tag];
+    const reparse = !old || old.n_lines !== b.n_lines;            // reparse only when the log grew
+    const parsed = reparse ? ((b.log && b.log.length) ? parseBattleLog(b.log) : null) : old.parsed;
+    if (parsed) parsed.tag = b.tag;
+    next[b.tag] = { tag: b.tag, p1: b.p1, p2: b.p2, turn: b.turn, n_lines: b.n_lines, parsed };
+  }
+  STATE.liveBattles = next;
+  const setChanged = tags !== STATE.specTags;
+  STATE.specTags = tags;
+  if (STATE.tab === "spectate") { if (setChanged) renderSpectate(); else renderTurnViewerInto(); }
+  if (setChanged) renderLiveBar();                                // refresh the "live battles" count
 }
 function stopPolling() { if (STATE.poll) { clearInterval(STATE.poll); STATE.poll = null; } }
 
 function loadStatic(m, src) {                       // demo / file-picker → leave live mode
-  stopPolling(); STATE.mode = "static"; STATE.status = null; STATE.lastTags = "__static__";
+  stopPolling(); STATE.mode = "static"; STATE.status = null; STATE.liveBattles = {}; STATE.specTags = "__static__";
   if (STATE.tab === "spectate") STATE.tab = "overview";
   if (applyManifest(m, src)) notify(`Loaded ${m.n_generations} generations from ${src}`);
 }

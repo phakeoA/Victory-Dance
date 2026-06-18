@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<meta charset="utf-8" />
+<!-- version 1 -->
+<title>battle-gen9championsvgc2026regma-14035</title>
+<style>
+    html,
+    body {
+        font-family: Verdana, sans-serif;
+        font-size: 10pt;
+        margin: 0;
+        padding: 0;
+    }
+
+    body {
+        padding: 12px 0;
+    }
+
+    .battle-log {
+        font-family: Verdana, sans-serif;
+        font-size: 10pt;
+    }
+
+    .battle-log-inline {
+        border: 1px solid #AAAAAA;
+        background: #EEF2F5;
+        color: black;
+        max-width: 640px;
+        margin: 0 auto 80px;
+        padding-bottom: 5px;
+    }
+
+    .battle-log .inner {
+        padding: 4px 8px 0px 8px;
+    }
+
+    .battle-log .inner-preempt {
+        padding: 0 8px 4px 8px;
+    }
+
+    .battle-log .inner-after {
+        margin-top: 0.5em;
+    }
+
+    .battle-log h2 {
+        margin: 0.5em -8px;
+        padding: 4px 8px;
+        border: 1px solid #AAAAAA;
+        background: #E0E7EA;
+        border-left: 0;
+        border-right: 0;
+        font-family: Verdana, sans-serif;
+        font-size: 13pt;
+    }
+
+    .backprop {
+        top: 0;
+    }
+
+    .battle-log .chat {
+        vertical-align: middle;
+        padding: 3px 0 3px 0;
+        font-size: 8pt;
+    }
+
+    .battle-log .chat strong {
+        color: #40576A;
+    }
+
+    .battle-log .chat em {
+        padding: 1px 4px 1px 3px;
+        color: #000000;
+        font-style: normal;
+    }
+
+    .chat.mine {
+        background: rgba(0, 0, 0, 0.05);
+        margin-left: -8px;
+        margin-right: -8px;
+        padding-left: 8px;
+        padding-right: 8px;
+    }
+
+    .spoiler {
+        color: #BBBBBB;
+        background: #BBBBBB;
+        padding: 0px 3px;
+    }
+
+    .spoiler:hover,
+    .spoiler:active,
+    .spoiler-shown {
+        color: #000000;
+        background: #E2E2E2;
+        padding: 0px 3px;
+    }
+
+    .spoiler a {
+        color: #BBBBBB;
+    }
+
+    .spoiler:hover a,
+    .spoiler:active a,
+    .spoiler-shown a {
+        color: #2288CC;
+    }
+
+    .chat code,
+    .chat .spoiler:hover code,
+    .chat .spoiler:active code,
+    .chat .spoiler-shown code {
+        border: 1px solid #C0C0C0;
+        background: #EEEEEE;
+        color: black;
+        padding: 0 2px;
+    }
+
+    .chat .spoiler code {
+        border: 1px solid #CCCCCC;
+        background: #CCCCCC;
+        color: #CCCCCC;
+    }
+
+    .battle-log .rated {
+        padding: 3px 4px;
+    }
+
+    .battle-log .rated strong {
+        color: white;
+        background: #89A;
+        padding: 1px 4px;
+        border-radius: 4px;
+    }
+
+    .spacer {
+        margin-top: 0.5em;
+    }
+
+    .message-announce {
+        background: #6688AA;
+        color: white;
+        padding: 1px 4px 2px;
+    }
+
+    .message-announce a,
+    .broadcast-green a,
+    .broadcast-blue a,
+    .broadcast-red a {
+        color: #DDEEFF;
+    }
+
+    .broadcast-green {
+        background-color: #559955;
+        color: white;
+        padding: 2px 4px;
+    }
+
+    .broadcast-blue {
+        background-color: #6688AA;
+        color: white;
+        padding: 2px 4px;
+    }
+
+    .infobox {
+        border: 1px solid #6688AA;
+        padding: 2px 4px;
+    }
+
+    .infobox-limited {
+        max-height: 200px;
+        overflow: auto;
+        overflow-x: hidden;
+    }
+
+    .broadcast-red {
+        background-color: #AA5544;
+        color: white;
+        padding: 2px 4px;
+    }
+
+    .message-learn-canlearn {
+        font-weight: bold;
+        color: #228822;
+        text-decoration: underline;
+    }
+
+    .message-learn-cannotlearn {
+        font-weight: bold;
+        color: #CC2222;
+        text-decoration: underline;
+    }
+
+    .message-effect-weak {
+        font-weight: bold;
+        color: #CC2222;
+    }
+
+    .message-effect-resist {
+        font-weight: bold;
+        color: #6688AA;
+    }
+
+    .message-effect-immune {
+        font-weight: bold;
+        color: #666666;
+    }
+
+    .message-learn-list {
+        margin-top: 0;
+        margin-bottom: 0;
+    }
+
+    .message-throttle-notice,
+    .message-error {
+        color: #992222;
+    }
+
+    .message-overflow,
+    .chat small.message-overflow {
+        font-size: 0pt;
+    }
+
+    .message-overflow::before {
+        font-size: 9pt;
+        content: '...';
+    }
+
+    .subtle {
+        color: #3A4A66;
+    }
+</style>
+<div class="wrapper replay-wrapper" style="max-width:1180px;margin:0 auto">
+    <input type="hidden" name="replayid" value="unregisteredserver-gen8randombattle-320064" />
+    <div class="battle"></div>
+    <div class="battle-log"></div>
+    <div class="replay-controls"></div>
+    <div class="replay-controls-2"></div>
+    <h1 style="font-weight:normal;text-align:center"><strong>poke-env battle replay</strong><br />battle-gen9championsvgc2026regma-14035<br /><a
+            href="http://pokemonshowdown.com/users/randomplayer1" class="subtle" target="_blank">LG0x21</a>
+        vs. <a href="http://pokemonshowdown.com/users/randomplayer2" class="subtle"
+            target="_blank">LG1x21</a></h1>
+    <script type="text/plain" class="battle-log-data">
+    >battle-gen9championsvgc2026regma-14035
+|init|battle
+|title|LG0x21 vs. LG1x21
+|j|☆LG0x21
+|j|☆LG1x21
+|gametype|doubles
+|player|p1|LG0x21|2|
+|player|p2|LG1x21|2|
+|gen|9
+|tier|[Gen 9 Champions] VGC 2026 Reg M-A
+|rule|Species Clause: Limit one of each Pokémon
+|rule|Item Clause: Limit 1 of each item
+|clearpoke
+|poke|p1|Floette-Eternal, L50, F|
+|poke|p1|Charizard, L50, M|
+|poke|p1|Garchomp, L50, F|
+|poke|p1|Aerodactyl, L50, M|
+|poke|p1|Sneasler, L50, F|
+|poke|p1|Kingambit, L50, F|
+|poke|p2|Farigiraf, L50, M|
+|poke|p2|Incineroar, L50, F|
+|poke|p2|Crabominable, L50, M|
+|poke|p2|Basculegion, L50, M|
+|poke|p2|Kingambit, L50, M|
+|poke|p2|Dragonite, L50, M|
+|teampreview|4
+|uhtml|otsrequest|<button name="send" value="/acceptopenteamsheets" class="button" style="margin-right: 10px;"><strong>Accept Open Team Sheets</strong></button><button name="send" value="/rejectopenteamsheets" class="button" style="margin-top: 10px"><strong>Deny Open Team Sheets</strong></button>
+|
+|teamsize|p1|4
+|teamsize|p2|4
+|start
+|switch|p1a: Floette|Floette-Eternal, L50, F|179/179
+|switch|p1b: Charizard|Charizard, L50, M|175/175
+|switch|p2a: Farigiraf|Farigiraf, L50, M|100/100
+|switch|p2b: Incineroar|Incineroar, L50, F|100/100
+|-ability|p2b: Incineroar|Intimidate|boost
+|-unboost|p1a: Floette|atk|1
+|-unboost|p1b: Charizard|atk|1
+|turn|1
+|
+|detailschange|p1b: Charizard|Charizard-Mega-Y, L50, M
+|-mega|p1b: Charizard|Charizard|Charizardite Y
+|-weather|SunnyDay|[from] ability: Drought|[of] p1b: Charizard
+|move|p1a: Floette|Protect|p1a: Floette
+|-singleturn|p1a: Floette|Protect
+|move|p2a: Farigiraf|Protect|p2a: Farigiraf
+|-singleturn|p2a: Farigiraf|Protect
+|move|p1b: Charizard|Blast Burn|p2b: Incineroar
+|-resisted|p2b: Incineroar|1
+|-damage|p2b: Incineroar|42/100
+|-mustrecharge|p1b: Charizard
+|move|p2b: Incineroar|Flare Blitz|p1a: Floette
+|-activate|p1a: Floette|move: Protect
+|
+|-weather|SunnyDay|[upkeep]
+|upkeep
+|turn|2
+|
+|cant|p1b: Charizard|recharge
+|move|p1a: Floette|Dazzling Gleam|p2a: Farigiraf|[spread] p2a,p2b
+|-damage|p2a: Farigiraf|71/100
+|-damage|p2b: Incineroar|13/100
+|move|p2a: Farigiraf|Thunderbolt|p1b: Charizard
+|-supereffective|p1b: Charizard|1
+|-crit|p1b: Charizard
+|-damage|p1b: Charizard|41/175
+|move|p2b: Incineroar|Darkest Lariat|p1a: Floette
+|-resisted|p1a: Floette|1
+|-damage|p1a: Floette|136/179
+|
+|-weather|SunnyDay|[upkeep]
+|upkeep
+|turn|3
+|
+|switch|p2b: Crabominable|Crabominable, L50, M|100/100
+|move|p1b: Charizard|Protect|p1b: Charizard
+|-singleturn|p1b: Charizard|Protect
+|move|p1a: Floette|Dazzling Gleam|p2b: Crabominable|[spread] p2a,p2b
+|-supereffective|p2b: Crabominable|1
+|-damage|p2a: Farigiraf|45/100
+|-damage|p2b: Crabominable|28/100
+|-enditem|p2a: Farigiraf|Sitrus Berry|[eat]
+|-heal|p2a: Farigiraf|69/100|[from] item: Sitrus Berry
+|move|p2a: Farigiraf|Trick Room|p2a: Farigiraf
+|-fieldstart|move: Trick Room|[of] p2a: Farigiraf
+|
+|-weather|SunnyDay|[upkeep]
+|upkeep
+|turn|4
+|
+|switch|p1a: Aerodactyl|Aerodactyl, L50, M|157/157
+|-ability|p1a: Aerodactyl|Unnerve
+|detailschange|p2b: Crabominable|Crabominable-Mega, L50, M
+|-mega|p2b: Crabominable|Crabominable|Crabominite
+|move|p2b: Crabominable|Mach Punch|p1a: Aerodactyl
+|-damage|p1a: Aerodactyl|75/157
+|move|p1b: Charizard|Weather Ball|p2a: Farigiraf
+|-damage|p2a: Farigiraf|0 fnt
+|faint|p2a: Farigiraf
+|
+|-weather|SunnyDay|[upkeep]
+|upkeep
+|
+|switch|p2a: Incineroar|Incineroar, L50, F|13/100
+|-ability|p2a: Incineroar|Intimidate|boost
+|-unboost|p1a: Aerodactyl|atk|1
+|-unboost|p1b: Charizard|atk|1
+|turn|5
+|
+|switch|p1b: Garchomp|Garchomp, L50, F|183/183
+|move|p2b: Crabominable|Ice Hammer|p1a: Aerodactyl
+|-supereffective|p1a: Aerodactyl|1
+|-damage|p1a: Aerodactyl|0 fnt
+|-unboost|p2b: Crabominable|spe|1
+|faint|p1a: Aerodactyl
+|move|p2a: Incineroar|Parting Shot|p1b: Garchomp
+|-unboost|p1b: Garchomp|atk|1
+|-unboost|p1b: Garchomp|spa|1
+|
+|switch|p2a: Basculegion|Basculegion, L50, M|100/100|[from] Parting Shot
+|
+|-weather|none
+|upkeep
+|
+|switch|p1a: Charizard|Charizard-Mega-Y, L50, M|41/175
+|-weather|SunnyDay|[from] ability: Drought|[of] p1a: Charizard
+|turn|6
+|
+|move|p1a: Charizard|Protect|p1a: Charizard
+|-singleturn|p1a: Charizard|Protect
+|move|p2b: Crabominable|Mach Punch|p1a: Charizard
+|-activate|p1a: Charizard|move: Protect
+|move|p2a: Basculegion|Flip Turn|p1b: Garchomp
+|-crit|p1b: Garchomp
+|-damage|p1b: Garchomp|133/183
+|-damage|p2a: Basculegion|87/100|[from] ability: Rough Skin|[of] p1b: Garchomp
+|
+|switch|p2a: Incineroar|Incineroar, L50, F|13/100|[from] Flip Turn
+|-ability|p2a: Incineroar|Intimidate|boost
+|-unboost|p1a: Charizard|atk|1
+|-unboost|p1b: Garchomp|atk|1
+|move|p1b: Garchomp|Earthquake|p2b: Crabominable|[spread] p2a,p2b
+|-activate|p1a: Charizard|move: Protect
+|-supereffective|p2a: Incineroar|1
+|-crit|p2b: Crabominable
+|-damage|p2a: Incineroar|0 fnt
+|-damage|p2b: Crabominable|0 fnt
+|faint|p2a: Incineroar
+|faint|p2b: Crabominable
+|
+|-weather|SunnyDay|[upkeep]
+|upkeep
+|
+|switch|p2a: Basculegion|Basculegion, L50, M|87/100
+|turn|7
+|
+|switch|p1b: Floette|Floette-Eternal, L50, F|136/179
+|move|p1a: Charizard|Blast Burn|p2a: Basculegion
+|-resisted|p2a: Basculegion|1
+|-damage|p2a: Basculegion|8/100
+|-mustrecharge|p1a: Charizard
+|move|p2a: Basculegion|Wave Crash|p1a: Charizard
+|-supereffective|p1a: Charizard|1
+|-damage|p1a: Charizard|0 fnt
+|faint|p1a: Charizard
+|-damage|p2a: Basculegion|1/100|[from] Recoil
+|
+|-weather|SunnyDay|[upkeep]
+|-fieldend|move: Trick Room
+|upkeep
+|
+|switch|p1a: Garchomp|Garchomp, L50, F|133/183
+|turn|8
+|
+|move|p1b: Floette|Protect|p1b: Floette
+|-singleturn|p1b: Floette|Protect
+|move|p1a: Garchomp|Earthquake|p2a: Basculegion|[spread] p2a
+|-activate|p1b: Floette|move: Protect
+|-damage|p2a: Basculegion|0 fnt
+|faint|p2a: Basculegion
+|
+|win|LG0x21
+    </script>
+</div>
+
+<div class="battle-log battle-log-inline" style="display:none"></div>
+
+<script>
+    let daily = Math.floor(Date.now() / 1000 / 60 / 60 / 24); document.write('<script src="https://play.pokemonshowdown.com/js/replay-embed.js?version' + daily + '"></' + 'script>');
+</script>
+
+<p style="text-align:center"> Replay created by <a href="https://github.com/hsahovic/poke-env">poke-env</a>, with code from <a
+        href="https://github.com/smogon/pokemon-showdown"> pokemon-showdown</a>. If something goes wrong, don't hesitate
+    to open an <a href="https://github.com/hsahovic/poke-env/issues">issue!</a></p>

@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<meta charset="utf-8" />
+<!-- version 1 -->
+<title>battle-gen9championsvgc2026regma-14016</title>
+<style>
+    html,
+    body {
+        font-family: Verdana, sans-serif;
+        font-size: 10pt;
+        margin: 0;
+        padding: 0;
+    }
+
+    body {
+        padding: 12px 0;
+    }
+
+    .battle-log {
+        font-family: Verdana, sans-serif;
+        font-size: 10pt;
+    }
+
+    .battle-log-inline {
+        border: 1px solid #AAAAAA;
+        background: #EEF2F5;
+        color: black;
+        max-width: 640px;
+        margin: 0 auto 80px;
+        padding-bottom: 5px;
+    }
+
+    .battle-log .inner {
+        padding: 4px 8px 0px 8px;
+    }
+
+    .battle-log .inner-preempt {
+        padding: 0 8px 4px 8px;
+    }
+
+    .battle-log .inner-after {
+        margin-top: 0.5em;
+    }
+
+    .battle-log h2 {
+        margin: 0.5em -8px;
+        padding: 4px 8px;
+        border: 1px solid #AAAAAA;
+        background: #E0E7EA;
+        border-left: 0;
+        border-right: 0;
+        font-family: Verdana, sans-serif;
+        font-size: 13pt;
+    }
+
+    .backprop {
+        top: 0;
+    }
+
+    .battle-log .chat {
+        vertical-align: middle;
+        padding: 3px 0 3px 0;
+        font-size: 8pt;
+    }
+
+    .battle-log .chat strong {
+        color: #40576A;
+    }
+
+    .battle-log .chat em {
+        padding: 1px 4px 1px 3px;
+        color: #000000;
+        font-style: normal;
+    }
+
+    .chat.mine {
+        background: rgba(0, 0, 0, 0.05);
+        margin-left: -8px;
+        margin-right: -8px;
+        padding-left: 8px;
+        padding-right: 8px;
+    }
+
+    .spoiler {
+        color: #BBBBBB;
+        background: #BBBBBB;
+        padding: 0px 3px;
+    }
+
+    .spoiler:hover,
+    .spoiler:active,
+    .spoiler-shown {
+        color: #000000;
+        background: #E2E2E2;
+        padding: 0px 3px;
+    }
+
+    .spoiler a {
+        color: #BBBBBB;
+    }
+
+    .spoiler:hover a,
+    .spoiler:active a,
+    .spoiler-shown a {
+        color: #2288CC;
+    }
+
+    .chat code,
+    .chat .spoiler:hover code,
+    .chat .spoiler:active code,
+    .chat .spoiler-shown code {
+        border: 1px solid #C0C0C0;
+        background: #EEEEEE;
+        color: black;
+        padding: 0 2px;
+    }
+
+    .chat .spoiler code {
+        border: 1px solid #CCCCCC;
+        background: #CCCCCC;
+        color: #CCCCCC;
+    }
+
+    .battle-log .rated {
+        padding: 3px 4px;
+    }
+
+    .battle-log .rated strong {
+        color: white;
+        background: #89A;
+        padding: 1px 4px;
+        border-radius: 4px;
+    }
+
+    .spacer {
+        margin-top: 0.5em;
+    }
+
+    .message-announce {
+        background: #6688AA;
+        color: white;
+        padding: 1px 4px 2px;
+    }
+
+    .message-announce a,
+    .broadcast-green a,
+    .broadcast-blue a,
+    .broadcast-red a {
+        color: #DDEEFF;
+    }
+
+    .broadcast-green {
+        background-color: #559955;
+        color: white;
+        padding: 2px 4px;
+    }
+
+    .broadcast-blue {
+        background-color: #6688AA;
+        color: white;
+        padding: 2px 4px;
+    }
+
+    .infobox {
+        border: 1px solid #6688AA;
+        padding: 2px 4px;
+    }
+
+    .infobox-limited {
+        max-height: 200px;
+        overflow: auto;
+        overflow-x: hidden;
+    }
+
+    .broadcast-red {
+        background-color: #AA5544;
+        color: white;
+        padding: 2px 4px;
+    }
+
+    .message-learn-canlearn {
+        font-weight: bold;
+        color: #228822;
+        text-decoration: underline;
+    }
+
+    .message-learn-cannotlearn {
+        font-weight: bold;
+        color: #CC2222;
+        text-decoration: underline;
+    }
+
+    .message-effect-weak {
+        font-weight: bold;
+        color: #CC2222;
+    }
+
+    .message-effect-resist {
+        font-weight: bold;
+        color: #6688AA;
+    }
+
+    .message-effect-immune {
+        font-weight: bold;
+        color: #666666;
+    }
+
+    .message-learn-list {
+        margin-top: 0;
+        margin-bottom: 0;
+    }
+
+    .message-throttle-notice,
+    .message-error {
+        color: #992222;
+    }
+
+    .message-overflow,
+    .chat small.message-overflow {
+        font-size: 0pt;
+    }
+
+    .message-overflow::before {
+        font-size: 9pt;
+        content: '...';
+    }
+
+    .subtle {
+        color: #3A4A66;
+    }
+</style>
+<div class="wrapper replay-wrapper" style="max-width:1180px;margin:0 auto">
+    <input type="hidden" name="replayid" value="unregisteredserver-gen8randombattle-320064" />
+    <div class="battle"></div>
+    <div class="battle-log"></div>
+    <div class="replay-controls"></div>
+    <div class="replay-controls-2"></div>
+    <h1 style="font-weight:normal;text-align:center"><strong>poke-env battle replay</strong><br />battle-gen9championsvgc2026regma-14016<br /><a
+            href="http://pokemonshowdown.com/users/randomplayer1" class="subtle" target="_blank">LG1x2</a>
+        vs. <a href="http://pokemonshowdown.com/users/randomplayer2" class="subtle"
+            target="_blank">LG0x2</a></h1>
+    <script type="text/plain" class="battle-log-data">
+    >battle-gen9championsvgc2026regma-14016
+|init|battle
+|title|LG0x2 vs. LG1x2
+|j|☆LG0x2
+|j|☆LG1x2
+|gametype|doubles
+|player|p1|LG0x2|266|
+|player|p2|LG1x2|266|
+|gen|9
+|tier|[Gen 9 Champions] VGC 2026 Reg M-A
+|rule|Species Clause: Limit one of each Pokémon
+|rule|Item Clause: Limit 1 of each item
+|clearpoke
+|poke|p1|Sylveon, L50, M|
+|poke|p1|Scovillain, L50, M|
+|poke|p1|Pelipper, L50, M|
+|poke|p1|Espathra, L50, M|
+|poke|p1|Sinistcha, L50|
+|poke|p1|Archaludon, L50, F|
+|poke|p2|Tyranitar, L50, F|
+|poke|p2|Excadrill, L50, F|
+|poke|p2|Hydreigon, L50, F|
+|poke|p2|Corviknight, L50, M|
+|poke|p2|Rotom-Wash, L50|
+|poke|p2|Mimikyu, L50, M|
+|teampreview|4
+|uhtml|otsrequest|<button name="send" value="/acceptopenteamsheets" class="button" style="margin-right: 10px;"><strong>Accept Open Team Sheets</strong></button><button name="send" value="/rejectopenteamsheets" class="button" style="margin-top: 10px"><strong>Deny Open Team Sheets</strong></button>
+|
+|teamsize|p1|4
+|teamsize|p2|4
+|start
+|switch|p1a: Sylveon|Sylveon, L50, M|100/100
+|switch|p1b: Scovillain|Scovillain, L50, M|100/100
+|switch|p2a: Tyranitar|Tyranitar, L50, F|197/197
+|switch|p2b: Excadrill|Excadrill, L50, F|186/186
+|-weather|Sandstorm|[from] ability: Sand Stream|[of] p2a: Tyranitar
+|turn|1
+|
+|detailschange|p2a: Tyranitar|Tyranitar-Mega, L50, F
+|-mega|p2a: Tyranitar|Tyranitar|Tyranitarite
+|detailschange|p1b: Scovillain|Scovillain-Mega, L50, M
+|-mega|p1b: Scovillain|Scovillain|Scovillainite
+|move|p1b: Scovillain|Rage Powder|p1b: Scovillain
+|-singleturn|p1b: Scovillain|move: Rage Powder
+|move|p2b: Excadrill|Earthquake|p1b: Scovillain|[spread] p2a,p1a,p1b
+|-supereffective|p2a: Tyranitar|1
+|-damage|p2a: Tyranitar|95/197
+|-damage|p1a: Sylveon|49/100
+|-damage|p1b: Scovillain|60/100
+|-status|p2b: Excadrill|brn|[from] ability: Spicy Spray|[of] p1b: Scovillain
+|move|p2a: Tyranitar|Low Kick|p1b: Scovillain
+|-damage|p1b: Scovillain|44/100
+|-status|p2a: Tyranitar|brn|[from] ability: Spicy Spray|[of] p1b: Scovillain
+|move|p1a: Sylveon|Hyper Voice|p2a: Tyranitar|[spread] p2a,p2b
+|-supereffective|p2a: Tyranitar|1
+|-crit|p2a: Tyranitar
+|-resisted|p2b: Excadrill|1
+|-damage|p2a: Tyranitar|0 fnt
+|-damage|p2b: Excadrill|119/186 brn
+|faint|p2a: Tyranitar
+|
+|-weather|Sandstorm|[upkeep]
+|-damage|p1b: Scovillain|38/100|[from] Sandstorm
+|-damage|p1a: Sylveon|43/100|[from] Sandstorm
+|-damage|p2b: Excadrill|108/186 brn|[from] brn
+|upkeep
+|
+|switch|p2a: Hydreigon|Hydreigon, L50, F|171/171
+|turn|2
+|
+|switch|p1a: Pelipper|Pelipper, L50, M|100/100
+|-weather|RainDance|[from] ability: Drizzle|[of] p1a: Pelipper
+|move|p2a: Hydreigon|Draco Meteor|p1a: Pelipper
+|-damage|p1a: Pelipper|27/100
+|-unboost|p2a: Hydreigon|spa|2
+|-enditem|p1a: Pelipper|Sitrus Berry|[eat]
+|-heal|p1a: Pelipper|52/100|[from] item: Sitrus Berry
+|move|p2b: Excadrill|Earthquake|p1b: Scovillain|[spread] p1b
+|-immune|p2a: Hydreigon|[from] ability: Levitate
+|-immune|p1a: Pelipper
+|-damage|p1b: Scovillain|20/100y
+|move|p1b: Scovillain|Overheat|p2a: Hydreigon
+|-resisted|p2a: Hydreigon|1
+|-damage|p2a: Hydreigon|141/171
+|-unboost|p1b: Scovillain|spa|2
+|
+|-weather|RainDance|[upkeep]
+|-damage|p2b: Excadrill|97/186 brn|[from] brn
+|upkeep
+|turn|3
+|
+|switch|p2b: Corviknight|Corviknight, L50, M|192/192
+|switch|p1b: Sylveon|Sylveon, L50, M|43/100
+|move|p2a: Hydreigon|Protect|p2a: Hydreigon
+|-singleturn|p2a: Hydreigon|Protect
+|move|p1a: Pelipper|Hurricane|p2b: Corviknight
+|-resisted|p2b: Corviknight|1
+|-damage|p2b: Corviknight|159/192
+|
+|-weather|RainDance|[upkeep]
+|-heal|p2b: Corviknight|171/192|[from] item: Leftovers
+|upkeep
+|turn|4
+|
+|move|p2a: Hydreigon|Dark Pulse|p1b: Sylveon
+|-resisted|p1b: Sylveon|1
+|-damage|p1b: Sylveon|35/100
+|move|p2b: Corviknight|Brave Bird|p1b: Sylveon
+|-damage|p1b: Sylveon|0 fnt
+|faint|p1b: Sylveon
+|-damage|p2b: Corviknight|149/192|[from] Recoil
+|move|p1a: Pelipper|Weather Ball|p2a: Hydreigon
+|-resisted|p2a: Hydreigon|1
+|-damage|p2a: Hydreigon|89/171
+|
+|-weather|RainDance|[upkeep]
+|-heal|p2b: Corviknight|161/192|[from] item: Leftovers
+|upkeep
+|
+|switch|p1b: Scovillain|Scovillain-Mega, L50, M|20/100y
+|turn|5
+|
+|switch|p2a: Excadrill|Excadrill, L50, F|97/186 brn
+|switch|p1b: Espathra|Espathra, L50, M|100/100
+|move|p2b: Corviknight|Bulk Up|p2b: Corviknight
+|-boost|p2b: Corviknight|atk|1
+|-boost|p2b: Corviknight|def|1
+|move|p1a: Pelipper|Weather Ball|p2b: Corviknight
+|-damage|p2b: Corviknight|53/192
+|
+|-weather|RainDance|[upkeep]
+|-heal|p2b: Corviknight|65/192|[from] item: Leftovers
+|-damage|p2a: Excadrill|86/186 brn|[from] brn
+|upkeep
+|turn|6
+|
+|move|p2a: Excadrill|Protect|p2a: Excadrill
+|-singleturn|p2a: Excadrill|Protect
+|move|p1a: Pelipper|Wide Guard|p1a: Pelipper
+|-singleturn|p1a: Pelipper|Wide Guard
+|move|p1b: Espathra|Lumina Crash|p2a: Excadrill
+|-activate|p2a: Excadrill|move: Protect
+|move|p2b: Corviknight|Bulk Up|p2b: Corviknight
+|-boost|p2b: Corviknight|atk|1
+|-boost|p2b: Corviknight|def|1
+|
+|-weather|none
+|-heal|p2b: Corviknight|77/192|[from] item: Leftovers
+|-damage|p2a: Excadrill|75/186 brn|[from] brn
+|-ability|p1b: Espathra|Speed Boost|boost
+|-boost|p1b: Espathra|spe|1
+|upkeep
+|turn|7
+|
+|switch|p2a: Hydreigon|Hydreigon, L50, F|89/171
+|move|p1b: Espathra|Baton Pass|p1b: Espathra
+|
+|switch|p1b: Scovillain|Scovillain-Mega, L50, M|20/100y|[from] Baton Pass
+|move|p2b: Corviknight|Brave Bird|p1a: Pelipper
+|-damage|p1a: Pelipper|0 fnt
+|faint|p1a: Pelipper
+|-damage|p2b: Corviknight|48/192|[from] Recoil
+|
+|-heal|p2b: Corviknight|60/192|[from] item: Leftovers
+|upkeep
+|
+|switch|p1a: Espathra|Espathra, L50, M|100/100
+|turn|8
+|
+|move|p1b: Scovillain|Protect|p1b: Scovillain
+|-singleturn|p1b: Scovillain|Protect
+|move|p1a: Espathra|Calm Mind|p1a: Espathra
+|-boost|p1a: Espathra|spa|1
+|-boost|p1a: Espathra|spd|1
+|move|p2a: Hydreigon|Dark Pulse|p1b: Scovillain
+|-activate|p1b: Scovillain|move: Protect
+|move|p2b: Corviknight|Brave Bird|p1a: Espathra
+|-damage|p1a: Espathra|0 fnt
+|faint|p1a: Espathra
+|-damage|p2b: Corviknight|0 fnt|[from] Recoil
+|faint|p2b: Corviknight
+|
+|upkeep
+|
+|switch|p2b: Excadrill|Excadrill, L50, F|75/186 brn
+|turn|9
+|
+|move|p2a: Hydreigon|Draco Meteor|p1b: Scovillain
+|-damage|p1b: Scovillain|0 fnt
+|-unboost|p2a: Hydreigon|spa|2
+|-status|p2a: Hydreigon|brn|[from] ability: Spicy Spray|[of] p1b: Scovillain
+|faint|p1b: Scovillain
+|
+|win|LG1x2
+    </script>
+</div>
+
+<div class="battle-log battle-log-inline" style="display:none"></div>
+
+<script>
+    let daily = Math.floor(Date.now() / 1000 / 60 / 60 / 24); document.write('<script src="https://play.pokemonshowdown.com/js/replay-embed.js?version' + daily + '"></' + 'script>');
+</script>
+
+<p style="text-align:center"> Replay created by <a href="https://github.com/hsahovic/poke-env">poke-env</a>, with code from <a
+        href="https://github.com/smogon/pokemon-showdown"> pokemon-showdown</a>. If something goes wrong, don't hesitate
+    to open an <a href="https://github.com/hsahovic/poke-env/issues">issue!</a></p>

@@ -77,6 +77,20 @@ def create_app(dash_dir=_DASH_DIR, archive_dir=_ARCHIVE_DIR) -> Flask:
     def live_log():
         return _serve_json(archive_dir / "live_log.json", _EMPTY_LOG)
 
+    @app.route("/live_battles.json")
+    def live_battles():
+        # #18 multi-battle spectate: aggregate the file-per-battle feed, written by each recorder
+        # (incl. separate MP collection/eval workers). Scope to the CURRENT run's latest gen
+        # (#18b review) so we don't rglob every saved replay ever; drop finished/stale ones.
+        from v_dance.selfplay.status import read_live_battles, current_live_dir
+        try:
+            battles = read_live_battles(current_live_dir(archive_dir / "live"))
+        except Exception:
+            battles = []
+        resp = jsonify({"battles": battles, "n": len(battles)})
+        resp.headers["Cache-Control"] = "no-store, max-age=0"
+        return resp
+
     @app.route("/<path:fname>")
     def asset(fname):
         if fname not in _ALLOWED:

@@ -304,6 +304,8 @@ async def run_gauntlet(
     n_workers: int = 1,
     mirror_battles: Optional[int] = None,
     stop_check: Optional[Callable[[], bool]] = None,
+    live_dir=None,
+    save_replays: bool = False,
 ) -> Dict[str, Tuple[int, int]]:
     """Play the model vs each opponent over the rotating team pool and return
     ``{opponent_name: (model_wins, n_finished)}``.
@@ -341,7 +343,8 @@ async def run_gauntlet(
         model_team = R.load_team(R.resolve_team_path(d["mt"]))
         opp_team = R.load_team(R.resolve_team_path(d["ot"]))
         model_player = R.make_player(
-            f"BC{uid}", model_team, model_path=ckpt, team_chooser_path=team_chooser)
+            f"BC{uid}", model_team, model_path=ckpt, team_chooser_path=team_chooser,
+            live_dir=live_dir, save_replays=save_replays)   # #18b: eval match spectate
         opp = _make_opponent(
             kind, f"OP{kind[:4]}{uid}", opp_team,
             model_path=prev_best_ckpt, team_chooser_path=team_chooser)

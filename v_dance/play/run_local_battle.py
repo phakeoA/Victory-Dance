@@ -285,10 +285,13 @@ def make_player(
     model_path: Path = _REPO_ROOT / "ai_train_scripts" / "BC_model" / "checkpoints" / "bc_best.pt",
     team_chooser_path: Path = _REPO_ROOT / "ai_train_scripts" / "teamPreview_model" / "checkpoints" / "teampreview_best.pt",
     max_concurrent_battles: int = 1,
+    live_dir=None, save_replays: bool = False,
 ) -> VGCPlayer:
     """Build a (gap-#6 spliced) player.  model_path=None → random fallback.
     ``max_concurrent_battles`` > 1 lets poke-env run that many battles of this player
-    in parallel (3c.8c CPU-parallel collection)."""
+    in parallel (3c.8c CPU-parallel collection). ``live_dir`` (#18b) wires the spectate feed so
+    this player's battles show on the dashboard (used for EVAL match spectate); ``save_replays``
+    keeps them on finish."""
     replay_path = _REPO_ROOT / "artifacts" / "replay_buffer" / f"{username}.jsonl"
     if model_path is None:
         return RandomVGCPlayer(
@@ -298,6 +301,7 @@ def make_player(
             team=team,
             max_concurrent_battles=max_concurrent_battles,
             log_level=logging.WARNING,
+            live_dir=live_dir, save_replays=save_replays,
         )
     return VGCPlayer(
         model_path=model_path,
@@ -309,6 +313,7 @@ def make_player(
         team=team,
         max_concurrent_battles=max_concurrent_battles,
         log_level=logging.WARNING,
+        live_dir=live_dir, save_replays=save_replays,
     )
 
 

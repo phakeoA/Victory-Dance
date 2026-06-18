@@ -121,9 +121,20 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
     """Root VGCPlayerBase + gap-#6 opponent splice (see module docstring)."""
 
     def __init__(self, *args, **kwargs):
+        # #18 multi-battle spectate (popped BEFORE super — poke-env doesn't know these): when
+        # live_dir is set, each battle writes its room + growing |-log to <live_dir>/<tag>.json,
+        # and on finish the replay is SAVED (save_replays) or deleted. Everything is guarded on
+        # self._live, so live/gauntlet play that doesn't set live_dir is byte-identical.
+        live_dir = kwargs.pop("live_dir", None)
+        save_replays = kwargs.pop("save_replays", False)
         super().__init__(*args, **kwargs)
         # raw protocol lines accumulated per battle tag (real-time)
         self._proto_log: Dict[str, List[str]] = {}
+        self._save_replays = bool(save_replays)
+        self._live = None
+        if live_dir:
+            from v_dance.selfplay.status import LiveBattles
+            self._live = LiveBattles(live_dir, min_interval=0.5)
         # per-(battle,turn) actions already tried, so a DETERMINISTIC policy
         # doesn't loop forever when Showdown reports a choice "[Unavailable]"
         # (e.g. a trapped switch / disabled move our approximate mask allows).
@@ -167,6 +178,7 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
         if not isinstance(battle, DoubleBattle):
             return self.choose_random_move(battle)
 
+        self._report_active(battle)        # #18 spectate feed (no-op unless live_dir set)
         if any(battle.force_switch):
             return self._handle_force_switch(battle)
 
@@ -425,6 +437,44 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
         # Use the BUILDER (not _handle_force_switch) so the loop guard isn't
         # double-counted — we already called it at the top of this method.
         return super()._build_force_switch_order(battle)
+
+    # ── #18 multi-battle spectate (base; works for collection AND eval players) ───
+    def _report_active(self, battle) -> None:
+        """Publish this battle's room + growing |-log to ``<live_dir>/<tag>.json`` so the
+        dashboard can show several concurrent battles. No-op unless ``live_dir`` was wired."""
+        live = getattr(self, "_live", None)        # tolerate __new__-built instances (tests)
+        if live is None:
+            return
+        try:
+            players = getattr(battle, "players", None) or []
+            tag = battle.battle_tag
+            live.update(
+                tag, turn=getattr(battle, "turn", 0) or 0,
+                log=self._proto_log.get(_norm_tag(tag)) or [],
+                p1=players[0] if len(players) > 0 else getattr(self, "username", "p1"),
+                p2=players[1] if len(players) > 1 else "opponent")
+        except Exception:
+            log.debug("live-battle report failed (non-fatal)", exc_info=True)
+
+    def _battle_finished_callback(self, battle):
+        """On finish (#18): SAVE the spectator replay (``done`` flag, kept on disk) when
+        ``save_replays``, else DELETE the live file. Guarded; then chains to the base."""
+        live = getattr(self, "_live", None)        # tolerate __new__-built instances (tests)
+        if live is not None:
+            try:
+                tag = battle.battle_tag
+                if getattr(self, "_save_replays", False):
+                    players = getattr(battle, "players", None) or []
+                    live.finalize(
+                        tag, turn=getattr(battle, "turn", 0) or 0,
+                        log=self._proto_log.get(_norm_tag(tag)) or [],
+                        p1=players[0] if len(players) > 0 else getattr(self, "username", "p1"),
+                        p2=players[1] if len(players) > 1 else "opponent")
+                else:
+                    live.remove(tag)
+            except Exception:
+                log.debug("live-battle finalize failed (non-fatal)", exc_info=True)
+        return super()._battle_finished_callback(battle)
 
     def _record_rl_decision(self, battle, state_vec, action_s0, action_s1,
                             gimmick_s0, gimmick_s1, source, decision_type):

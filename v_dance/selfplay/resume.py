@@ -19,10 +19,12 @@ and an optional wall-clock budget; the loop checks ``should_stop()`` between gen
 from __future__ import annotations
 
 import os
+import re
 import signal
 import time
 from dataclasses import asdict
 from pathlib import Path
+from typing import List, Optional, Tuple
 
 import torch
 
@@ -78,6 +80,68 @@ def load_into(path, *, actor_critic, trainer, device: str = "cpu"):
     league = OpponentLeague.from_obj(snap["league"])
     history = GenerationHistory.from_obj(snap["history"])
     return league, history, snap
+
+
+# ── per-generation snapshots (task #20: resume from any generation) ────────────
+_SNAP_RE = re.compile(r"^snap_gen(\d+)\.pt$")
+
+
+def snapshot_path_for(archive, generation: int) -> Path:
+    """Path of the full-state snapshot taken AFTER ``generation`` completed
+    (``<archive>/snap_gen{N}.pt``). Resuming it continues at gen N+1."""
+    return Path(archive) / f"snap_gen{int(generation)}.pt"
+
+
+def list_snapshots(archive) -> List[Tuple[int, Path]]:
+    """All per-gen snapshots in ``archive`` as ``(generation, path)``, sorted by generation."""
+    out: List[Tuple[int, Path]] = []
+    d = Path(archive)
+    if not d.is_dir():
+        return out
+    for p in d.glob("snap_gen*.pt"):
+        m = _SNAP_RE.match(p.name)
+        if m:
+            out.append((int(m.group(1)), p))
+    return sorted(out, key=lambda t: t[0])
+
+
+def latest_snapshot(archive) -> Optional[Path]:
+    """The highest-generation snapshot in ``archive``, or ``None`` if there are none."""
+    snaps = list_snapshots(archive)
+    return snaps[-1][1] if snaps else None
+
+
+def resolve_resume(archive, resume_gen=None, explicit_path=None) -> Optional[Path]:
+    """Resolve a resume request to a snapshot path (task #20):
+      * ``explicit_path`` (the legacy ``--resume <file>``) wins if given;
+      * ``resume_gen`` ``None`` -> ``None`` (FRESH start from the base ``--ckpt``);
+      * ``resume_gen`` ``"latest"``/``"last"``/``""`` -> the highest-gen snapshot;
+      * ``resume_gen`` an int / numeric string ``N`` -> ``snap_gen{N}.pt`` (whether or not it
+        exists — the caller validates + errors loudly so a typo never silently starts fresh)."""
+    if explicit_path:
+        return Path(explicit_path)
+    if resume_gen is None:
+        return None
+    s = str(resume_gen).strip().lower()
+    if s in ("", "latest", "last"):
+        return latest_snapshot(archive)
+    return snapshot_path_for(archive, int(s))
+
+
+def prune_snapshots(archive, keep: int) -> List[Path]:
+    """Keep only the last ``keep`` per-gen snapshots (the per-gen snapshots are ~21 MB each, so an
+    unbounded run would accumulate them). ``keep`` <= 0 keeps ALL. Returns the deleted paths."""
+    if not keep or keep <= 0:
+        return []
+    snaps = list_snapshots(archive)
+    deleted: List[Path] = []
+    for _gen, p in snaps[:-int(keep)]:
+        try:
+            p.unlink()
+            deleted.append(p)
+        except Exception:
+            pass
+    return deleted
 
 
 class StopController:
