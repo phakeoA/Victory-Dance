@@ -1089,5 +1089,27 @@ class VGCPlayerBase(Player):
         )
 
     def close(self) -> None:
-        """Flush and close the replay buffer."""
+        """Flush and close the replay buffer, then EVICT this player's poke-env logger.
+
+        poke-env's ``PSClient._create_logger`` does ``logging.getLogger(self.username)`` +
+        ``addHandler(StreamHandler())`` for EVERY player, and the stdlib interns every logger by
+        name in the process-global ``logging.Logger.manager.loggerDict`` forever — gc never frees
+        it. Because the 22d gen-salted account names make every player's username SINGLE-USE
+        (``BC{gen}x{uid}`` / ``LG0x{gen}x{uid}`` / …, never reconnected after the chunk), a fresh
+        Logger + StreamHandler + Formatter leaks per player per generation → tens of thousands of
+        unreclaimable objects over a long run, in every collection/eval worker. Removing the
+        handlers + popping the logger reclaims it. Fully guarded — teardown must never raise."""
         self._replay.close()
+        try:
+            import logging
+            name = self.ps_client.username
+            lg = logging.getLogger(name)
+            for h in list(lg.handlers):
+                lg.removeHandler(h)
+                try:
+                    h.close()
+                except Exception:
+                    pass
+            logging.Logger.manager.loggerDict.pop(name, None)
+        except Exception:
+            pass

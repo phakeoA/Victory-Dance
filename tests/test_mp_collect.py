@@ -131,21 +131,20 @@ def test_partition_specs_drops_empty_buckets():
 # ── merge_results ─────────────────────────────────────────────────────────────
 def test_merge_results_aggregates_and_skips_none():
     r1 = WorkerResult(trajectories=["t1", "t2"], source_counts={"model": 5},
-                      pfsp=[("gen1", True)], showcase=None, n_games=2)
+                      pfsp=[("gen1", True)], n_games=2)
     r2 = WorkerResult(trajectories=["t3"], source_counts={"model": 3, "retry": 1},
-                      pfsp=[("gen1", False)], showcase=["|turn|1"], n_games=1)
+                      pfsp=[("gen1", False)], n_games=1)
     merged = MP.merge_results([r1, None, r2])
     assert merged.trajectories == ["t1", "t2", "t3"]
     assert merged.source_counts == {"model": 8, "retry": 1}
     assert merged.pfsp == [("gen1", True), ("gen1", False)]
-    assert merged.showcase == ["|turn|1"]              # first non-empty
     assert merged.n_games == 3
 
 
 # ── picklability of the wire types ────────────────────────────────────────────
 def test_worker_result_is_picklable():
     r = WorkerResult(trajectories=[1, 2], source_counts={"model": 4},
-                     pfsp=[("g", True)], showcase=["|x"], n_games=2)
+                     pfsp=[("g", True)], n_games=2)
     assert pickle.loads(pickle.dumps(r)) == r
 
 
@@ -261,12 +260,12 @@ def test_collect_with_pool_freezes_weights_partitions_and_updates_league():
     def submit(payloads):
         captured["payloads"] = payloads
         return [WorkerResult(trajectories=[f"t{i}"], source_counts={"model": 1},
-                             pfsp=[("gen2", True)], showcase=None, n_games=1)
+                             pfsp=[("gen2", True)], n_games=1)
                 for i, _ in enumerate(payloads)]
 
     league = _RecordingLeague([("snapshot", _FakeSnap("gen2", "g2.pt"))])
     ac = object()
-    trajs, src, showcase = MP.collect_with_pool(
+    trajs, src = MP.collect_with_pool(
         ac, league, 4, team_pool=["A", "B"], ckpt_path="tmp_gen.pt", n_procs=2,
         async_per_proc=2, chunk_size=1, submit_fn=submit, save_ckpt_fn=save_ckpt)
 
@@ -289,7 +288,7 @@ def test_collect_with_pool_tolerates_dead_worker():
                 None]
 
     league = _RecordingLeague([("latest", "x.pt")])
-    trajs, src, _ = MP.collect_with_pool(
+    trajs, src = MP.collect_with_pool(
         ac=object(), league=league, n_games=2, team_pool=["A", "B"], ckpt_path="t.pt",
         n_procs=2, chunk_size=1, submit_fn=submit, save_ckpt_fn=lambda a, p: None)
     assert trajs == ["t"] and src == {"model": 1}              # only the live worker's output

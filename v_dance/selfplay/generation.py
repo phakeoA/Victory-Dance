@@ -226,7 +226,6 @@ async def collect_with_league(actor_critic, league: OpponentLeague, n_games: int
                                      matchup_seed=matchup_seed, seed=seed)
     trajectories: list = []
     source_counts: Counter = Counter()
-    showcase = {"log": None}             # raw |-log of one game, for a Type_D replay (3c.5)
     prog = {"games": 0, "won": 0, "decided": 0}    # live progress (3c.6e-3)
 
     def _sp(team, who, uid, cn, name, live=None):
@@ -285,17 +284,12 @@ async def collect_with_league(actor_critic, league: OpponentLeague, n_games: int
                 for traj in our_trajs.values():
                     if traj.meta.won is not None:
                         league.record_result(spec[1].snapshot_id, bool(traj.meta.won))
-            if showcase["log"] is None:               # grab one game's raw |-log
-                for _lines in (getattr(our, "_proto_log", {}) or {}).values():
-                    if _lines:
-                        showcase["log"] = list(_lines)
-                        break
             await PB.close_players(our, opp)
 
     # task #13: bounded-concurrency across pairings + soft-stop drain via the shared runner.
     await PB.run_jobs([lambda d=d: _run_chunk(d) for d in chunks],
                       workers=n_workers, stop_check=stop_check)
-    return trajectories, dict(source_counts), showcase["log"]
+    return trajectories, dict(source_counts)
 
 
 def gauntlet_eval(candidate_path, *, teams, team_chooser, battles: int = 30,
@@ -532,7 +526,6 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
     status = LiveStatus(archive / "status.json", min_interval=0.5)   # live feed; throttled (3c.8c)
     status.start_run(n_generations, hours=max_hours)
 
-    showcase = {"log": None}
     thru = {"games": 0, "secs": 0.0}     # 3c.8a throughput measurement (sec 20: measure first)
 
     def collect_fn(ac_, lg, gen):
@@ -559,7 +552,7 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
             _ckpt = MP.mp_ckpt_path(archive, gen)
             _coll_live = _gen_kind_dir(live_run_dir, gen, "replays")
             try:
-                trajs, src, log = MP.collect_with_pool(
+                trajs, src = MP.collect_with_pool(
                     ac_, lg, gen_cfg.n_games, team_pool=team_pool, ckpt_path=_ckpt,
                     submit_fn=pool.submit,
                     save_ckpt_fn=lambda a, p, _g=gen: MP.save_inference_ckpt(a, p, generation=_g),
@@ -577,7 +570,7 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                     pass
         else:
             coll_ac = ac_.inference_copy("cpu") if device != "cpu" else ac_
-            trajs, src, log = asyncio.run(collect_with_league(
+            trajs, src = asyncio.run(collect_with_league(
                 coll_ac, lg, gen_cfg.n_games, team_pool=team_pool, tau=tau_gen,
                 seed=seed + gen * 1000, matchup_seed=gen, team_chooser=team_chooser,
                 n_workers=cw, stop_check=stop.should_stop, status=status,
@@ -592,7 +585,6 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
         # wall-clock; the measurement that gates the 3c.8b/c optimisations).
         print(f"   throughput: {gen_cfg.n_games} games in {dt:.1f}s = {gpm:.1f} games/min "
               f"(avg {avg:.1f}/min, {len(trajs)} trajs)")
-        showcase["log"] = log
         return trajs, src
 
     def save_fn(ac_, gen):
@@ -751,12 +743,9 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                   f"clip_frac={us.get('clip_fraction', float('nan')):.2f} "
                   f"halted={us.get('halted')}")
             _save()                          # per-generation heartbeat snapshot
-            from v_dance.selfplay import archive as AR   # manifest (self-play) + Type_D replay (3c.5)
-            arts = AR.write_generation_artifacts(   # Type_D -> data/vods/Type_D by default
-                archive, history, league, showcase_log=showcase["log"],
-                tag=f"g{rep['generation']}")
-            if "type_d_html" in arts:
-                print(f"        archive: manifest.json + Type_D {Path(arts['type_d_html']).name}")
+            from v_dance.selfplay import archive as AR   # manifest (self-play) — dashboard data source
+            AR.write_generation_artifacts(archive, history, league)
+            print("        archive: manifest.json")
             status.phase("idle", generation=rep["generation"])
             reports.append(rep)
             done += 1

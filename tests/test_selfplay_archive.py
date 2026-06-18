@@ -28,14 +28,6 @@ def _history():
     return h
 
 
-_LOG = [
-    "|gametype|doubles", "|player|p1|Alice|101|1500", "|player|p2|Bob|rosa|1500",
-    "|gen|9", "|tier|[Gen 9 Champions] VGC 2026 Reg M-A", "|teamsize|p1|4", "|start",
-    "|switch|p1a: Charizard|Charizard, L50|100/100", "|turn|1",
-    "|move|p1a: Charizard|Flamethrower|p2a: Venusaur", "|faint|p2a: Venusaur", "|win|Alice",
-]
-
-
 # ── manifest (data store for the dashboard) ───────────────────────────────────
 def test_manifest(tmp_path):
     h = _history()
@@ -99,48 +91,10 @@ def test_manifest_stars_the_champion_not_argmax_scripted():
     assert m["generations"][2]["champion_elo"] == pytest.approx(1164.0)
 
 
-# ── Type_D = standard Showdown replay format ──────────────────────────────────
-def test_render_replay_is_showdown_format():
-    h = AR.render_replay_html(_LOG)
-    assert h.startswith("<!DOCTYPE html>")
-    assert '<script type="text/plain" class="battle-log-data">' in h    # the canonical tag
-    assert "replay-embed.js" in h                                       # the renderer
-    assert "|move|p1a: Charizard|Flamethrower|p2a: Venusaur" in h       # raw log embedded
-    assert "[Gen 9 Champions] VGC 2026 Reg M-A" in h                    # format from |tier|
-    assert "Alice vs. Bob" in h                                         # players from |player|
-
-
-def test_replay_html_neutralises_script_close():
-    h = AR.render_replay_html(["|c|x|oops </script> hi"])
-    assert "<\\/script>" in h and "oops <\\/script> hi" in h            # log's </ escaped
-
-
-def test_parse_replay_meta():
-    meta = AR._parse_replay_meta(_LOG)
-    assert meta["p1"] == "Alice" and meta["p2"] == "Bob"
-    assert meta["format"] == "[Gen 9 Champions] VGC 2026 Reg M-A"
-
-
-def test_write_type_d(tmp_path):
-    p = AR.write_type_d(tmp_path, 3, "show/case:odd", _LOG)
-    assert p.name == "gen_3_show_case_odd.html"                         # tag sanitised
-    txt = p.read_text(encoding="utf-8")
-    assert "battle-log-data" in txt and "|win|Alice" in txt            # parser-ingestible
-
-
-def test_write_generation_artifacts(tmp_path):
-    out = AR.write_generation_artifacts(tmp_path, _history(),
-                                        type_d_dir=tmp_path / "Type_D",
-                                        showcase_log=_LOG, tag="g2")
-    assert Path(out["manifest"]).exists() and Path(out["type_d_html"]).exists()
-    assert "gen_2_g2.html" in out["type_d_html"]                        # tagged with latest gen
-    assert "elo_curve" not in out                                       # NO static graph
-
-
-def test_write_generation_artifacts_no_showcase(tmp_path):
-    out = AR.write_generation_artifacts(tmp_path, _history())           # no log -> no Type_D
-    assert "manifest" in out and "type_d_html" not in out
-
-
-def test_type_d_default_dir_is_data_vods():
-    assert AR.TYPE_D_DIR.parent.name == "vods" and AR.TYPE_D_DIR.name == "Type_D"
+# ── write_generation_artifacts (manifest only; Type_D replays removed → --save-replays) ──
+def test_write_generation_artifacts_writes_manifest_only(tmp_path):
+    out = AR.write_generation_artifacts(tmp_path, _history())
+    assert Path(out["manifest"]).exists()                              # the dashboard data source
+    assert set(out) == {"manifest"}                                    # no Type_D / replay html
+    assert "elo_curve" not in out                                      # NO static graph
+    assert not list(tmp_path.glob("*.html"))                           # nothing renders replay HTML here

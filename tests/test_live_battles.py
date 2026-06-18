@@ -200,6 +200,25 @@ def test_save_replays_does_not_enable_pokeenv_native_dump(tmp_path):
     assert p._save_html_replays is True        # our structured-HTML flag is the one that's set
 
 
+def test_close_evicts_per_player_logger(tmp_path):
+    """Leak fix: poke-env interns a unique-named logger+handler per player in the process-global
+    loggerDict forever; with 22d gen-salted usernames that's one leak per player per gen. close()
+    must evict it so a long run doesn't accumulate tens of thousands of Logger/Handler objects."""
+    import gc
+    import logging
+    import v_dance.play.run_local_battle as R
+    from poke_env import AccountConfiguration
+    from v_dance.play.player import VGCPlayer
+    team = R.load_team(R.resolve_team_path("WolfeGlick"))
+    name = "LG0x999x777"                       # a representative gen-salted single-use account name
+    p = VGCPlayer(model_path=None, account_configuration=AccountConfiguration(name, None),
+                  battle_format=R.BATTLE_FORMAT, team=team, start_listening=False)
+    assert name in logging.Logger.manager.loggerDict          # poke-env interned it on construction
+    p.close()
+    gc.collect()
+    assert name not in logging.Logger.manager.loggerDict      # close() reclaimed it (no leak)
+
+
 def test_save_html_replay_real_poke_env_double_battle(tmp_path):
     # the actual path the finished-callback relies on: poke-env builds real replay HTML from a
     # freshly-constructed battle (no save_replays flag needed — _replay_data is always accumulated).

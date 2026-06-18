@@ -61,12 +61,11 @@ class ChunkSpec:
 @dataclass
 class WorkerResult:
     """One worker's picklable return: collected trajectories, decision-source tally, PFSP
-    outcomes ``(snapshot_id, latest_won)`` for the main process to fold into the league, one
-    showcase ``|``-log (for a Type_D replay), and the finished-game count."""
+    outcomes ``(snapshot_id, latest_won)`` for the main process to fold into the league, and the
+    finished-game count."""
     trajectories: list = field(default_factory=list)
     source_counts: dict = field(default_factory=dict)
     pfsp: List[Tuple[str, bool]] = field(default_factory=list)
-    showcase: Optional[list] = None
     n_games: int = 0
 
 
@@ -115,12 +114,11 @@ def partition_specs(specs: List[ChunkSpec], n_workers: int) -> List[List[ChunkSp
 
 def merge_results(results) -> WorkerResult:
     """Fold per-worker ``WorkerResult``s into one (trajectories concatenated, source counts
-    summed, PFSP outcomes concatenated, first non-empty showcase kept, games summed). ``None``
-    results (a worker that died) are skipped."""
+    summed, PFSP outcomes concatenated, games summed). ``None`` results (a worker that died) are
+    skipped."""
     trajs: list = []
     sc: Counter = Counter()
     pfsp: List[Tuple[str, bool]] = []
-    showcase = None
     games = 0
     for r in results:
         if r is None:
@@ -129,9 +127,7 @@ def merge_results(results) -> WorkerResult:
         sc.update(r.source_counts)
         pfsp.extend(r.pfsp)
         games += r.n_games
-        if showcase is None and r.showcase:
-            showcase = r.showcase
-    return WorkerResult(trajs, dict(sc), pfsp, showcase, games)
+    return WorkerResult(trajs, dict(sc), pfsp, games)
 
 
 # ── collection dispatch (injected player factory → offline-testable) ───────────
@@ -140,7 +136,7 @@ async def _collect_specs(ac, specs: List[ChunkSpec], *, tau: float, seed: int,
                          build_players: Callable, live_dir=None, save_replays: bool = False,
                          status=None, port: Optional[int] = None) -> WorkerResult:
     """Play every ChunkSpec in ``specs`` (bounded to ``async_workers`` concurrent battles within
-    this process), collecting trajectories + source counts + PFSP outcomes + a showcase log.
+    this process), collecting trajectories + source counts + PFSP outcomes.
     ``build_players(ac, spec, tau, seed, team_chooser) -> (our, opp)`` is INJECTED so the per-kind
     dispatch is offline-testable with fakes. Mirrors ``collect_with_league``'s per-kind logic:
     latest ⇒ collect BOTH perspectives; snapshot ⇒ our trajectory + record (snapshot_id, won) for
@@ -148,7 +144,6 @@ async def _collect_specs(ac, specs: List[ChunkSpec], *, tau: float, seed: int,
     trajectories: list = []
     source_counts: Counter = Counter()
     pfsp: List[Tuple[str, bool]] = []
-    showcase = {"log": None}
     games = {"n": 0}
 
     async def _run(spec: ChunkSpec):
@@ -177,15 +172,10 @@ async def _collect_specs(ac, specs: List[ChunkSpec], *, tau: float, seed: int,
                 for t in our_trajs.values():
                     if t.meta.won is not None:
                         pfsp.append((spec.snapshot_id, bool(t.meta.won)))
-            if showcase["log"] is None:
-                for lines in (getattr(our, "_proto_log", {}) or {}).values():
-                    if lines:
-                        showcase["log"] = list(lines)
-                        break
             await close_players(our, opp)
 
     await run_jobs([lambda s=s: _run(s) for s in specs], workers=async_workers)
-    return WorkerResult(trajectories, dict(source_counts), pfsp, showcase["log"], games["n"])
+    return WorkerResult(trajectories, dict(source_counts), pfsp, games["n"])
 
 
 def _build_players_real(ac, spec: ChunkSpec, tau: float, seed: int, team_chooser, live_dir=None,
@@ -420,7 +410,7 @@ def collect_with_pool(ac, league, n_games: int, *, team_pool, ckpt_path,
     ``submit_fn(payloads) -> List[Optional[WorkerResult]]`` (the real ProcessPoolExecutor backend
     is 14b.2b; a dead worker comes back ``None`` and is skipped) and ``save_ckpt_fn(ac, path)``
     (the real inference-ckpt save is 14b.2c) are INJECTED, so this orchestration is offline-tested
-    with fakes. Returns the SAME ``(trajectories, source_counts, showcase)`` shape as
+    with fakes. Returns the SAME ``(trajectories, source_counts)`` shape as
     ``collect_with_league`` so the 14b.3 wiring is a drop-in."""
     save_ckpt_fn(ac, ckpt_path)                          # freeze current weights for the workers
     specs = build_chunk_specs(league, team_pool, n_games, chunk_size=chunk_size,
@@ -447,4 +437,4 @@ def collect_with_pool(ac, league, n_games: int, *, team_pool, ckpt_path,
             status.games(merged.n_games, (won / decided) if decided else None)
         except Exception:
             log.debug("status games() update failed (non-fatal)", exc_info=True)
-    return merged.trajectories, merged.source_counts, merged.showcase
+    return merged.trajectories, merged.source_counts
