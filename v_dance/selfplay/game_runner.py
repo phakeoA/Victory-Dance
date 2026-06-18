@@ -353,57 +353,60 @@ def print_phase0_report(rep: dict) -> None:
 async def run_self_play_games(
     actor_critic, team_pool: Sequence[str], n_games: int, *,
     store_path=None, tau: float = 1.0, seed: int = 0, manage_server: bool = True,
-    battle_timeout: Optional[float] = 90.0, matchup_seed: int = 0,
+    battle_timeout: Optional[float] = 90.0, matchup_seed: int = 0, n_workers: int = 1,
 ):
     """Play ``n_games`` self-play battles (the shared policy on BOTH sides) over a
     side-balanced team rotation, collect both perspectives of each game, and write the
-    Type-C store. Returns ``(pairs, source_counts)``."""
-    import asyncio
+    Type-C store. Returns ``(pairs, source_counts)``. ``n_workers`` (task #13) runs that
+    many pairings concurrently via the shared runner (default 1 = sequential, as before)."""
     import logging as _logging
     from collections import Counter
 
     import v_dance.play.run_local_battle as R
     from poke_env import AccountConfiguration
+    from v_dance.play import parallel_battles as PB
     from v_dance.eval.gauntlet import team_matchups
 
     server = R.start_showdown() if manage_server else None
     pairs: List[tuple] = []
     source_counts: Counter = Counter()
+    # uid is assigned up front (sequentially, race-free) so concurrent pairings get
+    # collision-free account names / replay paths.
+    descriptors = []
     uid = 0
+    for team_a, team_b, n in team_matchups(team_pool, n_games, seed=matchup_seed):
+        uid += 1
+        descriptors.append((team_a, team_b, n, uid))
+
+    async def _run_chunk(team_a, team_b, n, uid):
+        ta = R.load_team(R.resolve_team_path(team_a))
+        tb = R.load_team(R.resolve_team_path(team_b))
+        p1 = SelfPlayVGCPlayer(
+            actor_critic, tau=tau, sample_seed=seed + uid,
+            replay_path=_REPO_ROOT / "artifacts" / "replay_buffer" / f"SP1_{uid}.jsonl",
+            account_configuration=AccountConfiguration(f"SP1x{uid}", None),
+            battle_format=R.BATTLE_FORMAT, team=ta, max_concurrent_battles=1,
+            log_level=_logging.WARNING)
+        p2 = SelfPlayVGCPlayer(
+            actor_critic, tau=tau, sample_seed=seed + 100000 + uid,
+            replay_path=_REPO_ROOT / "artifacts" / "replay_buffer" / f"SP2_{uid}.jsonl",
+            account_configuration=AccountConfiguration(f"SP2x{uid}", None),
+            battle_format=R.BATTLE_FORMAT, team=tb, max_concurrent_battles=1,
+            log_level=_logging.WARNING)
+        try:
+            await PB.play_pairing(p1, p2, n, battle_timeout=battle_timeout, label="self-play")
+        except Exception:
+            log.warning("self-play chunk failed — continuing.", exc_info=True)
+        finally:
+            source_counts.update(getattr(p1, "_source_counts", {}) or {})
+            source_counts.update(getattr(p2, "_source_counts", {}) or {})
+            pairs.extend(pair_trajectories(p1.finished_trajectories(),
+                                           p2.finished_trajectories()))
+            await PB.close_players(p1, p2)
+
     try:
-        for team_a, team_b, n in team_matchups(team_pool, n_games, seed=matchup_seed):
-            ta = R.load_team(R.resolve_team_path(team_a))
-            tb = R.load_team(R.resolve_team_path(team_b))
-            uid += 1
-            p1 = SelfPlayVGCPlayer(
-                actor_critic, tau=tau, sample_seed=seed + uid,
-                replay_path=_REPO_ROOT / "artifacts" / "replay_buffer" / f"SP1_{uid}.jsonl",
-                account_configuration=AccountConfiguration(f"SP1x{uid}", None),
-                battle_format=R.BATTLE_FORMAT, team=ta, max_concurrent_battles=1,
-                log_level=_logging.WARNING)
-            p2 = SelfPlayVGCPlayer(
-                actor_critic, tau=tau, sample_seed=seed + 100000 + uid,
-                replay_path=_REPO_ROOT / "artifacts" / "replay_buffer" / f"SP2_{uid}.jsonl",
-                account_configuration=AccountConfiguration(f"SP2x{uid}", None),
-                battle_format=R.BATTLE_FORMAT, team=tb, max_concurrent_battles=1,
-                log_level=_logging.WARNING)
-            try:
-                coro = p1.battle_against(p2, n_battles=n)
-                if battle_timeout and battle_timeout > 0:
-                    await asyncio.wait_for(coro, timeout=battle_timeout * n)
-                else:
-                    await coro
-            except asyncio.TimeoutError:
-                log.warning("self-play chunk WATCHDOG fired (%d games) — continuing.", n)
-            finally:
-                source_counts.update(getattr(p1, "_source_counts", {}) or {})
-                source_counts.update(getattr(p2, "_source_counts", {}) or {})
-                pairs.extend(pair_trajectories(p1.finished_trajectories(),
-                                               p2.finished_trajectories()))
-                await p1.ps_client.stop_listening()
-                await p2.ps_client.stop_listening()
-                p1.close()
-                p2.close()
+        await PB.run_jobs([lambda d=d: _run_chunk(*d) for d in descriptors],
+                          workers=n_workers)
     finally:
         if server is not None:
             R.stop_showdown(server)
@@ -430,6 +433,8 @@ def main(argv=None) -> int:
     ap.add_argument("--matchup-seed", type=int, default=0)
     ap.add_argument("--store", default=str(_REPO_ROOT / "artifacts" / "replay_buffer" / "selfplay_phase0.jsonl"))
     ap.add_argument("--battle-timeout", type=float, default=90.0)
+    ap.add_argument("--workers", type=int, default=1,
+                    help="run this many pairings concurrently (task #13; default 1 = sequential)")
     ap.add_argument("--no-server", action="store_true")
     ap.add_argument("--min-games", type=int, default=200)
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -457,7 +462,8 @@ def main(argv=None) -> int:
     pairs, sources = asyncio.run(run_self_play_games(
         ac, team_pool=args.teams, n_games=args.games, store_path=store_path,
         tau=args.tau, seed=args.seed, manage_server=not args.no_server,
-        battle_timeout=args.battle_timeout, matchup_seed=args.matchup_seed))
+        battle_timeout=args.battle_timeout, matchup_seed=args.matchup_seed,
+        n_workers=args.workers))
 
     rep = phase0_report(pairs, sources, min_games=args.min_games)
     print_phase0_report(rep)

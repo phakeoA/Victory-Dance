@@ -261,3 +261,52 @@ def test_report_active_writes_live_log(tmp_path):
     G.SelfPlayVGCPlayer._report_active(fake, battle)
     d = json.loads((tmp_path / "live_log.json").read_text(encoding="utf-8"))
     assert d["tag"] == "battle-gen9-77" and d["n_lines"] == 2 and d["log"][0] == "|turn|1"
+
+
+# ── run_self_play_games parallel refactor (task #13) ──────────────────────────
+def test_run_self_play_games_runs_all_pairings_via_shared_runner(monkeypatch):
+    """task #13: run_self_play_games now drives pairings through the shared bounded
+    runner. With n_workers>1 every pairing must still run, source counts aggregate,
+    and players close — proven offline with a fake SelfPlayVGCPlayer (no server)."""
+    import asyncio
+    import types as _t
+    from collections import Counter
+    import pytest
+    pytest.importorskip("poke_env")
+    import v_dance.play.run_local_battle as R
+
+    made = []
+
+    class FakeSP:
+        def __init__(self, ac, **kw):
+            self._source_counts = Counter()
+            self.closed = False
+            self.n_won_battles = 0
+            self.n_finished_battles = 0
+            async def _stop():
+                return None
+            self.ps_client = _t.SimpleNamespace(stop_listening=_stop)
+            made.append(self)
+
+        async def battle_against(self, opp, n_battles):
+            self.n_finished_battles += n_battles
+            self._source_counts["model"] += n_battles      # only the driving player records
+
+        def finished_trajectories(self):
+            return {}
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(G, "SelfPlayVGCPlayer", FakeSP)
+    monkeypatch.setattr(R, "start_showdown", lambda: None)
+    monkeypatch.setattr(R, "stop_showdown", lambda p: None)
+    monkeypatch.setattr(R, "load_team", lambda p: "T")
+    monkeypatch.setattr(R, "resolve_team_path", lambda n: n)
+
+    pairs, sources = asyncio.run(G.run_self_play_games(
+        object(), team_pool=["A", "B", "C"], n_games=6, manage_server=True, n_workers=3))
+    assert len(made) == 12              # 3 teams → 6 ordered pairs × 2 players each
+    assert all(p.closed for p in made)  # shared close_players ran for every pairing
+    assert sources.get("model", 0) == 6 # 6 games, the driving player recorded each
+    assert pairs == []                  # fake yields no finished trajectories

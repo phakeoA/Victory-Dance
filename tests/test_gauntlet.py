@@ -259,37 +259,52 @@ def test_run_gauntlet_parallel_aggregates_same(monkeypatch):
     assert len(made) == 12                                       # 2 opps × 6 pairings
 
 
-def test_play_chunk_watchdog_abandons_hung_battle():
-    """A battle that never resolves must NOT hang the gauntlet — the watchdog
-    abandons the chunk and returns promptly (the 3-hour-hang guarantee)."""
+# NOTE: the per-chunk WATCHDOG (was tested here via the gauntlet's private _play_chunk) now
+# lives once in v_dance/play/parallel_battles.play_pairing — see tests/test_parallel_battles.py
+# (test_play_pairing_watchdog_abandons_hang / _partial_finish_before_hang_still_counts).
+def test_run_gauntlet_stop_check_drops_queued_chunks(monkeypatch):
+    """task #13: a soft stop mid-eval must DRAIN the queued (opponent, pairing) chunks instead
+    of launching battles against a torn-down server. With stop_check set up front, no chunk runs
+    a battle, so no model players are even built and every tally stays (0, 0)."""
     import asyncio
+    import types as _t
+    import pytest
+    pytest.importorskip("poke_env")
+    import v_dance.play.run_local_battle as R
 
-    class HangPlayer:
-        def __init__(self):
+    built = []
+
+    class FakePlayer:
+        def __init__(self, wr=0.0):
             self.n_won_battles = 0
             self.n_finished_battles = 0
+            self._wr = wr
+            self.closed = False
+            async def _stop():
+                return None
+            self.ps_client = _t.SimpleNamespace(stop_listening=_stop)
 
         async def battle_against(self, opp, n_battles):
-            await asyncio.sleep(30)          # never finishes within the timeout
-
-    wins, fin = asyncio.run(G._play_chunk(HangPlayer(), object(), 1, timeout=0.05))
-    assert (wins, fin) == (0, 0)             # timed out → abandoned, nothing counted
-
-
-def test_play_chunk_no_timeout_counts_wins():
-    import asyncio
-
-    class QuickPlayer:
-        def __init__(self):
-            self.n_won_battles = 0
-            self.n_finished_battles = 0
-
-        async def battle_against(self, opp, n_battles):
-            self.n_won_battles += n_battles
             self.n_finished_battles += n_battles
+            self.n_won_battles += int(round(self._wr * n_battles))
 
-    wins, fin = asyncio.run(G._play_chunk(QuickPlayer(), object(), 3, timeout=10))
-    assert (wins, fin) == (3, 3)
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(R, "start_showdown", lambda: None)
+    monkeypatch.setattr(R, "stop_showdown", lambda p: None)
+    monkeypatch.setattr(R, "make_player",
+                        lambda u, t, **kw: built.append("m") or FakePlayer(wr=1.0))
+    monkeypatch.setattr(R, "load_team", lambda p: "T")
+    monkeypatch.setattr(R, "resolve_team_path", lambda n: n)
+    monkeypatch.setattr(G, "_make_opponent", lambda *a, **kw: FakePlayer(wr=0.0))
+
+    results, _sources = asyncio.run(G.run_gauntlet(
+        opponents=["random", "max_damage"], team_pool=["A", "B"],
+        battles_per_opponent=4, ckpt=Path("bc.pt"), team_chooser=Path("tc.pt"),
+        manage_server=True, n_workers=1, stop_check=lambda: True))
+    assert results == {"random": (0, 0), "max_damage": (0, 0)}   # nothing played
+    assert built == []                                           # no model players built
 
 
 # ── 3c.7b: team discovery under teams/Champions/ (M-A now, M-B as added) ───────

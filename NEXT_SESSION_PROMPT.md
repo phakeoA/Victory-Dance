@@ -1,4 +1,4 @@
-# Next-session handoff — Victory-Dance VGC bot: GATE v2 (frozen-champion ladder) — Phase 1 DONE → Phase 2 (HoF)
+# Next-session handoff — Victory-Dance VGC bot: PHASE 2 (HoF anti-cycle) BUILD COMPLETE → P2.5 (user smoke) + commit
 
 You are Opus 4.x continuing the Victory-Dance VGC Pokémon-Showdown self-play bot, in **ULTRACODE mode**
 (author/run Workflows for substantive review/design/root-cause; adversarially verify findings; token cost is
@@ -6,149 +6,177 @@ NOT a constraint — optimize for the most correct, exhaustive answer). Solo onl
 
 ## STEP 0 — read auto-memory FIRST
 Read `C:\Users\death\.claude\projects\D--ShowdownProject-Victory-Dance\memory\MEMORY.md`, then the notes it points to.
-**THE RESUME POINTER for the CURRENT work: `gate-redesign-2026-06-17` — READ FULLY** (the gate v2 design, decisions,
-and the P0/P1.1–P1.4 progress log). Also read `ppo-reward-design-2026-06-16` (the RL bible, design in
-`docs/ppo_reward_design.md` §1–20). Skim `victory-dance-project-layout`, `showdown-reg-update-pending-2026-06`.
+**THE RESUME POINTER for the CURRENT work: `gate-redesign-2026-06-17` — READ FULLY** (the gate v2 design, the Phase-2
+HoF design + its champion pivot, and the P0/P1/P2 progress log). Also read `ppo-reward-design-2026-06-16` (the RL bible,
+design in `docs/ppo_reward_design.md` §1–20) and **`docs/hof_anticycle_design.md`** (the full Phase-2 design + the
+P2.1 calibration + the champion pivot). Skim `victory-dance-project-layout`, `showdown-reg-update-pending-2026-06`.
 
 ## ⇒ THE USER's REQUIRED CADENCE — follow EXACTLY (this is how the WHOLE build has gone)
 - **After EVERY message, reprint the FULL UPDATED TO-DO LIST** as a table with **Effort (S/M/L) · Priority ·
-  Depends-on · Status** columns. NON-NEGOTIABLE — every single turn, even a one-line reply. (The to-do list is in
-  the §"Full to-do list" below — carry it forward and keep it current.)
+  Depends-on · Status** columns. NON-NEGOTIABLE — every single turn, even a one-line reply. (The list is below — carry
+  it forward and keep it current.) Keep the Phase-2 sub-breakdown table too while Phase 2 is live.
 - **Sub-problems, ONE at a time. PAUSE after each** — report what you did + the EVIDENCE (test counts, the actual
-  dry-run/sim output, the gauntlet numbers), then WAIT. Don't chain sub-problems unless the user batches several in
+  dry-run/sim output, the gauntlet/HoF numbers), then WAIT. Don't chain sub-problems unless the user batches several in
   one instruction — then do them in sequence and test after each, pausing at the end.
-- **Unit-test every change. Keep ALL tests green — currently 872 pass / 0 skip:** `python -m pytest tests -q`
+- **Unit-test every change. Keep ALL tests green — currently 901 pass / 0 skip:** `python -m pytest tests -q`
   (venv active; from repo root). Add a REGRESSION TEST for every bug.
+  - ⚠ **Test-output gotcha (Windows):** pytest's trailing `N passed` summary line does NOT flush into a redirected
+    stream here. Judge pass/fail by the **exit code** (`$LASTEXITCODE`/`EXIT=$?` == 0) + the all-dots progress (no
+    `F`/`E`/`s`). To count: `([regex]::Matches($content,'\.')).Count` in PowerShell on the captured log.
 - **Give a MANUAL test for each feature:** an OFFLINE demo (a focused pytest / `--dry-run` / `--demo` / tiny script)
   AND, for live features, the EXACT command + what-to-look-for (pass criteria). The user likes running things.
 - **The USER runs the long live stuff** (overnight generation, full gauntlets, run_local_battle). **You MAY run
-  bounded live smokes yourself when granted** — ALWAYS wrap in a hard `timeout`/`--hours` cap and redirect to a log
-  you can read. ⚠ A past incident wasted 3 HOURS on a stuck run — NEVER run an unbounded live command.
+  bounded live smokes yourself when granted** — ALWAYS wrap in a hard `timeout`/`--hours` cap + a `--generations` cap,
+  redirect to a log you can read, and KILL/verify-no-orphan after (check port 8000). ⚠ A past incident wasted 3 HOURS
+  on a stuck run — NEVER run an unbounded live command. Put smoke logs in a named folder (this session used
+  `artifacts/logs/p2_task/`) so the user knows what to delete.
 - **⚠ LIVE INTEGRATION IS THE BUG-PRONE SURFACE — the user's live smokes have caught ~8 real bugs offline tests
   missed.** ALWAYS hand the user a live smoke after a live-touching change; on a surfaced bug, fix + regression test +
-  diagnostic. (This session's gate v2 passed its live smoke clean: 0 mask-desync/"Can't pass"/switch-collision/errors.)
+  diagnostic. (This session's Phase-2 work all passed clean live smokes.)
 - **Do NOT retrain / re-export without explicit permission.** When permitted, prefer the CHEAPEST correct path.
+- **Use the adversarial/design Workflow** (the project's standard) for substantive design + bug-hunt + root-cause —
+  it produced the gate v2 design, the Phase-2 design, and caught real bugs. The pattern: N design lenses → adversarial
+  refuters → synthesis; or path-tracers → refuters → completeness-critic.
 - **Checkpoint progress into the `gate-redesign-2026-06-17` memory note** when meaningful work lands; update the
-  `MEMORY.md` index hooks. **The USER commits via GitHub Desktop — suggest logical commit groups, do NOT commit yourself.**
-- **Don't be afraid to create new files / split long modules** (user's explicit ask). Example done this session: the
-  gate logic moved to `gate.py`. The NEXT good extraction = the shared **parallel-battle runner** (collection + eval),
-  to do WITH the multiprocessing work (#13/#14).
+  `MEMORY.md` index hook (⚠ MEMORY.md is over its size cap — UPDATE the existing line in place, don't grow it). **The
+  USER commits via GitHub Desktop — suggest logical commit groups, do NOT commit yourself.**
+- **Don't be afraid to create new files / split long modules** (user's explicit ask). Done this session: the gate
+  logic is in `gate.py`, the HoF LIVE orchestration is in the new `v_dance/selfplay/hof.py`.
 
-## ⇐ WHERE WE LEFT OFF (end of this session) ⇒ NEXT = Phase 2 (HoF anti-cycle)
-The promotion gate was REDESIGNED this session into the **v2 FROZEN-CHAMPION LADDER** (the user's "static until
-proven" design, calibrated on a Monte-Carlo sim). **Phase 0 + Phase 1 (P1.1–P1.4) are DONE and VERIFIED — offline
-(dry-run/sim/872 tests) AND a clean live smoke. 872 pass / 0 skip. ALL UNCOMMITTED on `dev`** (suggest commit groups).
+## ⇐ WHERE WE LEFT OFF — PHASE 2 (HoF anti-cycle) IS BUILT, GREEN, LIVE-CLEAN ⇒ NEXT = P2.5 + commit
+The promotion gate is the **v2 FROZEN-CHAMPION LADDER** (Phase 0+1, prior sessions) PLUS **Phase 2 (HoF anti-cycle +
+the 0.55 bar + the mirror-collapse degradation guard)**, all built this session (P2.0–P2.4). **901 pass / 0 skip. ALL
+UNCOMMITTED on `dev`.** The gate now checks three things every generation:
+- **DEPTH** — beat your FROZEN champion: observed mirror win-rate ≥ **0.55** over ≥ **360** mirror games (`beat_champion`),
+  OR the h2h climb PLATEAUS at a not-losing level (`plateau_reanchor` backstop).
+- **BREADTH (Phase 2 HoF)** — on a promote, ALSO not-LOSE to your last **5 PAST CHAMPIONS** (excluding the current one
+  the mirror already tests). A proven loss to an older champion = a lineage cycle (the "G5 promoted backward over G4"
+  failure that motivated the redesign) → the promote is DOWNGRADED to a HOLD (`hof_reject`).
+- **GROUNDING + degradation** — scripted-ladder Elo; a scripted COLLAPSE reverts (Wilson high-water floor); and the NEW
+  **mirror-collapse** revert fires when the learner erodes significantly BELOW its own champion (`wilson_upper(mirror) <
+  0.45` over ≥360 games) — a real-strength erosion the scripted floor misses.
 
-**THE v2 GATE (in `v_dance/selfplay/gate.py`, `promotion_gate_v2` + `GateConfigV2`):** the champion stays FROZEN
-until the candidate either **(a) clears a HIGH bar — observed mirror win-rate ≥ 0.70 over ≥ `min_h2h_games`=200
-games (→ `beat_champion`)**, OR **(b) the head-to-head climb PLATEAUS** at a not-losing level (windowed `is_plateau`
-detector → `plateau_reanchor` backstop). A scripted **COLLAPSE → REVERT** is the safety net (highest priority), using
-a Wilson-lower-bound `scripted_high_water` floor (never regresses). Calibration (`gate_sim`) showed the **mirror needs
-~240 games** to be reliable (at 60 the bar leaks + the detector false-fires) → `--mirror-battles 240`.
+**Phase-2 sub-problems all DONE this session:**
+- **P2.0** design lock (design-panel + red-team Workflow) → the per-SNAPSHOT significance-veto (band-mean washes out a
+  single counter). **User pivot (better): HoF tests PAST CHAMPIONS, not non-champion gens** — older champions aren't
+  redundant with the mirror and catch lineage cycling directly. **User also lowered the bar 0.70→0.55** (promote on
+  CONVINCING not crushing improvement; couples to the HoF, which becomes load-bearing). **User added the mirror-collapse
+  revert** (the correct version of "reset on degradation").
+- **P2.1** `gate_sim.py` Monte-Carlo calibration (`--demo`) → LOCKED: HoF z=1.96 / bar wilson_upper<0.50 / n=60/suspect
+  (catch@0.30 90%, FWER@0.55 1.9%); mirror thr=0.55 / n=360 (FP 3.1%, pow@0.58 89%; correlation-sensitive → laterals
+  caught by the HoF+collapse); mirror-collapse margin 0.05 (bar 0.45) / n=360 (false-revert@0.50 ~0%, catch@0.35 99%).
+  **Force-valve SIMPLIFIED** (sim finding: the auto-advance "marginal" window is empty at n=60) → freeze + loud
+  operator alert + manual `--hof-override`, NOT an auto-promote. +`wilson_upper_bound` in gate.py.
+- **P2.2** gate code: `GateConfigV2` (0.55 / min_h2h_games 360 / mirror_collapse_*); `promotion_gate_v2` + mirror-collapse
+  revert; `HoFConfig` + `cluster_hof_suspects` (last 5 past champions excl current) + `hall_of_fame_gate` (worst-of-
+  snapshots, thin-pool→skip fail-open). **Audit fixed a real live bug: `--mirror-battles` default 240→360 (the 0.55 bar
+  was UNREACHABLE live).**
+- **P2.3** `hof_eval` (one `run_gauntlet` 'prev_best' mirror per suspect — zero new battle code; pre-validates each
+  suspect so a corrupt checkpoint skips, never false-vetoes on garbage).
+- **P2.4** WIRING (new file `v_dance/selfplay/hof.py`): `apply_hof_gate` (cluster → injected runner → gate → downgrade
+  → streak → override) called in `run_generation` on a promote; `GenerationHistory.hof_reject_streak` +
+  `GenerationRecord.hof` persisted; `operator_alert` 3-way (collapse-loop / **hof-standoff @ streak≥2** / generic-stall);
+  manifest `hof` block; CLI `--hof/--no-hof/--hof-champions/--hof-games/--hof-override`; banner + wizard HoF prompt +
+  per-gen console line; **`--dry-run` demonstrates the reject offline** (synthetic: gen7 beats the champion but loses to
+  gen0 → `HOLD (hof_reject)`).
 
-**WHY frozen-champion (user's insight, corrects an earlier framing):** freezing the champion breaks the Nash-50%
-trap — an improving policy pulls ahead of a STATIC benchmark, so h2h vs the frozen champion can climb past 70%.
-
-**This session shipped (all green + live-verified):**
-- **Phase 0** (current-code bugs the red-team found): h2h SE was double-counting variance (`_two_prop_se(p,n,0.5,n)` →
-  `sqrt(0.25/n)`); `OpponentLeague.reset_pfsp()` on champion change; per-gen eval `matchup_seed=seed+gen`;
-  `PPOTrainer.reset_optimizers()` on revert; deleted dead `refresh_phi` (static BC anchor) + a relaxing
-  `target_kl_for_generation` schedule (`--target-kl-relax`, default off).
-- **gate_sim** (`v_dance/selfplay/gate_sim.py`, `--demo`): Monte-Carlo promote-rate curves + sawtooth freeze/valve +
-  `simulate_frozen_ladder` + the `is_plateau` detector. The calibration tool — extend it before trusting new thresholds.
-- **P1.1** pure `promotion_gate_v2` + `GateConfigV2` (12 tests).
-- **P1.2** EXTRACTED gate→`gate.py` (generation.py re-exports, −260 lines); `GenerationHistory` gained champion state
-  (`scripted_high_water`, `h2h_history`, `champion_elo`, `record_h2h`/`advance_champion`); `run_generation` uses v2
-  (record_h2h BEFORE the gate; advance_champion resets); live mirror bump (`run_gauntlet`/`gauntlet_eval`
-  `mirror_battles` + `--mirror-battles 240`); resume back-compat; `_dry_run` demonstrates the full ladder.
-- **P1.3** DECOUPLED competence-gated admission — admit EVERY competent gen (verdict≠revert) as a league snapshot
-  (`is_champion=promoted`), not just promotes (PFSP diversity). `OpponentLeague.prune(cap,keep_recent)` = diversity-aware
-  eviction (keep champions + recent + a generation-strided spread; soft cap) + `cleanup_fn` deletes evicted files.
-  `GenConfig.league_cap=20/keep_recent=6`.
-- **P1.4** OBSERVABILITY — champion-LINEAGE Elo (non-saturating; steps `+400·log10(p/(1-p))` per promote, vs the
-  saturating scripted `model_elo`); manifest first-class `champion_path/champion_generation/champion_elo` +
-  `best_generation`=champion (dashboard stars the REAL champion, not argmax-scripted — live-confirmed: G2 had higher
-  Elo but G0 kept the ★ because G2 lost the h2h); dashboard.js features the lineage Elo; `operator_alert(history)`
-  watchdog (3 reverts=collapse loop / 25-gen stall) printed each live gen.
-
-**LIVE SMOKE RESULT (this session, clean):** gen0 PROMOTE(no_baseline)+champElo seeded; gen1–3 HOLD (h2h 44–52%, under
-70% — correct); `prev_best X/48` (mirror bump); league 1→4 all competent gens admitted; **0** mask-desync/"Can't pass"/
-"can only switch in once"/no-model/errors/retry; dashboard ★ on the champion. The G2-vs-G0 case is the best live proof
-the v2 gate works (scripted Elo ≠ real strength).
+**LIVE SMOKES (this session, all clean):** P2.2 2-gen smoke (banner shows 0.55/360/mirror-collapse-0.45; 0 bug-patterns;
+server clean); P2.3 `scratch/_hof_smoke.py` (candidate vs archived gen0–3 → confirm; at 30 games the CIs tighten
+0.85→0.67); P2.4 2-gen smoke (banner HoF line; gen0 promote + HoF skip = 0 past champions; manifest hof field present;
+0 bug-patterns; port 8000 clear). The HoF only TRIGGERS with ≥2 real past champions, so the natural live trigger is the
+overnight run (P2.5).
 
 ## ⇒ IMMEDIATE NEXT
-1. **Phase 2 — HoF anti-cycle** (the only Phase-2 item; gate-design §). Add a Hall-of-Fame check so a champion can't
-   advance by LATERALLY beating one anchor while losing to orthogonal archetypes (RPS). Design (from the red-team):
-   **cluster-stratified WORST-CASE** (beat ≥50% within EACH archetype cluster, not the average/majority), **conditional
-   on a mirror-promote** (don't pay HoF cost on a HOLD), **exclude the champion's own lineage** from the sample. REUSE
-   the existing bounded PFSP league as the HoF pool (don't rebuild). Calibrate via `gate_sim` first; test after each step.
-2. **Commit** the gate work (user does it; suggest groups — see memory note: A) gate v2+sim+mirror bump,
-   B) P1.3 admission + P1.4 observability).
-3. **Overnight run** (deferred — "no longer night"): fresh from v4 BC, `--mirror-battles 240`, watch champElo climb /
-   the gate HOLD then PROMOTE(beat_champion)/BACKSTOP(plateau). Clear `artifacts/self_play_archive/` first (smoke left
-   gen0–3 + resume.pt) or `--resume` it.
+1. **Commit** the Phase-2 work (user does it; suggest groups): **(1) Calibration** — `gate_sim.py`, `gate.py`
+   `wilson_upper_bound`, `tests/test_gate_sim.py`, `docs/hof_anticycle_design.md`. **(2) Gate brain** — `gate.py`
+   (0.55, mirror-collapse, HoF config/fns, history/record/alert), `tests/test_gate_v2.py`,
+   `tests/test_hall_of_fame_gate.py`, `tests/test_prev_best_gate.py`. **(3) HoF live + wiring** — `hof.py`,
+   `generation.py`, `archive.py`, `tests/test_hof_eval.py`, `tests/test_hof_wiring.py`, `scratch/_hof_smoke.py`.
+   (Plus the wizard `--mirror-battles` + champion-pivot edits already folded into 2/3.)
+2. **P2.5 — the OVERNIGHT RUN** (user runs; this is where the HoF triggers on real divergent champions):
+   `python -m v_dance.selfplay.generation --live --generations 0 --hours 8 --games 300 --mirror-battles 360
+   --max-cpu-fraction 0.5 --collect-workers 12 --max-vram-gb 4 --ckpt ai_train_scripts/BC_model/checkpoints_v4/bc_best.pt
+   -v 2> artifacts/logs/p2_task/overnight.log` (or the bare-command WIZARD, which now prompts for mirror-battles + HoF).
+   **Clear `artifacts/self_play_archive/` first** (or `--resume` it). WATCH: banner `HoF (Phase 2): ON`; early gens
+   `HoF: skipped (… < min_pool 2)`; once ≥2 champions accrue → `HoF[HOF_CONFIRM] vs past champions: …` on promotes, a
+   `HOLD (hof_reject)` if a candidate cycles, the `OPERATOR ALERT: … HoF rejects` standoff line if it rejects ≥2 in a
+   row (then re-run with `--hof-override` to force it through). Bug-scan the log (grep below) = 0.
+3. **THEN** (after Phase 2 ships + the run shows archetype competence): v1.* TP co-development (§14); P3 throughput
+   (#13 extract shared parallel runner → #14 multiprocessing); #18 multi-battle spectate (optional polish).
 
 ## Full to-do list (carry forward + REPRINT/UPDATE every message)
 | # | Task | Effort | Priority | Depends-on | Status |
 |---|------|--------|----------|------------|--------|
-| 1 | Sneasler mask-desync escape | M | P0 | — | ✅ done · live-verified |
-| 2 | Wizard `prev_best` toggle | S | P1 | — | ✅ done · verified |
-| 3 | Gate red-team (5-lens Workflow) | M | P1 | — | ✅ done |
-| 4 | Phase 0 (6 current-code bug fixes) | M | P1 | #3 | ✅ done |
-| 5 | Gate calibration sim + plateau detector | M | P1 | #3 | ✅ done |
-| 6 | P1.1 pure v2 gate fn | M | P1 | #5 | ✅ done |
-| 7 | P1.2 extract gate.py + wire v2 + mirror bump | L | P1 | #6 | ✅ done |
-| 8 | P1.3 competence-gated bounded admission + eviction | M | P1 | #7 | ✅ done |
-| 9 | P1.4 observability (lineage Elo, dashboard champion, abort) | M | P1 | #7 | ✅ done · live-verified |
-| 10 | **Phase 2: HoF anti-cycle** (cluster-stratified worst-case, conditional on promote) | L | **P2 (NEXT)** | #8,#9 | ⬜ |
-| 11 | Commit session gate work (suggest groups; USER commits) | S | P1 | — | ⬜ uncommitted |
-| 12 | 🌙 Overnight training run (`--mirror-battles 240`) | — (user) | P2 | #10 (or now) | ⏸ deferred |
-| 13 | Extract shared parallel-battle runner (multi-core prep) | M | P3 | — | ⬜ |
+| 1–9 | Phase 0 + Phase 1 (gate v2, sim, extract, admission, lineage-Elo observability) | — | P1 | — | ✅ done |
+| 10 | **Phase 2: HoF anti-cycle + 0.55 bar + mirror-collapse** (P2.0–P2.4) | L | P2 | #8,#9 | ✅ build complete (P2.5 = user smoke) |
+| 11 | Commit session gate work (groups 1–3; USER commits) | S | P1 | — | ⬜ uncommitted |
+| 12 | 🌙 Overnight run = **P2.5** (`--mirror-battles 360`; HoF triggers live) | — (user) | P2 | #10 | ⏸ ready |
+| 13 | Extract shared parallel-battle runner (collection + eval + HoF) | M | P3 | — | ⬜ |
 | 14 | 3c.8d true multiprocessing collection | L | P3 | #13 | ⬜ |
 | 15 | v1.* TP co-development (§14) | L | P5 | archetype-competent policy (#12) | ⬜ |
 | 16 | 3c.7d scripted demo episodes | M | conditional | live training | ⬜ deferred |
 | 17 | Reg M-B migration | L | GATED ~2026-06-24 | ecosystem | ⬜ blocked |
+| 18 | Multi-battle Spectate (dashboard shows several concurrent battles, not just one) | S | optional | 3c.6 dashboard | ⬜ |
+
+### Phase 2 sub-breakdown (keep until P2.5 ships)
+| Sub | Sub-problem | Status |
+|---|---|---|
+| P2.0 | Design lock (per-snapshot veto; champion pivot; 0.55 bar; mirror-collapse) | ✅ done |
+| P2.1 | gate_sim calibration (HoF + 0.55 mirror + mirror-collapse + force-valve) | ✅ done |
+| P2.2 | Gate code (HoF fns + 0.55 + mirror-collapse + `--mirror-battles` 360 audit fix) | ✅ done |
+| P2.3 | Live HoF eval plumbing (`hof_eval`) | ✅ done |
+| P2.4 | Wire into run_generation + force-valve alert + CLI + wizard + observability | ✅ done |
+| P2.5 | Full overnight run where the HoF triggers on real champions (USER) | ⬜ ready |
 
 ## Environment + commands (Windows; user runs Git Bash + PowerShell; Bash tool available)
-- venv active in the user's shell (`((.venv) )`) → `python` = venv python. Headless tool calls: use
-  `.venv/Scripts/python.exe`. venv node at `.venv/node/node.exe` (`--check` a .js for syntax).
-- **Run all commands from the REPO ROOT** `D:\ShowdownProject\Victory-Dance` (Bash default CWD is the
-  `data/scripts/vod_parser` subdir → `cd /d/ShowdownProject/Victory-Dance` first; PowerShell tool defaults there too).
-- Tests: `python -m pytest tests -q` (**872 pass / 0 skip**). `PYTHONIOENCODING=utf-8` when capturing stdout.
-  **Log files contain unicode → `grep` needs `-a`.** Full-suite count via PowerShell `Select-Object -Last 3` (the
-  Bash-tool tail can drop the summary line).
-- **Gate calibration sim:** `python -m v_dance.selfplay.gate_sim --demo` (promote-rate curves + freeze/valve +
-  frozen-ladder). EXTEND this to validate any new threshold/HoF logic BEFORE wiring live.
-- **Dry-run (no server, demonstrates the v2 gate):** `python -m v_dance.selfplay.generation --dry-run --generations 8`
-  → PROMOTE(no_baseline)→HOLD→PROMOTE(beat_champion, champElo steps)→REVERT(collapse); league grows on competent gens.
-- **Live run flags:** `--live --generations 0 --hours 8 --games 300 --eval-battles <auto> --mirror-battles 240
-  --max-cpu-fraction 0.5 --collect-workers 12 --max-vram-gb 4 --ckpt …checkpoints_v4/bc_best.pt`. Bare
+- venv active in the user's shell → `python` = venv python. Headless tool calls: `.venv/Scripts/python.exe`. venv node
+  at `.venv/node/node.exe`. **Run all commands from the REPO ROOT** `D:\ShowdownProject\Victory-Dance` (Bash default
+  CWD is `data/scripts/vod_parser` → `cd /d/ShowdownProject/Victory-Dance` first; PowerShell tool defaults there too).
+- Tests: `python -m pytest tests -q` (**901 pass / 0 skip**). `PYTHONIOENCODING=utf-8` when capturing stdout; logs have
+  unicode → `grep -a`. See the test-output gotcha in the cadence (use exit code, not the summary line).
+- **Gate calibration sim:** `python -m v_dance.selfplay.gate_sim --demo` (HoF veto + 0.55 mirror + mirror-collapse +
+  force-valve tables). EXTEND this to validate any new threshold BEFORE wiring live.
+- **Dry-run (no server; demonstrates the FULL v2+HoF ladder):** `python -m v_dance.selfplay.generation --dry-run
+  --generations 8` → gen0 PROMOTE(no_baseline) → HOLD → PROMOTE(beat_champion, champElo steps) → HOLD →
+  REVERT(scripted_collapse) → REVERT(mirror_collapse) → PROMOTE → **gen7 HOLD(hof_reject)** with `HoF vs past champions:
+  gen2:40/60 gen0:18/60* -> hof_reject`.
+- **HoF eval smoke (server; forces the games vs archived champions):** `python scratch/_hof_smoke.py --games 30
+  --workers 6` (needs gen*.pt in `artifacts/self_play_archive/`).
+- **Live run flags:** `--live --generations 0 --hours 8 --games 300 --mirror-battles 360 --eval-battles <auto>
+  --max-cpu-fraction 0.5 --collect-workers 12 --max-vram-gb 4 --ckpt …checkpoints_v4/bc_best.pt`. HoF flags:
+  `--hof/--no-hof` (default ON), `--hof-champions 5`, `--hof-games 60`, `--hof-override`. Bare
   `python -m v_dance.selfplay.generation` = WIZARD. Dashboard: `python -m v_dance.datatools.dashboard_server --port 5175`.
-- **Live-smoke recipe (bounded):** add `--generations 4 --games 40 --eval-battles 12 --mirror-battles 48 --hours 0.5 -v
-  2> artifacts/logs/smoke.log`; then `grep -aE "would PASS an ACTIVE|Can't pass|can only switch in once|NO model loaded|
-  REJECTED" artifacts/logs/smoke.log` MUST be 0.
+- **Live-smoke recipe (bounded):** `--live --generations 2 --games 10 --eval-battles 4 --mirror-battles 24 --hours 0.12
+  -v > artifacts/logs/p2_task/smoke.log 2>&1`; then `grep -acE "would PASS an ACTIVE|Can't pass|can only switch in
+  once|NO model loaded|order REJECTED|Traceback|won't load" artifacts/logs/p2_task/smoke.log` MUST be 0. (HoF will SKIP
+  in a 2-gen smoke — too few champions; that's correct.) After: confirm port 8000 is clear (no orphan server).
 - Gauntlet: `python -m v_dance.eval.gauntlet --ckpt …checkpoints_v4/bc_best.pt --workers 8`. Team validation:
-  `python scratch/validate_teams.py`.
+  `python scratch/validate_teams.py`. **Clean up `artifacts/logs/p2_task/` when Phase 2 ships.**
 
 ## Gotchas / standing facts
-- **GATE = v2 frozen-champion ladder (sec 16), in `gate.py`.** `run_generation` uses `promotion_gate_v2` (NOT the
-  legacy `promotion_gate`, which still exists/tested + is used by `gate_sim` fidelity). Verdicts: revert(collapse) →
-  promote(`beat_champion` ≥70% over ≥200 mirror games) → promote(`plateau_reanchor`) → hold. `GenConfig` carries
-  `gate_v2`, `league_cap`, `keep_recent`. `--no-prev-best` skips the mirror → gate can only hold/collapse (freeze).
-- **gen 0 ALWAYS auto-promotes** (`no_baseline`, seeds the champion + lineage Elo). `--live` WITHOUT `--resume` starts
-  FRESH from `--ckpt` BC. Trained models → `artifacts/self_play_archive/gen{N}.pt`; champion = `history.best_path`;
-  NEVER written back to bc_best.pt. The smoke left gen0–3 + resume.pt in the archive — clear or `--resume`.
+- **GATE = v2 frozen-champion ladder + Phase-2 HoF, in `gate.py` (pure) + `hof.py` (live).** `run_generation` calls
+  `promotion_gate_v2` then `apply_hof_gate` (hof.py) on a promote. **Verdict priority:** revert(scripted_collapse →
+  mirror_collapse) → promote(beat_champion ≥0.55 over ≥360) → promote(plateau_reanchor) → hold; THEN on a promote the
+  HoF can downgrade to hold(hof_reject). `GenConfig` carries `gate_v2`, `hof`, `league_cap`, `keep_recent`.
+- **Key config defaults:** `GateConfigV2` promote_threshold=0.55, promote_z=1.645, min_h2h_games=360,
+  mirror_collapse_margin=0.05 (bar wilson_upper<0.45), mirror_collapse_z=1.645, mirror_collapse_min_games=360.
+  `HoFConfig` enabled=True, n_champions=5, games_per_snapshot=60, min_games_per_snap=40, z=1.96, min_pool=2,
+  force_limit=4, override=False. `--mirror-battles` default 360 (was the live bar-unreachable bug at 240).
+- **HoF suspects = the last 5 PAST CHAMPIONS** (accepted promotions), newest-first, EXCLUDING the current champion
+  (`cluster_hof_suspects(snapshots, n, current_champion_path=history.best_path)`). The gate fn is selection-agnostic
+  (only sees `(id,wins,games)`), so a future diverse-non-champion supplement is a one-fn change. min_pool=2 → fail-open
+  skip until ≥2 past champions (nothing to cycle early). Rule = NOT-LOSING (significance-veto, wilson_upper<0.5);
+  "must-beat-all" was rejected (freezes). Cap ~8 (FWER grows with count).
+- **gen 0 ALWAYS auto-promotes** (`no_baseline`). `--live` WITHOUT `--resume` starts FRESH from `--ckpt` BC. Trained
+  models → `artifacts/self_play_archive/gen{N}.pt`; champion = `history.best_path`; NEVER written back to bc_best.pt.
 - **⚠ bc_best.pt CLOBBER:** production `…checkpoints/bc_best.pt` is gitignored + got overwritten with the v3 backup
-  twice (user's manual `cp PRE_V4_BACKUP.pt`). **DURABLE v4 SOURCE = `…checkpoints_v4/bc_best.pt`.** If `bc_best.pt`
-  ever reads `state_dim=1854`, re-promote from `checkpoints_v4`; or just pass `--ckpt …checkpoints_v4/bc_best.pt`.
+  twice. **DURABLE v4 SOURCE = `…checkpoints_v4/bc_best.pt`** — pass `--ckpt …checkpoints_v4/bc_best.pt` to bypass.
 - **STATE_DIM 1866, LAYOUT v4, ACTION_DIM 16, GIMMICK_DIM 2.** Production policy = base BC **v4**; TP = 46-dim
-  (`teampreview_best.pt`); Tera = placeholder.
-- **γ=0.997 FLOOR; PBRS OFF; reward = terminal ±1 only.** KL anchor = STATIC gen-0 BC (preserves rare tactics;
-  `refresh_phi` deleted). Collection stochastic (tau annealed 1.3→1.0 over 12 gens). De-dup keeps only EXECUTED model
-  decisions. ResourceBudget: GPU for PPO update only, collection on CPU (latency/GIL-bound; `--collect-workers` can
-  exceed the CPU cap). User caps: 0.5 CPU (5900X→6) + 4 GB VRAM (3070 Ti).
+  (`teampreview_best.pt`); Tera = placeholder. γ=0.997 FLOOR; PBRS OFF; reward = terminal ±1. KL anchor = STATIC gen-0
+  BC. Collection stochastic (tau annealed 1.3→1.0 over 12 gens). ResourceBudget: GPU for PPO update only, collection on
+  CPU. User caps: 0.5 CPU (5900X→6) + 4 GB VRAM (3070 Ti).
 - **ENV PINNED (`PINS.md`):** poke-env `@a6e4f67`, Showdown `@ecf39eef1`. ⚠ Reg M-B due ~2026-06-24 (gated on the
   ecosystem; stay on M-A; see [[showdown-reg-update-pending-2026-06]]).
-- **The adversarial root-cause/red-team Workflow pattern** (path-tracers → refuters → completeness-critic; lens-diverse
-  reviewers) is the project's tool for subtle bugs + design review — it found the gate's blocker + 6 real code bugs this
-  session. Reuse it. Diagnostics: `tests/_parity_harness.py`, `scratch/_smoke_zoroark.py`, `scratch/validate_teams.py`.
+- **The adversarial Workflow** (design panel / red-team / path-tracers→refuters→completeness-critic) is the project's
+  tool for subtle bugs + design review — it produced the gate v2 + Phase-2 designs this session. Reuse it. Diagnostics:
+  `tests/_parity_harness.py`, `scratch/_hof_smoke.py`, `scratch/validate_teams.py`.

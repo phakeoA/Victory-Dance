@@ -207,23 +207,22 @@ async def collect_with_league(actor_critic, league: OpponentLeague, n_games: int
       * snapshot  -> our recorder vs a FROZEN checkpoint player; collect OUR trajectory only
                      and record the latest-vs-snapshot outcome for PFSP;
       * scripted  -> our recorder vs a gauntlet anchor; collect OUR trajectory only.
-    ``n_workers`` (3c.8c) sets ``max_concurrent_battles`` on every player so poke-env runs
-    that many battles of a chunk in PARALLEL — the dominant throughput lever (sec 20); the
-    chunk size is raised to at least ``n_workers`` so each chunk fills the concurrency.
+    ``n_workers`` (3c.8c / task #13) bounds how many distinct (matchup, opponent) chunks run
+    CONCURRENTLY via the shared runner (``play.parallel_battles.run_jobs``) — the dominant
+    throughput lever (sec 20): collection is latency/Node-bound, so overlapping pairings hide
+    each other's websocket round-trips. ``stop_check`` drains the queued chunks on a soft stop.
     Returns ``(trajectories, source_counts)`` — a flat list ready for the trainer."""
-    import asyncio
     import logging as _logging
     from collections import Counter
 
     import v_dance.play.run_local_battle as R
     from poke_env import AccountConfiguration
+    from v_dance.play import parallel_battles as PB
     from v_dance.eval.gauntlet import _make_opponent
     from v_dance.selfplay.game_runner import SelfPlayVGCPlayer
 
-    workers = max(1, int(n_workers))
     chunks = build_collection_chunks(league, team_pool, n_games, chunk_size=chunk_size,
                                      matchup_seed=matchup_seed, seed=seed)
-    sem = asyncio.Semaphore(workers)     # 3c.8c: run up to `workers` distinct pairings at once
     trajectories: list = []
     source_counts: Counter = Counter()
     showcase = {"log": None}             # raw |-log of one game, for a Type_D replay (3c.5)
@@ -238,72 +237,58 @@ async def collect_with_league(actor_critic, league: OpponentLeague, n_games: int
             log_level=_logging.WARNING)
 
     async def _run_chunk(d):
-        # The semaphore bounds CONCURRENT chunks to `workers` (the dominant lever, sec 20):
-        # distinct (matchup, opponent) battles overlap so each one's websocket round-trips
-        # hide the others' — collection is latency/Node-bound, not compute-bound. Shared-state
-        # mutations below run synchronously in `finally` (no await between them), so they're
-        # atomic under asyncio interleaving.
-        async with sem:
-            # Stop promptly on Ctrl-C / time budget: a soft stop must abort the ~hundreds of
-            # QUEUED chunks instead of launching battles against a (Windows-Ctrl-C-killed)
-            # server, which would flood the log with ConnectionRefused.
-            if stop_check is not None and stop_check():
-                return
-            ta = R.load_team(R.resolve_team_path(d["team_a"]))
-            tb = R.load_team(R.resolve_team_path(d["team_b"]))
-            cn, spec, uid = d["cn"], d["spec"], d["uid"]
-            kind = spec[0]
-            our = _sp(ta, 0, uid, cn, status=status)
+        # Bounded concurrency + the soft-stop drain are owned by the shared runner (run_jobs)
+        # below; distinct (matchup, opponent) battles overlap so each one's websocket round-trips
+        # hide the others' — collection is latency/Node-bound, not compute-bound (the dominant
+        # lever, sec 20). The shared-state mutations in `finally` run synchronously (no await
+        # between them), so they're atomic under asyncio interleaving.
+        ta = R.load_team(R.resolve_team_path(d["team_a"]))
+        tb = R.load_team(R.resolve_team_path(d["team_b"]))
+        cn, spec, uid = d["cn"], d["spec"], d["uid"]
+        kind = spec[0]
+        our = _sp(ta, 0, uid, cn, status=status)
+        if kind == "latest":
+            opp = _sp(tb, 1, uid, cn)
+        elif kind == "snapshot":
+            opp = R.make_player(f"LGsx{uid}", tb, model_path=spec[1].path,
+                                team_chooser_path=team_chooser, max_concurrent_battles=max(1, cn))
+        else:   # scripted
+            opp = _make_opponent(spec[1], f"LGc{spec[1][:3]}{uid}", tb,
+                                 max_concurrent_battles=max(1, cn))
+        try:
+            # play_pairing owns the per-chunk hung-battle watchdog; the broad except keeps a
+            # non-timeout chunk failure (a build / desync error) from aborting the whole batch.
+            await PB.play_pairing(our, opp, cn, battle_timeout=battle_timeout, label=f"vs {kind}")
+        except Exception:
+            log.warning("league collect chunk failed (vs %s) — continuing.", kind, exc_info=True)
+        finally:
+            source_counts.update(getattr(our, "_source_counts", {}) or {})
+            our_trajs = our.finished_trajectories()
+            trajectories.extend(our_trajs.values())
+            prog["games"] += cn
+            for _t in our_trajs.values():
+                if _t.meta.won is not None:
+                    prog["decided"] += 1
+                    prog["won"] += 1 if _t.meta.won else 0
+            if status is not None:
+                status.games(prog["games"], (prog["won"] / prog["decided"]) if prog["decided"] else None)
             if kind == "latest":
-                opp = _sp(tb, 1, uid, cn)
+                source_counts.update(getattr(opp, "_source_counts", {}) or {})
+                trajectories.extend(opp.finished_trajectories().values())
             elif kind == "snapshot":
-                opp = R.make_player(f"LGsx{uid}", tb, model_path=spec[1].path,
-                                    team_chooser_path=team_chooser, max_concurrent_battles=max(1, cn))
-            else:   # scripted
-                opp = _make_opponent(spec[1], f"LGc{spec[1][:3]}{uid}", tb,
-                                     max_concurrent_battles=max(1, cn))
-            try:
-                coro = our.battle_against(opp, n_battles=cn)
-                if battle_timeout and battle_timeout > 0:
-                    await asyncio.wait_for(coro, timeout=battle_timeout * cn)
-                else:
-                    await coro
-            except asyncio.TimeoutError:
-                log.warning("league collect WATCHDOG fired (%d games vs %s) — continuing.", cn, kind)
-            except Exception:
-                log.warning("league collect chunk failed (vs %s) — continuing.", kind, exc_info=True)
-            finally:
-                source_counts.update(getattr(our, "_source_counts", {}) or {})
-                our_trajs = our.finished_trajectories()
-                trajectories.extend(our_trajs.values())
-                prog["games"] += cn
-                for _t in our_trajs.values():
-                    if _t.meta.won is not None:
-                        prog["decided"] += 1
-                        prog["won"] += 1 if _t.meta.won else 0
-                if status is not None:
-                    status.games(prog["games"], (prog["won"] / prog["decided"]) if prog["decided"] else None)
-                if kind == "latest":
-                    source_counts.update(getattr(opp, "_source_counts", {}) or {})
-                    trajectories.extend(opp.finished_trajectories().values())
-                elif kind == "snapshot":
-                    for traj in our_trajs.values():
-                        if traj.meta.won is not None:
-                            league.record_result(spec[1].snapshot_id, bool(traj.meta.won))
-                if showcase["log"] is None:               # grab one game's raw |-log
-                    for _lines in (getattr(our, "_proto_log", {}) or {}).values():
-                        if _lines:
-                            showcase["log"] = list(_lines)
-                            break
-                try:
-                    await our.ps_client.stop_listening()
-                    await opp.ps_client.stop_listening()
-                except Exception:
-                    pass
-                our.close()
-                opp.close()
+                for traj in our_trajs.values():
+                    if traj.meta.won is not None:
+                        league.record_result(spec[1].snapshot_id, bool(traj.meta.won))
+            if showcase["log"] is None:               # grab one game's raw |-log
+                for _lines in (getattr(our, "_proto_log", {}) or {}).values():
+                    if _lines:
+                        showcase["log"] = list(_lines)
+                        break
+            await PB.close_players(our, opp)
 
-    await asyncio.gather(*[_run_chunk(d) for d in chunks])
+    # task #13: bounded-concurrency across pairings + soft-stop drain via the shared runner.
+    await PB.run_jobs([lambda d=d: _run_chunk(d) for d in chunks],
+                      workers=n_workers, stop_check=stop_check)
     return trajectories, dict(source_counts), showcase["log"]
 
 
@@ -311,7 +296,7 @@ def gauntlet_eval(candidate_path, *, teams, team_chooser, battles: int = 30,
                   matchup_seed: int = 0, battle_timeout: Optional[float] = 90.0,
                   manage_server: bool = False, n_workers: int = 1,
                   prev_best_path: Optional[str] = None,
-                  mirror_battles: Optional[int] = None):
+                  mirror_battles: Optional[int] = None, stop_check=None):
     """Evaluate a saved checkpoint on the scripted gauntlet (>=4 teams, side-balanced).
     Returns ``(results{opp:(wins,n)}, model_elo)``. ``n_workers`` (3c.8c) parallelises the
     eval the same way as collection so the promotion gate isn't the throughput bottleneck.
@@ -336,7 +321,7 @@ def gauntlet_eval(candidate_path, *, teams, team_chooser, battles: int = 30,
         prev_best_ckpt=Path(prev_best_path) if prev_best_path else None,
         team_chooser=Path(team_chooser), manage_server=manage_server,
         matchup_seed=matchup_seed, battle_timeout=battle_timeout, n_workers=n_workers,
-        mirror_battles=mirror_battles))
+        mirror_battles=mirror_battles, stop_check=stop_check))
     return results, GA.model_elo(results)
 
 
@@ -536,7 +521,7 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
         out = gauntlet_eval(path, teams=_eval_pool, team_chooser=team_chooser,
                             battles=eval_battles, manage_server=False, n_workers=n_workers,
                             prev_best_path=prev_best_path, mirror_battles=mirror_battles,
-                            matchup_seed=seed + history.generation)
+                            matchup_seed=seed + history.generation, stop_check=stop.should_stop)
         dt = _time.perf_counter() - t0
         n_eval = sum(g for _w, g in out[0].values())     # total finished eval battles
         gpm = n_eval / dt * 60.0 if dt > 0 else float("nan")
