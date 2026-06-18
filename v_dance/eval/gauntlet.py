@@ -31,6 +31,7 @@ import json
 import logging
 import math
 import random
+import re
 import sys
 from collections import Counter
 from pathlib import Path
@@ -243,6 +244,36 @@ def team_matchups(team_pool: Sequence[str], n_battles: int,
 # ══════════════════════════════════════════════════════════════════════════════
 # Async orchestrator (reuses run_local_battle) — exercised by the live smoke
 # ══════════════════════════════════════════════════════════════════════════════
+# ── saved-replay routing (task E): organise the eval HTML replays by opponent ──
+# Scripted opponents -> eval/<kind>/ ; the gen-vs-gen battles (the prev_best promotion mirror AND
+# the HoF past-champion battles, both kind='prev_best') -> eval/<LEAGUE_SUBDIR>/ . Change this one
+# constant to rename the gen-vs-gen folder (e.g. "championship").
+LEAGUE_SUBDIR = "league"
+_CKPT_GEN_RE = re.compile(r"gen(\d+)\.pt$")
+
+
+def _ckpt_gen(path) -> Optional[int]:
+    """Generation number parsed from a ``…/gen<N>.pt`` checkpoint path, or None."""
+    if not path:
+        return None
+    m = _CKPT_GEN_RE.search(str(path))
+    return int(m.group(1)) if m else None
+
+
+def eval_replay_routing(kind: str, candidate_gen, *, opp_ref=None):
+    """Where a saved eval replay goes + how it's named (task E). Returns ``(subdir, label)``:
+      * scripted opponent  -> ``(<kind>, "gen<N>_vs_<kind>")``  e.g. ``("heuristic", "gen3_vs_heuristic")``
+      * prev_best / HoF    -> ``(LEAGUE_SUBDIR, "gen<N>_vs_gen<M>")`` where M is the opponent
+        checkpoint's generation (``opp_ref``), or ``"champion"`` when it isn't a ``gen<M>.pt``.
+    ``candidate_gen`` is the candidate's generation N (``"?"`` if unknown). Pure — offline-tested."""
+    n = "?" if candidate_gen is None else candidate_gen
+    if kind == "prev_best":
+        m = _ckpt_gen(opp_ref)
+        opp = f"gen{m}" if m is not None else "champion"
+        return LEAGUE_SUBDIR, f"gen{n}_vs_{opp}"
+    return kind, f"gen{n}_vs_{kind}"
+
+
 def _make_opponent(kind: str, username: str, team: str, model_path=None,
                    team_chooser_path=None, max_concurrent_battles: int = 1):
     """Construct one opponent player of the given ``kind``. ``max_concurrent_battles`` > 1
@@ -338,13 +369,21 @@ async def run_gauntlet(
             descriptors.append({"kind": kind, "mt": model_team_name,
                                 "ot": opp_team_name, "n": n, "uid": uid})
 
+    cand_gen = _ckpt_gen(ckpt)                         # task E: candidate gen N for replay names
+
     async def _run(d):
         kind, n, uid = d["kind"], d["n"], d["uid"]
         model_team = R.load_team(R.resolve_team_path(d["mt"]))
         opp_team = R.load_team(R.resolve_team_path(d["ot"]))
+        # task E: save this match's HTML under eval/<kind>/ (scripted) or eval/league/ (gen-vs-gen),
+        # named gen<N>_vs_<kind|genM>. The live spectate JSON stays flat in live_dir (dashboard).
+        _subdir, _label = eval_replay_routing(
+            kind, cand_gen, opp_ref=(prev_best_ckpt if kind == "prev_best" else None))
+        _rdir = str(Path(live_dir) / _subdir) if (live_dir and save_replays) else None
         model_player = R.make_player(
             f"BC{uid}", model_team, model_path=ckpt, team_chooser_path=team_chooser,
-            live_dir=live_dir, save_replays=save_replays)   # #18b: eval match spectate
+            live_dir=live_dir, save_replays=save_replays,   # #18b: eval match spectate
+            replay_dir=_rdir, replay_label=_label)
         opp = _make_opponent(
             kind, f"OP{kind[:4]}{uid}", opp_team,
             model_path=prev_best_ckpt, team_chooser_path=team_chooser)

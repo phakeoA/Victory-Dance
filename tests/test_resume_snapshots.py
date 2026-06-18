@@ -15,17 +15,41 @@ def _make_snaps(d: Path, gens):
         (d / f"snap_gen{g}.pt").write_text("x")
 
 
+def _make_sub_snaps(d: Path, gens):
+    sub = d / "sub_checkpoints"
+    sub.mkdir(parents=True, exist_ok=True)
+    for g in gens:
+        (sub / f"snap_gen{g}.pt").write_text("x")
+
+
 def test_snapshot_path_for():
-    assert RS.snapshot_path_for("/arch", 5).name == "snap_gen5.pt"
+    p = RS.snapshot_path_for("/arch", 5)
+    assert p.name == "snap_gen5.pt"
+    assert p.parent.name == "sub_checkpoints"              # tidy archive: snapshots in sub_checkpoints/
 
 
 def test_list_and_latest_snapshot(tmp_path):
+    # legacy FLAT layout (snaps at the archive root) still resolves (backward-compat)
     _make_snaps(tmp_path, [0, 2, 10])
     (tmp_path / "gen3.pt").write_text("not a snapshot")     # must be ignored
     (tmp_path / "resume.pt").write_text("legacy")           # ignored too
     gens = [g for g, _ in RS.list_snapshots(tmp_path)]
     assert gens == [0, 2, 10]                               # sorted, only snap_gen*
     assert RS.latest_snapshot(tmp_path).name == "snap_gen10.pt"
+
+
+def test_list_snapshots_reads_sub_checkpoints(tmp_path):
+    _make_sub_snaps(tmp_path, [0, 3, 7])                    # the NEW layout
+    assert [g for g, _ in RS.list_snapshots(tmp_path)] == [0, 3, 7]
+    assert RS.latest_snapshot(tmp_path).parent.name == "sub_checkpoints"
+
+
+def test_list_snapshots_backward_compat_root_and_subdir(tmp_path):
+    (tmp_path / "snap_gen0.pt").write_text("root")         # old flat snap
+    _make_sub_snaps(tmp_path, [0, 1])                       # new ones; gen0 also in sub_checkpoints
+    got = dict(RS.list_snapshots(tmp_path))
+    assert sorted(got) == [0, 1]
+    assert got[0].parent.name == "sub_checkpoints"         # duplicate gen resolved to sub_checkpoints/
 
 
 def test_latest_snapshot_none_when_empty(tmp_path):

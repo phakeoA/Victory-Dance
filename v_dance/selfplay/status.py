@@ -279,6 +279,30 @@ class LiveBattles:
             pass
         self._last.pop(tag, None)
 
+    def save_html_replay(self, tag: str, battle, *, out_dir=None, label: Optional[str] = None) -> Optional[Path]:
+        """Save a finished battle as a real, playable Showdown **HTML** replay and DROP the transient
+        live JSON. This is what ``--save-replays`` keeps (the artifact you can open in a browser),
+        instead of the cosmetic live-feed JSON.
+
+        The file is ``<out_dir or self.dir>/<label_>?<tag>.html`` — ``out_dir`` (task E) lets the
+        eval gauntlet file replays into per-opponent sub-folders (``eval/<kind>/``, ``eval/league/``)
+        while the LIVE spectate JSON stays in ``self.dir``; ``label`` prefixes the name so it reads
+        ``gen<N>_vs_<kind>_<tag>.html``. ``battle`` is DUCK-TYPED (any object exposing
+        ``save_replay(path)`` — poke-env's ``AbstractBattle`` does). Crash-proof: a failed save never
+        breaks teardown, and the live JSON (in ``self.dir``) is removed regardless. Returns the
+        written path, or None on failure."""
+        d = Path(out_dir) if out_dir else self.dir
+        stem = f"{label}_{_safe_tag(tag)}" if label else _safe_tag(tag)
+        out = d / f"{stem}.html"
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            battle.save_replay(out)
+            return out
+        except Exception:
+            return None
+        finally:
+            self.remove(tag)            # the live JSON (in self.dir) was a LIVE-only feed — drop it
+
 
 def current_live_dir(live_root):
     """The CURRENT run's LATEST-generation spectate dir — the only place live battles are. The

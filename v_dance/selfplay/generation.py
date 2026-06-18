@@ -423,7 +423,7 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                          snapshot_path=None, max_hours=None) -> dict:
     """Run real generations end-to-end (collect via the league -> PPO update -> gauntlet
     eval -> promotion gate -> admit/refresh/revert), RESUMABLY (3c.4 / #20): a PER-GENERATION
-    snapshot (``snap_gen{N}.pt`` in ``archive``) is written after every generation, so a later run
+    snapshot (``snap_gen{N}.pt`` in ``archive/sub_checkpoints/``) is written after every generation, so a later run
     can ``resume_gen`` from ANY kept generation (an int N continues at N+1; ``"latest"`` = the
     newest; ``None`` = fresh from ``--ckpt``). ``resume_from`` is the legacy explicit-file path.
     ``keep_snapshots`` bounds how many per-gen snapshots are retained (0 = all). The run stops
@@ -452,7 +452,7 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
     from v_dance.selfplay.status import run_stamp as _run_stamp, gen_kind_dir as _gen_kind_dir
     live_run_dir = archive / "live" / _run_stamp()
     print(f"   spectate: live/{live_run_dir.name}/gen_*/<replays|eval>  "
-          f"({'SAVING replays' if save_replays else 'live-only (deleted on finish)'})")
+          f"({'SAVING .html replays' if save_replays else 'live-only (deleted on finish)'})")
     _eval_pool = list(eval_team_pool) if eval_team_pool else list(team_pool)
     _eval_pairs = len(_eval_pool) * (len(_eval_pool) - 1)
     eval_battles = resolve_eval_battles(eval_battles, len(_eval_pool))
@@ -573,7 +573,12 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
         return trajs, src
 
     def save_fn(ac_, gen):
-        p = archive / f"gen{gen}.pt"
+        # Per-gen policy checkpoints live in <archive>/checkpoints/ (tidy archive; the full-state
+        # resume snapshots go in <archive>/sub_checkpoints/). The league/gate store + reload THIS
+        # returned path, so moving the dir needs no other change.
+        ckpt_dir = archive / "checkpoints"
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        p = ckpt_dir / f"gen{gen}.pt"
         ac_.save(p, generation=gen)
         return str(p)
 
@@ -622,7 +627,10 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
         out = asyncio.run(hof_eval(
             candidate_path, suspects, team_pool=_eval_pool, team_chooser=team_chooser,
             games_per_snapshot=gen_cfg.hof.games_per_snapshot, n_workers=n_workers,
-            manage_server=False, matchup_seed=seed + history.generation))
+            manage_server=False, matchup_seed=seed + history.generation,
+            # task E: HoF past-champion battles spectate + save to eval/league/ too
+            live_dir=_gen_kind_dir(live_run_dir, history.generation, "eval"),
+            save_replays=save_replays))
         dt = _time.perf_counter() - t0
         n = sum(g for _i, _w, g in out)
         print(f"   HoF eval: {len(out)} past champions, {n} games in {dt:.1f}s")
@@ -638,10 +646,13 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
         # archive doesn't grow without bound. Only OUR archived gen files, never a champion (those
         # aren't in `evicted`) or the base ckpt — and only after prune + before the resume save,
         # so nothing still references them.
+        # only delete OUR archived gen files — the archive root (legacy flat layout) or the new
+        # checkpoints/ sub-dir — never a champion, the base ckpt, or anything outside the archive.
+        allowed = {archive.resolve(), (archive / "checkpoints").resolve()}
         for s in evicted:
             try:
                 fp = Path(s.path)
-                if fp.exists() and fp.parent.resolve() == archive.resolve():
+                if fp.exists() and fp.parent.resolve() in allowed:
                     fp.unlink()
             except Exception:
                 log.debug("evicted-snapshot file cleanup failed (non-fatal)", exc_info=True)
@@ -748,7 +759,7 @@ def _dry_run(n_generations: int = 6, seed: int = 0) -> None:
         return [object()] * 200, {"model": 4000}     # 200 fake trajectories
 
     def save_fn(ac, gen):
-        return f"archive/gen{gen}.pt"
+        return f"archive/checkpoints/gen{gen}.pt"
 
     def eval_fn(path, prev_best_path=None):
         gen = len(history.records)
@@ -922,8 +933,8 @@ def _wizard(ap):
                                "12 to use collection's CPU headroom; blank = cap", int)
     args.collect_procs = ask("Collection PROCESSES (multicore; 1 = single-process asyncio)", 1,
                              "4-6 to bypass the GIL (~5x, probe 14a); ~0.6GB RAM each", int)
-    args.save_replays = ask_yn("Save spectator replays? (keep each battle's log under "
-                               "live/<stamp>/gen_N/{replays,eval}; N = deleted on finish)", False)
+    args.save_replays = ask_yn("Save spectator replays as playable .html? (under "
+                               "live/<stamp>/gen_N/{replays,eval}/<tag>.html; N = deleted on finish)", False)
     args.max_vram_gb = ask("Max VRAM GB for the GPU update", None,
                            "4 (of 8 GB); blank = uncapped", float)
     args.mirror_battles = ask("Mirror battles vs the champion (the 0.55 beat_champion bar)", 360,
@@ -1075,18 +1086,19 @@ if __name__ == "__main__":
                     help="resume from an EXPLICIT snapshot file (legacy/power-user); prefer "
                          "--resume-gen. Use the SAME --ckpt as the original run.")
     ap.add_argument("--resume-gen", default=None,
-                    help="resume from a GENERATION's snapshot in <archive> (#20): an int N loads "
-                         "snap_gen{N}.pt and continues at N+1; 'latest' = the newest; omitted = "
-                         "FRESH from --ckpt BC. (Snapshots are kept per generation.)")
+                    help="resume from a GENERATION's snapshot in <archive>/sub_checkpoints/ (#20): an "
+                         "int N loads snap_gen{N}.pt and continues at N+1; 'latest' = the newest; "
+                         "omitted = FRESH from --ckpt BC. (Snapshots are kept per generation.)")
     ap.add_argument("--keep-snapshots", type=int, default=25,
                     help="keep only the last N per-gen snapshots (~21 MB each; default 25 ≈ 525 MB "
                          "of rollback). 0 = keep ALL.")
     ap.add_argument("--save-replays", action="store_true",
-                    help="SAVE spectator replays (#18b) under artifacts/.../live/<start-stamp>/"
-                         "gen_<N>/{replays,eval}/<tag>.json instead of deleting them on finish "
-                         "(the dashboard turn-viewer can re-open them; default off = live-only).")
+                    help="SAVE finished battles as real, playable Showdown .html replays under "
+                         "artifacts/.../live/<start-stamp>/gen_<N>/{replays,eval}/<tag>.html "
+                         "(open in a browser) instead of deleting the live feed on finish "
+                         "(default off = live-only).")
     ap.add_argument("--snapshot", default=None,
-                    help="(deprecated; ignored) snapshots are now per-gen snap_gen{N}.pt in <archive>")
+                    help="(deprecated; ignored) snapshots are now per-gen snap_gen{N}.pt in <archive>/sub_checkpoints/")
     ap.add_argument("--hours", type=float, default=None,
                     help="stop cleanly after ~this many wall-clock hours (between gens)")
     ap.add_argument("--prev-best", action=argparse.BooleanOptionalAction, default=True,

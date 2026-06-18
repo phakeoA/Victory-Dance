@@ -28,7 +28,8 @@ log = logging.getLogger(__name__)
 async def hof_eval(candidate_path, suspects, *, team_pool, team_chooser,
                    games_per_snapshot: int = 60, matchup_seed: int = 0,
                    battle_timeout: Optional[float] = 90.0, n_workers: int = 1,
-                   manage_server: bool = False, gauntlet_fn=None):
+                   manage_server: bool = False, gauntlet_fn=None,
+                   live_dir=None, save_replays: bool = False):
     """Play the CANDIDATE vs each HoF SUSPECT (a frozen past-champion checkpoint) for
     ``games_per_snapshot`` side-balanced battles, returning ``[(snapshot_id, wins, games), ...]``.
 
@@ -60,7 +61,10 @@ async def hof_eval(candidate_path, suspects, *, team_pool, team_chooser,
                 ckpt=Path(candidate_path), team_chooser=Path(team_chooser),
                 prev_best_ckpt=Path(suspect.path), manage_server=False,
                 matchup_seed=matchup_seed, battle_timeout=battle_timeout,
-                n_workers=int(n_workers))
+                n_workers=int(n_workers),
+                # task E: the candidate-vs-past-champion battles also save to eval/league/ named
+                # gen<N>_vs_gen<M> (M = the suspect's gen, parsed from its checkpoint path).
+                live_dir=live_dir, save_replays=save_replays)
             wins, games = res.get("prev_best", (0, 0))
             results.append((suspect.snapshot_id, int(wins), int(games)))
     finally:

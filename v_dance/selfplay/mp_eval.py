@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 from collections import Counter
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, List, Optional
 
 from v_dance.play.parallel_battles import close_players, play_pairing, run_jobs
@@ -110,13 +111,19 @@ def _build_eval_players_real(candidate, prev_best, team_chooser, spec: EvalSpec,
     global uid so they're unique across worker processes. ``live_dir`` (#18b) makes the model
     player publish its eval match to the spectate feed."""
     import v_dance.play.run_local_battle as R
-    from v_dance.eval.gauntlet import _make_opponent
+    from v_dance.eval.gauntlet import _make_opponent, eval_replay_routing, _ckpt_gen
     uid = spec.uid
     model_team = R.load_team(R.resolve_team_path(spec.team_a))
     opp_team = R.load_team(R.resolve_team_path(spec.team_b))
+    # task E: file the saved replay under eval/<kind>/ (scripted) or eval/league/ (gen-vs-gen),
+    # named gen<N>_vs_<kind|genM>; the live spectate JSON stays flat in live_dir (dashboard).
+    subdir, label = eval_replay_routing(spec.kind, _ckpt_gen(candidate),
+                                        opp_ref=(prev_best if spec.kind == "prev_best" else None))
+    rdir = str(Path(live_dir) / subdir) if (live_dir and save_replays) else None
     model_player = R.make_player(f"BC{uid}", model_team, model_path=candidate,
                                  team_chooser_path=team_chooser,
-                                 live_dir=live_dir, save_replays=save_replays)
+                                 live_dir=live_dir, save_replays=save_replays,
+                                 replay_dir=rdir, replay_label=label)
     opp = _make_opponent(spec.kind, f"OP{spec.kind[:4]}{uid}", opp_team,
                          model_path=prev_best, team_chooser_path=team_chooser)
     return model_player, opp

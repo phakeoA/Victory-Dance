@@ -139,3 +139,108 @@ def test_read_live_battles_recurses_and_annotates_gen_kind(tmp_path):
     by_tag = {b["tag"]: b for b in got}
     assert by_tag["battle-c"]["gen"] == 0 and by_tag["battle-c"]["kind"] == "replays"
     assert by_tag["battle-e"]["gen"] == 1 and by_tag["battle-e"]["kind"] == "eval"
+
+
+# ── Fix A: --save-replays now writes a real playable .html replay, not litter JSON ────────────
+class _StubBattle:
+    """Duck-typed stand-in for poke-env's battle: ``save_replay(path)`` writes HTML (as the
+    real ``AbstractBattle.save_replay`` does from its accumulated protocol log)."""
+    def __init__(self, tag, html="<html>replay</html>", raises=False):
+        self.battle_tag = tag
+        self._html = html
+        self._raises = raises
+
+    def save_replay(self, path):
+        if self._raises:
+            raise RuntimeError("boom")
+        from pathlib import Path as _P
+        _P(path).write_text(self._html, encoding="utf-8")
+        return _P(path)
+
+
+def test_save_html_replay_writes_html_and_drops_json(tmp_path):
+    lb = LiveBattles(tmp_path)
+    lb.update("battle-x-9", turn=4, log=["|turn|4"])          # the LIVE-feed json exists
+    assert (tmp_path / "battle-x-9.json").exists()
+    out = lb.save_html_replay("battle-x-9", _StubBattle("battle-x-9", "<html>WON</html>"))
+    assert out == tmp_path / "battle-x-9.html"
+    assert out.exists() and "WON" in out.read_text(encoding="utf-8")
+    assert not (tmp_path / "battle-x-9.json").exists()        # the live json is dropped on finish
+    assert read_live_battles(tmp_path) == []                  # nothing LIVE remains
+
+
+def test_save_html_replay_sanitizes_filename(tmp_path):
+    lb = LiveBattles(tmp_path)
+    out = lb.save_html_replay("battle/odd:tag", _StubBattle("battle/odd:tag"))
+    assert out == tmp_path / f"{_safe_tag('battle/odd:tag')}.html" and out.exists()
+
+
+def test_save_html_replay_failure_is_crash_proof_and_still_drops_json(tmp_path):
+    lb = LiveBattles(tmp_path)
+    lb.update("b", turn=1, log=["|turn|1"])
+    out = lb.save_html_replay("b", _StubBattle("b", raises=True))   # save blows up
+    assert out is None                                       # reported, not raised
+    assert not (tmp_path / "b.json").exists()                # live json still dropped
+
+
+def test_save_replays_does_not_enable_pokeenv_native_dump(tmp_path):
+    """Regression: ``SplicingVGCPlayerBase`` must NOT reuse poke-env's ``_save_replays`` attribute.
+    poke-env's ``Player`` stores its OWN native-save flag there and ``_create_battle`` reads it to
+    stamp every battle; clobbering it back to True re-enabled poke-env's uncategorized
+    ``./replays/<user> - <tag>.html`` dump (the stray root + selfplay folders). Our flag lives under
+    a DISTINCT name so poke-env's stays False and only the structured ``<live_dir>/<tag>.html`` lands."""
+    import v_dance.play.run_local_battle as R
+    from poke_env import AccountConfiguration
+    from v_dance.play.player import VGCPlayer
+    team = R.load_team(R.resolve_team_path("WolfeGlick"))
+    p = VGCPlayer(model_path=None, account_configuration=AccountConfiguration("BCnodump", None),
+                  battle_format=R.BATTLE_FORMAT, team=team, save_replays=True,
+                  live_dir=str(tmp_path), start_listening=False)
+    assert p._save_replays is False           # poke-env's NATIVE dump stays DISABLED
+    assert p._save_html_replays is True        # our structured-HTML flag is the one that's set
+
+
+def test_save_html_replay_real_poke_env_double_battle(tmp_path):
+    # the actual path the finished-callback relies on: poke-env builds real replay HTML from a
+    # freshly-constructed battle (no save_replays flag needed — _replay_data is always accumulated).
+    import logging
+    from poke_env.battle.double_battle import DoubleBattle
+    b = DoubleBattle("battle-gen9vgc2026regma-77", "TrainerRed",
+                     logging.getLogger("test"), gen=9)
+    lb = LiveBattles(tmp_path)
+    out = lb.save_html_replay("battle-gen9vgc2026regma-77", b)
+    assert out is not None and out.exists() and out.suffix == ".html"
+    txt = out.read_text(encoding="utf-8")
+    # poke-env's replay template is a full HTML doc (<!doctype html> + the battle log embed);
+    # the battle tag appears in the <title> and the embedded log header.
+    assert "battle-gen9vgc2026regma-77" in txt and "<!doctype html>" in txt.lower()
+
+
+# ── task E: eval replays routed by opponent into eval/<kind>/ + eval/league/ ───────────────────
+def test_eval_replay_routing_scripted():
+    from v_dance.eval.gauntlet import eval_replay_routing
+    assert eval_replay_routing("heuristic", 3) == ("heuristic", "gen3_vs_heuristic")
+    assert eval_replay_routing("random", 0) == ("random", "gen0_vs_random")
+    assert eval_replay_routing("max_damage", 12) == ("max_damage", "gen12_vs_max_damage")
+
+
+def test_eval_replay_routing_league_gen_vs_gen():
+    from v_dance.eval.gauntlet import eval_replay_routing
+    # prev_best mirror / HoF: opp checkpoint gen -> eval/league/gen<N>_vs_gen<M>
+    assert eval_replay_routing("prev_best", 3, opp_ref="x/checkpoints/gen1.pt") == ("league", "gen3_vs_gen1")
+    # opponent path isn't a gen<M>.pt (e.g. the base BC) -> 'champion'
+    assert eval_replay_routing("prev_best", 3, opp_ref="x/bc_best.pt") == ("league", "gen3_vs_champion")
+    # unknown candidate gen (standalone gauntlet on a non-gen ckpt) -> gen?
+    assert eval_replay_routing("prev_best", None, opp_ref="a/gen2.pt") == ("league", "gen?_vs_gen2")
+
+
+def test_save_html_replay_out_dir_and_label(tmp_path):
+    # task E: live JSON lives in self.dir; the HTML lands in out_dir with the descriptive prefix
+    lb = LiveBattles(tmp_path)
+    lb.update("battle-z-7", turn=2, log=["|turn|2"])        # the live-feed json (self.dir)
+    sub = tmp_path / "heuristic"
+    out = lb.save_html_replay("battle-z-7", _StubBattle("battle-z-7", "<html>R</html>"),
+                              out_dir=sub, label="gen3_vs_heuristic")
+    assert out == sub / "gen3_vs_heuristic_battle-z-7.html"
+    assert out.exists() and "R" in out.read_text(encoding="utf-8")
+    assert not (tmp_path / "battle-z-7.json").exists()      # the live json (self.dir) was dropped

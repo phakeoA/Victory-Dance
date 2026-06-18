@@ -32,6 +32,13 @@ from pathlib import Path
 # script dir / any cached repo-root modules. ─────────────────────────────────
 _HERE = Path(__file__).resolve().parent
 _REPO_ROOT = _HERE.parents[1]   # v_dance/play/ -> repo root
+# Force the SelectorEventLoop BEFORE poke_env is imported (it builds its background
+# loop at import time) — on Windows the default Proactor loop's _poll races under
+# Ctrl-C and wedges the terminal. See v_dance/__init__.py for the full rationale;
+# this duplicate guard covers running this file as a script (where poke_env is
+# imported before v_dance.__init__ runs).
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 from poke_env import AccountConfiguration
 from v_dance.play.player import VGCPlayer              # local_battle/player.py (spliced)
 from v_dance.play.random_player import RandomVGCPlayer  # local_battle/random_player.py (spliced)
@@ -286,12 +293,14 @@ def make_player(
     team_chooser_path: Path = _REPO_ROOT / "ai_train_scripts" / "teamPreview_model" / "checkpoints" / "teampreview_best.pt",
     max_concurrent_battles: int = 1,
     live_dir=None, save_replays: bool = False,
+    replay_dir=None, replay_label=None,
 ) -> VGCPlayer:
     """Build a (gap-#6 spliced) player.  model_path=None → random fallback.
     ``max_concurrent_battles`` > 1 lets poke-env run that many battles of this player
     in parallel (3c.8c CPU-parallel collection). ``live_dir`` (#18b) wires the spectate feed so
     this player's battles show on the dashboard (used for EVAL match spectate); ``save_replays``
-    keeps them on finish."""
+    keeps them on finish. ``replay_dir`` / ``replay_label`` (task E) route the SAVED html into a
+    sub-folder with a descriptive name (e.g. ``eval/heuristic/gen3_vs_heuristic_<tag>.html``)."""
     replay_path = _REPO_ROOT / "artifacts" / "replay_buffer" / f"{username}.jsonl"
     if model_path is None:
         return RandomVGCPlayer(
@@ -302,6 +311,7 @@ def make_player(
             max_concurrent_battles=max_concurrent_battles,
             log_level=logging.WARNING,
             live_dir=live_dir, save_replays=save_replays,
+            replay_dir=replay_dir, replay_label=replay_label,
         )
     return VGCPlayer(
         model_path=model_path,
@@ -314,6 +324,7 @@ def make_player(
         max_concurrent_battles=max_concurrent_battles,
         log_level=logging.WARNING,
         live_dir=live_dir, save_replays=save_replays,
+        replay_dir=replay_dir, replay_label=replay_label,
     )
 
 

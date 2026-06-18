@@ -25,6 +25,11 @@ models/*.pt
 models/*.pth
 # all runtime outputs live under artifacts/ (self_play_archive, replay_buffer, logs, eval_results)
 artifacts/
+# defensive: poke-env's NATIVE replay dump writes ./replays/ relative to CWD. We disable it
+# (we save categorized .html under artifacts/.../live/<stamp>/gen_N/{replays,eval}); this guards
+# against any stray dump ever being committed.
+/replays/
+v_dance/selfplay/replays/
 # Pokémon Showdown local server (cloned by setup.sh — not part of this repo)
 pokemon-showdown/
 

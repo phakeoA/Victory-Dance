@@ -85,24 +85,35 @@ def load_into(path, *, actor_critic, trainer, device: str = "cpu"):
 # ── per-generation snapshots (task #20: resume from any generation) ────────────
 _SNAP_RE = re.compile(r"^snap_gen(\d+)\.pt$")
 
+# The full-state resume snapshots live in this sub-folder of the archive (keeps the archive tidy:
+# the per-gen policy checkpoints go in ``checkpoints/``, these resume snapshots in
+# ``sub_checkpoints/``). ``list_snapshots`` ALSO reads the archive root so runs started under the
+# old flat layout still resume.
+SNAPSHOT_SUBDIR = "sub_checkpoints"
+
 
 def snapshot_path_for(archive, generation: int) -> Path:
     """Path of the full-state snapshot taken AFTER ``generation`` completed
-    (``<archive>/snap_gen{N}.pt``). Resuming it continues at gen N+1."""
-    return Path(archive) / f"snap_gen{int(generation)}.pt"
+    (``<archive>/sub_checkpoints/snap_gen{N}.pt``). Resuming it continues at gen N+1.
+    (Older runs wrote it flat at ``<archive>/snap_gen{N}.pt``; ``list_snapshots`` still finds those.)"""
+    return Path(archive) / SNAPSHOT_SUBDIR / f"snap_gen{int(generation)}.pt"
 
 
 def list_snapshots(archive) -> List[Tuple[int, Path]]:
-    """All per-gen snapshots in ``archive`` as ``(generation, path)``, sorted by generation."""
-    out: List[Tuple[int, Path]] = []
+    """All per-gen snapshots in ``archive`` as ``(generation, path)``, sorted by generation. Reads
+    the current ``<archive>/sub_checkpoints/`` AND the legacy archive root (old flat layout), so a
+    run started under either layout still resumes; on a duplicate generation the sub_checkpoints/
+    copy wins."""
+    found: dict = {}
     d = Path(archive)
-    if not d.is_dir():
-        return out
-    for p in d.glob("snap_gen*.pt"):
-        m = _SNAP_RE.match(p.name)
-        if m:
-            out.append((int(m.group(1)), p))
-    return sorted(out, key=lambda t: t[0])
+    for base in (d, d / SNAPSHOT_SUBDIR):          # root first so sub_checkpoints/ overrides on a dup
+        if not base.is_dir():
+            continue
+        for p in base.glob("snap_gen*.pt"):
+            m = _SNAP_RE.match(p.name)
+            if m:
+                found[int(m.group(1))] = p
+    return sorted(found.items(), key=lambda t: t[0])
 
 
 def latest_snapshot(archive) -> Optional[Path]:

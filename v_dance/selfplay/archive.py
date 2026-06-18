@@ -91,7 +91,7 @@ def build_manifest(history, league=None) -> dict:
         best_wr_so_far = wr if (wr is not None and best_wr_so_far is None) else best_wr_so_far
         gens.append({
             "generation": r.generation,
-            "checkpoint": f"gen{r.generation}.pt",
+            "checkpoint": f"checkpoints/gen{r.generation}.pt",
             "scripted_win_rate": wr,
             "model_elo": r.model_elo,
             "champion_elo": getattr(r, "champion_elo", None),     # non-saturating lineage Elo curve

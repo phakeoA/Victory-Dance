@@ -127,10 +127,22 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
         # self._live, so live/gauntlet play that doesn't set live_dir is byte-identical.
         live_dir = kwargs.pop("live_dir", None)
         save_replays = kwargs.pop("save_replays", False)
+        # task E: where the SAVED html replay goes (else self._live.dir) + its filename prefix, so the
+        # eval gauntlet can file replays into eval/<kind>/ and eval/league/ named gen<N>_vs_<...>.
+        replay_dir = kwargs.pop("replay_dir", None)
+        replay_label = kwargs.pop("replay_label", None)
         super().__init__(*args, **kwargs)
         # raw protocol lines accumulated per battle tag (real-time)
         self._proto_log: Dict[str, List[str]] = {}
-        self._save_replays = bool(save_replays)
+        # ⚠ MUST NOT be named ``_save_replays`` — poke-env's ``Player`` uses that exact attribute as
+        # its OWN native-replay flag, which ``_create_battle`` reads to stamp every battle and
+        # ``AbstractBattle._finish_battle`` then uses to dump an UNCATEGORIZED ``./replays/<user> -
+        # <tag>.html``. We pop the kwarg (so poke-env's flag stays False) and keep OUR flag under a
+        # DISTINCT name, so poke-env's native dump never fires and only OUR structured
+        # ``<live_dir>/<tag>.html`` (see _battle_finished_callback) is written.
+        self._save_html_replays = bool(save_replays)
+        self._replay_dir = replay_dir
+        self._replay_label = replay_label
         self._live = None
         if live_dir:
             from v_dance.selfplay.status import LiveBattles
@@ -457,23 +469,22 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
             log.debug("live-battle report failed (non-fatal)", exc_info=True)
 
     def _battle_finished_callback(self, battle):
-        """On finish (#18): SAVE the spectator replay (``done`` flag, kept on disk) when
-        ``save_replays``, else DELETE the live file. Guarded; then chains to the base."""
+        """On finish (#18): when ``save_replays`` is on, SAVE a real Showdown **HTML** replay
+        (``<live_dir>/<tag>.html`` via poke-env's ``battle.save_replay`` — a file you can open in a
+        browser); else just DELETE the live-feed file. Either way the transient live JSON (the
+        dashboard's LIVE feed only) is dropped. Guarded; then chains to the base."""
         live = getattr(self, "_live", None)        # tolerate __new__-built instances (tests)
         if live is not None:
             try:
                 tag = battle.battle_tag
-                if getattr(self, "_save_replays", False):
-                    players = getattr(battle, "players", None) or []
-                    live.finalize(
-                        tag, turn=getattr(battle, "turn", 0) or 0,
-                        log=self._proto_log.get(_norm_tag(tag)) or [],
-                        p1=players[0] if len(players) > 0 else getattr(self, "username", "p1"),
-                        p2=players[1] if len(players) > 1 else "opponent")
+                if getattr(self, "_save_html_replays", False):
+                    live.save_html_replay(tag, battle,    # playable HTML + drop the live JSON
+                                          out_dir=getattr(self, "_replay_dir", None),
+                                          label=getattr(self, "_replay_label", None))
                 else:
                     live.remove(tag)
             except Exception:
-                log.debug("live-battle finalize failed (non-fatal)", exc_info=True)
+                log.debug("live-battle replay save failed (non-fatal)", exc_info=True)
         return super()._battle_finished_callback(battle)
 
     def _record_rl_decision(self, battle, state_vec, action_s0, action_s1,
