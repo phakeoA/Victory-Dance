@@ -284,19 +284,27 @@ class LiveBattles:
         live JSON. This is what ``--save-replays`` keeps (the artifact you can open in a browser),
         instead of the cosmetic live-feed JSON.
 
+        The replay is rendered by OUR Showdown-native emitter (``replay_html.render_replay_html``):
+        the battle's RAW ``|``-protocol log (the server's ground truth, read from
+        ``battle._replay_data``) wrapped in the canonical Showdown replay template — the SAME format
+        the client's Download-replay button / the Type_B corpus produce. This replaces poke-env's
+        ``battle.save_replay`` so the saved replays are Showdown-native, not poke-env's rendering
+        (the user's call: less poke-env, more Showdown). It animates via the Showdown CDN client.
+
         The file is ``<out_dir or self.dir>/<label_>?<tag>.html`` — ``out_dir`` (task E) lets the
         eval gauntlet file replays into per-opponent sub-folders (``eval/<kind>/``, ``eval/league/``)
         while the LIVE spectate JSON stays in ``self.dir``; ``label`` prefixes the name so it reads
         ``gen<N>_vs_<kind>_<tag>.html``. ``battle`` is DUCK-TYPED (any object exposing
-        ``save_replay(path)`` — poke-env's ``AbstractBattle`` does). Crash-proof: a failed save never
-        breaks teardown, and the live JSON (in ``self.dir``) is removed regardless. Returns the
-        written path, or None on failure."""
+        ``_replay_data``). Crash-proof: a failed save never breaks teardown, and the live JSON
+        (in ``self.dir``) is removed regardless. Returns the written path, or None on failure."""
+        from v_dance.selfplay.replay_html import battle_replay_lines, render_replay_html
         d = Path(out_dir) if out_dir else self.dir
         stem = f"{label}_{_safe_tag(tag)}" if label else _safe_tag(tag)
         out = d / f"{stem}.html"
         try:
             d.mkdir(parents=True, exist_ok=True)
-            battle.save_replay(out)
+            html = render_replay_html(battle_replay_lines(battle), replayid=_safe_tag(tag))
+            out.write_text(html, encoding="utf-8")
             return out
         except Exception:
             return None

@@ -143,28 +143,31 @@ def test_read_live_battles_recurses_and_annotates_gen_kind(tmp_path):
 
 # ── Fix A: --save-replays now writes a real playable .html replay, not litter JSON ────────────
 class _StubBattle:
-    """Duck-typed stand-in for poke-env's battle: ``save_replay(path)`` writes HTML (as the
-    real ``AbstractBattle.save_replay`` does from its accumulated protocol log)."""
-    def __init__(self, tag, html="<html>replay</html>", raises=False):
+    """Duck-typed stand-in for poke-env's battle: exposes ``_replay_data`` (List[List[str]] — each a
+    ``|``-split protocol message), which the save path rejoins into the raw ``|``-log and renders via
+    our Showdown emitter. ``raises`` makes reading it blow up (exercises the crash-proof path)."""
+    def __init__(self, tag, lines=None, raises=False):
         self.battle_tag = tag
-        self._html = html
         self._raises = raises
+        self._lines = lines if lines is not None else ["|gametype|doubles", "|turn|1", "|win|TrainerRed"]
 
-    def save_replay(self, path):
+    @property
+    def _replay_data(self):
         if self._raises:
             raise RuntimeError("boom")
-        from pathlib import Path as _P
-        _P(path).write_text(self._html, encoding="utf-8")
-        return _P(path)
+        return [ln.split("|") for ln in self._lines]           # "|move|x" -> ['', 'move', 'x']
 
 
 def test_save_html_replay_writes_html_and_drops_json(tmp_path):
     lb = LiveBattles(tmp_path)
     lb.update("battle-x-9", turn=4, log=["|turn|4"])          # the LIVE-feed json exists
     assert (tmp_path / "battle-x-9.json").exists()
-    out = lb.save_html_replay("battle-x-9", _StubBattle("battle-x-9", "<html>WON</html>"))
+    out = lb.save_html_replay("battle-x-9", _StubBattle("battle-x-9",
+                              lines=["|tier|[Gen 9] VGC", "|win|steven"]))
     assert out == tmp_path / "battle-x-9.html"
-    assert out.exists() and "WON" in out.read_text(encoding="utf-8")
+    txt = out.read_text(encoding="utf-8")
+    assert out.exists() and 'class="battle-log-data"' in txt and "replay-embed.js" in txt  # Showdown format
+    assert "|win|steven" in txt                              # the raw server log embedded faithfully
     assert not (tmp_path / "battle-x-9.json").exists()        # the live json is dropped on finish
     assert read_live_battles(tmp_path) == []                  # nothing LIVE remains
 
@@ -220,19 +223,41 @@ def test_close_evicts_per_player_logger(tmp_path):
 
 
 def test_save_html_replay_real_poke_env_double_battle(tmp_path):
-    # the actual path the finished-callback relies on: poke-env builds real replay HTML from a
-    # freshly-constructed battle (no save_replays flag needed — _replay_data is always accumulated).
+    # the actual path the finished-callback relies on: read the real battle's accumulated raw
+    # _replay_data and render OUR Showdown replay HTML (no poke-env save_replay).
     import logging
     from poke_env.battle.double_battle import DoubleBattle
     b = DoubleBattle("battle-gen9vgc2026regma-77", "TrainerRed",
                      logging.getLogger("test"), gen=9)
+    b._replay_data.append(["", "tier", "[Gen 9 Champions] VGC 2026 Reg M-A"])
+    b._replay_data.append(["", "turn", "1"])
+    b._replay_data.append(["", "win", "TrainerRed"])          # the server's ground-truth stream
     lb = LiveBattles(tmp_path)
     out = lb.save_html_replay("battle-gen9vgc2026regma-77", b)
     assert out is not None and out.exists() and out.suffix == ".html"
     txt = out.read_text(encoding="utf-8")
-    # poke-env's replay template is a full HTML doc (<!doctype html> + the battle log embed);
-    # the battle tag appears in the <title> and the embedded log header.
-    assert "battle-gen9vgc2026regma-77" in txt and "<!doctype html>" in txt.lower()
+    assert "<!DOCTYPE html>" in txt and 'class="battle-log-data"' in txt and "replay-embed.js" in txt
+    assert "|turn|1" in txt and "|win|TrainerRed" in txt      # raw server log faithfully embedded
+    assert "battle-gen9vgc2026regma-77" in txt                # replayid
+
+
+def test_render_replay_html_is_showdown_format():
+    """The emitter that replaces poke-env's save_replay — Showdown's canonical replay format."""
+    from v_dance.selfplay.replay_html import render_replay_html
+    log = ["|tier|[Gen 9 Champions] VGC 2026 Reg M-A", "|player|p1|Alice|101|1500",
+           "|player|p2|Bob|rosa|1500", "|move|p1a: Charizard|Flamethrower|p2a: Venusaur", "|win|Alice"]
+    h = render_replay_html(log, replayid="b-1")
+    assert h.startswith("<!DOCTYPE html>")
+    assert 'class="battle-log-data"' in h and "replay-embed.js" in h      # CDN-animated player
+    assert "|move|p1a: Charizard|Flamethrower|p2a: Venusaur" in h         # raw log embedded
+    assert "[Gen 9 Champions] VGC 2026 Reg M-A" in h                      # format in title/header
+    assert "Alice vs. Bob" in h                                           # players parsed from |player|
+
+
+def test_render_replay_html_neutralises_script_close():
+    from v_dance.selfplay.replay_html import render_replay_html
+    h = render_replay_html(["|c|x|oops </script> hi"])
+    assert "<\\/script>" in h and "oops <\\/script> hi" in h              # </ escaped, tag can't close early
 
 
 # ── task E: eval replays routed by opponent into eval/<kind>/ + eval/league/ ───────────────────
@@ -277,8 +302,8 @@ def test_save_html_replay_out_dir_and_label(tmp_path):
     lb = LiveBattles(tmp_path)
     lb.update("battle-z-7", turn=2, log=["|turn|2"])        # the live-feed json (self.dir)
     sub = tmp_path / "heuristic"
-    out = lb.save_html_replay("battle-z-7", _StubBattle("battle-z-7", "<html>R</html>"),
+    out = lb.save_html_replay("battle-z-7", _StubBattle("battle-z-7", lines=["|win|R"]),
                               out_dir=sub, label="gen3_vs_heuristic")
     assert out == sub / "gen3_vs_heuristic_battle-z-7.html"
-    assert out.exists() and "R" in out.read_text(encoding="utf-8")
+    assert out.exists() and "|win|R" in out.read_text(encoding="utf-8")
     assert not (tmp_path / "battle-z-7.json").exists()      # the live json (self.dir) was dropped

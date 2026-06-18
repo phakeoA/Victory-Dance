@@ -197,3 +197,61 @@ def test_force_valve_marginal_window_empty_at_n60():
                                       marginal_stat="point", n_gens=40, trials=1500, seed=7)
     assert catastrophic["frac_runs_forced"] == 0.0      # never force-advances a real counter
     assert allmarginal["frac_runs_forced"] > 0.9        # mechanism works when everything is 'marginal'
+
+
+# ── 19b.1 — staged short→full mirror calibration ──────────────────────────────
+def test_mirror_gate_verdict_matches_the_rate_functions():
+    """The per-trial mirror verdict must equal the gate's own promote / collapse conditions (the
+    same ones mirror_promote_rate / mirror_collapse_rate — already pinned to promotion_gate_v2 —
+    use), so the staged sim can never drift from the real gate."""
+    import numpy as np
+    n = 360
+    rng = np.random.default_rng(11)
+    for tp in (0.50, 0.55, 0.40):
+        wins = GS._draw_wins(rng, tp, n, 40000)
+        v = GS.mirror_gate_verdict(wins, n)
+        p = wins / n
+        promote = (p >= 0.55) & (p - 1.645 * np.sqrt(p * (1 - p) / n) > 0.5)
+        revert = GS._wilson_upper_vec(wins, n, 1.645) < 0.45
+        assert np.array_equal(v == 1, promote)              # PROMOTE branch
+        assert np.array_equal(v == -1, revert)              # REVERT branch
+        assert not np.any(promote & revert)                 # mutually exclusive
+    short = GS._draw_wins(np.random.default_rng(1), 0.70, 90, 2000)   # a STRONG short result …
+    assert np.all(GS.mirror_gate_verdict(short, 90) == 0)            # … still only HOLD (n < 360)
+
+
+def test_mirror_escalate_mask_escalates_borderline_skips_interior():
+    import numpy as np
+    n = 300
+    assert bool(GS.mirror_escalate_mask(np.array([int(0.62 * n)]), n)[0])   # clear promoter → escalate
+    assert bool(GS.mirror_escalate_mask(np.array([int(0.38 * n)]), n)[0])   # clear collapse  → escalate
+    assert not bool(GS.mirror_escalate_mask(np.array([int(0.50 * n)]), n)[0])  # tight interior → skip
+    # asymmetric z: a lenient promote-side z lets a ~0.50 short skip at a smaller n (revert side held)
+    n2 = 150
+    assert bool(GS.mirror_escalate_mask(np.array([int(0.50 * n2)]), n2, z_promote=1.645)[0])     # wide → escalate
+    assert not bool(GS.mirror_escalate_mask(np.array([int(0.50 * n2)]), n2,
+                                            z_promote=1.0, revert_band=0.40)[0])                  # lenient → skip
+
+
+def test_staged_escalated_matches_full_and_skip_is_decision_equivalent():
+    # a clear promoter (0.65) almost always escalates → staged == the full mirror, no false-skip
+    s = GS.staged_mirror_stats(0.65, 120, 360, trials=8000, seed=3)
+    assert s["escalate_rate"] > 0.95 and s["false_skip"] < 0.01
+    # at the danger edges (just-promote / just-revert / dead-centre) a skip must never miss a verdict
+    for tp in (0.55, 0.45, 0.50):
+        r = GS.staged_mirror_stats(tp, 120, 360, trials=8000, seed=3)
+        assert r["false_skip"] < 0.01
+    # avg_games is bounded by [n_short, full_n] and frac is consistent
+    assert 120 <= s["avg_games"] <= 360
+    assert abs(s["avg_games_frac"] - s["avg_games"] / 360) < 1e-9
+
+
+def test_staged_strict_equivalence_yields_negligible_savings():
+    """19b.1's headline finding (regression-guarded): under STRICT decision-equivalence (the
+    symmetric 0.45/0.55 band) the short mirror almost never skips — the promote bar sits only ~0.05
+    above the typical ~0.50 mirror rate, so a short mirror can't rule a promote in/out cheaply. The
+    eval saving is negligible, which is WHY 19b.2-.4 were shelved."""
+    tooth = [0.50, 0.51, 0.52, 0.53, 0.54, 0.55]
+    agg = GS.staged_mirror_aggregate(tooth, 180, 360, z_esc=1.645, trials=8000, seed=4)
+    assert agg["mean_cost_frac"] > 0.95         # < 5% of the full-mirror eval saved
+    assert agg["worst_false_skip"] < 0.01       # and it IS decision-equivalent (just not worth it)

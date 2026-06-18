@@ -290,6 +290,117 @@ def force_valve_rate(suspect_true_p: float, n_per_snap: int, *, force_limit: int
     return {"mean_forces": forces / trials, "frac_runs_forced": runs_forced / trials}
 
 
+# ══ 19b — staged short→full mirror calibration (19b SHELVED — kept as the record) ══
+# ⚠ 19b was SHELVED 2026-06-18: this calibration is WHY. It is NOT wired into the live gate (19b.2-.4
+# were not built) — it stays as the reproducible basis for the decision (`--staged`). DO NOT mistake
+# it for pending work, and don't revert it (it documents the call; see the keep-calibration-artifacts
+# memory). FINDING: under strict decision-equivalence the staged mirror saves ~0% (the promote bar
+# 0.55 sits too close to the ~0.50 mirror rate to rule a promote in/out cheaply); ~10-13% only by
+# relaxing equivalence (1-gen promote delays) — not worth the wiring now that eval is mp+multi-server.
+# ─────────────────────────────────────────────────────────────────────────────
+# The per-gen prev_best MIRROR (default 360 games) is the biggest slice of eval. A SHORT mirror
+# first, escalating to the full one only when the short result is BORDERLINE, can cut that cost —
+# but ONLY if it's DECISION-EQUIVALENT to the full mirror (it must never skip a gen the full mirror
+# would promote/revert). The catch: the promote bar (0.55) sits only ~0.05 above the typical mirror
+# rate (~0.50 after a re-anchor), so a short mirror's CI can't cheaply rule a promote in/out — this
+# is what the sweep below QUANTIFIES, so we know the real ROI before wiring anything.
+def mirror_gate_verdict(wins, n: int, *, promote_threshold: float = 0.55, promote_z: float = 1.645,
+                        collapse_z: float = 1.645, collapse_margin: float = 0.05,
+                        min_games: int = 360):
+    """The MIRROR branch of ``promotion_gate_v2`` as a per-trial verdict over a numpy array of win
+    counts at game count ``n``: ``+1`` PROMOTE (``p>=threshold`` AND normal-approx lower-CI ``>0.5``),
+    ``-1`` REVERT (``wilson_upper < 0.5-margin``), else ``0`` HOLD. A non-HOLD verdict needs
+    ``n>=min_games`` (a short mirror can only HOLD). A fidelity test pins this == the mean of
+    ``mirror_promote_rate`` / ``mirror_collapse_rate``, so the staged sim can't drift from the gate."""
+    wins = np.asarray(wins)
+    p = wins / n
+    lower = p - promote_z * np.sqrt(p * (1.0 - p) / max(1, n))
+    enough = n >= min_games
+    promote = enough & (p >= promote_threshold) & (lower > 0.5)
+    revert = enough & (_wilson_upper_vec(wins, n, collapse_z) < (0.5 - collapse_margin))
+    out = np.zeros(wins.shape, dtype=np.int8)
+    out[revert] = -1                  # collapse-revert (gate priority; disjoint from promote anyway)
+    out[promote] = 1
+    return out
+
+
+def mirror_escalate_mask(short_wins, n_short: int, *, promote_threshold: float = 0.55,
+                         revert_band: float = 0.45, z_esc: float = 1.645,
+                         z_promote: Optional[float] = None, z_revert: Optional[float] = None):
+    """Vectorized staged-mirror ESCALATION rule (the form 19b.2 wires into the gate): escalate to
+    the full mirror UNLESS the short Wilson CI lands entirely in the HOLD interior — i.e. escalate
+    iff it can't rule out a promote (``upper(z_promote) >= promote_threshold``) NOR a revert
+    (``lower(z_revert) <= revert_band``). Wider z ⇒ escalate more ⇒ safer but smaller savings. The
+    promote/revert bands take INDEPENDENT z (default both ``z_esc``): a missed promote only DELAYS a
+    promotion ~1 gen (cheap), so the promote side can use a SMALLER z than the safety-critical
+    revert side."""
+    zp = z_esc if z_promote is None else z_promote
+    zr = z_esc if z_revert is None else z_revert
+    upper = _wilson_upper_vec(short_wins, n_short, zp)
+    lower = _wilson_lower_vec(short_wins, n_short, zr)
+    return (upper >= promote_threshold) | (lower <= revert_band)
+
+
+def staged_mirror_stats(true_p: float, n_short: int, full_n: int = 360, *, z_esc: float = 1.645,
+                        z_promote: Optional[float] = None, z_revert: Optional[float] = None,
+                        promote_threshold: float = 0.55, revert_band: float = 0.45,
+                        promote_z: float = 1.645, collapse_z: float = 1.645,
+                        collapse_margin: float = 0.05, trials: int = 20000, seed: int = 0,
+                        rho: float = 0.0) -> dict:
+    """Monte-Carlo the STAGED mirror vs the FULL mirror at true win-rate ``true_p``.
+
+    The short mirror is a PREFIX of the full one: draw ``n_short`` + ``(full_n - n_short)`` at
+    ``true_p``; the full mirror is their SUM. Baseline verdict = the gate on all ``full_n``. Staged:
+    if the short result ESCALATES, the gate runs on all ``full_n`` (== baseline, SAME games); else
+    the staged verdict is HOLD and the remainder games are SAVED. So the ONLY divergence from the
+    full-mirror gate is a SKIP — and a DANGEROUS skip is one where the full mirror would NOT hold.
+    Returns escalate/skip rates, avg games used (+ as a fraction of ``full_n`` = the cost), and the
+    false-skip rates (missed PROMOTE / missed REVERT) the calibration must drive to ~0."""
+    rng = np.random.default_rng(seed)
+    short = _draw_wins(rng, true_p, int(n_short), int(trials), rho)
+    rem = _draw_wins(rng, true_p, int(full_n) - int(n_short), int(trials), rho)
+    full = short + rem
+    base = mirror_gate_verdict(full, int(full_n), promote_threshold=promote_threshold,
+                               promote_z=promote_z, collapse_z=collapse_z,
+                               collapse_margin=collapse_margin)
+    escalate = mirror_escalate_mask(short, int(n_short), promote_threshold=promote_threshold,
+                                    revert_band=revert_band, z_esc=z_esc,
+                                    z_promote=z_promote, z_revert=z_revert)
+    skip = ~escalate
+    games = np.where(escalate, int(full_n), int(n_short))
+    missed_promote = float(np.mean(skip & (base == 1)))
+    missed_revert = float(np.mean(skip & (base == -1)))
+    return {
+        "true_p": true_p,
+        "escalate_rate": float(np.mean(escalate)),
+        "skip_rate": float(np.mean(skip)),
+        "avg_games": float(np.mean(games)),
+        "avg_games_frac": float(np.mean(games)) / int(full_n),
+        "missed_promote": missed_promote,
+        "missed_revert": missed_revert,
+        "false_skip": missed_promote + missed_revert,
+    }
+
+
+def staged_mirror_aggregate(true_ps, n_short: int, full_n: int = 360, *, z_esc: float = 1.645,
+                            trials: int = 20000, seed: int = 0, rho: float = 0.0, **kw) -> dict:
+    """Aggregate ``staged_mirror_stats`` over a list of ``true_ps`` (a representative run trajectory
+    — e.g. one sawtooth tooth 0.50→0.56 plus the collapse band) and report the run-level headline:
+    mean cost (avg games as a fraction of the full mirror) and the WORST false-skip across the
+    trajectory (the safety bound that must be ~0). Equal weight per true_p (one gen each)."""
+    rows = [staged_mirror_stats(tp, n_short, full_n, z_esc=z_esc, trials=trials, seed=seed,
+                                rho=rho, **kw) for tp in true_ps]
+    return {
+        "n_short": int(n_short), "z_esc": z_esc,
+        "mean_cost_frac": float(np.mean([r["avg_games_frac"] for r in rows])),
+        "mean_skip_rate": float(np.mean([r["skip_rate"] for r in rows])),
+        "worst_false_skip": float(max(r["false_skip"] for r in rows)),
+        "worst_missed_promote": float(max(r["missed_promote"] for r in rows)),
+        "worst_missed_revert": float(max(r["missed_revert"] for r in rows)),
+        "rows": rows,
+    }
+
+
 # ── demo (no server / torch): print the calibration tables ────────────────────
 def _demo(trials: int = 30000, seed: int = 0) -> None:
     ops = [
@@ -411,14 +522,84 @@ def _demo_p21(trials: int = 20000, seed: int = 0) -> None:
     print("===========================================================================")
 
 
+def _demo_staged(trials: int = 30000, seed: int = 0) -> None:
+    """19b.1 — staged short→full mirror calibration. The full mirror is n=360. A SHORT mirror skips
+    the rest ONLY when the short result is conclusively HOLD. This prints, for a sweep of
+    (n_short, z_esc): per-true-p skip-rate + cost, and the run-level headline (mean cost vs the full
+    mirror + the WORST false-skip, which MUST be ~0 for decision-equivalence)."""
+    full_n = 360
+    # The danger zones the safety bound must cover: just-below the promote bar (0.53-0.55) and just
+    # at the revert edge (0.42-0.45). The savings come from gens FAR from both (~0.46-0.51).
+    grid = [0.42, 0.45, 0.47, 0.48, 0.50, 0.52, 0.53, 0.55, 0.58]
+    # one realistic sawtooth tooth (re-anchor 0.50 → climb → promote ~0.56) + a collapse sample:
+    tooth = [0.50, 0.50, 0.51, 0.52, 0.53, 0.54, 0.55, 0.40]
+    print("== 19b.1 — staged short→full mirror calibration (full mirror n=360) ========")
+    print("  Per-true-p SKIP-rate (% of gens the short mirror decides alone) — higher = cheaper,")
+    print("  but a skip in a PROMOTE/REVERT row is a FALSE-SKIP (the number that must be ~0).\n")
+    for z_esc in (1.645, 1.96, 2.33):
+        print(f"  --- z_esc={z_esc} (escalation CI width) ---")
+        print("    n_short |" + "".join(f"{p:>7.2f}" for p in grid) + "  | cost  worst-FS")
+        for n_short in (90, 120, 180, 240, 300):
+            agg = staged_mirror_aggregate(tooth, n_short, full_n, z_esc=z_esc,
+                                          trials=trials, seed=seed)
+            cells = ""
+            for tp in grid:
+                r = staged_mirror_stats(tp, n_short, full_n, z_esc=z_esc, trials=trials, seed=seed)
+                fs = "*" if r["false_skip"] > 0.002 else " "      # flag any non-trivial false-skip
+                cells += f"{r['skip_rate']*100:5.0f}%{fs}"
+            print(f"    {n_short:>5}   |{cells}  |{agg['mean_cost_frac']*100:4.0f}% "
+                  f"{agg['worst_false_skip']*100:6.2f}%")
+        print()
+    print("  cost = mean mirror games as % of the full 360 over the sawtooth tooth (lower = saves more).")
+    print("  worst-FS = worst per-gen false-skip over the tooth — the DECISION-EQUIVALENCE bound (~0 req).")
+    print("  '*' marks a true-p column where >0.2% of skips were wrong (a promote/revert was missed).")
+    print()
+    # The revert-side escalation (lower <= 0.45) is what kills savings: the ACTUAL collapse-revert
+    # boundary is ~true-0.405 (wilson_upper(p,360,1.645) < 0.45), so escalating at 0.45 needlessly
+    # holds every 0.46-0.51 gen. Tightening revert_band toward the real boundary should recover
+    # safe savings — sweep it (z_esc fixed at the promote-z so the bands are comparable):
+    print("  REVERT-BAND sweep (z_esc=1.645): does matching the band to the real ~0.405 boundary save?")
+    print("    n_short |" + "".join(f" rb={b:.2f}" for b in (0.45, 0.42, 0.40, 0.38)) + "   (cost%/worst-FS%)")
+    for n_short in (120, 180, 240, 300):
+        cells = ""
+        for rb in (0.45, 0.42, 0.40, 0.38):
+            agg = staged_mirror_aggregate(tooth, n_short, full_n, z_esc=1.645, revert_band=rb,
+                                          trials=trials, seed=seed)
+            cells += f"  {agg['mean_cost_frac']*100:3.0f}/{agg['worst_false_skip']*100:.1f}"
+        print(f"    {n_short:>5}   |{cells}")
+    print("    → cost = % of full-360 eval; worst-FS must stay ~0. A band BELOW the real revert")
+    print("      boundary risks missing a collapse (worst-FS climbs); at/above it stays safe.")
+    print()
+    # RELAXED: a missed PROMOTE only DELAYS a promotion ~1 gen (the candidate keeps training and is
+    # re-judged next gen) — far cheaper than a missed REVERT. So keep the revert side SAFE
+    # (z_revert=1.645, band=0.40) but make the promote side LENIENT (smaller z_promote) to skip the
+    # climbing gens. Cost vs the TOLERATED missed-promote (delay) rate, with missed-REVERT held ~0.
+    print("  RELAXED promote side (z_revert=1.645, revert_band=0.40; missed-promote = ~1-gen DELAY):")
+    print(f"    {'n_short':>7} {'z_promote':>9} | {'cost%':>6} {'miss-PROM%':>10} {'miss-REV%':>9}")
+    for n_short in (90, 120, 180):
+        for zp in (1.645, 1.28, 1.0):
+            rows = [staged_mirror_stats(tp, n_short, full_n, z_promote=zp, z_revert=1.645,
+                                        revert_band=0.40, trials=trials, seed=seed) for tp in tooth]
+            cost = float(np.mean([r["avg_games_frac"] for r in rows]))
+            mp = float(max(r["missed_promote"] for r in rows))
+            mr = float(max(r["missed_revert"] for r in rows))
+            print(f"    {n_short:>7} {zp:>9.2f} | {cost*100:5.0f}% {mp*100:9.1f}% {mr*100:8.1f}%")
+    print("    → even lenient (z_promote=1.0) the promote bar at 0.55 sits too close to the ~0.50")
+    print("      climb to skip much without missing real promotes — savings stay modest.")
+    print("===========================================================================")
+
+
 if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser(description="Promotion-gate calibration simulator (pure)")
     ap.add_argument("--demo", action="store_true", help="print the promote-rate + freeze tables")
+    ap.add_argument("--staged", action="store_true", help="19b.1 staged short→full mirror calibration")
     ap.add_argument("--trials", type=int, default=30000)
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
-    if args.demo:
+    if args.staged:
+        _demo_staged(args.trials, args.seed)
+    elif args.demo:
         _demo(args.trials, args.seed)
     else:
         ap.print_help()

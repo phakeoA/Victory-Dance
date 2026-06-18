@@ -1,0 +1,324 @@
+>battle-gen9championsvgc2026regma-65159
+|init|battle
+|title|BC55x66 vs. OPheur55x66
+|j|☆BC55x66
+|j|☆OPheur55x66
+|gametype|doubles
+|player|p1|BC55x66|1|
+|player|p2|OPheur55x66|170|
+|gen|9
+|tier|[Gen 9 Champions] VGC 2026 Reg M-A
+|rule|Species Clause: Limit one of each Pokémon
+|rule|Item Clause: Limit 1 of each item
+|clearpoke
+|poke|p1|Sneasler, L50, F|
+|poke|p1|Charizard, L50, F|
+|poke|p1|Whimsicott, L50, F|
+|poke|p1|Basculegion, L50, M|
+|poke|p1|Zoroark-Hisui, L50, F|
+|poke|p1|Corviknight, L50, F|
+|poke|p2|Dragonite, L50, M|
+|poke|p2|Maushold, L50|
+|poke|p2|Archaludon, L50, F|
+|poke|p2|Pelipper, L50, F|
+|poke|p2|Scizor, L50, F|
+|poke|p2|Basculegion, L50, M|
+|teampreview|4
+|uhtml|otsrequest|<button name="send" value="/acceptopenteamsheets" class="button" style="margin-right: 10px;"><strong>Accept Open Team Sheets</strong></button><button name="send" value="/rejectopenteamsheets" class="button" style="margin-top: 10px"><strong>Deny Open Team Sheets</strong></button>
+|
+|teamsize|p1|4
+|teamsize|p2|4
+|start
+|switch|p1a: Charizard|Charizard, L50, F|132/132
+|switch|p1b: Whimsicott|Whimsicott, L50, F|137/137
+|switch|p2a: Dragonite|Dragonite, L50, M|100/100
+|switch|p2b: Maushold|Maushold, L50|100/100
+|turn|1
+|
+|move|p2b: Maushold|Protect|p2b: Maushold
+|-singleturn|p2b: Maushold|Protect
+|move|p1b: Whimsicott|Encore||[still]
+|-fail|p1b: Whimsicott
+|move|p1a: Charizard|Hyper Voice|p2b: Maushold|[spread] p2a
+|-activate|p2b: Maushold|move: Protect
+|-damage|p2a: Dragonite|85/100
+|move|p2a: Dragonite|Hurricane|p1b: Whimsicott|[miss]
+|-miss|p2a: Dragonite|p1b: Whimsicott
+|
+|upkeep
+|turn|2
+|
+|move|p2b: Maushold|Protect||[still]
+|-fail|p2b: Maushold
+|move|p1b: Whimsicott|Encore|p2a: Dragonite
+|-start|p2a: Dragonite|Encore
+|move|p1a: Charizard|Hyper Voice|p2b: Maushold|[spread] p2a,p2b
+|-damage|p2a: Dragonite|56/100
+|-damage|p2b: Maushold|60/100
+|move|p2a: Dragonite|Hurricane|p1b: Whimsicott|[miss]
+|-miss|p2a: Dragonite|p1b: Whimsicott
+|
+|upkeep
+|turn|3
+|
+|move|p2b: Maushold|Protect|p2b: Maushold
+|-singleturn|p2b: Maushold|Protect
+|move|p1b: Whimsicott|Encore||[still]
+|-fail|p1b: Whimsicott
+|move|p1a: Charizard|Hyper Voice|p2b: Maushold|[spread] p2a
+|-activate|p2b: Maushold|move: Protect
+|-damage|p2a: Dragonite|30/100
+|move|p2a: Dragonite|Hurricane|p1b: Whimsicott|[miss]
+|-miss|p2a: Dragonite|p1b: Whimsicott
+|
+|upkeep
+|turn|4
+|
+|move|p2b: Maushold|Protect||[still]
+|-fail|p2b: Maushold
+|move|p1b: Whimsicott|Encore||[still]
+|-fail|p1b: Whimsicott
+|move|p1a: Charizard|Hyper Voice|p2a: Dragonite|[spread] p2a,p2b
+|-damage|p2a: Dragonite|4/100
+|-damage|p2b: Maushold|15/100
+|move|p2a: Dragonite|Hurricane|p1b: Whimsicott
+|-supereffective|p1b: Whimsicott|1
+|-damage|p1b: Whimsicott|0 fnt
+|faint|p1b: Whimsicott
+|
+|-end|p2a: Dragonite|Encore
+|upkeep
+|
+|switch|p1b: Charizard|Charizard, L50, F|168/168
+|turn|5
+|
+|detailschange|p1b: Charizard|Charizard-Mega-Y, L50, F
+|-mega|p1b: Charizard|Charizard|Charizardite Y
+|-weather|SunnyDay|[from] ability: Drought|[of] p1b: Charizard
+|move|p2b: Maushold|Protect|p2b: Maushold
+|-singleturn|p2b: Maushold|Protect
+|move|p1a: Charizard|Hyper Voice|p2a: Dragonite|[spread] p2a
+|-activate|p2b: Maushold|move: Protect
+|-damage|p2a: Dragonite|0 fnt
+|faint|p2a: Dragonite
+|move|p1b: Charizard|Heat Wave|p2b: Maushold
+|-activate|p2b: Maushold|move: Protect
+|
+|-weather|SunnyDay|[upkeep]
+|upkeep
+|
+|switch|p2a: Pelipper|Pelipper, L50, F|100/100
+|-weather|RainDance|[from] ability: Drizzle|[of] p2a: Pelipper
+|turn|6
+|
+|move|p2b: Maushold|Protect||[still]
+|-fail|p2b: Maushold
+|move|p1a: Charizard|Hyper Voice|p2a: Pelipper|[spread] p2a,p2b
+|-damage|p2a: Pelipper|67/100
+|-damage|p2b: Maushold|0 fnt
+|faint|p2b: Maushold
+|move|p1b: Charizard|Heat Wave|p2a: Pelipper
+|-resisted|p2a: Pelipper|1
+|-damage|p2a: Pelipper|50/100y
+|-enditem|p2a: Pelipper|Sitrus Berry|[eat]
+|-heal|p2a: Pelipper|75/100|[from] item: Sitrus Berry
+|move|p2a: Pelipper|Hurricane|p1a: Charizard
+|-damage|p1a: Charizard|21/132
+|-start|p1a: Charizard|confusion
+|replace|p1a: Zoroark|Zoroark-Hisui, L50, F
+|-end|p1a: Zoroark|Illusion
+|
+|-weather|RainDance|[upkeep]
+|upkeep
+|
+|switch|p2b: Archaludon|Archaludon, L50, F|100/100
+|turn|7
+|
+|-activate|p1a: Zoroark|confusion
+|move|p1a: Zoroark|Hyper Voice|p2b: Archaludon|[spread] p2a,p2b
+|-resisted|p2b: Archaludon|1
+|-damage|p2a: Pelipper|30/100
+|-damage|p2b: Archaludon|83/100
+|-ability|p2b: Archaludon|Stamina|boost
+|-boost|p2b: Archaludon|def|1
+|move|p1b: Charizard|Heat Wave|p2b: Archaludon|[spread] p2a,p2b
+|-resisted|p2a: Pelipper|1
+|-damage|p2a: Pelipper|19/100
+|-damage|p2b: Archaludon|64/100
+|-ability|p2b: Archaludon|Stamina|boost
+|-boost|p2b: Archaludon|def|1
+|move|p2b: Archaludon|Electro Shot||[still]
+|-prepare|p2b: Archaludon|Electro Shot
+|-boost|p2b: Archaludon|spa|1
+|-anim|p2b: Archaludon|Electro Shot|p1a: Zoroark
+|-damage|p1a: Zoroark|0 fnt
+|faint|p1a: Zoroark
+|move|p2a: Pelipper|Hurricane|p1b: Charizard
+|-damage|p1b: Charizard|102/168
+|
+|-weather|RainDance|[upkeep]
+|-heal|p2b: Archaludon|70/100|[from] item: Leftovers
+|upkeep
+|
+|switch|p1a: Basculegion|Basculegion, L50, M|197/197
+|turn|8
+|
+|move|p1b: Charizard|Weather Ball|p2b: Archaludon
+|-resisted|p2b: Archaludon|1
+|-damage|p2b: Archaludon|42/100
+|-ability|p2b: Archaludon|Stamina|boost
+|-boost|p2b: Archaludon|def|1
+|move|p1a: Basculegion|Last Respects|p2b: Archaludon
+|-damage|p2b: Archaludon|14/100
+|-ability|p2b: Archaludon|Stamina|boost
+|-boost|p2b: Archaludon|def|1
+|move|p2b: Archaludon|Electro Shot||[still]
+|-prepare|p2b: Archaludon|Electro Shot
+|-boost|p2b: Archaludon|spa|1
+|-anim|p2b: Archaludon|Electro Shot|p1a: Basculegion
+|-supereffective|p1a: Basculegion|1
+|-damage|p1a: Basculegion|0 fnt
+|faint|p1a: Basculegion
+|move|p2a: Pelipper|Hurricane|p1b: Charizard
+|-damage|p1b: Charizard|41/168
+|
+|-weather|RainDance|[upkeep]
+|-heal|p2b: Archaludon|20/100y|[from] item: Leftovers
+|upkeep
+|turn|9
+|
+|move|p2b: Archaludon|Protect|p2b: Archaludon
+|-singleturn|p2b: Archaludon|Protect
+|move|p2a: Pelipper|Wide Guard|p2a: Pelipper
+|-singleturn|p2a: Pelipper|Wide Guard
+|move|p1b: Charizard|Heat Wave|p2b: Archaludon|[spread] 
+|-activate|p2a: Pelipper|move: Wide Guard
+|-activate|p2b: Archaludon|move: Wide Guard
+|
+|-weather|RainDance|[upkeep]
+|-heal|p2b: Archaludon|26/100|[from] item: Leftovers
+|upkeep
+|turn|10
+|
+|move|p2b: Archaludon|Protect||[still]
+|-fail|p2b: Archaludon
+|move|p2a: Pelipper|Wide Guard|p2a: Pelipper
+|-singleturn|p2a: Pelipper|Wide Guard
+|move|p1b: Charizard|Heat Wave|p2a: Pelipper|[spread] 
+|-activate|p2a: Pelipper|move: Wide Guard
+|-activate|p2b: Archaludon|move: Wide Guard
+|
+|-weather|none
+|-heal|p2b: Archaludon|32/100|[from] item: Leftovers
+|upkeep
+|turn|11
+|
+|move|p2b: Archaludon|Protect|p2b: Archaludon
+|-singleturn|p2b: Archaludon|Protect
+|move|p2a: Pelipper|Wide Guard|p2a: Pelipper
+|-singleturn|p2a: Pelipper|Wide Guard
+|move|p1b: Charizard|Heat Wave|p2a: Pelipper|[spread] 
+|-activate|p2a: Pelipper|move: Wide Guard
+|-activate|p2b: Archaludon|move: Wide Guard
+|
+|-heal|p2b: Archaludon|39/100|[from] item: Leftovers
+|upkeep
+|turn|12
+|
+|move|p2b: Archaludon|Protect|p2b: Archaludon
+|-singleturn|p2b: Archaludon|Protect
+|move|p2a: Pelipper|Wide Guard|p2a: Pelipper
+|-singleturn|p2a: Pelipper|Wide Guard
+|move|p1b: Charizard|Heat Wave|p2a: Pelipper|[spread] 
+|-activate|p2a: Pelipper|move: Wide Guard
+|-activate|p2b: Archaludon|move: Wide Guard
+|
+|-heal|p2b: Archaludon|45/100|[from] item: Leftovers
+|upkeep
+|turn|13
+|
+|move|p2b: Archaludon|Protect||[still]
+|-fail|p2b: Archaludon
+|move|p2a: Pelipper|Wide Guard|p2a: Pelipper
+|-singleturn|p2a: Pelipper|Wide Guard
+|move|p1b: Charizard|Heat Wave|p2a: Pelipper|[spread] 
+|-activate|p2a: Pelipper|move: Wide Guard
+|-activate|p2b: Archaludon|move: Wide Guard
+|
+|-heal|p2b: Archaludon|51/100|[from] item: Leftovers
+|upkeep
+|turn|14
+|
+|move|p2b: Archaludon|Protect|p2b: Archaludon
+|-singleturn|p2b: Archaludon|Protect
+|move|p2a: Pelipper|Wide Guard|p2a: Pelipper
+|-singleturn|p2a: Pelipper|Wide Guard
+|move|p1b: Charizard|Heat Wave|p2b: Archaludon|[spread] 
+|-activate|p2a: Pelipper|move: Wide Guard
+|-activate|p2b: Archaludon|move: Wide Guard
+|
+|-heal|p2b: Archaludon|57/100|[from] item: Leftovers
+|upkeep
+|turn|15
+|
+|move|p2b: Archaludon|Protect||[still]
+|-fail|p2b: Archaludon
+|move|p2a: Pelipper|Wide Guard|p2a: Pelipper
+|-singleturn|p2a: Pelipper|Wide Guard
+|move|p1b: Charizard|Heat Wave|p2b: Archaludon|[spread] 
+|-activate|p2a: Pelipper|move: Wide Guard
+|-activate|p2b: Archaludon|move: Wide Guard
+|
+|-heal|p2b: Archaludon|63/100|[from] item: Leftovers
+|upkeep
+|turn|16
+|
+|move|p2b: Archaludon|Protect|p2b: Archaludon
+|-singleturn|p2b: Archaludon|Protect
+|move|p2a: Pelipper|Wide Guard|p2a: Pelipper
+|-singleturn|p2a: Pelipper|Wide Guard
+|move|p1b: Charizard|Heat Wave|p2b: Archaludon|[spread] 
+|-activate|p2a: Pelipper|move: Wide Guard
+|-activate|p2b: Archaludon|move: Wide Guard
+|
+|-heal|p2b: Archaludon|69/100|[from] item: Leftovers
+|upkeep
+|turn|17
+|
+|move|p2a: Pelipper|Wide Guard|p2a: Pelipper
+|-singleturn|p2a: Pelipper|Wide Guard
+|move|p1b: Charizard|Heat Wave|p2b: Archaludon|[spread] 
+|-activate|p2a: Pelipper|move: Wide Guard
+|-activate|p2b: Archaludon|move: Wide Guard
+|move|p2b: Archaludon|Dragon Pulse|p2a: Pelipper
+|-damage|p2a: Pelipper|0 fnt
+|faint|p2a: Pelipper
+|
+|-heal|p2b: Archaludon|75/100|[from] item: Leftovers
+|upkeep
+|turn|18
+|
+|move|p1b: Charizard|Weather Ball|p2b: Archaludon
+|-resisted|p2b: Archaludon|1
+|-damage|p2b: Archaludon|66/100
+|-ability|p2b: Archaludon|Stamina|boost
+|-boost|p2b: Archaludon|def|1
+|move|p2b: Archaludon|Electro Shot||[still]
+|-prepare|p2b: Archaludon|Electro Shot
+|-boost|p2b: Archaludon|spa|1
+|
+|-heal|p2b: Archaludon|72/100|[from] item: Leftovers
+|upkeep
+|turn|19
+|
+|move|p1b: Charizard|Weather Ball|p2b: Archaludon
+|-resisted|p2b: Archaludon|1
+|-damage|p2b: Archaludon|63/100
+|-ability|p2b: Archaludon|Stamina|boost
+|-boost|p2b: Archaludon|def|1
+|move|p2b: Archaludon|Electro Shot|p1b: Charizard|[from] lockedmove
+|-supereffective|p1b: Charizard|1
+|-damage|p1b: Charizard|0 fnt
+|faint|p1b: Charizard
+|
+|win|OPheur55x66
