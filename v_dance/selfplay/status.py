@@ -322,6 +322,51 @@ def current_live_dir(live_root):
     return gens[-1] if gens else run
 
 
+def latest_run_dir(live_root):
+    """The most-recent run-stamp dir under ``live/`` (run stamps sort chronologically), or None."""
+    root = Path(live_root)
+    if not root.is_dir():
+        return None
+    runs = sorted(p for p in root.iterdir() if p.is_dir())
+    return runs[-1] if runs else None
+
+
+# the gen-vs-gen 'league' section sorts FIRST (it's the promotion mirror + HoF the user cares about);
+# the scripted sections follow alphabetically.
+_SECTION_RANK = {"league": 0}
+
+
+def list_saved_eval_replays(live_root, generation) -> List[dict]:
+    """Saved eval replay HTMLs for ``generation`` under the CURRENT run, as an ORDERED LIST of
+    ``{"section": str, "files": [{"name","mtime"}, ...]}`` — section = the ``eval/`` sub-folder
+    (``league`` / ``random`` / ``max_damage`` / ``heuristic``, task E). ``league`` (the gen-vs-gen
+    promotion mirror + HoF) is ordered FIRST, then scripted alpha; within a section, newest first.
+    A LIST (not a dict) so the league-first order survives JSON serialization (Flask's jsonify sorts
+    dict keys). Empty list if the generation has none yet. Read-only; used by the dashboard's
+    saved-replay browser (#H)."""
+    run = latest_run_dir(live_root)
+    if run is None:
+        return []
+    evald = run / f"gen_{int(generation)}" / "eval"
+    if not evald.is_dir():
+        return []
+    sections: dict = {}
+    for kd in evald.iterdir():
+        if not kd.is_dir():
+            continue
+        files = []
+        for f in kd.glob("*.html"):
+            try:
+                files.append({"name": f.name, "mtime": f.stat().st_mtime})
+            except OSError:
+                pass
+        if files:
+            files.sort(key=lambda x: -x["mtime"])           # newest first
+            sections[kd.name] = files
+    ordered = sorted(sections, key=lambda k: (_SECTION_RANK.get(k, 1), k))
+    return [{"section": k, "files": sections[k]} for k in ordered]
+
+
 def read_live_battles(live_dir, *, stale_after: float = 45.0, clock=time.time) -> List[dict]:
     """Currently-LIVE battles under ``live_dir`` (RECURSIVELY — the structured tree
     ``<run>/gen_<N>/<replays|eval>/<tag>.json``). A cheap ``mtime`` pre-filter skips the (possibly

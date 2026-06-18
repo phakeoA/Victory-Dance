@@ -22,7 +22,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from flask import Flask, Response, jsonify, send_from_directory
+from flask import Flask, Response, jsonify, request, send_from_directory
 
 _REPO = Path(__file__).resolve().parents[2]
 _DASH_DIR = _REPO / "data" / "scripts" / "dashboard"
@@ -31,6 +31,9 @@ _ARCHIVE_DIR = _REPO / "artifacts" / "self_play_archive"
 # only these are served from the dashboard dir (defense-in-depth alongside
 # send_from_directory's own traversal protection)
 _ALLOWED = {"dashboard.html", "dashboard.css", "dashboard.js", "demo_manifest.json"}
+
+# eval/ sub-folders whose saved .html replays the browser may serve (#H); whitelist guards the route.
+_EVAL_SECTIONS = {"league", "random", "max_damage", "heuristic", "replays", "eval"}
 
 _EMPTY_MANIFEST = {"n_generations": 0, "best_path": None, "best_generation": None,
                    "best_win_rate": None, "best_elo": None, "n_promotions": 0,
@@ -56,7 +59,9 @@ def _serve_json(path: Path, default: dict):
 
 
 def create_app(dash_dir=_DASH_DIR, archive_dir=_ARCHIVE_DIR) -> Flask:
-    dash_dir, archive_dir = Path(dash_dir), Path(archive_dir)
+    # resolve to ABSOLUTE: send_from_directory (the /eval_replay file server, #H) 404s on a relative
+    # directory, so a relative --archive would otherwise serve nothing.
+    dash_dir, archive_dir = Path(dash_dir).resolve(), Path(archive_dir).resolve()
     app = Flask(__name__, static_folder=None)
     app.config["DASH_DIR"] = dash_dir
     app.config["ARCHIVE_DIR"] = archive_dir
@@ -90,6 +95,35 @@ def create_app(dash_dir=_DASH_DIR, archive_dir=_ARCHIVE_DIR) -> Flask:
         resp = jsonify({"battles": battles, "n": len(battles)})
         resp.headers["Cache-Control"] = "no-store, max-age=0"
         return resp
+
+    @app.route("/eval_replays.json")
+    def eval_replays():
+        # #H: list the SAVED eval replay HTMLs (task E) for a generation, grouped by section
+        # (league/random/max_damage/heuristic), so the Spectate tab can browse them per gen.
+        from v_dance.selfplay.status import list_saved_eval_replays
+        gen = request.args.get("gen", type=int)
+        try:
+            sections = list_saved_eval_replays(archive_dir / "live", gen) if gen is not None else []
+        except Exception:
+            sections = []
+        resp = jsonify({"gen": gen, "sections": sections})
+        resp.headers["Cache-Control"] = "no-store, max-age=0"
+        return resp
+
+    @app.route("/eval_replay/<int:gen>/<kind>/<path:name>")
+    def eval_replay(gen, kind, name):
+        # #H: serve one saved replay HTML so clicking it opens the animated Showdown replay. Scoped to
+        # the current run's gen_<N>/eval/<kind>/; send_from_directory rejects path traversal.
+        from v_dance.selfplay.status import latest_run_dir
+        if kind not in _EVAL_SECTIONS or not name.endswith(".html"):
+            return ("not found", 404)
+        run = latest_run_dir(archive_dir / "live")
+        if run is None:
+            return ("not found", 404)
+        d = run / f"gen_{gen}" / "eval" / kind
+        if not d.is_dir():
+            return ("not found", 404)
+        return send_from_directory(d, name)
 
     @app.route("/<path:fname>")
     def asset(fname):

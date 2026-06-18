@@ -94,3 +94,41 @@ def test_live_battles_default_empty_and_aggregates(client):
     tags = sorted(b["tag"] for b in j["battles"])
     assert tags == ["battle-a-1", "battle-b-2"]                # SEVERAL concurrent battles
     assert "no-store" in c.get("/live_battles.json").headers.get("Cache-Control", "")
+
+
+# ── #H: saved gauntlet-replay browser ────────────────────────────────────────────────────────
+def _make_eval_tree(arch, *, stamp="2026-06-18_03-00-00", gen=3):
+    base = arch / "live" / stamp / f"gen_{gen}" / "eval"
+    (base / "league").mkdir(parents=True)
+    (base / "heuristic").mkdir(parents=True)
+    (base / "league" / "gen3_vs_gen0_battle-x-1.html").write_text("<!doctype html>LEAGUE", encoding="utf-8")
+    (base / "heuristic" / "gen3_vs_heuristic_battle-y-2.html").write_text("<!doctype html>H", encoding="utf-8")
+    return base
+
+
+def test_eval_replays_default_empty(client):
+    _, c, _ = client
+    assert c.get("/eval_replays.json").get_json()["sections"] == []          # no gen -> empty
+    j = c.get("/eval_replays.json?gen=3").get_json()
+    assert j["gen"] == 3 and j["sections"] == []                             # gen has no files yet
+
+
+def test_eval_replays_lists_grouped_league_first(client):
+    _, c, arch = client
+    _make_eval_tree(arch)
+    j = c.get("/eval_replays.json?gen=3").get_json()
+    sects = j["sections"]
+    assert sects[0]["section"] == "league"                                   # league/championship FIRST
+    assert {s["section"] for s in sects} == {"league", "heuristic"}
+    assert sects[0]["files"][0]["name"] == "gen3_vs_gen0_battle-x-1.html"
+    assert "no-store" in c.get("/eval_replays.json?gen=3").headers.get("Cache-Control", "")
+
+
+def test_eval_replay_serves_html_and_guards(client):
+    _, c, arch = client
+    _make_eval_tree(arch)
+    r = c.get("/eval_replay/3/league/gen3_vs_gen0_battle-x-1.html")
+    assert r.status_code == 200 and b"LEAGUE" in r.data                       # the real saved replay
+    assert c.get("/eval_replay/3/bogus/x.html").status_code == 404            # kind not whitelisted
+    assert c.get("/eval_replay/3/league/x.json").status_code == 404           # non-.html rejected
+    assert c.get("/eval_replay/3/league/missing.html").status_code == 404     # absent file

@@ -187,6 +187,39 @@ def _count_lines(path: Path) -> int:
         return sum(1 for _ in f)
 
 
+def prune_replay_buffer(buffer_dir, keep: int = 200) -> int:
+    """Cap the BC-era diagnostic replay buffer to its ``keep`` most-recently-modified ``.jsonl``
+    files, deleting the older ones. Returns the count deleted.
+
+    Each live player streams a per-turn BC-style trace (state/action/source/outcome) to its own
+    ``<username>.jsonl`` here; the usernames are uid-keyed, so a long run accumulates THOUSANDS of
+    files that nothing cleans up. The self-play RL training does NOT read these (it uses a separate
+    trajectory store — see ``selfplay/store.py``), so trimming old ones is safe. ``keep`` <= 0 keeps
+    ALL. Crash-proof: a file that can't be deleted (an open handle on Windows = a battle still
+    writing it) is skipped, so call this at GEN BOUNDARIES when no battle is mid-write (the current
+    generation's files may transiently exceed ``keep`` until the next boundary prune)."""
+    if not keep or keep <= 0:
+        return 0
+    d = Path(buffer_dir)
+    if not d.is_dir():
+        return 0
+    files = []
+    for f in d.glob("*.jsonl"):
+        try:
+            files.append((f.stat().st_mtime, f))
+        except OSError:
+            pass
+    files.sort(key=lambda t: t[0], reverse=True)          # newest first
+    deleted = 0
+    for _mt, f in files[int(keep):]:                       # everything past the newest `keep`
+        try:
+            f.unlink()
+            deleted += 1
+        except OSError:                                    # open handle / perms -> skip, try next time
+            pass
+    return deleted
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Teampreview heuristic
 # ══════════════════════════════════════════════════════════════════════════════

@@ -30,7 +30,8 @@ const DEMO_MANIFEST = {
 
 const STATE = { m: null, sel: null, tab: "overview", src: "demo data",
                 mode: "static", status: null, lastKey: null, lastTags: "", poll: null,
-                liveLog: null, logKey: "", viewTurn: 0, followLatest: true };
+                liveLog: null, logKey: "", viewTurn: 0, followLatest: true,
+                evalReplays: null, evalReplaysKey: null };   // #H: saved eval replays for STATE.sel
 
 // ── tiny helpers ──────────────────────────────────────────────────────────────
 const $ = (id) => document.getElementById(id);
@@ -311,12 +312,16 @@ function selectGen(genNum) {
   if (!g) return;
   STATE.sel = genNum;
   renderGenList(); renderDetail();
-  switchTab("detail");
+  // #H: if the user is on the Spectate tab, STAY there and show THIS gen's saved replays (instead of
+  // jumping to Generation Detail) — that's the "click a gen → browse its eval replays" flow.
+  if (STATE.tab === "spectate") { renderSavedReplays(); loadEvalReplays(genNum); }
+  else switchTab("detail");
 }
 function switchTab(tab) {
   STATE.tab = tab;
   document.querySelectorAll(".vtab").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
   ["overview", "health", "spectate", "detail"].forEach((t) => $("tab-" + t).classList.toggle("hidden", t !== tab));
+  if (tab === "spectate") { renderSpectate(); loadEvalReplays(STATE.sel); }   // #H: refresh saved replays on entry
 }
 
 // ── live badge / status bar / spectate (status-driven) ────────────────────────
@@ -357,15 +362,57 @@ function liveBattleList() {
 }
 
 function renderSpectate() {
-  const pane = $("tab-spectate"), s = STATE.status;
-  const url = (s && s.showdown_url) || "http://localhost:8000";
+  const pane = $("tab-spectate");
   if (STATE.mode === "static") {
-    pane.innerHTML = `<div class="spec-empty"><div class="big">🎬</div><p>Live spectating is available when the dashboard is served by the dashboard server during a self-play run.</p></div>`;
+    pane.innerHTML = `<div class="spec-empty"><div class="big">🎬</div><p>Live spectating &amp; saved gauntlet replays are available when the dashboard is served by the dashboard server during a self-play run.</p></div>`;
     return;
   }
+  // #H: two regions — SAVED gauntlet replays for the selected generation (top, what the user browses)
+  // and the LIVE battle turn-viewer (below). They refresh independently so a poll doesn't reset either.
+  pane.innerHTML = `<div id="spec-saved"></div><div id="spec-live"></div>`;
+  renderSavedReplays();
+  renderLiveSpectate();
+}
+
+// #H: SAVED eval replays (task E) for STATE.sel, grouped by section — league/championship first.
+function renderSavedReplays() {
+  const host = document.getElementById("spec-saved");
+  if (!host) return;
+  const gen = STATE.sel;
+  const wrap = (body) => `<div class="panel"><div class="panel-hdr"><h2>🏆 Saved gauntlet replays${gen != null ? " — Gen " + gen : ""}</h2><span class="hint">click a replay to open it animated (new tab) · pick a generation on the left</span></div><div class="panel-body">${body}</div></div>`;
+  if (gen == null) { host.innerHTML = wrap(`<div class="spec-note">Select a generation on the left to browse its saved gauntlet replays.</div>`); return; }
+  const data = STATE.evalReplays;
+  const sections = (data && data.gen === gen) ? data.sections : null;       // ordered list (league first)
+  if (!sections) { host.innerHTML = wrap(`<div class="spec-note">Loading gen ${gen} replays…</div>`); return; }
+  if (!sections.length) { host.innerHTML = wrap(`<div class="spec-note">No saved eval replays for gen ${gen} yet. Run with <code>--save-replays</code>; the gauntlet's battles appear here as they finish.</div>`); return; }
+  host.innerHTML = wrap(sections.map((s) => savedSectionHtml(gen, s.section, s.files)).join(""));
+}
+
+function savedSectionHtml(gen, kind, files) {
+  const isLeague = kind === "league";
+  const title = isLeague ? "🏅 League / Championship — generation vs generation" : "🤖 vs " + esc(kind);
+  const links = files.map((f) =>
+    `<a class="replay-link" href="eval_replay/${gen}/${esc(kind)}/${encodeURIComponent(f.name)}" target="_blank" rel="noopener" title="${esc(f.name)}">${esc(prettyReplayName(f.name))}</a>`).join("");
+  return `<div class="replay-section${isLeague ? " league" : ""}"><div class="rs-hdr">${title} <span class="rs-count">${files.length}</span></div><div class="rs-links">${links}</div></div>`;
+}
+
+// gen3_vs_gen0_battle-gen9…-15493.html  ->  "gen3 vs gen0 · #15493"
+function prettyReplayName(name) {
+  const n = String(name).replace(/\.html$/i, "");
+  const label = (n.split("_battle-")[0] || n).replace(/_/g, " ");
+  const m = n.match(/-(\d+)$/);
+  return label + (m ? " · #" + m[1] : "");
+}
+
+// #18 live battle turn-viewer (unchanged content; now lives in its own region so saved replays above
+// can refresh without wiping it).
+function renderLiveSpectate() {
+  const host = document.getElementById("spec-live");
+  if (!host) return;
+  const s = STATE.status, url = (s && s.showdown_url) || "http://localhost:8000";
   const battles = liveBattleList();
   if (!battles.length) {
-    pane.innerHTML = `<div class="spec-empty"><div class="big">🎬</div><p>No live battles right now.<br/>Start a self-play run and its current games show here, turn by turn.</p></div>`;
+    host.innerHTML = `<div class="spec-empty small"><div class="big">🎬</div><p>No live battles right now.<br/>The current run's games show here turn by turn while collection / eval run.</p></div>`;
     return;
   }
   if (!battles.some((b) => b.tag === STATE.specSel)) STATE.specSel = battles[0].tag;   // keep/repair selection
@@ -377,7 +424,7 @@ function renderSpectate() {
   const sel = battles.find((b) => b.tag === STATE.specSel) || battles[0];
   const watch = `<a class="btn pri" href="${esc(url)}/${esc(sel.tag)}" target="_blank" rel="noopener">▶ Watch ${esc(sel.p1)} vs ${esc(sel.p2)} (animated, new tab)</a>`;
   const note = `<div class="spec-note">${battles.length} live battle${battles.length === 1 ? "" : "s"} — click one to follow it turn by turn (rendered from its log, no internet). <b>▶ Watch</b> opens the animated Showdown client (needs internet).</div>`;
-  pane.innerHTML = note + `<div class="spec-chips">${chips}</div><div class="spec-actions">${watch}</div><div id="tv-container"></div>`;
+  host.innerHTML = note + `<div class="spec-chips">${chips}</div><div class="spec-actions">${watch}</div><div id="tv-container"></div>`;
   renderTurnViewerInto();
 }
 
@@ -525,6 +572,7 @@ async function pollOnce() {
     if (key !== STATE.lastKey) { STATE.lastKey = key; applyManifest(m, "live"); }   // re-render charts only when a generation actually changes
   } catch (e) { /* manifest may not exist until gen 0 finishes */ }
   try { applyLiveBattles(await fetchJSON("live_battles.json")); } catch (e) { /* no live battles yet */ }
+  if (STATE.tab === "spectate" && STATE.sel != null) loadEvalReplays(STATE.sel);   // #H: keep saved replays fresh
   return true;
 }
 
@@ -543,8 +591,24 @@ function applyLiveBattles(data) {
   STATE.liveBattles = next;
   const setChanged = tags !== STATE.specTags;
   STATE.specTags = tags;
-  if (STATE.tab === "spectate") { if (setChanged) renderSpectate(); else renderTurnViewerInto(); }
+  // #H: only the LIVE region re-renders here, so the saved-replays region above it is left intact.
+  if (STATE.tab === "spectate") { if (setChanged) renderLiveSpectate(); else renderTurnViewerInto(); }
   if (setChanged) renderLiveBar();                                // refresh the "live battles" count
+}
+
+// #H: fetch the SAVED eval replays for a generation; only re-render when the set actually changes
+// (the gauntlet adds replays as it runs, so this is polled while the Spectate tab is open).
+async function loadEvalReplays(gen) {
+  if (STATE.mode === "static" || gen == null) return;
+  try {
+    const d = await fetchJSON("eval_replays.json?gen=" + gen);
+    const sections = d.sections || [];                                       // ordered list (league first)
+    const key = gen + "|" + sections.map((s) => s.section + ":" + s.files.length).join(",");
+    if (key === STATE.evalReplaysKey && STATE.evalReplays && STATE.evalReplays.gen === gen) return;
+    STATE.evalReplaysKey = key;
+    STATE.evalReplays = { gen: d.gen, sections };
+    if (STATE.tab === "spectate") renderSavedReplays();
+  } catch (e) { /* server doesn't have it (file:// / older run) */ }
 }
 function stopPolling() { if (STATE.poll) { clearInterval(STATE.poll); STATE.poll = null; } }
 

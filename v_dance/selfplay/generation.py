@@ -419,7 +419,7 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                          device: str = "cpu", n_workers: int = 1, collect_workers=None,
                          collect_procs: int = 1, collect_async_per_proc: int = 3,
                          resume_from=None, resume_gen=None, keep_snapshots: int = 25,
-                         save_replays: bool = False,
+                         save_replays: bool = False, keep_replay_buffers: int = 200,
                          snapshot_path=None, max_hours=None) -> dict:
     """Run real generations end-to-end (collect via the league -> PPO update -> gauntlet
     eval -> promotion gate -> admit/refresh/revert), RESUMABLY (3c.4 / #20): a PER-GENERATION
@@ -672,8 +672,15 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
     server = R.start_showdown() if manage_server else None
     reports = []
     done = 0
+    # Cap the BC-era diagnostic replay buffer (one uid-keyed .jsonl per battle player, never read by
+    # the RL training) so a long run can't fill the disk. Pruned at run start (clears prior bloat) +
+    # each gen boundary (no battle is mid-write then). 0 = keep all.
+    from v_dance.play.vgc_base import prune_replay_buffer as _prune_rb
+    _rb_dir = _REPO_ROOT / "artifacts" / "replay_buffer"
+    _prune_rb(_rb_dir, keep_replay_buffers)
     try:
         while (n_generations is None or done < n_generations) and not stop.should_stop():
+            _prune_rb(_rb_dir, keep_replay_buffers)        # trim the previous gen's traces
             rep = run_generation(ac, trainer, league, history, collect_fn=collect_fn,
                                  eval_fn=eval_fn, save_fn=save_fn, restore_fn=restore_fn,
                                  cleanup_fn=cleanup_fn,
@@ -882,7 +889,7 @@ def _launch_live(args):
         collect_procs=args.collect_procs, collect_async_per_proc=args.collect_async,
         manage_server=not args.no_server, resume_from=args.resume,
         resume_gen=args.resume_gen, keep_snapshots=args.keep_snapshots,
-        save_replays=args.save_replays,
+        save_replays=args.save_replays, keep_replay_buffers=args.keep_replay_buffers,
         snapshot_path=args.snapshot, max_hours=args.hours)
 
 
@@ -1092,6 +1099,10 @@ if __name__ == "__main__":
     ap.add_argument("--keep-snapshots", type=int, default=25,
                     help="keep only the last N per-gen snapshots (~21 MB each; default 25 ≈ 525 MB "
                          "of rollback). 0 = keep ALL.")
+    ap.add_argument("--keep-replay-buffers", type=int, default=200,
+                    help="cap artifacts/replay_buffer/ to its N most-recent per-battle .jsonl traces "
+                         "(the BC-era diagnostic log; NOT read by RL training). Pruned at run start + "
+                         "each gen boundary so a long run can't fill the disk. Default 200; 0 = keep ALL.")
     ap.add_argument("--save-replays", action="store_true",
                     help="SAVE finished battles as real, playable Showdown .html replays under "
                          "artifacts/.../live/<start-stamp>/gen_<N>/{replays,eval}/<tag>.html "

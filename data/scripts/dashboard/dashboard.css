@@ -230,4 +230,18 @@ body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); co
 .spec-empty { padding: 48px 20px; text-align: center; color: var(--text3); }
 .spec-empty .big { font-size: 40px; margin-bottom: 8px; }
 .spec-empty p { font-size: 13px; line-height: 1.7; }
+.spec-empty.small { padding: 22px 16px; }
+.spec-empty.small .big { font-size: 26px; margin-bottom: 4px; }
+
+/* #H: saved gauntlet-replay browser (Spectate tab) — league/championship highlighted */
+.spec-note code { background: var(--bg3); color: var(--text); padding: 1px 5px; border-radius: 4px; font-size: 10px; }
+.replay-section { margin-bottom: 14px; }
+.replay-section.league { background: rgba(245, 200, 66, .06); border: 1px solid var(--bdr2); border-left: 3px solid var(--yellow); border-radius: var(--rad); padding: 10px 12px; }
+.rs-hdr { font-size: 12px; font-weight: 600; color: var(--text); margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+.replay-section.league .rs-hdr { color: var(--yellow); }
+.rs-count { font-size: 10px; color: var(--text3); background: var(--surf2); border: 1px solid var(--bdr2); border-radius: 10px; padding: 1px 7px; font-variant-numeric: tabular-nums; }
+.rs-links { display: flex; flex-wrap: wrap; gap: 6px; }
+.replay-link { font-size: 11px; color: var(--text2); background: var(--surf2); border: 1px solid var(--bdr2); border-radius: var(--rad); padding: 5px 9px; text-decoration: none; transition: background .12s, border-color .12s, color .12s; font-variant-numeric: tabular-nums; }
+.replay-link:hover { background: var(--bg3); border-color: var(--blue); color: var(--blue); }
+.replay-section.league .replay-link:hover { border-color: var(--yellow); color: var(--yellow); }
 ::-webkit-scrollbar { width: 7px; height: 7px; } ::-webkit-scrollbar-track { background: var(--bg); } ::-webkit-scrollbar-thumb { background: var(--bdr2); border-radius: 3px; }

@@ -234,6 +234,25 @@ def test_eval_replay_routing_league_gen_vs_gen():
     assert eval_replay_routing("prev_best", None, opp_ref="a/gen2.pt") == ("league", "gen?_vs_gen2")
 
 
+def test_list_saved_eval_replays_orders_league_first_latest_run(tmp_path):
+    # #H: the saved-replay browser lists the LATEST run's gen_<N>/eval/, league section first
+    from v_dance.selfplay.status import list_saved_eval_replays, latest_run_dir
+    live = tmp_path / "live"
+    old = live / "2026-06-18_01-00-00" / "gen_2" / "eval" / "random"
+    old.mkdir(parents=True)
+    (old / "old.html").write_text("x")                       # an EARLIER run — must be ignored
+    new = live / "2026-06-18_05-00-00" / "gen_4" / "eval"
+    (new / "league").mkdir(parents=True)
+    (new / "heuristic").mkdir(parents=True)
+    (new / "league" / "gen4_vs_gen1_battle-a-1.html").write_text("x")
+    (new / "heuristic" / "gen4_vs_heuristic_battle-b-2.html").write_text("x")
+    assert latest_run_dir(live).name == "2026-06-18_05-00-00"
+    out = list_saved_eval_replays(live, 4)
+    assert [s["section"] for s in out] == ["league", "heuristic"]    # league FIRST, then scripted alpha
+    assert out[0]["files"][0]["name"] == "gen4_vs_gen1_battle-a-1.html"
+    assert list_saved_eval_replays(live, 99) == []                   # a gen with none -> empty
+
+
 def test_save_html_replay_out_dir_and_label(tmp_path):
     # task E: live JSON lives in self.dir; the HTML lands in out_dir with the descriptive prefix
     lb = LiveBattles(tmp_path)
