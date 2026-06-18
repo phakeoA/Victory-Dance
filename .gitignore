@@ -27,3 +27,6 @@ models/*.pth
 artifacts/
 # Pokémon Showdown local server (cloned by setup.sh — not part of this repo)
 pokemon-showdown/
+
+# agent memory index archive (not project source)
+memory.md_before

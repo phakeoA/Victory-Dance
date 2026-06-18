@@ -145,10 +145,66 @@ def start_showdown() -> subprocess.Popen | None:
     sys.exit(1)
 
 
+def _terminate_tree(proc: subprocess.Popen) -> bool:
+    """Terminate ``proc`` AND every descendant. ``node pokemon-showdown start`` forks a child
+    server process (the one that actually holds the port), so killing only ``proc`` orphans it.
+    Returns True if the tree was handled (psutil or taskkill), False if neither was usable
+    (caller then falls back to a plain single-process terminate)."""
+    # 1) psutil (cross-platform): SIGTERM the launcher + all descendants, then SIGKILL stragglers.
+    try:
+        import psutil
+        try:
+            parent = psutil.Process(proc.pid)
+        except psutil.NoSuchProcess:
+            return True                          # already gone
+        tree = parent.children(recursive=True) + [parent]
+        for p in tree:
+            try:
+                p.terminate()
+            except psutil.NoSuchProcess:
+                pass
+        _gone, alive = psutil.wait_procs(tree, timeout=5)
+        for p in alive:
+            try:
+                p.kill()
+            except psutil.NoSuchProcess:
+                pass
+        return True
+    except Exception:
+        log.debug("psutil tree-kill unavailable/failed; trying taskkill", exc_info=True)
+
+    # 2) Windows fallback: taskkill /T walks the tree without psutil.
+    if sys.platform == "win32":
+        try:
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/F", "/T"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            return True
+        except Exception:
+            log.debug("taskkill fallback failed", exc_info=True)
+    return False
+
+
 def stop_showdown(proc: subprocess.Popen | None) -> None:
+    """Stop the Showdown server, killing the WHOLE process tree.
+
+    ``node pokemon-showdown start`` forks a CHILD server process that holds port 8000; the old
+    ``proc.terminate()`` killed only the launcher, ORPHANING that child on Windows — and the next
+    ``start_showdown`` then silently REUSES the stale server (its port-open check passes). So
+    terminate the launcher AND every descendant (``_terminate_tree``), with a plain terminate/kill
+    as the last resort for the no-fork case."""
     if proc is None:
         return
     log.info("Stopping Showdown server …")
+    if proc.poll() is not None:
+        return                                   # launcher already exited
+    if _terminate_tree(proc):
+        try:
+            proc.wait(timeout=5)                 # reap the launcher handle
+        except Exception:
+            pass
+        log.info("Showdown server stopped.")
+        return
+    # last resort (psutil + taskkill both unusable): the original single-process terminate/kill.
     proc.terminate()
     try:
         proc.wait(timeout=5)

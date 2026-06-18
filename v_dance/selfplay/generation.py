@@ -414,6 +414,7 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                          tau_anneal_gens: int = 12, seed: int = 0,
                          eval_battles=None, mirror_battles: int = 360, manage_server: bool = True,
                          device: str = "cpu", n_workers: int = 1, collect_workers=None,
+                         collect_procs: int = 1, collect_async_per_proc: int = 3,
                          resume_from=None, snapshot_path=None, max_hours=None) -> dict:
     """Run real generations end-to-end (collect via the league -> PPO update -> gauntlet
     eval -> promotion gate -> admit/refresh/revert), RESUMABLY (3c.4): a snapshot is
@@ -431,6 +432,7 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
     import v_dance.play.run_local_battle as R
     from v_dance.selfplay.actor_critic import ActorCritic
     from v_dance.selfplay.trainer import PPOTrainer
+    from v_dance.selfplay import mp_collect as MP
     from v_dance.selfplay import resume as RS
     from v_dance.selfplay.status import LiveStatus
 
@@ -444,7 +446,19 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
     # than the cap-derived `n_workers`; eval is heavier (fast scripted battles) so it stays at
     # n_workers. collect_workers defaults to n_workers (no change unless the user opts in).
     cw = max(1, int(collect_workers)) if collect_workers else n_workers
-    print(f"   workers: collect={cw}  eval={n_workers}")
+    # 14b.3: collect_procs > 1 → TRUE multiprocessing collection (bypasses the GIL on the per-turn
+    # model inference; probe 14a ~5x). The pool object is cheap — workers spawn lazily on the first
+    # submit, after the server is up — and is torn down in the finally. procs=1 keeps the asyncio
+    # path verbatim (zero behaviour change).
+    _mp = bool(collect_procs and int(collect_procs) > 1)
+    pool = MP.CollectionPool(int(collect_procs)) if _mp else None
+    if _mp:
+        MP.sweep_mp_ckpts(archive)   # reclaim any per-gen worker ckpts orphaned by a prior crash
+        print(f"   collection: MULTIPROCESS {collect_procs} procs x {collect_async_per_proc} "
+              f"battles each (~{int(collect_procs) * int(collect_async_per_proc)} concurrent, "
+              f"~{round(int(collect_procs) * 0.6, 1)}GB RAM)")
+    else:
+        print(f"   workers: collect={cw}  eval={n_workers}")
     print(f"   teams: TRAIN pool={len(team_pool)} (archetype draw, sec 15)  "
           f"EVAL pool={len(_eval_pool)} ({_eval_pairs} pairs)  "
           f"eval-battles={eval_battles}/opp (~{3 * eval_battles} games/gen)")
@@ -485,16 +499,39 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
             gen, _base_target_kl, trainer.tcfg.target_kl_relax_per_gen, trainer.tcfg.target_kl_max)
         # 3c.8b: collection runs on CPU (sec 20) — use a CPU inference-copy when the trainer
         # lives on the GPU; the copy reflects the latest trained weights (remade each gen).
-        coll_ac = ac_.inference_copy("cpu") if device != "cpu" else ac_
         status.phase("collecting", generation=gen, games_total=gen_cfg.n_games)
         if tau_anneal_gens > 0 and tau_start != tau_end:
             print(f"   collect: tau={tau_gen:.3f} (gen {gen}; anneal {tau_start}->{tau_end} "
                   f"over {tau_anneal_gens} gens)")
         t0 = _time.perf_counter()
-        trajs, src, log = asyncio.run(collect_with_league(
-            coll_ac, lg, gen_cfg.n_games, team_pool=team_pool, tau=tau_gen,
-            seed=seed + gen * 1000, matchup_seed=gen, team_chooser=team_chooser,
-            n_workers=cw, stop_check=stop.should_stop, status=status))
+        if pool is not None:
+            # 14b.3: multiprocess collection — freeze the current weights to a per-gen ckpt the
+            # workers reload, fan the chunks across processes, fold results + apply PFSP in main.
+            # STOP SEMANTICS: a stop (Ctrl-C / --hours) is honoured at GEN BOUNDARIES — the current
+            # gen's batch runs to completion (bounded by mp throughput, ~tens of seconds), then the
+            # loop exits. The finer per-chunk drain is the asyncio path's (stop_check → run_jobs).
+            _ckpt = MP.mp_ckpt_path(archive, gen)
+            try:
+                trajs, src, log = MP.collect_with_pool(
+                    ac_, lg, gen_cfg.n_games, team_pool=team_pool, ckpt_path=_ckpt,
+                    submit_fn=pool.submit,
+                    save_ckpt_fn=lambda a, p, _g=gen: MP.save_inference_ckpt(a, p, generation=_g),
+                    n_procs=int(collect_procs), async_per_proc=int(collect_async_per_proc),
+                    tau=tau_gen, seed=seed + gen * 1000, matchup_seed=gen,
+                    team_chooser=team_chooser, status=status)
+            finally:
+                # ALWAYS drop the per-gen ckpt — even if collection raised (Ctrl-C lands inside the
+                # blocking submit) — else a full-weight file orphans each crashed gen (review fix).
+                try:
+                    Path(_ckpt).unlink(missing_ok=True)
+                except Exception:
+                    pass
+        else:
+            coll_ac = ac_.inference_copy("cpu") if device != "cpu" else ac_
+            trajs, src, log = asyncio.run(collect_with_league(
+                coll_ac, lg, gen_cfg.n_games, team_pool=team_pool, tau=tau_gen,
+                seed=seed + gen * 1000, matchup_seed=gen, team_chooser=team_chooser,
+                n_workers=cw, stop_check=stop.should_stop, status=status))
         dt = _time.perf_counter() - t0
         thru["games"] += gen_cfg.n_games
         thru["secs"] += dt
@@ -514,21 +551,35 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
 
     def eval_fn(path, prev_best_path=None):
         t0 = _time.perf_counter()
-        # Vary the eval matchup seed per generation (was the default 0 every gen, making the
-        # 6-team pool a STATIC target a champion-exploiter overfits and locking fixed-pool
-        # matchup luck into the win-rate). Keyed to the generation so it stays deterministic
-        # / resumable while averaging the fixed-pool luck out across gens (red-team finding).
-        out = gauntlet_eval(path, teams=_eval_pool, team_chooser=team_chooser,
-                            battles=eval_battles, manage_server=False, n_workers=n_workers,
-                            prev_best_path=prev_best_path, mirror_battles=mirror_battles,
-                            matchup_seed=seed + history.generation, stop_check=stop.should_stop)
+        # The eval matchup seed varies per generation (keyed to the gen) so the fixed 6-team pool
+        # isn't a static target a champion-exploiter overfits — deterministic/resumable, averaging
+        # the fixed-pool matchup luck out across gens (red-team finding).
+        if pool is not None:
+            # #19: multiprocess EVAL on the SAME pool — fan the gauntlet descriptors across the
+            # collection worker processes (the GIL win applied to eval). model_elo stays in main.
+            from v_dance.selfplay import mp_eval as ME
+            import v_dance.eval.gauntlet as GA
+            opps = list(SCRIPTED_OPPONENTS) + (["prev_best"] if prev_best_path else [])
+            results, _src = ME.eval_with_pool(
+                path, opponents=opps, team_pool=_eval_pool, battles_per_opponent=eval_battles,
+                team_chooser=team_chooser, submit_fn=pool.submit, prev_best=prev_best_path,
+                mirror_battles=mirror_battles, matchup_seed=seed + history.generation,
+                n_procs=int(collect_procs), async_per_proc=int(collect_async_per_proc))
+            out = (results, GA.model_elo(results))
+            _eval_label = f"{int(collect_procs)} procs"
+        else:
+            out = gauntlet_eval(path, teams=_eval_pool, team_chooser=team_chooser,
+                                battles=eval_battles, manage_server=False, n_workers=n_workers,
+                                prev_best_path=prev_best_path, mirror_battles=mirror_battles,
+                                matchup_seed=seed + history.generation, stop_check=stop.should_stop)
+            _eval_label = f"{n_workers} workers"
         dt = _time.perf_counter() - t0
         n_eval = sum(g for _w, g in out[0].values())     # total finished eval battles
         gpm = n_eval / dt * 60.0 if dt > 0 else float("nan")
         pb = out[0].get("prev_best")
         pb_s = f" | prev_best {pb[0]}/{pb[1]}" if pb else ""
         print(f"   eval throughput: {n_eval} games in {dt:.1f}s = {gpm:.1f} games/min "
-              f"({n_workers} workers){pb_s}")
+              f"({_eval_label}){pb_s}")
         return out
 
     def hof_run(candidate_path, suspects):
@@ -613,6 +664,9 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
     finally:
         status.finish_run()
         _save()                              # final flush (also on Ctrl-C / exception)
+        if pool is not None:
+            pool.close()                     # tear down the collection worker processes
+            MP.sweep_mp_ckpts(archive)       # reclaim any per-gen worker ckpt left by a crashed gen
         if server is not None:
             R.stop_showdown(server)
     print(f"\n  ran {done} generation(s); snapshot -> {snap_path}")
@@ -756,6 +810,11 @@ def _launch_live(args):
     _upd = "PPO update on GPU (VRAM capped)" if _rb["device"] == "cuda" else "CPU PPO update"
     print(f"   hybrid (3c.8): {_upd}; collection on CPU, {_cw} parallel battles "
           f"(eval {_rb['workers']}).")
+    if args.collect_procs and args.collect_procs > 1:
+        print(f"   multicore (14b): collection across {args.collect_procs} PROCESSES x "
+              f"{args.collect_async} battles each (~{args.collect_procs * args.collect_async} "
+              f"concurrent, ~{round(args.collect_procs * 0.6, 1)}GB RAM) — GIL-free per process "
+              f"(probe 14a ~5x). [supersedes --collect-workers]")
     run_live_generations(
         Path(args.ckpt), n_generations=n_gen, team_pool=train_pool,
         eval_team_pool=eval_pool,
@@ -768,6 +827,7 @@ def _launch_live(args):
         tau_start=args.tau_start, tau_end=args.tau, tau_anneal_gens=args.tau_anneal_gens,
         seed=args.seed, eval_battles=args.eval_battles, mirror_battles=args.mirror_battles,
         device=_rb["device"], n_workers=_rb["workers"], collect_workers=args.collect_workers,
+        collect_procs=args.collect_procs, collect_async_per_proc=args.collect_async,
         manage_server=not args.no_server, resume_from=args.resume,
         snapshot_path=args.snapshot, max_hours=args.hours)
 
@@ -817,6 +877,8 @@ def _wizard(ap):
                                 "0.5 = half your cores", float)
     args.collect_workers = ask("Collection workers (concurrent battles)", None,
                                "12 to use collection's CPU headroom; blank = cap", int)
+    args.collect_procs = ask("Collection PROCESSES (multicore; 1 = single-process asyncio)", 1,
+                             "4-6 to bypass the GIL (~5x, probe 14a); ~0.6GB RAM each", int)
     args.max_vram_gb = ask("Max VRAM GB for the GPU update", None,
                            "4 (of 8 GB); blank = uncapped", float)
     args.mirror_battles = ask("Mirror battles vs the champion (the 0.55 beat_champion bar)", 360,
@@ -850,6 +912,8 @@ def _wizard(ap):
         parts.append(f"--mirror-battles {args.mirror_battles}")
     if args.collect_workers:
         parts.append(f"--collect-workers {args.collect_workers}")
+    if args.collect_procs and args.collect_procs > 1:
+        parts.append(f"--collect-procs {args.collect_procs}")
     if args.max_vram_gb is not None:
         parts.append(f"--max-vram-gb {args.max_vram_gb}")
     if not args.prev_best:
@@ -892,7 +956,7 @@ if __name__ == "__main__":
     ap.add_argument("--mirror-battles", type=int, default=360,
                     help="head-to-head battles vs the CHAMPION for the v2 gate's 0.55 bar (sec 16). "
                          "Default 360 (>= the gate's min_h2h_games=360 floor; P2.1 gate_sim: the 0.55 "
-                         "bar needs ~360 to hold false-promote ~3% AND the mirror-collapse revert "
+                         "bar needs ~360 to hold false-promote ~3%% AND the mirror-collapse revert "
                          "needs it). The scripted ladder stays at --eval-battles; only the mirror is bumped.")
     ap.add_argument("--warmup", type=int, default=5, help="critic-only warm-up updates (gen 0)")
     ap.add_argument("--ckpt", default=str(_REPO_ROOT / "ai_train_scripts" / "BC_model"
@@ -941,6 +1005,14 @@ if __name__ == "__main__":
                     help="concurrent COLLECTION battles (3c.8c); defaults to the CPU-cap "
                          "worker count. Collection is latency-bound (~30%% CPU at 6) so you "
                          "can set this HIGHER (e.g. 12) to use the headroom; eval stays capped.")
+    ap.add_argument("--collect-procs", type=int, default=1,
+                    help="TRUE multiprocessing collection across this many worker PROCESSES "
+                         "(14b; default 1 = single-process asyncio). >1 bypasses the GIL on model "
+                         "inference (~5x in probe 14a); ~0.6GB RAM each. Try 4-6. Supersedes "
+                         "--collect-workers when >1.")
+    ap.add_argument("--collect-async", type=int, default=3,
+                    help="concurrent battles WITHIN each collection process (14b; default 3); "
+                         "total concurrency ~= --collect-procs x --collect-async.")
     ap.add_argument("--max-vram-gb", type=float, default=None,
                     help="GPU memory ceiling for the PPO update (enforced via "
                          "set_per_process_memory_fraction; allocations beyond it fail loudly)")
