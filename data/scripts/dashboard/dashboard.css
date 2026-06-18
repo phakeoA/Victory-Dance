@@ -244,4 +244,9 @@ body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); co
 .replay-link { font-size: 11px; color: var(--text2); background: var(--surf2); border: 1px solid var(--bdr2); border-radius: var(--rad); padding: 5px 9px; text-decoration: none; transition: background .12s, border-color .12s, color .12s; font-variant-numeric: tabular-nums; }
 .replay-link:hover { background: var(--bg3); border-color: var(--blue); color: var(--blue); }
 .replay-section.league .replay-link:hover { border-color: var(--yellow); color: var(--yellow); }
+/* #H2: Hall-of-Fame status note in the league section */
+.hof-note { font-size: 11px; line-height: 1.5; margin: 0 0 9px; padding: 7px 10px; border-radius: var(--rad); background: var(--bg2); border: 1px solid var(--bdr); border-left: 3px solid var(--text3); color: var(--text2); }
+.hof-note b { color: var(--text); }
+.hof-note.ok { border-left-color: var(--green); }
+.hof-note.veto { border-left-color: var(--orange); }
 ::-webkit-scrollbar { width: 7px; height: 7px; } ::-webkit-scrollbar-track { background: var(--bg); } ::-webkit-scrollbar-thumb { background: var(--bdr2); border-radius: 3px; }

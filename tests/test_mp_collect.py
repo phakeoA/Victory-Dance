@@ -61,6 +61,59 @@ def test_build_chunk_specs_uids_are_unique_and_sequential():
     assert uids == list(range(1, len(specs) + 1))      # 1..N, globally unique
 
 
+def test_build_chunk_specs_stamps_generation_and_defaults_zero():
+    """22d: every chunk carries the generation (folded into the worker account names); default 0."""
+    league = _FakeLeague([("latest", "x.pt")])
+    specs = MP.build_chunk_specs(league, ["A", "B", "C"], 6, chunk_size=1, seed=1, gen=4)
+    assert specs and all(s.gen == 4 for s in specs)
+    league2 = _FakeLeague([("latest", "x.pt")])
+    assert all(s.gen == 0 for s in
+               MP.build_chunk_specs(league2, ["A", "B", "C"], 6, chunk_size=1, seed=1))
+
+
+def test_collect_with_pool_threads_generation_onto_specs():
+    """generation reaches the ChunkSpecs shipped to the workers (so they build gen-keyed names)."""
+    captured = {}
+
+    def submit(payloads):
+        captured["specs"] = [s for p in payloads for s in p[1]]   # payload[1] = the ChunkSpec batch
+        return [WorkerResult(n_games=1) for _ in payloads]
+
+    league = _RecordingLeague([("latest", "x.pt")])
+    MP.collect_with_pool(object(), league, 2, team_pool=["A", "B"], ckpt_path="t.pt",
+                         n_procs=1, chunk_size=1, submit_fn=submit,
+                         save_ckpt_fn=lambda a, p: None, generation=9)
+    assert captured["specs"] and all(s.gen == 9 for s in captured["specs"])
+
+
+def test_collect_with_pool_assigns_pool_ports_round_robin():
+    """22f.3: worker batches are spread round-robin across the pool servers (batch i -> ports[i%K])."""
+    captured = {}
+
+    def submit(payloads):
+        captured["ports"] = [p[9] for p in payloads]    # index 9 = the assigned server port
+        return [WorkerResult(n_games=1) for _ in payloads]
+
+    league = _RecordingLeague([("latest", "x.pt")])
+    MP.collect_with_pool(object(), league, 6, team_pool=["A", "B", "C"], ckpt_path="t.pt",
+                         n_procs=3, chunk_size=1, submit_fn=submit,
+                         save_ckpt_fn=lambda a, p: None, ports=[8000, 8001])
+    assert captured["ports"] == [8000, 8001, 8000]      # 3 batches over 2 servers, round-robin
+
+
+def test_collect_with_pool_no_ports_is_single_server():
+    captured = {}
+
+    def submit(payloads):
+        captured["ports"] = [p[9] for p in payloads]
+        return [WorkerResult(n_games=1) for _ in payloads]
+
+    league = _RecordingLeague([("latest", "x.pt")])
+    MP.collect_with_pool(object(), league, 4, team_pool=["A", "B"], ckpt_path="t.pt",
+                         n_procs=2, chunk_size=1, submit_fn=submit, save_ckpt_fn=lambda a, p: None)
+    assert captured["ports"] and all(port is None for port in captured["ports"])   # 8000 default
+
+
 # ── partition_specs ───────────────────────────────────────────────────────────
 def test_partition_specs_round_robin_balances():
     specs = [ChunkSpec("A", "B", 1, "latest", None, None, i) for i in range(5)]
@@ -139,7 +192,7 @@ class _FakePlayer:
         self.closed = True
 
 
-def _fake_build_players(ac, spec, tau, seed, tc, live_dir=None, save_replays=False):
+def _fake_build_players(ac, spec, tau, seed, tc, live_dir=None, save_replays=False, port=None):
     our = _FakePlayer(trajs={f"b{spec.uid}": _FakeTraj(True)}, sources={"model": 5})
     if spec.kind == "latest":
         opp = _FakePlayer(trajs={f"b{spec.uid}o": _FakeTraj(False)}, sources={"model": 3})
@@ -413,7 +466,7 @@ def test_worker_ac_loads_the_trained_critic_not_the_bc_clone(tmp_path):
 
 def test_collect_specs_build_error_skips_only_that_chunk():
     """14b.3 review: a transient player-build error skips THAT chunk, not the whole worker batch."""
-    def build(ac, spec, tau, seed, tc, live_dir=None, save_replays=False):
+    def build(ac, spec, tau, seed, tc, live_dir=None, save_replays=False, port=None):
         if spec.uid == 2:
             raise RuntimeError("team resolve failed")
         return _fake_build_players(ac, spec, tau, seed, tc)

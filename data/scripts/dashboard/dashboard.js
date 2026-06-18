@@ -393,7 +393,34 @@ function savedSectionHtml(gen, kind, files) {
   const title = isLeague ? "🏅 League / Championship — generation vs generation" : "🤖 vs " + esc(kind);
   const links = files.map((f) =>
     `<a class="replay-link" href="eval_replay/${gen}/${esc(kind)}/${encodeURIComponent(f.name)}" target="_blank" rel="noopener" title="${esc(f.name)}">${esc(prettyReplayName(f.name))}</a>`).join("");
-  return `<div class="replay-section${isLeague ? " league" : ""}"><div class="rs-hdr">${title} <span class="rs-count">${files.length}</span></div><div class="rs-links">${links}</div></div>`;
+  // #H2: in the league section, explain the gen's Hall-of-Fame status so an absent gen-vs-older-
+  // champion reads as intentional (e.g. "skipped — thin pool"), not a missing replay.
+  return `<div class="replay-section${isLeague ? " league" : ""}"><div class="rs-hdr">${title} <span class="rs-count">${files.length}</span></div>${isLeague ? hofNote(gen) : ""}<div class="rs-links">${links}</div></div>`;
+}
+
+// #H2: human-readable Hall-of-Fame status for a generation, from the manifest's per-gen `hof` field.
+// Cases: skipped (thin pool), ran+passed, ran+vetoed, override, or none (gen didn't promote).
+function hofNote(gen) {
+  const rec = ((STATE.m && STATE.m.generations) || []).find((g) => g.generation === gen);
+  if (!rec) return "";
+  const hof = rec.hof;
+  if (!hof) {                                            // no HoF round recorded
+    if (!rec.promoted)
+      return `<div class="hof-note skip">No Hall-of-Fame round — gen ${gen} ${rec.verdict === "revert" ? "reverted" : "wasn't promoted"}, so only the champion mirror was played (the breadth check runs only on a promotion).</div>`;
+    return "";                                           // promoted but HoF disabled → no note
+  }
+  if (hof.reason === "thin_pool_skip") {
+    const n = hof.eligible || 0;
+    return `<div class="hof-note skip">Hall-of-Fame breadth check <b>skipped</b> — only ${n} past champion${n === 1 ? "" : "s"} eligible (needs ${hof.min_pool || 2}+). It activates once more champions accrue, so there are no gen-vs-older-champion battles here yet.</div>`;
+  }
+  const sus = hof.suspects || [];                        // HoF actually ran
+  const ids = sus.map((s) => esc(s.snapshot_id)).join(", ");
+  const vetoed = sus.filter((s) => s.vetoed).length;
+  const n = hof.n_suspects != null ? hof.n_suspects : sus.length;
+  const vs = `${n} past champion${n === 1 ? "" : "s"}${ids ? " (" + ids + ")" : ""}`;
+  if (hof.overridden) return `<div class="hof-note veto">Hall-of-Fame: a reject was <b>overridden</b> (operator) — tested vs ${vs}.</div>`;
+  if (!rec.promoted || vetoed) return `<div class="hof-note veto">Hall-of-Fame <b>vetoed</b> the promote — lost to ${vetoed || "a"} of ${vs}.</div>`;
+  return `<div class="hof-note ok">Hall-of-Fame <b>passed</b> — held its own vs ${vs}; those are the extra gen-vs-gen battles below.</div>`;
 }
 
 // gen3_vs_gen0_battle-gen9…-15493.html  ->  "gen3 vs gen0 · #15493"

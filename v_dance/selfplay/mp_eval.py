@@ -22,7 +22,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List, Optional
 
-from v_dance.play.parallel_battles import close_players, play_pairing, run_jobs
+from v_dance.play.parallel_battles import (close_players, eval_account_names, gen_salt,
+                                           play_pairing, run_jobs)
 from v_dance.selfplay.mp_collect import partition_specs   # round-robin split (generic over any list)
 
 log = logging.getLogger(__name__)
@@ -31,18 +32,22 @@ log = logging.getLogger(__name__)
 @dataclass
 class EvalSpec:
     """One gauntlet chunk: ``n`` battles of the candidate vs ``kind`` on the ``team_a`` vs
-    ``team_b`` pairing. ``uid`` is globally unique so worker account names never collide."""
+    ``team_b`` pairing. ``uid`` is globally unique within the gen so worker account names never
+    collide across processes; ``gen`` (22d) folds the GENERATION into those names so they don't
+    collide across gens either (a stale challenge from one gen vs the next gen's reuse)."""
     kind: str
     team_a: str
     team_b: str
     n: int
     uid: int
+    gen: int = 0
 
 
 def build_eval_specs(opponents, team_pool, battles_per_opponent: int, *, matchup_seed: int = 0,
-                     mirror_battles: Optional[int] = None) -> List[EvalSpec]:
+                     mirror_battles: Optional[int] = None, gen: int = 0) -> List[EvalSpec]:
     """Plan the gauntlet as flat picklable specs — the same descriptor set ``run_gauntlet`` builds
-    (the prev_best mirror gets ``mirror_battles`` instead of the scripted count). Torch-free."""
+    (the prev_best mirror gets ``mirror_battles`` instead of the scripted count). ``gen`` (22d) is
+    stamped onto every spec so the worker account names fold in the generation. Torch-free."""
     from v_dance.eval.gauntlet import team_matchups
     specs: List[EvalSpec] = []
     uid = 0
@@ -50,7 +55,7 @@ def build_eval_specs(opponents, team_pool, battles_per_opponent: int, *, matchup
         nb = mirror_battles if (kind == "prev_best" and mirror_battles) else battles_per_opponent
         for team_a, team_b, n in team_matchups(team_pool, nb, seed=matchup_seed):
             uid += 1
-            specs.append(EvalSpec(kind, team_a, team_b, n, uid))
+            specs.append(EvalSpec(kind, team_a, team_b, n, uid, gen))
     return specs
 
 
@@ -73,7 +78,8 @@ def merge_eval_results(results):
 # ── dispatch (injected player factory → offline-testable) ──────────────────────
 async def _eval_specs(candidate, prev_best, team_chooser, specs: List[EvalSpec], *,
                       battle_timeout: Optional[float], async_workers: int,
-                      build_players: Callable, live_dir=None, save_replays: bool = False):
+                      build_players: Callable, live_dir=None, save_replays: bool = False,
+                      port: Optional[int] = None):
     """Play every EvalSpec (bounded to ``async_workers`` concurrent battles in this process) and
     tally ``(wins, finished)`` per opponent kind + the decision-source counts. A build error skips
     THAT chunk (not the whole worker batch)."""
@@ -84,7 +90,7 @@ async def _eval_specs(candidate, prev_best, team_chooser, specs: List[EvalSpec],
         acc.setdefault(spec.kind, [0, 0])
         try:
             model_player, opp = build_players(candidate, prev_best, team_chooser, spec,
-                                              live_dir, save_replays)
+                                              live_dir, save_replays, port=port)  # 22f: pool server
         except Exception:
             log.warning("mp eval player-build failed (vs %s) — skipping chunk.",
                         spec.kind, exc_info=True)
@@ -105,27 +111,29 @@ async def _eval_specs(candidate, prev_best, team_chooser, specs: List[EvalSpec],
 
 
 def _build_eval_players_real(candidate, prev_best, team_chooser, spec: EvalSpec,
-                             live_dir=None, save_replays: bool = False):
+                             live_dir=None, save_replays: bool = False, port: Optional[int] = None):
     """The real per-kind eval players (poke-env). Mirrors ``run_gauntlet``'s ``_run`` exactly:
     a model player on the candidate vs a scripted/prev_best opponent, account names keyed to the
-    global uid so they're unique across worker processes. ``live_dir`` (#18b) makes the model
-    player publish its eval match to the spectate feed."""
+    global uid AND ``spec.gen`` (22d) so they're unique across worker processes AND across
+    generations. ``live_dir`` (#18b) makes the model player publish its eval match to the
+    spectate feed."""
     import v_dance.play.run_local_battle as R
     from v_dance.eval.gauntlet import _make_opponent, eval_replay_routing, _ckpt_gen
     uid = spec.uid
     model_team = R.load_team(R.resolve_team_path(spec.team_a))
     opp_team = R.load_team(R.resolve_team_path(spec.team_b))
+    model_name, opp_name = eval_account_names(spec.kind, uid, salt=gen_salt(spec.gen))
     # task E: file the saved replay under eval/<kind>/ (scripted) or eval/league/ (gen-vs-gen),
     # named gen<N>_vs_<kind|genM>; the live spectate JSON stays flat in live_dir (dashboard).
     subdir, label = eval_replay_routing(spec.kind, _ckpt_gen(candidate),
                                         opp_ref=(prev_best if spec.kind == "prev_best" else None))
     rdir = str(Path(live_dir) / subdir) if (live_dir and save_replays) else None
-    model_player = R.make_player(f"BC{uid}", model_team, model_path=candidate,
+    model_player = R.make_player(model_name, model_team, model_path=candidate,
                                  team_chooser_path=team_chooser,
                                  live_dir=live_dir, save_replays=save_replays,
-                                 replay_dir=rdir, replay_label=label)
-    opp = _make_opponent(spec.kind, f"OP{spec.kind[:4]}{uid}", opp_team,
-                         model_path=prev_best, team_chooser_path=team_chooser)
+                                 replay_dir=rdir, replay_label=label, port=port)
+    opp = _make_opponent(spec.kind, opp_name, opp_team,
+                         model_path=prev_best, team_chooser_path=team_chooser, port=port)
     return model_player, opp
 
 
@@ -143,11 +151,11 @@ def eval_worker(payload):
     torch.set_num_threads(1)
     _logging.getLogger("poke_env").setLevel(_logging.ERROR)
     _logging.getLogger("websockets").setLevel(_logging.ERROR)
-    candidate, prev_best, team_chooser, specs, battle_timeout, async_workers, live_dir, save_replays = payload
+    candidate, prev_best, team_chooser, specs, battle_timeout, async_workers, live_dir, save_replays, port = payload
     return asyncio.run(_eval_specs(
         candidate, prev_best, team_chooser, specs, battle_timeout=battle_timeout,
         async_workers=async_workers, build_players=_build_eval_players_real,
-        live_dir=live_dir, save_replays=save_replays))
+        live_dir=live_dir, save_replays=save_replays, port=port))
 
 
 # ── main-process orchestration ─────────────────────────────────────────────────
@@ -155,7 +163,7 @@ def eval_with_pool(candidate, *, opponents, team_pool, battles_per_opponent: int
                    submit_fn: Callable, prev_best=None, mirror_battles: Optional[int] = None,
                    matchup_seed: int = 0, battle_timeout: Optional[float] = 90.0,
                    n_procs: int = 4, async_per_proc: int = 3,
-                   live_dir=None, save_replays: bool = False):
+                   live_dir=None, save_replays: bool = False, generation: int = 0, ports=None):
     """Multiprocess analogue of ``gauntlet.run_gauntlet`` (task #19). Pre-validates the candidate
     (+ prev_best) load LOUDLY in main, plans + partitions the gauntlet descriptors, ships them to
     the pool via the injected ``submit_fn`` (``pool.submit(payloads, worker_fn=eval_worker)``), and
@@ -166,13 +174,17 @@ def eval_with_pool(candidate, *, opponents, team_pool, battles_per_opponent: int
     if prev_best:
         model_io.load_bc_policy(str(prev_best))
     specs = build_eval_specs(opponents, team_pool, battles_per_opponent,
-                             matchup_seed=matchup_seed, mirror_battles=mirror_battles)
+                             matchup_seed=matchup_seed, mirror_battles=mirror_battles,
+                             gen=generation)
     batches = partition_specs(specs, n_procs)
     pb = str(prev_best) if prev_best else None
     tc = str(team_chooser) if team_chooser else None
     ld = str(live_dir) if live_dir else None
+    # 22f: spread the eval worker batches round-robin across the pool servers (batch i -> ports[i%K]).
+    _ports = [int(p) for p in ports] if ports else None
     payloads = [(str(candidate), pb, tc, batch, battle_timeout, async_per_proc, ld,
-                 bool(save_replays)) for batch in batches]
+                 bool(save_replays), (_ports[i % len(_ports)] if _ports else None))
+                for i, batch in enumerate(batches)]
     results, source = merge_eval_results(submit_fn(payloads, worker_fn=eval_worker))
     for kind in opponents:
         results.setdefault(kind, (0, 0))             # a fully-dropped opponent reads 0/0, not absent

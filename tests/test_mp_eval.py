@@ -30,6 +30,56 @@ def test_build_eval_specs_mirror_override_and_unique_uids():
     assert [s.uid for s in specs] == list(range(1, len(specs) + 1))   # globally unique
 
 
+def test_build_eval_specs_stamps_generation_and_defaults_zero():
+    """22d: every spec carries the generation so the worker account names fold it in; the default
+    is gen 0 (so legacy callers / the picklability test read a defined value)."""
+    specs = ME.build_eval_specs(["prev_best"], ["A", "B"], 4, gen=7)
+    assert specs and all(s.gen == 7 for s in specs)
+    assert all(s.gen == 0 for s in ME.build_eval_specs(["prev_best"], ["A", "B"], 4))
+
+
+def test_eval_specs_account_names_disjoint_across_generations():
+    """The derived (model, opp) names for the SAME uids must be disjoint between two gens — the
+    actual collision the live run hit (`already a challenge between you and OPprev…`)."""
+    from v_dance.play.parallel_battles import eval_account_names, gen_salt
+    def names(gen):
+        return {n for s in ME.build_eval_specs(["prev_best", "random"], ["A", "B"], 4, gen=gen)
+                for n in eval_account_names(s.kind, s.uid, salt=gen_salt(s.gen))}
+    assert names(7).isdisjoint(names(8))
+
+
+def test_eval_with_pool_threads_generation_onto_specs(monkeypatch):
+    """generation reaches the EvalSpecs shipped to the workers (so the worker builds gen-keyed names)."""
+    import v_dance.play.model_io as MIO
+    monkeypatch.setattr(MIO, "load_bc_policy", lambda p: None)
+    captured = {}
+
+    def submit(payloads, worker_fn=None):
+        captured["specs"] = [s for p in payloads for s in p[3]]   # payload[3] = the EvalSpec batch
+        return [{"acc": {}, "source": {}} for _ in payloads]
+
+    ME.eval_with_pool("cand.pt", opponents=["random"], team_pool=["A", "B"],
+                      battles_per_opponent=4, team_chooser=None, submit_fn=submit,
+                      n_procs=2, generation=12)
+    assert captured["specs"] and all(s.gen == 12 for s in captured["specs"])
+
+
+def test_eval_with_pool_assigns_pool_ports_round_robin(monkeypatch):
+    """22f.3: eval worker batches spread round-robin across the pool servers (batch i -> ports[i%K])."""
+    import v_dance.play.model_io as MIO
+    monkeypatch.setattr(MIO, "load_bc_policy", lambda p: None)
+    captured = {}
+
+    def submit(payloads, worker_fn=None):
+        captured["ports"] = [p[8] for p in payloads]    # index 8 = the assigned server port
+        return [{"acc": {}, "source": {}} for _ in payloads]
+
+    ME.eval_with_pool("cand.pt", opponents=["random", "max_damage", "heuristic"],
+                      team_pool=["A", "B", "C"], battles_per_opponent=30, team_chooser=None,
+                      submit_fn=submit, n_procs=3, ports=[8000, 8001])
+    assert captured["ports"] == [8000, 8001, 8000]      # 3 batches over 2 servers, round-robin
+
+
 def test_merge_eval_results_sums_per_kind_and_skips_none():
     r1 = {"acc": {"random": (3, 4)}, "source": {"model": 5}}
     r2 = {"acc": {"random": (2, 4), "max_damage": (1, 2)}, "source": {"model": 3}}
@@ -59,7 +109,7 @@ class _FakeEvalPlayer:
         self.closed = True
 
 
-def _build(candidate, prev_best, tc, spec, live_dir=None, save_replays=False):
+def _build(candidate, prev_best, tc, spec, live_dir=None, save_replays=False, port=None):
     return _FakeEvalPlayer(wr=1.0), _FakeEvalPlayer(wr=0.0)   # model wins every battle
 
 
@@ -76,7 +126,7 @@ def test_eval_specs_tallies_wins_per_opponent_kind():
 
 
 def test_eval_specs_build_error_skips_only_that_chunk():
-    def build(candidate, prev_best, tc, spec, live_dir=None, save_replays=False):
+    def build(candidate, prev_best, tc, spec, live_dir=None, save_replays=False, port=None):
         if spec.uid == 2:
             raise RuntimeError("team resolve failed")
         return _build(candidate, prev_best, tc, spec)

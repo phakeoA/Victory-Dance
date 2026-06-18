@@ -275,28 +275,31 @@ def eval_replay_routing(kind: str, candidate_gen, *, opp_ref=None):
 
 
 def _make_opponent(kind: str, username: str, team: str, model_path=None,
-                   team_chooser_path=None, max_concurrent_battles: int = 1):
+                   team_chooser_path=None, max_concurrent_battles: int = 1, port=None):
     """Construct one opponent player of the given ``kind``. ``max_concurrent_battles`` > 1
-    enables parallel battles vs this opponent (3c.8c)."""
+    enables parallel battles vs this opponent (3c.8c). ``port`` (22f) binds it to the assigned
+    pool server (``None`` = poke-env's localhost:8000 default)."""
     import v_dance.play.run_local_battle as R
     from poke_env import AccountConfiguration
     if kind == "random":
         return R.make_player(username, team, model_path=None,
-                             max_concurrent_battles=max_concurrent_battles)
+                             max_concurrent_battles=max_concurrent_battles, port=port)
     if kind in ("max_damage", "heuristic"):
         from v_dance.eval.eval_opponents import MaxDamageVGCPlayer, HeuristicVGCPlayer
         cls = MaxDamageVGCPlayer if kind == "max_damage" else HeuristicVGCPlayer
+        _server = {"server_configuration": R.localhost_server_config(port)} if port is not None else {}
         return cls(
             replay_path=_REPO_ROOT / "artifacts" / "replay_buffer" / f"{username}.jsonl",
             account_configuration=AccountConfiguration(username, None),
             battle_format=R.BATTLE_FORMAT, team=team,
             max_concurrent_battles=max_concurrent_battles,
             log_level=logging.WARNING,
+            **_server,
         )
     if kind == "prev_best":
         return R.make_player(username, team, model_path=model_path,
                              team_chooser_path=team_chooser_path,
-                             max_concurrent_battles=max_concurrent_battles)
+                             max_concurrent_battles=max_concurrent_battles, port=port)
     raise ValueError(f"unknown opponent kind: {kind}")
 
 
@@ -337,6 +340,7 @@ async def run_gauntlet(
     stop_check: Optional[Callable[[], bool]] = None,
     live_dir=None,
     save_replays: bool = False,
+    name_salt: str = "",
 ) -> Dict[str, Tuple[int, int]]:
     """Play the model vs each opponent over the rotating team pool and return
     ``{opponent_name: (model_wins, n_finished)}``.
@@ -348,7 +352,12 @@ async def run_gauntlet(
     (respects the CPU cap). ``stop_check`` (a sync predicate) drains the QUEUED chunks on a soft
     stop, so a mid-eval Ctrl-C during the overnight run doesn't launch battles at a torn-down
     server. The per-kind (wins, finished) accumulation + the source tally run synchronously in
-    ``finally`` (no await between the reads/writes), so they're atomic under asyncio interleaving."""
+    ``finally`` (no await between the reads/writes), so they're atomic under asyncio interleaving.
+
+    ``name_salt`` (22d) folds the generation (and, for the HoF, the suspect) into the ``BC…`` /
+    ``OP…`` account names so they don't repeat across gens — a stale server-side challenge from one
+    gen can't collide with the next gen's reuse (``already a challenge between you and OPprev…``).
+    ``""`` (the standalone-CLI default) keeps the legacy ``BC{uid}`` / ``OP{kind4}{uid}`` names."""
     import v_dance.play.run_local_battle as R
     from v_dance.play import parallel_battles as PB
     server = R.start_showdown() if manage_server else None
@@ -380,12 +389,13 @@ async def run_gauntlet(
         _subdir, _label = eval_replay_routing(
             kind, cand_gen, opp_ref=(prev_best_ckpt if kind == "prev_best" else None))
         _rdir = str(Path(live_dir) / _subdir) if (live_dir and save_replays) else None
+        model_name, opp_name = PB.eval_account_names(kind, uid, salt=name_salt)  # 22d
         model_player = R.make_player(
-            f"BC{uid}", model_team, model_path=ckpt, team_chooser_path=team_chooser,
+            model_name, model_team, model_path=ckpt, team_chooser_path=team_chooser,
             live_dir=live_dir, save_replays=save_replays,   # #18b: eval match spectate
             replay_dir=_rdir, replay_label=_label)
         opp = _make_opponent(
-            kind, f"OP{kind[:4]}{uid}", opp_team,
+            kind, opp_name, opp_team,
             model_path=prev_best_ckpt, team_chooser_path=team_chooser)
         if spect["open"]:                 # atomic check+clear (no await between)
             spect["open"] = False

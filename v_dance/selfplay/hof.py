@@ -42,10 +42,12 @@ async def hof_eval(candidate_path, suspects, *, team_pool, team_chooser,
     the aggregation unit-tests offline without a server."""
     import v_dance.play.model_io as model_io
     import v_dance.play.run_local_battle as R
+    from v_dance.eval.gauntlet import _ckpt_gen        # candidate/suspect gen for 22d name salts
     if gauntlet_fn is None:                            # lazy (keeps importers torch/poke-env-free)
         import v_dance.eval.gauntlet as GA
         gauntlet_fn = GA.run_gauntlet
     model_io.load_bc_policy(str(candidate_path))       # fail LOUD if the candidate won't load
+    cand_gen = _ckpt_gen(candidate_path)               # N in checkpoints/genN.pt (None if unnamed)
     server = R.start_showdown() if manage_server else None
     results: list = []
     try:
@@ -55,13 +57,21 @@ async def hof_eval(candidate_path, suspects, *, team_pool, team_chooser,
             except Exception as e:                     # missing / corrupt snapshot → skip (never veto on garbage)
                 log.warning("HoF suspect %s won't load (%s) — skipping", suspect.snapshot_id, e)
                 continue
+            # 22d: salt the HoF account names with BOTH the candidate gen AND the suspect, so they
+            # never collide with the main prev_best mirror at the SAME gen (which uses salt=str(N)
+            # — same opponent KIND, same uids) nor with another suspect's gauntlet. 'h' is a
+            # toID-safe separator (Showdown strips '_').
+            _sg = _ckpt_gen(suspect.path)
+            if _sg is None:
+                _sg = "".join(ch for ch in str(suspect.snapshot_id) if ch.isdigit()) or "x"
+            _salt = f"{cand_gen if cand_gen is not None else 'c'}h{_sg}"
             res, _sources = await gauntlet_fn(
                 opponents=["prev_best"], team_pool=list(team_pool),
                 battles_per_opponent=int(games_per_snapshot),
                 ckpt=Path(candidate_path), team_chooser=Path(team_chooser),
                 prev_best_ckpt=Path(suspect.path), manage_server=False,
                 matchup_seed=matchup_seed, battle_timeout=battle_timeout,
-                n_workers=int(n_workers),
+                n_workers=int(n_workers), name_salt=_salt,
                 # task E: the candidate-vs-past-champion battles also save to eval/league/ named
                 # gen<N>_vs_gen<M> (M = the suspect's gen, parsed from its checkpoint path).
                 live_dir=live_dir, save_replays=save_replays)

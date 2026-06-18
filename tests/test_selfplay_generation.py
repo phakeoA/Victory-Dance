@@ -286,4 +286,29 @@ def test_live_wiring_importable():
         assert hasattr(GN, fn)
     assert inspect.iscoroutinefunction(GN.collect_with_league)
     assert set(inspect.signature(GN.run_live_generations).parameters) >= {
-        "ckpt", "n_generations", "team_pool", "team_chooser", "archive_dir"}
+        "ckpt", "n_generations", "team_pool", "team_chooser", "archive_dir", "n_servers"}
+
+
+# ── 22f.4: staggered multi-server recycle schedule ────────────────────────────
+def test_server_recycle_index_single_server_matches_legacy():
+    """K=1 must reproduce the old behaviour: recycle the (only) server every N gens, nothing else."""
+    fired = [g for g in range(1, 61) if GN.server_recycle_index(g, 20, 1) is not None]
+    assert fired == [20, 40, 60]                                # every 20 gens
+    assert all(GN.server_recycle_index(g, 20, 1) == 0 for g in fired)   # always the single server
+
+
+def test_server_recycle_index_staggers_a_pool():
+    """K=2, N=20 → stride 10: one server every 10 gens, ROUND-ROBIN, so each server is refreshed
+    every 20 gens and they never recycle in the same gen (no all-down stall)."""
+    sched = {g: GN.server_recycle_index(g, 20, 2) for g in range(1, 61)}
+    assert sched[10] == 0 and sched[20] == 1 and sched[30] == 0 and sched[40] == 1
+    fired = {g: i for g, i in sched.items() if i is not None}
+    assert set(fired) == {10, 20, 30, 40, 50, 60}              # one recycle every stride (10) gens
+    # each individual server is recycled every 20 gens (every OTHER stride)
+    assert [g for g, i in fired.items() if i == 0] == [10, 30, 50]
+    assert [g for g, i in fired.items() if i == 1] == [20, 40, 60]
+
+
+def test_server_recycle_index_disabled_and_gen0():
+    assert GN.server_recycle_index(0, 20, 3) is None           # gen 0 boundary: never
+    assert GN.server_recycle_index(20, 0, 3) is None           # restart_server_every=0 disables it

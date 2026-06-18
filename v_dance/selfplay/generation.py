@@ -199,7 +199,8 @@ async def collect_with_league(actor_critic, league: OpponentLeague, n_games: int
                               matchup_seed: int = 0, chunk_size: int = 10,
                               n_workers: int = 1, stop_check=None,
                               battle_timeout: Optional[float] = 90.0, team_chooser=None,
-                              status=None, live_dir=None, save_replays: bool = False):
+                              status=None, live_dir=None, save_replays: bool = False,
+                              name_salt: str = ""):
     """Collect ``n_games`` self-play games against LEAGUE-sampled opponents (assumes the
     Showdown server is already up — the caller manages it). Each chunk draws one opponent:
       * latest    -> SelfPlayVGCPlayer(ac) on both seats; collect BOTH trajectories (both
@@ -228,12 +229,12 @@ async def collect_with_league(actor_critic, league: OpponentLeague, n_games: int
     showcase = {"log": None}             # raw |-log of one game, for a Type_D replay (3c.5)
     prog = {"games": 0, "won": 0, "decided": 0}    # live progress (3c.6e-3)
 
-    def _sp(team, who, uid, cn, live=None):
+    def _sp(team, who, uid, cn, name, live=None):
         return SelfPlayVGCPlayer(
             actor_critic, tau=tau, sample_seed=seed + (who * 10_000) + uid, live_dir=live,
             save_replays=save_replays,
-            replay_path=_REPO_ROOT / "artifacts" / "replay_buffer" / f"LG{who}_{uid}.jsonl",
-            account_configuration=AccountConfiguration(f"LG{who}x{uid}", None),
+            replay_path=_REPO_ROOT / "artifacts" / "replay_buffer" / f"{name}.jsonl",
+            account_configuration=AccountConfiguration(name, None),
             battle_format=R.BATTLE_FORMAT, team=team, max_concurrent_battles=max(1, cn),
             log_level=_logging.WARNING)
 
@@ -247,14 +248,18 @@ async def collect_with_league(actor_critic, league: OpponentLeague, n_games: int
         tb = R.load_team(R.resolve_team_path(d["team_b"]))
         cn, spec, uid = d["cn"], d["spec"], d["uid"]
         kind = spec[0]
-        our = _sp(ta, 0, uid, cn, live=live_dir)         # #18: our recorder publishes the room+log
+        # 22d: gen-keyed account names (name_salt = str(gen)) so a stale server-side challenge
+        # from one gen can't collide with the next gen's reuse of the same uid.
+        opp_ref = spec[1] if kind == "scripted" else None
+        our_name, opp_name = PB.collect_account_names(kind, uid, salt=name_salt, opp_ref=opp_ref)
+        our = _sp(ta, 0, uid, cn, our_name, live=live_dir)   # #18: our recorder publishes the room+log
         if kind == "latest":
-            opp = _sp(tb, 1, uid, cn)                     # opp shares the same battle_tag; one writer is enough
+            opp = _sp(tb, 1, uid, cn, opp_name)              # opp shares the same battle_tag; one writer is enough
         elif kind == "snapshot":
-            opp = R.make_player(f"LGsx{uid}", tb, model_path=spec[1].path,
+            opp = R.make_player(opp_name, tb, model_path=spec[1].path,
                                 team_chooser_path=team_chooser, max_concurrent_battles=max(1, cn))
         else:   # scripted
-            opp = _make_opponent(spec[1], f"LGc{spec[1][:3]}{uid}", tb,
+            opp = _make_opponent(spec[1], opp_name, tb,
                                  max_concurrent_battles=max(1, cn))
         try:
             # play_pairing owns the per-chunk hung-battle watchdog; the broad except keeps a
@@ -298,7 +303,7 @@ def gauntlet_eval(candidate_path, *, teams, team_chooser, battles: int = 30,
                   manage_server: bool = False, n_workers: int = 1,
                   prev_best_path: Optional[str] = None,
                   mirror_battles: Optional[int] = None, stop_check=None,
-                  live_dir=None, save_replays: bool = False):
+                  live_dir=None, save_replays: bool = False, name_salt: str = ""):
     """Evaluate a saved checkpoint on the scripted gauntlet (>=4 teams, side-balanced).
     Returns ``(results{opp:(wins,n)}, model_elo)``. ``n_workers`` (3c.8c) parallelises the
     eval the same way as collection so the promotion gate isn't the throughput bottleneck.
@@ -324,7 +329,7 @@ def gauntlet_eval(candidate_path, *, teams, team_chooser, battles: int = 30,
         team_chooser=Path(team_chooser), manage_server=manage_server,
         matchup_seed=matchup_seed, battle_timeout=battle_timeout, n_workers=n_workers,
         mirror_battles=mirror_battles, stop_check=stop_check,
-        live_dir=live_dir, save_replays=save_replays))
+        live_dir=live_dir, save_replays=save_replays, name_salt=name_salt))
     return results, GA.model_elo(results)
 
 
@@ -410,6 +415,21 @@ def resolve_eval_battles(eval_battles, n_eval_teams: int) -> int:
     return 2 * pairs
 
 
+def server_recycle_index(done: int, restart_server_every: int, n_servers: int):
+    """Which pool-server INDEX to recycle at gen boundary ``done`` — or ``None`` to recycle nothing
+    this gen (22f staggered anti-bloat). Refresh ONE server every ``restart_server_every // K`` gens,
+    round-robin, so each is recycled every ``restart_server_every`` gens but they never all go down
+    together (which would stall the whole run). ``K=1`` reduces to "recycle the single server every
+    ``restart_server_every`` gens"; ``restart_server_every=0`` disables recycling. Pure → unit-tested."""
+    if not restart_server_every or done <= 0:
+        return None
+    k = max(1, int(n_servers))
+    stride = max(1, int(restart_server_every) // k)
+    if done % stride != 0:
+        return None
+    return (done // stride - 1) % k
+
+
 def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                          archive_dir, eval_team_pool=None,
                          gen_cfg: GenConfig = GenConfig(), ppo_cfg=None,
@@ -420,6 +440,7 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                          collect_procs: int = 1, collect_async_per_proc: int = 3,
                          resume_from=None, resume_gen=None, keep_snapshots: int = 25,
                          save_replays: bool = False, keep_replay_buffers: int = 200,
+                         restart_server_every: int = 20, n_servers: int = 1,
                          snapshot_path=None, max_hours=None) -> dict:
     """Run real generations end-to-end (collect via the league -> PPO update -> gauntlet
     eval -> promotion gate -> admit/refresh/revert), RESUMABLY (3c.4 / #20): a PER-GENERATION
@@ -545,7 +566,8 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                     n_procs=int(collect_procs), async_per_proc=int(collect_async_per_proc),
                     tau=tau_gen, seed=seed + gen * 1000, matchup_seed=gen,
                     team_chooser=team_chooser, status=status, live_dir=_coll_live,
-                    save_replays=save_replays)
+                    save_replays=save_replays, generation=gen,   # 22d: gen-keyed account names
+                    ports=_pool_ports)                           # 22f: spread workers across the pool
             finally:
                 # ALWAYS drop the per-gen ckpt — even if collection raised (Ctrl-C lands inside the
                 # blocking submit) — else a full-weight file orphans each crashed gen (review fix).
@@ -559,7 +581,8 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                 coll_ac, lg, gen_cfg.n_games, team_pool=team_pool, tau=tau_gen,
                 seed=seed + gen * 1000, matchup_seed=gen, team_chooser=team_chooser,
                 n_workers=cw, stop_check=stop.should_stop, status=status,
-                live_dir=_gen_kind_dir(live_run_dir, gen, "replays"), save_replays=save_replays))
+                live_dir=_gen_kind_dir(live_run_dir, gen, "replays"), save_replays=save_replays,
+                name_salt=str(gen)))   # 22d: gen-keyed account names
         dt = _time.perf_counter() - t0
         thru["games"] += gen_cfg.n_games
         thru["secs"] += dt
@@ -599,7 +622,9 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                 team_chooser=team_chooser, submit_fn=pool.submit, prev_best=prev_best_path,
                 mirror_battles=mirror_battles, matchup_seed=seed + history.generation,
                 n_procs=int(collect_procs), async_per_proc=int(collect_async_per_proc),
-                live_dir=_eval_live, save_replays=save_replays)
+                live_dir=_eval_live, save_replays=save_replays,
+                generation=history.generation,   # 22d: gen-keyed account names
+                ports=_pool_ports)               # 22f: spread eval workers across the pool
             out = (results, GA.model_elo(results))
             _eval_label = f"{int(collect_procs)} procs"
         else:
@@ -607,7 +632,8 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                                 battles=eval_battles, manage_server=False, n_workers=n_workers,
                                 prev_best_path=prev_best_path, mirror_battles=mirror_battles,
                                 matchup_seed=seed + history.generation, stop_check=stop.should_stop,
-                                live_dir=_eval_live, save_replays=save_replays)
+                                live_dir=_eval_live, save_replays=save_replays,
+                                name_salt=str(history.generation))   # 22d: gen-keyed account names
             _eval_label = f"{n_workers} workers"
         dt = _time.perf_counter() - t0
         n_eval = sum(g for _w, g in out[0].values())     # total finished eval battles
@@ -669,7 +695,13 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                          gen_cfg=gen_cfg, seed=seed)
         RS.prune_snapshots(archive, keep_snapshots)
 
-    server = R.start_showdown() if manage_server else None
+    # 22f: a POOL of K Showdown servers (ports 8000..8000+K-1). Spreading the worker processes
+    # across them keeps any single server from saturating under concurrency (#22) or bloating over a
+    # long run (#22c) — each sees ~1/K the battles. K=1 (default) is the single shared server,
+    # byte-identical to before. An externally-managed server (manage_server=False) is always single.
+    _n_servers = max(1, int(n_servers)) if manage_server else 1
+    server_pool = R.ServerPool(_n_servers, manage=manage_server).start_all()
+    _pool_ports = server_pool.ports if _n_servers > 1 else None   # None => poke-env's 8000 default
     reports = []
     done = 0
     # Cap the BC-era diagnostic replay buffer (one uid-keyed .jsonl per battle player, never read by
@@ -681,6 +713,17 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
     try:
         while (n_generations is None or done < n_generations) and not stop.should_stop():
             _prune_rb(_rb_dir, keep_replay_buffers)        # trim the previous gen's traces
+            # #22c/22f anti-bloat: a Node Showdown server leaks over a long run (accumulated battle
+            # rooms → slow handshakes, stale challenges, eval STALLS by ~gen 50 even at low
+            # concurrency). Recycle servers at GEN BOUNDARIES (no battle in flight → the next gen's
+            # players just reconnect to a fresh one). With a POOL we STAGGER (one server per recycle
+            # event, round-robin) so they never all go down at once; K=1 reduces to the old behaviour.
+            _idx = server_recycle_index(done, restart_server_every, _n_servers) if manage_server else None
+            if _idx is not None:
+                _port = server_pool.ports[_idx]
+                print(f"   [server] recycling pool server :{_port} after {done} gens "
+                      f"({_n_servers} server(s), staggered anti-bloat)")
+                server_pool.recycle(_port)
             rep = run_generation(ac, trainer, league, history, collect_fn=collect_fn,
                                  eval_fn=eval_fn, save_fn=save_fn, restore_fn=restore_fn,
                                  cleanup_fn=cleanup_fn,
@@ -723,8 +766,7 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
         if pool is not None:
             pool.close()                     # tear down the collection worker processes
             MP.sweep_mp_ckpts(archive)       # reclaim any per-gen worker ckpt left by a crashed gen
-        if server is not None:
-            R.stop_showdown(server)
+        server_pool.stop_all()               # 22f: tree-kill every pool server
     _latest = RS.latest_snapshot(archive)
     print(f"\n  ran {done} generation(s); latest snapshot -> "
           f"{_latest.name if _latest else '(none)'}  (resume with --resume-gen latest)")
@@ -890,6 +932,7 @@ def _launch_live(args):
         manage_server=not args.no_server, resume_from=args.resume,
         resume_gen=args.resume_gen, keep_snapshots=args.keep_snapshots,
         save_replays=args.save_replays, keep_replay_buffers=args.keep_replay_buffers,
+        restart_server_every=args.restart_server_every, n_servers=args.servers,
         snapshot_path=args.snapshot, max_hours=args.hours)
 
 
@@ -1103,6 +1146,18 @@ if __name__ == "__main__":
                     help="cap artifacts/replay_buffer/ to its N most-recent per-battle .jsonl traces "
                          "(the BC-era diagnostic log; NOT read by RL training). Pruned at run start + "
                          "each gen boundary so a long run can't fill the disk. Default 200; 0 = keep ALL.")
+    ap.add_argument("--restart-server-every", type=int, default=20,
+                    help="recycle the local Showdown server every N generations (#22c anti-bloat): it "
+                         "leaks memory/rooms over a long run and by ~gen 50 the eval STALLS (slow "
+                         "handshakes, stale challenges). Restarting between gens keeps it fast. "
+                         "Default 20; 0 = never (only for short runs). With --servers>1 the recycle "
+                         "is STAGGERED across the pool (one server per N/K gens, round-robin).")
+    ap.add_argument("--servers", type=int, default=1,
+                    help="run a POOL of N local Showdown servers on ports 8000..8000+N-1 (22f) and "
+                         "spread the collection/eval worker processes across them, so no single "
+                         "server saturates under concurrency (#22) or bloats over a long run (#22c) "
+                         "— each handles ~1/N the battles. Default 1 (single shared server). A good "
+                         "rule: N ~= --collect-procs / 3.")
     ap.add_argument("--save-replays", action="store_true",
                     help="SAVE finished battles as real, playable Showdown .html replays under "
                          "artifacts/.../live/<start-stamp>/gen_<N>/{replays,eval}/<tag>.html "

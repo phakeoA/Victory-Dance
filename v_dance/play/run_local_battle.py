@@ -74,6 +74,14 @@ SHOWDOWN_HOST  = "localhost"
 SHOWDOWN_PORT  = 8000
 SHOWDOWN_READY_TIMEOUT = 120
 
+# #22: poke-env websocket grace. Under heavy parallel eval (the 8-proc mirror) the single local
+# server briefly stalls for tens of seconds — at poke-env's defaults (ping_timeout 20s,
+# open_timeout 10s) that drops connections (`sent 1011 ... keepalive ping timeout`) and fails
+# logins (`Expected BC… to be logged in`). Wider timeouts let the connection ride out the stall.
+WS_PING_TIMEOUT  = 60.0
+WS_PING_INTERVAL = 30.0
+WS_OPEN_TIMEOUT  = 30.0
+
 _VENV_NODE_CANDIDATES = [
     _REPO_ROOT / ".venv" / "node" / "node.exe",   # Windows
     _REPO_ROOT / ".venv" / "node" / "node",        # Linux/macOS
@@ -107,9 +115,13 @@ def _port_open(host: str, port: int) -> bool:
         return False
 
 
-def start_showdown() -> subprocess.Popen | None:
-    if _port_open(SHOWDOWN_HOST, SHOWDOWN_PORT):
-        log.info("Showdown server already running on port %d — skipping launch.", SHOWDOWN_PORT)
+def start_showdown_on(port: int = SHOWDOWN_PORT) -> subprocess.Popen | None:
+    """Start a Showdown server on ``port``, returning the launcher proc (or None if a server is
+    ALREADY listening there — someone else manages it). 22f: the ``ServerPool`` runs several of
+    these on consecutive ports. The port is passed as Showdown's positional ``[PORT]`` arg
+    (``server/sockets.ts`` scans argv for the first all-numeric token)."""
+    if _port_open(SHOWDOWN_HOST, port):
+        log.info("Showdown server already running on port %d — skipping launch.", port)
         return None
 
     if not SHOWDOWN_DIR.is_dir():
@@ -121,7 +133,7 @@ def start_showdown() -> subprocess.Popen | None:
     env = os.environ.copy()
     env["PATH"] = node_dir + os.pathsep + env.get("PATH", "")
 
-    log.info("Starting Pokémon Showdown server … (first launch builds it, ~30s)")
+    log.info("Starting Pokémon Showdown server on port %d … (first launch builds it, ~30s)", port)
     # Isolate the server from the console's Ctrl-C: on Windows a Ctrl-C sends CTRL_C_EVENT
     # to the whole process group, which would KILL the server while our (soft-stop) collection
     # is still launching battles → a flood of ConnectionRefused. A new process group lets the
@@ -129,7 +141,7 @@ def start_showdown() -> subprocess.Popen | None:
     # it explicitly regardless of group).
     _flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
     proc = subprocess.Popen(
-        [node, "pokemon-showdown", "start", "--no-security"],
+        [node, "pokemon-showdown", "start", str(int(port)), "--no-security"],
         cwd=SHOWDOWN_DIR,
         env=env,
         stdout=subprocess.DEVNULL,
@@ -139,8 +151,8 @@ def start_showdown() -> subprocess.Popen | None:
 
     deadline = time.monotonic() + SHOWDOWN_READY_TIMEOUT
     while time.monotonic() < deadline:
-        if _port_open(SHOWDOWN_HOST, SHOWDOWN_PORT):
-            log.info("Showdown server ready on port %d ✅", SHOWDOWN_PORT)
+        if _port_open(SHOWDOWN_HOST, port):
+            log.info("Showdown server ready on port %d ✅", port)
             return proc
         if proc.poll() is not None:
             log.error("Showdown server exited unexpectedly (exit %d).", proc.returncode)
@@ -148,8 +160,14 @@ def start_showdown() -> subprocess.Popen | None:
         time.sleep(0.5)
 
     proc.terminate()
-    log.error("Showdown server did not open port %d within %ds.", SHOWDOWN_PORT, SHOWDOWN_READY_TIMEOUT)
+    log.error("Showdown server did not open port %d within %ds.", port, SHOWDOWN_READY_TIMEOUT)
     sys.exit(1)
+
+
+def start_showdown() -> subprocess.Popen | None:
+    """Start the default single server on port 8000 — a back-compat wrapper around
+    ``start_showdown_on`` (every existing caller passes no port)."""
+    return start_showdown_on(SHOWDOWN_PORT)
 
 
 def _terminate_tree(proc: subprocess.Popen) -> bool:
@@ -220,6 +238,63 @@ def stop_showdown(proc: subprocess.Popen | None) -> None:
     log.info("Showdown server stopped.")
 
 
+class ServerPool:
+    """A pool of K Showdown servers on consecutive ports (22f, the multi-server architecture).
+
+    The single shared server is the throughput bottleneck — it SATURATES under high worker
+    concurrency (#22, the eval deadlock) AND BLOATS over a long run (#22c, the gen-54 crawl).
+    Spreading the worker processes across K servers (each on its own port, ``base_port`` ..
+    ``base_port+K-1``) makes every server handle ~1/K the battles, so neither failure mode bites
+    as hard, and one server can be recycled without stalling the others. ``n_servers <= 1`` (or
+    ``manage=False``) reduces to the existing single-server behaviour with ZERO change.
+
+    ``start_fn`` / ``stop_fn`` are injectable so the start / recycle / stop orchestration
+    unit-tests offline WITHOUT spawning Node (the real spawn is ``start_showdown_on`` /
+    ``stop_showdown``, exercised by the live smoke)."""
+
+    def __init__(self, n_servers: int = 1, *, base_port: int = SHOWDOWN_PORT, manage: bool = True,
+                 start_fn=None, stop_fn=None):
+        self.n = max(1, int(n_servers))
+        self.base_port = int(base_port)
+        self.manage = bool(manage)
+        self.ports = [self.base_port + i for i in range(self.n)]
+        self._start = start_fn or start_showdown_on
+        self._stop = stop_fn or stop_showdown
+        self._procs: dict = {}                 # port -> launcher proc (None = pre-existing/unmanaged)
+
+    def start_all(self) -> "ServerPool":
+        """Start every server in the pool (no-op when ``manage=False``)."""
+        if self.manage:
+            for port in self.ports:
+                self._procs[port] = self._start(port)
+        return self
+
+    def port_for_worker(self, worker_index: int) -> int:
+        """Round-robin worker→server assignment (balanced: worker ``i`` → ``ports[i % n]``)."""
+        return self.ports[int(worker_index) % self.n]
+
+    def recycle(self, port: int) -> None:
+        """Stop+restart ONE server (anti-bloat at a gen boundary), leaving the others up. The
+        port stays the same, so the next gen's workers reconnect to a fresh server transparently."""
+        if not self.manage:
+            return
+        self._stop(self._procs.get(port))
+        self._procs[port] = self._start(port)
+
+    def stop_all(self) -> None:
+        """Tree-kill every managed server (each via ``stop_showdown``)."""
+        if not self.manage:
+            return
+        for port in list(self._procs):
+            self._stop(self._procs.pop(port))
+
+    def __enter__(self) -> "ServerPool":
+        return self.start_all()
+
+    def __exit__(self, *exc) -> None:
+        self.stop_all()
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Team loading
 # ══════════════════════════════════════════════════════════════════════════════
@@ -285,6 +360,19 @@ def load_team(path: Path) -> str:
 # Players
 # ══════════════════════════════════════════════════════════════════════════════
 
+def localhost_server_config(port: int = SHOWDOWN_PORT):
+    """A poke-env ``ServerConfiguration`` for a LOCAL Showdown server on ``port`` (22f: each worker
+    binds the server it was assigned). Mirrors poke-env's ``LocalhostServerConfiguration`` with the
+    port swapped; the auth endpoint is unused under ``--no-security`` (local play) but kept so the
+    config is otherwise identical."""
+    from poke_env.ps_client.server_configuration import (LocalhostServerConfiguration,
+                                                         ServerConfiguration)
+    return ServerConfiguration(
+        f"ws://localhost:{int(port)}/showdown/websocket",
+        LocalhostServerConfiguration.authentication_url,
+    )
+
+
 def make_player(
     username: str,
     team: str,
@@ -294,14 +382,19 @@ def make_player(
     max_concurrent_battles: int = 1,
     live_dir=None, save_replays: bool = False,
     replay_dir=None, replay_label=None,
+    port: int | None = None,
 ) -> VGCPlayer:
     """Build a (gap-#6 spliced) player.  model_path=None → random fallback.
     ``max_concurrent_battles`` > 1 lets poke-env run that many battles of this player
     in parallel (3c.8c CPU-parallel collection). ``live_dir`` (#18b) wires the spectate feed so
     this player's battles show on the dashboard (used for EVAL match spectate); ``save_replays``
     keeps them on finish. ``replay_dir`` / ``replay_label`` (task E) route the SAVED html into a
-    sub-folder with a descriptive name (e.g. ``eval/heuristic/gen3_vs_heuristic_<tag>.html``)."""
+    sub-folder with a descriptive name (e.g. ``eval/heuristic/gen3_vs_heuristic_<tag>.html``).
+    ``port`` (22f) binds this player to the Showdown server on that port (a specific pool member);
+    ``None`` keeps poke-env's default (localhost:8000), so the single-server path is unchanged."""
     replay_path = _REPO_ROOT / "artifacts" / "replay_buffer" / f"{username}.jsonl"
+    # 22f: bind to the assigned pool server when a port is given (else poke-env's localhost default).
+    _server = {"server_configuration": localhost_server_config(port)} if port is not None else {}
     if model_path is None:
         return RandomVGCPlayer(
             replay_path=replay_path,
@@ -312,6 +405,9 @@ def make_player(
             log_level=logging.WARNING,
             live_dir=live_dir, save_replays=save_replays,
             replay_dir=replay_dir, replay_label=replay_label,
+            ping_timeout=WS_PING_TIMEOUT, ping_interval=WS_PING_INTERVAL,
+            open_timeout=WS_OPEN_TIMEOUT,
+            **_server,
         )
     return VGCPlayer(
         model_path=model_path,
@@ -325,6 +421,9 @@ def make_player(
         log_level=logging.WARNING,
         live_dir=live_dir, save_replays=save_replays,
         replay_dir=replay_dir, replay_label=replay_label,
+        ping_timeout=WS_PING_TIMEOUT, ping_interval=WS_PING_INTERVAL,
+        open_timeout=WS_OPEN_TIMEOUT,
+        **_server,
     )
 
 
