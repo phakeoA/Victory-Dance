@@ -32,11 +32,15 @@ from v_dance.selfplay.league import OpponentLeague
 # existing `from ...generation import promotion_gate / GenerationHistory / GateConfig / ...`
 # imports keep working unchanged after the split (sec 16).
 from v_dance.selfplay.gate import (  # noqa: F401,E402
-    SCRIPTED_OPPONENTS, _two_prop_se, wilson_lower_bound,
+    SCRIPTED_OPPONENTS, _two_prop_se, wilson_lower_bound, wilson_upper_bound,
     GateConfig, promotion_gate, is_plateau, GateConfigV2, promotion_gate_v2,
+    HoFConfig, cluster_hof_suspects, hall_of_fame_gate,
     aggregate_scripted, aggregate_prev_best, operator_alert,
     GenerationRecord, GenerationHistory, GenConfig,
 )
+# Phase-2 HoF LIVE orchestration (pure gate logic stays in gate.py); re-exported so existing
+# `from ...generation import hof_eval` imports (test_hof_eval, scratch/_hof_smoke) keep working.
+from v_dance.selfplay.hof import hof_eval, apply_hof_gate  # noqa: F401,E402
 
 log = logging.getLogger(__name__)
 
@@ -57,6 +61,7 @@ def run_generation(
     actor_critic, trainer, league: OpponentLeague, history: GenerationHistory, *,
     collect_fn: Callable, eval_fn: Callable, save_fn: Callable,
     restore_fn: Optional[Callable] = None, cleanup_fn: Optional[Callable] = None,
+    hof_eval_fn: Optional[Callable] = None,
     status=None, cfg: GenConfig = GenConfig(),
 ) -> dict:
     """Run ONE generation. Injected live steps:
@@ -101,6 +106,13 @@ def run_generation(
         scripted_wins=sw, scripted_games=sg, high_water=history.scripted_high_water,
         mirror_wins=pbw, mirror_games=pbg, h2h_history=history.h2h_history,
         have_champion=have_champion, cfg=cfg.gate_v2)
+    # Phase 2 (P2.4): the HoF breadth veto runs ONLY on a PROMOTE — require the candidate to also
+    # not-lose to its past champions (the lineage-cycle guard). A REJECT downgrades promote->hold
+    # (reason 'hof_reject'); the candidate is STILL admitted below as a non-champion league opponent.
+    # No-op when the HoF is disabled / no runner is injected (offline tests + --dry-run).
+    verdict, hof_reason, hof_stats = apply_hof_gate(
+        verdict, gate_stats.get("reason"), candidate_path=candidate, league=league,
+        history=history, cfg=cfg.hof, hof_eval_fn=hof_eval_fn)
     promoted = verdict == "promote"
     if status is not None:
         status.set_update(update_stats, last_verdict=verdict)
@@ -132,13 +144,13 @@ def run_generation(
     rec = GenerationRecord(generation=gen, n_trajectories=len(trajectories),
                            scripted_wins=sw, scripted_games=sg, model_elo=elo,
                            verdict=verdict, promoted=promoted, update_stats=update_stats,
-                           champion_elo=history.champion_elo)
+                           champion_elo=history.champion_elo, hof=hof_stats)
     history.add(rec)
     return {"generation": gen, "verdict": verdict, "promoted": promoted,
-            "reason": gate_stats.get("reason"),
+            "reason": hof_reason,
             "scripted_win_rate": (sw / sg) if sg else None, "model_elo": elo,
             "champion_elo": history.champion_elo, "mirror_win_rate": mirror_rate,
-            "league_size": len(league.snapshots), "gate": gate_stats,
+            "league_size": len(league.snapshots), "gate": gate_stats, "hof": hof_stats,
             "n_trajectories": len(trajectories), "update_stats": update_stats}
 
 
@@ -415,7 +427,7 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                          gen_cfg: GenConfig = GenConfig(), ppo_cfg=None,
                          train_cfg=None, tau_start: float = 1.3, tau_end: float = 1.0,
                          tau_anneal_gens: int = 12, seed: int = 0,
-                         eval_battles=None, mirror_battles: int = 240, manage_server: bool = True,
+                         eval_battles=None, mirror_battles: int = 360, manage_server: bool = True,
                          device: str = "cpu", n_workers: int = 1, collect_workers=None,
                          resume_from=None, snapshot_path=None, max_hours=None) -> dict:
     """Run real generations end-to-end (collect via the league -> PPO update -> gauntlet
@@ -534,6 +546,21 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
               f"({n_workers} workers){pb_s}")
         return out
 
+    def hof_run(candidate_path, suspects):
+        # Phase-2 HoF: play the candidate vs its past-champion suspects (server already up). Sync
+        # wrapper (like collect_fn/eval_fn) so run_generation stays sync + offline-injectable.
+        if not suspects:
+            return []
+        t0 = _time.perf_counter()
+        out = asyncio.run(hof_eval(
+            candidate_path, suspects, team_pool=_eval_pool, team_chooser=team_chooser,
+            games_per_snapshot=gen_cfg.hof.games_per_snapshot, n_workers=n_workers,
+            manage_server=False, matchup_seed=seed + history.generation))
+        dt = _time.perf_counter() - t0
+        n = sum(g for _i, _w, g in out)
+        print(f"   HoF eval: {len(out)} past champions, {n} games in {dt:.1f}s")
+        return out
+
     def restore_fn(ac_, path):
         ac_.restore_from(path)        # reload champion policy + critic (collapse recovery)
         trainer.reset_optimizers()    # clear the stale Adam moments that drove the collapse,
@@ -564,8 +591,21 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
         while (n_generations is None or done < n_generations) and not stop.should_stop():
             rep = run_generation(ac, trainer, league, history, collect_fn=collect_fn,
                                  eval_fn=eval_fn, save_fn=save_fn, restore_fn=restore_fn,
-                                 cleanup_fn=cleanup_fn, status=status, cfg=gen_cfg)
+                                 cleanup_fn=cleanup_fn,
+                                 hof_eval_fn=(hof_run if gen_cfg.hof.enabled else None),
+                                 status=status, cfg=gen_cfg)
             print_generation_report(rep)
+            _hof = rep.get("hof")                   # Phase-2 HoF breadth-veto readout (P2.4)
+            if _hof and _hof.get("reason") != "thin_pool_skip":
+                susp = "  ".join(f"{r['snapshot_id']}:{r['wins']}/{r['games']}"
+                                 f"{'*' if r['vetoed'] else ''}" for r in _hof.get("suspects", []))
+                tag = "OVERRIDDEN" if _hof.get("overridden") else str(_hof.get("reason", "")).upper()
+                wu = _hof.get("worst_upper")
+                print(f"        HoF[{tag}] vs past champions: {susp}  worst={_hof.get('worst_snapshot_id')}"
+                      + (f" upper={wu:.2f}" if wu is not None else ""))
+            elif _hof:
+                print(f"        HoF: skipped ({_hof.get('eligible', 0)} past champions < min_pool "
+                      f"{gen_cfg.hof.min_pool}) — too few promotions to cycle yet")
             _alert = operator_alert(history)        # unattended-run watchdog (sec 16)
             if _alert:
                 print(f"        ⚠ {_alert}")
@@ -615,12 +655,13 @@ def _dry_run(n_generations: int = 6, seed: int = 0) -> None:
     trainer = _Trainer()
 
     # Synthetic per-gen (scripted, head-to-head-vs-champion) win-rates that drive the v2
-    # frozen-champion gate through every verdict: gen0 auto-promote, climb-then-clear the 70%
-    # bar (beat_champion), hold while below it, a scripted dip → collapse REVERT, then a
-    # plateau → backstop re-anchor. Mirror runs at 240 games (>= min_h2h_games) so the bar can fire.
-    scripted_wr = [0.55, 0.60, 0.62, 0.63, 0.30, 0.58, 0.58, 0.58][:n_generations]
-    mirror_wr = [None, 0.55, 0.72, 0.55, 0.50, 0.58, 0.58, 0.58][:n_generations]
-    eval_games, mirror_games = 400, 240
+    # frozen-champion gate through every verdict: gen0 auto-promote; hold below the 0.55 bar;
+    # clear it (beat_champion); a scripted dip → scripted-collapse REVERT; a mirror erosion below
+    # the champion → mirror-collapse REVERT (P2.2); then more beat_champion promotes. Mirror runs
+    # at 360 games (>= min_h2h_games) so the 0.55 bar and the mirror-collapse revert can fire.
+    scripted_wr = [0.55, 0.58, 0.60, 0.60, 0.30, 0.60, 0.60, 0.60][:n_generations]
+    mirror_wr = [None, 0.52, 0.60, 0.50, 0.55, 0.38, 0.58, 0.58][:n_generations]
+    eval_games, mirror_games = 400, 360
     calls = {"restore": 0}
 
     def collect_fn(ac, league, gen):
@@ -643,16 +684,28 @@ def _dry_run(n_generations: int = 6, seed: int = 0) -> None:
 
     def restore_fn(ac, path): calls["restore"] += 1
 
+    def hof_fn(candidate_path, suspects):
+        # Synthetic HoF (P2.4): the candidate LOSES to its OLDEST champion (gen0) but beats the
+        # rest — so once >= min_pool past champions exist (late in the run) the breadth veto
+        # downgrades that promote to a HOLD (hof_reject), visible offline without a server.
+        return [(s.snapshot_id, (18 if s.snapshot_id == "gen0" else 40), 60) for s in suspects]
+
     print("== Generation-loop dry run (no server) =====================")
     print(f"  synthetic scripted win-rate per gen: {scripted_wr}")
     print(f"  synthetic mirror   win-rate per gen: {mirror_wr}")
-    print("  v2 gate: keep the champion frozen until the candidate clears the 70% bar vs it OR "
-          "the climb plateaus; revert on a scripted collapse\n")
+    print("  v2 gate: keep the champion frozen until the candidate clears the 0.55 bar vs it OR "
+          "the climb plateaus; revert on a scripted collapse OR a mirror collapse (eroded below "
+          "its own champion)\n")
     for _ in range(n_generations):
         rep = run_generation(ac, trainer, league, history, collect_fn=collect_fn,
-                             eval_fn=eval_fn, save_fn=save_fn,
-                             restore_fn=restore_fn, cfg=GenConfig(warmup_updates=3))
+                             eval_fn=eval_fn, save_fn=save_fn, restore_fn=restore_fn,
+                             hof_eval_fn=hof_fn, cfg=GenConfig(warmup_updates=3))
         print_generation_report(rep)
+        _h = rep.get("hof")
+        if _h and _h.get("reason") != "thin_pool_skip":
+            susp = "  ".join(f"{r['snapshot_id']}:{r['wins']}/{r['games']}"
+                             f"{'*' if r['vetoed'] else ''}" for r in _h.get("suspects", []))
+            print(f"        HoF vs past champions: {susp} -> {_h.get('reason')}")
     print(f"\n  reverts (on regression): {calls['restore']}")
     print(f"  league snapshots admitted : {len(league.snapshots)}  "
           f"({[s.snapshot_id for s in league.snapshots]})")
@@ -706,8 +759,13 @@ def _launch_live(args):
     print(f"   exploration (sec 12): KL-to-BC coef={args.kl_coef} "
           f"target_kl_bc={'off' if args.target_kl_bc <= 0 else args.target_kl_bc} "
           f"min_ev={'off' if args.min_ev is None else args.min_ev} {_tau_desc}")
-    print(f"   gate (sec 16): prev_best head-to-head bar = "
-          f"{'ON' if args.prev_best else 'OFF (pure scripted ladder)'}")
+    _gc = GateConfigV2()
+    print(f"   gate (sec 16): frozen-champion ladder — beat_champion >= {_gc.promote_threshold:.2f} over "
+          f"{args.mirror_battles} mirror games; mirror-collapse revert < {0.5 - _gc.mirror_collapse_margin:.2f}; "
+          f"prev_best mirror = {'ON' if args.prev_best else 'OFF (pure scripted ladder)'}")
+    print(f"   HoF (Phase 2): {'ON' if args.hof else 'OFF'} — not-lose to last {args.hof_champions} "
+          f"past champions @ {args.hof_games} games each"
+          + ("  [--hof-override: rejects logged, NOT blocking]" if args.hof_override else ""))
     _cw = args.collect_workers if args.collect_workers else _rb["workers"]
     print(f"   resources (sec 20): {summarize(_rb)}")
     _upd = "PPO update on GPU (VRAM capped)" if _rb["device"] == "cuda" else "CPU PPO update"
@@ -718,7 +776,9 @@ def _launch_live(args):
         eval_team_pool=eval_pool,
         team_chooser=args.team_chooser, archive_dir=args.archive,
         gen_cfg=GenConfig(n_games=args.games, warmup_updates=args.warmup,
-                          gate=GateConfig(use_prev_best=args.prev_best)),
+                          gate=GateConfig(use_prev_best=args.prev_best),
+                          hof=HoFConfig(enabled=args.hof, n_champions=args.hof_champions,
+                                        games_per_snapshot=args.hof_games, override=args.hof_override)),
         ppo_cfg=ppo_cfg, train_cfg=train_cfg,
         tau_start=args.tau_start, tau_end=args.tau, tau_anneal_gens=args.tau_anneal_gens,
         seed=args.seed, eval_battles=args.eval_battles, mirror_battles=args.mirror_battles,
@@ -774,8 +834,15 @@ def _wizard(ap):
                                "12 to use collection's CPU headroom; blank = cap", int)
     args.max_vram_gb = ask("Max VRAM GB for the GPU update", None,
                            "4 (of 8 GB); blank = uncapped", float)
+    args.mirror_battles = ask("Mirror battles vs the champion (the 0.55 beat_champion bar)", 360,
+                              "360 = the calibrated floor (P2.1); 48 for a fast test", int)
     args.prev_best = ask_yn("Use the prev_best head-to-head promotion bar? "
                             "(promotes past a scripted plateau; N = pure scripted ladder)", True)
+    args.hof = ask_yn("Run the Hall-of-Fame breadth check on a promote? (also require beating "
+                      "your last few PAST champions, not just the current one — catches cycling)", True)
+    if args.hof:
+        args.hof_champions = ask("  How many past champions must the candidate beat", 5,
+                                 "5 (cap ~8); excludes the current champion the mirror tests", int)
     if ask_yn("Resume the previous run (continue training)?", False):
         snap = Path(args.archive) / "resume.pt"
         if snap.exists():
@@ -794,12 +861,18 @@ def _wizard(ap):
         parts.append(f"--hours {args.hours}")
     if args.eval_battles is not None:
         parts.append(f"--eval-battles {args.eval_battles}")
+    if args.mirror_battles != 360:
+        parts.append(f"--mirror-battles {args.mirror_battles}")
     if args.collect_workers:
         parts.append(f"--collect-workers {args.collect_workers}")
     if args.max_vram_gb is not None:
         parts.append(f"--max-vram-gb {args.max_vram_gb}")
     if not args.prev_best:
         parts.append("--no-prev-best")
+    if not args.hof:
+        parts.append("--no-hof")
+    elif args.hof_champions != 5:
+        parts.append(f"--hof-champions {args.hof_champions}")
     if args.resume:
         parts.append(f"--resume {args.resume}")
     if args.verbose:
@@ -831,10 +904,11 @@ if __name__ == "__main__":
                          "team-pairs). DEFAULT auto-sizes to 2*N*(N-1) = full both-orientation "
                          "side-balanced coverage of the eval pool (6 teams => 60/opp, ~180 "
                          "games/gen). Pass a small int (e.g. 12) for a fast UI smoke.")
-    ap.add_argument("--mirror-battles", type=int, default=240,
-                    help="head-to-head battles vs the CHAMPION for the v2 gate's 70%% bar (sec 16). "
-                         "Default 240 (>= the gate's min_h2h_games=200 noise floor; gate_sim). The "
-                         "scripted ladder stays at --eval-battles; only the mirror is bumped.")
+    ap.add_argument("--mirror-battles", type=int, default=360,
+                    help="head-to-head battles vs the CHAMPION for the v2 gate's 0.55 bar (sec 16). "
+                         "Default 360 (>= the gate's min_h2h_games=360 floor; P2.1 gate_sim: the 0.55 "
+                         "bar needs ~360 to hold false-promote ~3% AND the mirror-collapse revert "
+                         "needs it). The scripted ladder stays at --eval-battles; only the mirror is bumped.")
     ap.add_argument("--warmup", type=int, default=5, help="critic-only warm-up updates (gen 0)")
     ap.add_argument("--ckpt", default=str(_REPO_ROOT / "ai_train_scripts" / "BC_model"
                                           / "checkpoints" / "bc_best.pt"))
@@ -898,6 +972,20 @@ if __name__ == "__main__":
                     help="use the prev_best head-to-head promotion bar (sec 16: lets a gen "
                          "promote past a scripted plateau by beating the accepted-best mirror). "
                          "--no-prev-best = pure scripted gate (also skips the mirror's eval games)")
+    # ── Phase-2 Hall-of-Fame breadth veto (sec 16) ────────────────────────────
+    ap.add_argument("--hof", action=argparse.BooleanOptionalAction, default=True,
+                    help="Phase-2 HoF breadth veto: on a PROMOTE, ALSO require the candidate to "
+                         "not-LOSE to its last --hof-champions PAST champions (catches lineage "
+                         "cycling — beats the current champion but loses to an older one). "
+                         "--no-hof = promote on the mirror bar alone.")
+    ap.add_argument("--hof-champions", type=int, default=HoFConfig().n_champions,
+                    help="how many PAST champions the candidate must not-lose to (default 5; "
+                         "excludes the current champion the mirror already tests; cap ~8 for FWER)")
+    ap.add_argument("--hof-games", type=int, default=HoFConfig().games_per_snapshot,
+                    help="battles vs EACH past-champion suspect (default 60; the P2.1 floor)")
+    ap.add_argument("--hof-override", action="store_true",
+                    help="operator escape: let HoF-rejected promotes THROUGH (still evaluated + "
+                         "logged loud) to release a frozen lineage-cycle standoff")
     ap.add_argument("--no-server", action="store_true")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()

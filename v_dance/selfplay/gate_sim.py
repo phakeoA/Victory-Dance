@@ -31,7 +31,8 @@ import numpy as np
 
 # Canonical plateau detector lives WITH the gate (gate.py) so the sim and the real gate share
 # ONE implementation — re-exported here so GS.is_plateau keeps working.
-from v_dance.selfplay.gate import is_plateau  # noqa: F401,E402
+from v_dance.selfplay.gate import (  # noqa: F401,E402
+    is_plateau, wilson_lower_bound, wilson_upper_bound)
 
 
 def _se(n_games: int) -> float:
@@ -152,6 +153,143 @@ def simulate_frozen_ladder(n_gens: int, true_edge_fn, n_games: int, *,
     }
 
 
+# ══ P2.1 — HoF veto + 0.55 mirror + mirror-collapse calibration ════════════════
+# Vectorised Wilson bounds (the scalar gate.wilson_*_bound applied to a numpy array of win
+# counts) — kept here, and a test pins them == the scalar impls so the sim can NEVER drift
+# from the real gate's decision rule.
+def _wilson_upper_vec(wins, n: int, z: float):
+    p = wins / n
+    z2 = z * z
+    denom = 1.0 + z2 / n
+    centre = p + z2 / (2.0 * n)
+    margin = z * np.sqrt(p * (1.0 - p) / n + z2 / (4.0 * n * n))
+    return np.minimum(1.0, (centre + margin) / denom)
+
+
+def _wilson_lower_vec(wins, n: int, z: float):
+    p = wins / n
+    z2 = z * z
+    denom = 1.0 + z2 / n
+    centre = p + z2 / (2.0 * n)
+    margin = z * np.sqrt(p * (1.0 - p) / n + z2 / (4.0 * n * n))
+    return np.maximum(0.0, (centre - margin) / denom)
+
+
+def _draw_wins(rng, true_p: float, n: int, trials: int, rho: float = 0.0):
+    """Per-suspect win counts over ``n`` games. ``rho==0`` → i.i.d. Binomial. ``rho>0`` →
+    BETA-BINOMIAL with intra-cluster correlation ``rho`` (overdispersion): real model-vs-model
+    games share a latent matchup strength, so the games within one suspect are CORRELATED and the
+    EFFECTIVE n is < the nominal n (``n_eff ≈ n / (1 + (n-1)·rho)``). This is the same effect that
+    made the mirror need 240 not 200 — the correlated sweep re-prices every threshold under it."""
+    tp = min(1.0 - 1e-9, max(1e-9, float(true_p)))
+    if rho <= 0.0:
+        return rng.binomial(n, tp, size=trials)
+    a = tp * (1.0 - rho) / rho
+    b = (1.0 - tp) * (1.0 - rho) / rho
+    p_eff = rng.beta(a, b, size=trials)
+    return rng.binomial(n, p_eff)
+
+
+def hof_snapshot_veto_rate(true_p: float, n_games: int, *, z: float = 1.96,
+                           trials: int = 20000, seed: int = 0, rho: float = 0.0) -> float:
+    """P(a SINGLE HoF suspect at true win-rate ``true_p`` is VETOED) = P(wilson_upper(wins,n,z)
+    < 0.50). For ``true_p < 0.5`` this is the per-snapshot CATCH power (detecting a real weak
+    suspect / RPS counter); for ``true_p >= 0.5`` it is the per-snapshot FALSE-reject rate."""
+    rng = np.random.default_rng(seed)
+    wins = _draw_wins(rng, true_p, n_games, trials, rho)
+    return float(np.mean(_wilson_upper_vec(wins, n_games, z) < 0.5))
+
+
+def hof_reject_rate(true_ps, n_games: int, *, z: float = 1.96, min_games: int = 40,
+                    trials: int = 20000, seed: int = 0, rho: float = 0.0) -> float:
+    """P(the HoF gate REJECTS) for a suspect set with true win-rates ``true_ps``, each played
+    ``n_games``. The gate rejects iff ANY eligible (``n_games >= min_games``) suspect has
+    wilson_upper < 0.50 — EXACTLY ``hall_of_fame_gate``'s worst-of-snapshots rule (P2.2). Joint
+    Monte-Carlo (so the correlated variant composes). A planted set ``[0.20, 0.55, 0.55, ...]``
+    gives the CATCH rate; an all-honest set ``[0.55]*M`` gives the FAMILY-WISE false-reject rate."""
+    rng = np.random.default_rng(seed)
+    rejected = np.zeros(int(trials), dtype=bool)
+    if n_games < min_games:                      # no eligible suspect can veto → never rejects
+        return 0.0
+    for tp in true_ps:
+        wins = _draw_wins(rng, tp, n_games, trials, rho)
+        rejected |= (_wilson_upper_vec(wins, n_games, z) < 0.5)
+    return float(np.mean(rejected))
+
+
+def hof_bandmean_veto_rate(true_ps_in_band, n_per_snap: int, *, z: float = 1.96,
+                           trials: int = 20000, seed: int = 0, rho: float = 0.0) -> float:
+    """The OLD per-BAND-MEAN rule the design REJECTED: pool a band's snapshots into ONE
+    (wins, games) and veto iff the band MEAN's wilson_upper < 0.50. This exists ONLY as the
+    regression-guard for the core design decision — it shows P(catch) ≈ 0 for a single hidden
+    counter (one 0.20 among 0.55 fodder), which is why the gate MUST be per-snapshot."""
+    rng = np.random.default_rng(seed)
+    total = np.zeros(int(trials), dtype=np.int64)
+    for tp in true_ps_in_band:
+        total += _draw_wins(rng, tp, n_per_snap, trials, rho).astype(np.int64)
+    games = len(list(true_ps_in_band)) * n_per_snap
+    return float(np.mean(_wilson_upper_vec(total, games, z) < 0.5))
+
+
+def mirror_promote_rate(true_p: float, n_games: int, *, threshold: float = 0.55,
+                        z: float = 1.645, trials: int = 20000, seed: int = 0,
+                        rho: float = 0.0) -> float:
+    """P(the v2 ``beat_champion`` bar fires) at true mirror win-rate ``true_p`` over ``n_games``:
+    observed >= ``threshold`` AND the normal-approx lower CI ``p - z*sqrt(p(1-p)/n) > 0.5`` —
+    IDENTICAL to ``promotion_gate_v2``'s mirror branch (a fidelity test pins it). ``true_p == 0.5``
+    ⇒ FALSE-promote rate; ``> 0.5`` ⇒ power. The 0.70→0.55 recalibration reads its n off this."""
+    rng = np.random.default_rng(seed)
+    wins = _draw_wins(rng, true_p, n_games, trials, rho)
+    p = wins / n_games
+    lower = p - z * np.sqrt(p * (1.0 - p) / max(1, n_games))
+    return float(np.mean((p >= threshold) & (lower > 0.5)))
+
+
+def mirror_collapse_rate(true_p: float, n_games: int, *, z: float = 1.645, margin: float = 0.05,
+                         trials: int = 20000, seed: int = 0, rho: float = 0.0) -> float:
+    """P(the mirror-collapse REVERT fires) = P(wilson_upper(wins,n,z) < 0.50 - ``margin``) at true
+    mirror win-rate ``true_p`` (the learner's win-rate vs its own FROZEN champion). ``true_p`` near
+    0.5 (a freshly re-anchored, healthy learner restarting ~even vs the new champion) ⇒ the
+    FALSE-revert rate, which MUST be ~0; ``true_p`` well below 0.5 (a genuinely eroded learner) ⇒
+    the catch rate. Picks ``mirror_collapse_margin`` so a healthy learner is never reverted."""
+    rng = np.random.default_rng(seed)
+    wins = _draw_wins(rng, true_p, n_games, trials, rho)
+    return float(np.mean(_wilson_upper_vec(wins, n_games, z) < (0.5 - margin)))
+
+
+def force_valve_rate(suspect_true_p: float, n_per_snap: int, *, force_limit: int = 4,
+                     z: float = 1.96, marginal_cut: float = 0.40, marginal_stat: str = "point",
+                     n_gens: int = 40, trials: int = 2000, seed: int = 0) -> dict:
+    """Calibrate the plateau-reanchor FORCE valve under a PERSISTENT weak suspect. Each gen the
+    HoF tests one suspect held at ``suspect_true_p``; count CONSECUTIVE vetoes (wilson_upper<0.5);
+    after ``force_limit`` consecutive vetoes, FORCE the re-anchor ONLY if the worst suspect is
+    MARGINAL — ``marginal_stat`` ∈ {'point' (observed p), 'lower' (wilson_lower)} ``>= marginal_cut``.
+    A CATASTROPHIC suspect (below the cut) must NEVER force (freeze + alert per the user). Returns
+    mean force events/run + the fraction of runs that ever forced — so 'marginal mild hole advances
+    within the limit' vs 'catastrophic hole never advances' is visible, and the marginal statistic
+    can be chosen (the originally-specified wilson_lower>=0.45 is degenerate — a vetoed suspect's
+    lower CI is almost always < 0.45, so the split must sit lower / on the point estimate)."""
+    rng = np.random.default_rng(seed)
+    forces = 0
+    runs_forced = 0
+    for _ in range(int(trials)):
+        streak = 0
+        forced_this_run = False
+        for _g in range(int(n_gens)):
+            wins = int(rng.binomial(n_per_snap, max(1e-9, min(1 - 1e-9, suspect_true_p))))
+            vetoed = wilson_upper_bound(wins, n_per_snap, z) < 0.5
+            stat = (wins / n_per_snap) if marginal_stat == "point" \
+                else wilson_lower_bound(wins, n_per_snap, z)
+            streak = streak + 1 if vetoed else 0
+            if streak >= force_limit:
+                if stat >= marginal_cut:            # marginal hole → force-advance
+                    forces += 1
+                    forced_this_run = True
+                streak = 0                          # reset the window after the decision point
+        runs_forced += int(forced_this_run)
+    return {"mean_forces": forces / trials, "frac_runs_forced": runs_forced / trials}
+
+
 # ── demo (no server / torch): print the calibration tables ────────────────────
 def _demo(trials: int = 30000, seed: int = 0) -> None:
     ops = [
@@ -217,6 +355,59 @@ def _demo(trials: int = 30000, seed: int = 0) -> None:
     print("    → at n=60 the bar FALSE-promotes the plateaued-60% policy (noise hits 70%) AND")
     print("      the detector FALSE-fires on the climbing one. At n=240 the bar only fires for")
     print("      the genuine climber and the backstop only fires on the real plateau.")
+    print("===========================================================================")
+    _demo_p21(trials, seed)
+
+
+def _demo_p21(trials: int = 20000, seed: int = 0) -> None:
+    """P2.1 — HoF veto + 0.55 mirror + mirror-collapse + force-valve calibration tables. These
+    pick the LOCKED numbers wired in P2.2: HoF z=1.96/n=60/<=6 suspects; mirror thr=0.55/n=360;
+    mirror-collapse margin=0.05/n=360; force valve simplified to freeze+alert (the marginal
+    auto-advance window is empty at the HoF's n)."""
+    t = min(int(trials), 20000)
+    print("\n== P2.1 — HoF / mirror-0.55 / collapse calibration (Monte-Carlo) ==========")
+    tps = [0.20, 0.30, 0.40, 0.50, 0.55, 0.60]
+    print("  (1) HoF PER-SNAPSHOT veto rate  z=1.96  (true<0.5 = CATCH, >=0.5 = false-reject):")
+    print("      n   |" + "".join(f"{p:>7.2f}" for p in tps))
+    for n in (40, 60, 80, 120):
+        print(f"      {n:<4}|" + "".join(
+            f"{hof_snapshot_veto_rate(p, n, z=1.96, trials=t, seed=seed)*100:6.1f}%" for p in tps))
+    catch = hof_reject_rate([0.20, 0.60, 0.60, 0.60, 0.60, 0.60], 60, z=1.96, trials=t, seed=seed)
+    band = hof_bandmean_veto_rate([0.20, 0.60, 0.60, 0.60, 0.60, 0.60], 60, z=1.96, trials=t, seed=seed)
+    print(f"\n  (2) REGRESSION GUARD (one 0.20 counter among five 0.60, n=60): per-snapshot catch "
+          f"{catch*100:.1f}%  vs  band-mean {band*100:.1f}%")
+    print("      → band-mean is BLIND to a hidden counter; the gate MUST be per-snapshot.")
+    print("\n  (3) FAMILY-WISE false-reject (M=6) + CATCH under correlation rho:")
+    print(f"      {'rho':>6} {'catch@0.30':>11} {'FWER@0.55':>10} {'FWER@0.50':>10}")
+    for rho in (0.0, 0.002, 0.005, 0.01):
+        print(f"      {rho:6.3f} "
+              f"{hof_snapshot_veto_rate(0.30,60,z=1.96,trials=t,seed=seed,rho=rho)*100:10.1f}% "
+              f"{hof_reject_rate([0.55]*6,60,z=1.96,trials=t,seed=seed,rho=rho)*100:9.1f}% "
+              f"{hof_reject_rate([0.50]*6,60,z=1.96,trials=t,seed=seed,rho=rho)*100:9.1f}%")
+    print("      → LOCKED: z=1.96, n=60/suspect, <=6 suspects — robust to rho<=~0.005.")
+    mtps = [0.50, 0.55, 0.58, 0.60, 0.65]
+    print("\n  (4) MIRROR 0.55 bar promote-rate  thr=0.55 z=1.645  (0.50 col = false-promote):")
+    print("      n   |" + "".join(f"{p:>7.2f}" for p in mtps))
+    for n in (240, 300, 360, 500):
+        print(f"      {n:<4}|" + "".join(
+            f"{mirror_promote_rate(p, n, threshold=0.55, z=1.645, trials=t, seed=seed)*100:6.1f}%"
+            for p in mtps))
+    print("      → LOCKED: threshold=0.55, n=360 (FP ~3%, pow@0.58 ~89%); true-0.55 ~50%/gen (~2 gens).")
+    print("      → correlation-sensitive (FP rises with rho) — laterals are absorbed by the HoF + collapse-revert.")
+    ctps = [0.50, 0.48, 0.45, 0.42, 0.40, 0.35, 0.30]
+    print("\n  (5) MIRROR-COLLAPSE revert  z=1.645 bar wilson_upper<0.45  (~0.5 = false-revert MUST be ~0):")
+    print("      n   |" + "".join(f"{p:>7.2f}" for p in ctps))
+    for n in (240, 360):
+        print(f"      {n:<4}|" + "".join(
+            f"{mirror_collapse_rate(p, n, z=1.645, margin=0.05, trials=t, seed=seed)*100:6.1f}%"
+            for p in ctps))
+    print("      → LOCKED: margin=0.05 (bar 0.45), n=360 (false-revert@0.50 ~0%, catch@0.35 ~99%).")
+    fzero = force_valve_rate(0.30, 60, force_limit=4, marginal_cut=0.0, n_gens=40, trials=2000, seed=seed)
+    fcut = force_valve_rate(0.30, 60, force_limit=4, marginal_cut=0.40, n_gens=40, trials=2000, seed=seed)
+    print(f"\n  (6) FORCE-VALVE (weak 0.30 suspect, n=60): cut=0.0 forces "
+          f"{fzero['frac_runs_forced']*100:.0f}% of runs, cut=0.40 forces {fcut['frac_runs_forced']*100:.0f}%.")
+    print("      → FINDING: a persistently-vetoed suspect is ALWAYS point<0.40 (catastrophic); the")
+    print("        marginal auto-advance window is EMPTY at n=60 → SIMPLIFY to freeze+alert+--hof-override.")
     print("===========================================================================")
 
 

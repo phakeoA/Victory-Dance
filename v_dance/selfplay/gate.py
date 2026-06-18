@@ -42,6 +42,22 @@ def wilson_lower_bound(wins: int, games: int, z: float = 1.645) -> float:
     return max(0.0, (centre - margin) / denom)
 
 
+def wilson_upper_bound(wins: int, games: int, z: float = 1.645) -> float:
+    """Wilson score interval UPPER bound — the symmetric sibling of ``wilson_lower_bound``.
+    Used by the HoF breadth veto (P2.2): a suspect is PROVEN losing only when its win-rate's
+    UPPER CI sits below 0.50, and by the mirror-collapse revert (learner significantly worse than
+    its own frozen champion). Returns 1.0 for no games (no evidence ⇒ cannot prove a loss).
+    Mirrors ``wilson_lower_bound`` exactly with ``+margin`` instead of ``-margin``."""
+    if games <= 0:
+        return 1.0
+    p = wins / games
+    z2 = z * z
+    denom = 1.0 + z2 / games
+    centre = p + z2 / (2.0 * games)
+    margin = z * math.sqrt(p * (1.0 - p) / games + z2 / (4.0 * games * games))
+    return min(1.0, (centre + margin) / denom)
+
+
 # ── legacy gate (scripted ladder + prev_best head-to-head) ────────────────────
 @dataclass
 class GateConfig:
@@ -132,14 +148,23 @@ class GateConfigV2:
     """Frozen-champion ladder (the user's 'static until proven' design, calibrated on gate_sim).
     The champion stays FROZEN until the candidate clears a HIGH observed bar vs it, OR a PLATEAU
     backstop fires because the climb genuinely stalled. Collapse-revert is the safety net."""
-    promote_threshold: float = 0.70     # observed mirror win-rate vs champion to crown a new one
+    promote_threshold: float = 0.55     # observed mirror win-rate vs champion to crown a new one
+                                        # (P2.1: 0.70->0.55 — promote on CONVINCING, not crushing, improvement;
+                                        #  leans on the HoF breadth veto to catch lateral RPS promotes)
     promote_z: float = 1.645            # the mirror rate's lower CI must also exceed 0.5 (sig. guard)
-    min_h2h_games: int = 200            # need >= this many mirror games to trust the bar (sim floor)
+    min_h2h_games: int = 360            # need >= this many mirror games to trust the bar (P2.1 sim: the
+                                        # 0.55 bar needs ~360 to hold false-promote ~3%; was 200 for 0.70)
     floor_margin: float = 0.06          # scripted may sit this far below high-water before "collapse"
     floor_z: float = 1.645             # significance band for the collapse test
     plateau_window: int = 5            # gens of h2h history per plateau-comparison window
     plateau_margin: float = 0.01       # recent window must beat prior by > this to be "still rising"
     plateau_not_losing: float = 0.5    # backstop only re-anchors if the plateau is at/above this
+    # mirror-collapse revert (P2.1): the learner eroded significantly BELOW its own frozen champion — a real
+    # degradation the scripted floor can miss. Reverts to champion (reuses the scripted-collapse wiring).
+    mirror_collapse_margin: float = 0.05   # revert if wilson_upper(mirror) < 0.5 - this (bar 0.45)
+    mirror_collapse_z: float = 1.645       # significance band for the mirror-collapse test
+    mirror_collapse_min_games: int = 360   # need >= this many mirror games so a freshly-re-anchored learner
+                                           # (~50% vs the new champion) is never falsely reverted (sim: ~0%)
 
 
 def promotion_gate_v2(*, scripted_wins: int, scripted_games: int,
@@ -179,18 +204,31 @@ def promotion_gate_v2(*, scripted_wins: int, scripted_games: int,
     enough = mirror_games >= cfg.min_h2h_games
     beats_bar = enough and p_mir >= cfg.promote_threshold and mir_lower > 0.5
 
+    # Mirror-collapse: the learner has eroded significantly BELOW its own frozen champion (a real
+    # degradation the scripted floor can miss). Wilson UPPER bound < 0.5 - margin = "provably worse
+    # than the champion", needing >= mirror_collapse_min_games so a freshly re-anchored learner
+    # (~50% vs the new, stronger champion) is never falsely reverted (P2.1 sim: false-revert@0.50 ~0%).
+    mir_upper = wilson_upper_bound(mirror_wins, mirror_games, cfg.mirror_collapse_z) \
+        if mirror_games > 0 else 1.0
+    mirror_enough = mirror_games >= cfg.mirror_collapse_min_games
+    mirror_collapsed = mirror_enough and mir_upper < (0.5 - cfg.mirror_collapse_margin)
+
     plateaued = is_plateau(h2h_history, cfg.plateau_window, cfg.plateau_margin)
     backstop = plateaued and (p_mir >= cfg.plateau_not_losing) and not beats_bar
 
     stats = {
         "scripted": {"p": p_scr, "upper_ci": scr_upper, "floor": floor, "collapsed": collapsed},
-        "mirror": {"p": p_mir, "lower_ci": mir_lower, "n": mirror_games,
-                   "enough_games": enough, "beats_bar": beats_bar},
+        "mirror": {"p": p_mir, "lower_ci": mir_lower, "upper_ci": mir_upper, "n": mirror_games,
+                   "enough_games": enough, "beats_bar": beats_bar, "collapsed": mirror_collapsed},
         "plateau": {"detected": plateaued, "not_losing": p_mir >= cfg.plateau_not_losing,
                     "backstop": backstop},
     }
+    # Priority: safety reverts first (scripted collapse, then mirror collapse — both restore the
+    # champion), then the high bar, then the stall backstop, else hold.
     if collapsed:
         verdict, reason = "revert", "scripted_collapse"
+    elif mirror_collapsed:
+        verdict, reason = "revert", "mirror_collapse"
     elif beats_bar:
         verdict, reason = "promote", "beat_champion"
     elif backstop:
@@ -199,6 +237,90 @@ def promotion_gate_v2(*, scripted_wins: int, scripted_games: int,
         verdict, reason = "hold", "hold"
     stats["reason"] = reason
     return verdict, stats
+
+
+# ── Hall-of-Fame anti-cycle gate (Phase 2 — breadth veto on a mirror-promote) ──
+@dataclass
+class HoFConfig:
+    """Phase-2 Hall-of-Fame breadth veto (docs/hof_anticycle_design.md). On a v2 mirror-promote
+    the candidate must ALSO not be PROVEN losing to any of its last ``n_champions`` PAST CHAMPIONS
+    (accepted promotions, EXCLUDING the current champion the mirror already tests). This catches
+    LINEAGE CYCLING — a candidate that beats the current champion but loses to an OLDER champion =
+    the accepted lineage isn't monotonic improvement, it's an RPS cycle (the 'G5 promoted backward
+    over G4' failure that motivated the v2 redesign). Past champions are the STRONG milestones and
+    are spread across training eras, so the set is naturally diverse. Numbers locked in P2.1."""
+    enabled: bool = True
+    n_champions: int = 5             # the candidate must not-lose to its last N past champions (excl. current)
+    games_per_snapshot: int = 60     # mirror games vs each sampled past champion
+    min_games_per_snap: int = 40     # below this a suspect is reported but CANNOT veto (no noise-freeze)
+    z: float = 1.96                  # veto significance band (P2.1: halves per-snapshot false-reject)
+    min_pool: int = 2                # need >= this many PAST-CHAMPION suspects to render a veto, else SKIP
+                                     # (fail-open — early in a run there are too few promotions to cycle)
+    force_limit: int = 4             # consecutive hof-rejects of a plateau_reanchor -> freeze + operator alert
+                                     # (P2.1: the auto-advance 'marginal' window is empty at n=60 -> alert only)
+    override: bool = False           # operator escape (--hof-override): let HoF-rejected promotes through
+                                     # (still EVALUATED + logged loudly) to release a frozen catastrophic standoff
+
+
+def cluster_hof_suspects(snapshots, *, n: int = 5, current_champion_path=None):
+    """Pick the HoF suspect set = the candidate's PAST CHAMPIONS (accepted promotions) — the
+    STRONG milestones of its own lineage — EXCLUDING the current champion (the v2 mirror already
+    tests it 360 games deep). Requiring the candidate to not-lose to its prior ``n`` champions
+    directly catches LINEAGE CYCLING (beats the current champion but loses to an older one). Past
+    champions are promoted across training time, so the set is naturally era-diverse AND strong
+    (each one cleared the bar — a sharper test than a held non-champion gen). Returns the most-
+    recent ``n`` past champions, NEWEST first. Pure — works on any object with ``.generation``,
+    ``.is_champion``, ``.snapshot_id``, ``.path``.
+
+    The current champion is dropped by ``current_champion_path`` when given (exact, the wiring
+    knows ``history.best_path``); otherwise the highest-generation champion is treated as current.
+    The gate (``hall_of_fame_gate``) only sees ``(id, wins, games)`` — never how the suspects were
+    chosen — so swapping the selection (e.g. add diverse non-champions later) touches THIS fn only."""
+    champs = [s for s in snapshots if getattr(s, "is_champion", False)]
+    if not champs:
+        return []
+    champs = sorted(champs, key=lambda s: (s.generation, s.snapshot_id))
+    if current_champion_path is not None:
+        champs = [s for s in champs if s.path != current_champion_path]
+    else:
+        champs = champs[:-1]                       # drop the latest-gen champion = the current one
+    return list(reversed(champs[-max(0, int(n)):]))   # the most-recent n past champions, newest first
+
+
+def hall_of_fame_gate(snap_results, *, cfg: HoFConfig = HoFConfig()) -> Tuple[str, dict]:
+    """The HoF breadth VETO (pure). ``snap_results`` = list of ``(snapshot_id, wins, games)`` for
+    the sampled suspects. Returns ``("confirm" | "reject" | "skip", stats)``:
+      * REJECT — ANY eligible (``games >= min_games_per_snap``) suspect is PROVEN losing, i.e. its
+        ``wilson_upper(wins, games, z) < 0.50`` (worst-of-snapshots; no band averaging — that washes
+        out a single hidden counter, the design's core finding).
+      * SKIP   — fewer than ``min_pool`` ELIGIBLE suspects: fail-open (== confirm), never block a
+        promote on absence of breadth evidence (a thin / champion-flooded pool).
+      * CONFIRM — otherwise (no suspect proven losing).
+    A suspect below the games floor is reported (for observability) but cannot veto."""
+    rows = []
+    eligible = 0
+    worst_id, worst_upper = None, 1.0
+    rejected = False
+    for sid, wins, games in snap_results:
+        wins, games = int(wins), int(games)
+        upper = wilson_upper_bound(wins, games, cfg.z)
+        lower = wilson_lower_bound(wins, games, cfg.z)
+        can_veto = games >= cfg.min_games_per_snap
+        eligible += int(can_veto)
+        vetoed = can_veto and upper < 0.5
+        rejected = rejected or vetoed
+        if upper < worst_upper:
+            worst_upper, worst_id = upper, sid
+        rows.append({"snapshot_id": sid, "wins": wins, "games": games,
+                     "wilson_lower": lower, "wilson_upper": upper,
+                     "eligible": can_veto, "vetoed": vetoed})
+    if eligible < cfg.min_pool:
+        return "skip", {"reason": "thin_pool_skip", "eligible": eligible,
+                        "min_pool": cfg.min_pool, "n_suspects": len(rows), "suspects": rows}
+    verdict = "reject" if rejected else "confirm"
+    return verdict, {"reason": "hof_reject" if rejected else "hof_confirm",
+                     "eligible": eligible, "worst_snapshot_id": worst_id,
+                     "worst_upper": worst_upper, "n_suspects": len(rows), "suspects": rows}
 
 
 # ── gauntlet-result aggregation ───────────────────────────────────────────────
@@ -231,12 +353,13 @@ class GenerationRecord:
     promoted: bool
     update_stats: dict = field(default_factory=dict)
     champion_elo: Optional[float] = None     # the champion-LINEAGE Elo as of this gen (non-saturating)
+    hof: Optional[dict] = None               # the Phase-2 HoF breadth-veto result this gen (None = not run)
 
     def to_obj(self) -> dict:
         return {"generation": self.generation, "n_trajectories": self.n_trajectories,
                 "scripted_wins": self.scripted_wins, "scripted_games": self.scripted_games,
                 "model_elo": self.model_elo, "verdict": self.verdict,
-                "promoted": self.promoted, "champion_elo": self.champion_elo,
+                "promoted": self.promoted, "champion_elo": self.champion_elo, "hof": self.hof,
                 "update_stats": {k: v for k, v in self.update_stats.items()
                                  if isinstance(v, (int, float))}}
 
@@ -247,7 +370,7 @@ class GenerationRecord:
                    scripted_games=int(d.get("scripted_games", 0)),
                    model_elo=d.get("model_elo"), verdict=d.get("verdict", "hold"),
                    promoted=bool(d.get("promoted", False)),
-                   champion_elo=d.get("champion_elo"),
+                   champion_elo=d.get("champion_elo"), hof=d.get("hof"),
                    update_stats=d.get("update_stats", {}))
 
 
@@ -261,6 +384,7 @@ class GenerationHistory:
     h2h_history: List[float] = field(default_factory=list)  # per-gen observed mirror win-rate since
                                                             # the champion was last frozen (plateau input)
     champion_elo: Optional[float] = None            # champion-LINEAGE Elo (rises each promote; non-saturating)
+    hof_reject_streak: int = 0                       # consecutive HoF-rejected promotes (force-valve + alert)
 
     @property
     def generation(self) -> int:
@@ -307,7 +431,8 @@ class GenerationHistory:
         return {"records": [r.to_obj() for r in self.records], "best_path": self.best_path,
                 "best_scripted": list(self.best_scripted),
                 "scripted_high_water": self.scripted_high_water,
-                "h2h_history": list(self.h2h_history), "champion_elo": self.champion_elo}
+                "h2h_history": list(self.h2h_history), "champion_elo": self.champion_elo,
+                "hof_reject_streak": self.hof_reject_streak}
 
     @classmethod
     def from_obj(cls, d: dict) -> "GenerationHistory":
@@ -316,7 +441,8 @@ class GenerationHistory:
                    best_scripted=tuple(d.get("best_scripted", (0, 0))),
                    scripted_high_water=d.get("scripted_high_water"),
                    h2h_history=list(d.get("h2h_history", [])),
-                   champion_elo=d.get("champion_elo"))
+                   champion_elo=d.get("champion_elo"),
+                   hof_reject_streak=int(d.get("hof_reject_streak", 0)))
 
 
 # ── generation config ─────────────────────────────────────────────────────────
@@ -326,15 +452,19 @@ class GenConfig:
     warmup_updates: int = 5       # critic-only warm-up updates on the FIRST generation
     gate: GateConfig = field(default_factory=GateConfig)            # legacy gate (use_prev_best toggle)
     gate_v2: GateConfigV2 = field(default_factory=GateConfigV2)     # the live frozen-champion gate
+    hof: "HoFConfig" = field(default_factory=lambda: HoFConfig())   # Phase-2 HoF breadth veto (wired in P2.4)
     league_cap: int = 20          # max league snapshots (sec 16; diversity-aware eviction)
     keep_recent: int = 6          # snapshots always kept regardless of the cap
 
 
 # ── operator alert (unattended-run watchdog, sec 16) ──────────────────────────
-def operator_alert(history, *, revert_limit: int = 3, stall_limit: int = 25) -> Optional[str]:
-    """Surface a loud ALERT for an UNATTENDED run: a COLLAPSE LOOP (>= ``revert_limit`` consecutive
-    REVERTs) or a long champion STALL (no promotion in >= ``stall_limit`` gens). Returns the alert
-    text or None. Pure (reads ``history.records``) so the live loop just prints it; tested offline."""
+def operator_alert(history, *, revert_limit: int = 3, stall_limit: int = 25,
+                   hof_standoff_limit: int = 2) -> Optional[str]:
+    """Surface a loud ALERT for an UNATTENDED run, with a 3-WAY taxonomy so a freeze is never
+    ambiguous: a COLLAPSE LOOP (>= ``revert_limit`` consecutive REVERTs), a HoF STANDOFF (>=
+    ``hof_standoff_limit`` consecutive HoF-rejected promotes — a lineage cycle the champion is
+    frozen against), or a long generic champion STALL (no promotion in >= ``stall_limit`` gens).
+    Returns the alert text or None. Pure (reads ``history``) so the live loop just prints it."""
     recs = getattr(history, "records", None) or []
     if not recs:
         return None
@@ -347,6 +477,11 @@ def operator_alert(history, *, revert_limit: int = 3, stall_limit: int = 25) -> 
     if streak >= revert_limit:
         return (f"OPERATOR ALERT: {streak} consecutive REVERTs — collapse loop; consider "
                 f"stopping / lowering the LR.")
+    hof_streak = int(getattr(history, "hof_reject_streak", 0) or 0)
+    if hof_streak >= hof_standoff_limit:
+        return (f"OPERATOR ALERT: {hof_streak} consecutive HoF rejects — the candidate keeps beating "
+                f"the champion but LOSES to a PAST champion (a lineage cycle). The champion is frozen; "
+                f"re-run with --hof-override to force the advance if that's intended.")
     since = next((i for i, r in enumerate(reversed(recs)) if r.promoted), len(recs))
     if since >= stall_limit:
         return (f"OPERATOR ALERT: champion frozen {since} gens (no promotion) — check the h2h "

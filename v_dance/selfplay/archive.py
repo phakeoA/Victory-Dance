@@ -102,6 +102,7 @@ def build_manifest(history, league=None) -> dict:
             "win_rate_delta": wr_delta,
             "is_best": wr is not None and (best_wr_so_far is None or wr >= best_wr_so_far),
             "is_champion": (champ_gen is not None and r.generation == champ_gen),
+            "hof": getattr(r, "hof", None),     # Phase-2 breadth-veto result (None = HoF didn't run)
         })
         if r.model_elo is not None:
             prev_elo = r.model_elo

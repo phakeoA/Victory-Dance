@@ -102,8 +102,8 @@ class _FakeTrainer:
 
 def test_run_generation_passes_champion_path_and_promotes_on_bar_clear():
     """run_generation (v2 gate) passes the CHAMPION (best_path) to the eval as the mirror anchor,
-    and promotes (beat_champion) when the candidate clears the 70% bar over >= 200 mirror games —
-    advancing the champion and resetting the head-to-head history."""
+    and promotes (beat_champion) when the candidate clears the 0.55 bar over >= min_h2h_games (360)
+    mirror games — advancing the champion and resetting the head-to-head history."""
     from v_dance.selfplay.generation import run_generation, GenConfig, GenerationHistory
     league = _FakeLeague()
     history = GenerationHistory()
@@ -114,9 +114,9 @@ def test_run_generation_passes_champion_path_and_promotes_on_bar_clear():
 
     def eval_fn(path, prev_best_path):
         seen["prev_best_path"] = prev_best_path
-        # healthy scripted + the candidate beats the champion 180/240 (>=70%, >=min_h2h_games)
+        # healthy scripted + the candidate beats the champion 270/360 (0.75 >= 0.55, >= min_h2h_games)
         return ({"random": (60, 67), "max_damage": (60, 67), "heuristic": (60, 66),
-                 "prev_best": (180, 240)}, 1500.0)
+                 "prev_best": (270, 360)}, 1500.0)
 
     rep = run_generation(object(), _FakeTrainer(), league, history,
                          collect_fn=lambda ac, lg, gen: ([], {}),

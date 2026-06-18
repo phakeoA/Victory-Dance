@@ -117,3 +117,83 @@ def test_reanchor_valve_caps_the_gap():
                                      reanchor_every=8, seed=5)
     assert no_valve["advances"] <= 1 and no_valve["frozen"]   # true edge 0 ⇒ bar ~never fires
     assert valve["forced"] >= 5 and valve["max_gap"] <= 8     # valve advances every ~8 gens
+
+
+# ── P2.1: HoF veto + 0.55 mirror recalibration + mirror-collapse + force valve ──
+def test_wilson_vecs_match_scalar_gate_impl():
+    """The sim's vectorised Wilson bounds MUST equal gate.py's scalar ones, so the calibration
+    can never drift from the real gate's decision rule (the fidelity invariant)."""
+    import numpy as np
+    from v_dance.selfplay.gate import wilson_lower_bound, wilson_upper_bound
+    wins = np.array([0, 10, 30, 45, 60, 90, 120])
+    for n, z in [(120, 1.96), (240, 1.645)]:
+        up = GS._wilson_upper_vec(wins, n, z)
+        lo = GS._wilson_lower_vec(wins, n, z)
+        for i, w in enumerate(wins):
+            assert up[i] == pytest.approx(wilson_upper_bound(int(w), n, z), abs=1e-9)
+            assert lo[i] == pytest.approx(wilson_lower_bound(int(w), n, z), abs=1e-9)
+
+
+def test_hof_snapshot_catch_monotone_and_calibrated():
+    catch = [GS.hof_snapshot_veto_rate(p, 60, z=1.96, trials=8000, seed=1)
+             for p in (0.20, 0.30, 0.40, 0.50)]
+    assert catch[0] > catch[1] > catch[2] > catch[3]              # weaker suspect ⇒ more catch
+    assert catch[0] > 0.95                                        # a 0.20 counter is almost always caught
+    assert GS.hof_snapshot_veto_rate(0.30, 60, z=1.96, trials=8000, seed=1) > 0.85    # ≥85% @0.30
+    assert GS.hof_snapshot_veto_rate(0.50, 60, z=1.96, trials=20000, seed=1) < 0.05   # low false-reject
+    assert GS.hof_snapshot_veto_rate(0.60, 60, z=1.96, trials=8000, seed=1) < 0.02
+
+
+def test_hof_per_snapshot_beats_bandmean_on_hidden_counter():
+    """THE design-decision regression guard: one 0.20 counter hidden among 0.60 fodder is caught
+    ~always per-snapshot but is INVISIBLE to the rejected band-mean rule."""
+    suspects = [0.20, 0.60, 0.60, 0.60, 0.60, 0.60]
+    assert GS.hof_reject_rate(suspects, 60, z=1.96, trials=8000, seed=2) > 0.95
+    assert GS.hof_bandmean_veto_rate(suspects, 60, z=1.96, trials=8000, seed=2) < 0.05
+
+
+def test_hof_min_games_floor_blocks_veto():
+    # below the min-games floor an underpowered suspect cannot veto (no noise-freeze)
+    assert GS.hof_reject_rate([0.20], 30, z=1.96, min_games=40, trials=4000, seed=3) == 0.0
+    assert GS.hof_reject_rate([0.20], 60, z=1.96, min_games=40, trials=4000, seed=3) > 0.9
+
+
+def test_hof_family_false_reject_bounded_and_correlation_inflates():
+    iid = GS.hof_reject_rate([0.55] * 6, 60, z=1.96, trials=20000, seed=4, rho=0.0)
+    corr = GS.hof_reject_rate([0.55] * 6, 60, z=1.96, trials=20000, seed=4, rho=0.005)
+    assert iid < 0.05                       # a realistic 0.55-vs-ancestors candidate rarely false-rejects
+    assert corr > iid                       # correlated games lower effective n ⇒ more false-reject
+
+
+def test_mirror_promote_rate_matches_v2_gate_and_recalibrates():
+    from v_dance.selfplay.gate import promotion_gate_v2, GateConfigV2
+    cfg = GateConfigV2(promote_threshold=0.55, promote_z=1.645, min_h2h_games=360)
+    n = 360
+    for wins in (190, 200, 210, 230):
+        p = wins / n
+        sim = (p >= 0.55) and (p - 1.645 * (p * (1 - p) / n) ** 0.5 > 0.5)
+        _, st = promotion_gate_v2(scripted_wins=140, scripted_games=180, high_water=0.55,
+                                  mirror_wins=wins, mirror_games=n, h2h_history=[0.5],
+                                  have_champion=True, cfg=cfg)
+        assert sim == st["mirror"]["beats_bar"], f"mismatch at wins={wins}"
+    assert GS.mirror_promote_rate(0.50, 360, threshold=0.55, trials=20000, seed=5) < 0.06   # FP modest
+    assert GS.mirror_promote_rate(0.60, 360, threshold=0.55, trials=8000, seed=5) > 0.9      # strong power
+
+
+def test_mirror_collapse_never_false_reverts_but_catches_erosion():
+    assert GS.mirror_collapse_rate(0.50, 360, z=1.645, margin=0.05, trials=20000, seed=6) < 0.01
+    assert GS.mirror_collapse_rate(0.48, 360, z=1.645, margin=0.05, trials=20000, seed=6) < 0.02
+    assert GS.mirror_collapse_rate(0.35, 360, z=1.645, margin=0.05, trials=8000, seed=6) > 0.9
+    assert GS.mirror_collapse_rate(0.30, 360, z=1.645, margin=0.05, trials=8000, seed=6) > 0.98
+
+
+def test_force_valve_marginal_window_empty_at_n60():
+    """A persistently-vetoed suspect is always point<0.40 (catastrophic), so the marginal auto-
+    advance never fires at the HoF's n — the sim that justified simplifying the valve to
+    freeze+alert+--hof-override."""
+    catastrophic = GS.force_valve_rate(0.30, 60, force_limit=4, marginal_cut=0.40,
+                                       marginal_stat="point", n_gens=40, trials=1500, seed=7)
+    allmarginal = GS.force_valve_rate(0.30, 60, force_limit=4, marginal_cut=0.0,
+                                      marginal_stat="point", n_gens=40, trials=1500, seed=7)
+    assert catastrophic["frac_runs_forced"] == 0.0      # never force-advances a real counter
+    assert allmarginal["frac_runs_forced"] > 0.9        # mechanism works when everything is 'marginal'
