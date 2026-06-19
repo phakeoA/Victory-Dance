@@ -54,11 +54,14 @@ class PotentialShaper(nn.Module):
     """Frozen Phi: a separate snapshot of ``trunk + value_head`` scaled by ``coef``.
     ``Phi(s) = coef*(2*sigmoid(value_logit) - 1)`` ∈ [-coef, coef]; ``Phi(terminal) = 0``."""
 
-    def __init__(self, trunk: nn.Module, value_head: nn.Module, coef: float = 0.2,
-                 device: str = "cpu"):
+    def __init__(self, trunk: nn.Module = None, value_head: nn.Module = None, coef: float = 0.2,
+                 device: str = "cpu", critic_net: nn.Module = None):
         super().__init__()
         self.trunk = trunk
         self.value_head = value_head
+        # #23 shared_trunk: when the critic has no trunk/value_head pair (attn AttnCritic),
+        # hold the whole frozen value module and read its forward win-logit instead.
+        self.critic_net = critic_net
         self.coef = float(coef)
         self.device = device
         self.to(device).eval()
@@ -68,8 +71,14 @@ class PotentialShaper(nn.Module):
     @classmethod
     def from_critic(cls, critic, coef: float = 0.2, device: str = "cpu") -> "PotentialShaper":
         """Snapshot Phi from the (BC-calibrated) critic — a DEEP COPY, so Phi is frozen
-        and independent of the critic that keeps training (sec 4)."""
-        shaper = cls(copy.deepcopy(critic.trunk), copy.deepcopy(critic.value_head), coef, device)
+        and independent of the critic that keeps training (sec 4). Arch-aware: the flat
+        Critic exposes trunk+value_head; the attn AttnCritic does not, so deep-copy the
+        whole critic and read its value forward (default-OFF PBRS must not crash on attn)."""
+        if hasattr(critic, "trunk"):
+            shaper = cls(trunk=copy.deepcopy(critic.trunk),
+                         value_head=copy.deepcopy(critic.value_head), coef=coef, device=device)
+        else:
+            shaper = cls(critic_net=copy.deepcopy(critic), coef=coef, device=device)
         assert id(shaper) != id(critic), "Phi must be a SEPARATE module from the critic (sec 5)"
         return shaper
 
@@ -77,7 +86,10 @@ class PotentialShaper(nn.Module):
     def phi(self, states) -> torch.Tensor:
         t = states if torch.is_tensor(states) else torch.as_tensor(
             np.asarray(states, np.float32), device=self.device)
-        z = self.value_head(self.trunk(t)).squeeze(-1)
+        if self.critic_net is not None:                    # attn shared_trunk critic
+            z = self.critic_net(t)
+        else:
+            z = self.value_head(self.trunk(t)).squeeze(-1)
         return self.coef * (2.0 * torch.sigmoid(z) - 1.0)
 
     def phi_values(self, states) -> np.ndarray:

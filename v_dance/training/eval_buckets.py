@@ -99,26 +99,12 @@ def expected_calibration_error(
     return ece, table
 
 
-# ── Checkpoint load (in-package, mirrors local_battle/model_io) ────────────────
+# ── Checkpoint load (delegates to the canonical attn-only model_io loader) ─────
 def _load_policy(ckpt_path: str, device: str = "cpu"):
     import torch
-    from v_dance.models.bc_model import BCPolicy
-    from v_dance.encoders.state_encoder import get_gimmick_dim
-    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
-    cfg = ckpt["config"]
-    model = BCPolicy(
-        state_dim=cfg["state_dim"],
-        action_dim=cfg["action_dim"],
-        hidden_dims=tuple(cfg.get("hidden_dims", (512, 256))),
-        dropout=cfg.get("dropout", 0.0),
-        heads=tuple(cfg.get("heads", HEADS)),
-        gimmick_dim=cfg.get("gimmick_dim", get_gimmick_dim()),
-        gimmick_heads=cfg.get("gimmick_heads"),
-    )
-    state = ckpt["model_state"]
-    has_gimmick = any(k.startswith("gimmick_heads.") for k in state)
-    model.load_state_dict(state, strict=has_gimmick)
-    model.to(device).eval()
+    from v_dance.play.model_io import load_bc_policy
+    cfg = torch.load(ckpt_path, map_location=device, weights_only=False).get("config", {})
+    model, _heads = load_bc_policy(ckpt_path, device=device)
     return model, cfg
 
 

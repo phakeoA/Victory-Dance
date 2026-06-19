@@ -42,6 +42,7 @@ if sys.platform == "win32":
 from poke_env import AccountConfiguration
 from v_dance.play.player import VGCPlayer              # local_battle/player.py (spliced)
 from v_dance.play.random_player import RandomVGCPlayer  # local_battle/random_player.py (spliced)
+from v_dance import formats                            # single source of truth for the active format
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -66,7 +67,7 @@ log = logging.getLogger(__name__)
 CHAMPIONS_DIR  = _REPO_ROOT / "teams" / "Champions"
 TEAM_FILE      = CHAMPIONS_DIR / "M-A" / "team1"        # TrainerRed
 TEAM_FILE_2    = CHAMPIONS_DIR / "M-A" / "WolfeGlick"   # TrainerBlue
-BATTLE_FORMAT  = "gen9championsvgc2026regma"
+BATTLE_FORMAT  = formats.DEFAULT_FORMAT   # active Champions-doubles reg (M-B); env/registry-driven, see v_dance/formats.py
 N_BATTLES_DEFAULT = 1
 
 SHOWDOWN_DIR   = _REPO_ROOT / "pokemon-showdown"
@@ -304,12 +305,32 @@ _NON_TEAM_SUFFIXES = {".json", ".md", ".py", ".gitkeep", ".gitignore", ".lock",
                       ".yml", ".yaml", ".txt"}
 
 
-def discover_teams(root: Path | None = None) -> list[str]:
+def _reg_team_subdir(base: Path, fmt: str | None) -> Path | None:
+    """The teams/Champions/<reg> subfolder matching ``fmt`` (regmb -> 'M-B'), or
+    None if there's no matching subfolder."""
+    from v_dance.formats import reg_token
+    tok = reg_token(fmt)
+    if not tok:
+        return None
+    want = tok[3:]                              # 'regmb' -> 'mb'
+    for d in base.iterdir() if base.exists() else []:
+        if d.is_dir() and "".join(c for c in d.name.lower() if c.isalnum()) == want:
+            return d
+    return None
+
+
+def discover_teams(root: Path | None = None, reg: str | None = None) -> list[str]:
     """Every team paste under ``teams/Champions/`` (recursively), so the training pool
     auto-grows as M-A/M-B (or any future reg) folders are filled in — drop a file in,
     no code change. Returns repo-relative POSIX paths, sorted; READMEs / json / hidden
-    files are skipped. Pass ``root`` to scan a different directory (used by tests)."""
+    files are skipped. Pass ``root`` to scan a different directory (used by tests).
+    Pass ``reg`` (a format id) to RESTRICT to that reg's subfolder when one exists —
+    so a backwards-compat (older-reg) run never draws a newer-reg team illegal in it."""
     base = Path(root) if root is not None else CHAMPIONS_DIR
+    if reg and root is None:                    # filter the default pool to the reg's subdir
+        sub = _reg_team_subdir(base, reg)
+        if sub is not None:
+            base = sub
     out: list[str] = []
     if not base.exists():
         return out
@@ -354,6 +375,37 @@ def load_team(path: Path) -> str:
         sys.exit(1)
     log.info("Loaded team from %s", path.resolve())
     return text
+
+
+def pick_team_files(initialdir=None) -> list[str]:
+    """Native OS multi-select file picker for team pastes (Ctrl/Shift-click for several).
+    Returns repo-relative POSIX paths, or [] on cancel / unavailable so the caller can fall
+    back. SHARED by the gauntlet (``--pick-teams``) and the self-play eval
+    (``--pick-eval-teams``) — pick a strategy showcase (perish trap / sand / rain / sun)
+    to score + spectate. Opens once at launch; the tkinter import is lazy (no GUI cost
+    unless used)."""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        idir = str(initialdir or CHAMPIONS_DIR)
+        sel = filedialog.askopenfilenames(
+            title="Select team files (Ctrl/Shift-click for multiple)",
+            initialdir=idir if Path(idir).exists() else None)
+        root.destroy()
+        out: list[str] = []
+        for p in sel:
+            pp = Path(p)
+            try:
+                out.append(pp.relative_to(_REPO_ROOT).as_posix())
+            except ValueError:                       # outside the repo -> absolute
+                out.append(str(pp))
+        return out
+    except Exception as exc:
+        print(f"[warn] team file picker unavailable ({exc}); falling back.")
+        return []
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -527,7 +579,7 @@ async def run(
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Run local VGC Reg M-A battles (gap-#6 splice).")
+    p = argparse.ArgumentParser(description="Run local VGC Reg M-B battles (gap-#6 splice).")
     p.add_argument("--battles", "-n", type=int, default=N_BATTLES_DEFAULT)
     p.add_argument("--format", "-f", default=BATTLE_FORMAT, dest="battle_format")
     p.add_argument("--team1", default=TEAM_FILE,
@@ -548,7 +600,18 @@ def parse_args() -> argparse.Namespace:
 if __name__ == "__main__":
     args = parse_args()
     _configure_logging(args.verbose)
-    BATTLE_FORMAT = args.battle_format
+    # Select the format for this process (parity with generation/gauntlet) so the
+    # belief resolver follows --format too.
+    if not formats.is_champions_doubles(args.battle_format):
+        raise SystemExit(f"--format {args.battle_format!r} is not a Champions-doubles id "
+                         f"(known: {formats.known_formats()})")
+    _newest = formats.DEFAULT_FORMAT
+    formats.set_active_format(args.battle_format)
+    BATTLE_FORMAT = formats.DEFAULT_FORMAT
+    if args.battle_format != _newest:
+        log.warning("Running NON-default format %s (newest=%s) — the default team pool "
+                    "spans all regs; pin --team/--team1/--team2 to a %s-legal team.",
+                    args.battle_format, _newest, args.battle_format)
     # --team (if given) forces both players onto one team; otherwise each player
     # uses its own --team1 / --team2 (distinct by default).  Each accepts a team
     # NAME (resolved under teams/M-A/) or a path.

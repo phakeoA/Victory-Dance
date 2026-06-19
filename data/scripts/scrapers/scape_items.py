@@ -23,7 +23,14 @@ TARGET_URL   = "https://www.serebii.net/pokemonchampions/items.shtml"
 
 _SCRIPT_DIR = Path(__file__).resolve().parent          # data/scripts/scrapers/
 OUTPUT_DIR  = _SCRIPT_DIR.parents[2] / "data"          # <project_root>/data/
-OUTPUT_FILE = OUTPUT_DIR / "serebii_champions_items.json"
+# Per-reg output (Serebii's page is single + tracks the CURRENT reg). The active
+# format's reg by default; --reg overrides in __main__.
+try:
+    from v_dance.formats import default_format as _default_format, reg_token as _reg_token
+    _DEFAULT_REG = _reg_token(_default_format()) or "regmb"
+except Exception:
+    _DEFAULT_REG = "regmb"
+OUTPUT_FILE = OUTPUT_DIR / f"serebii_champions_items_{_DEFAULT_REG}.json"
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -116,8 +123,8 @@ def parse_markdown_items(markdown_text: str) -> list[dict]:
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
-async def main() -> None:
-    print(f"[scrape] Fetching Serebii items via Markdown from {TARGET_URL}...")
+async def main(reg: str = "regmb") -> None:
+    print(f"[scrape] Fetching Serebii [{reg}] items via Markdown from {TARGET_URL}...")
     
     browser_conf = _make_browser_config()
     run_conf = _make_run_config()
@@ -135,6 +142,7 @@ async def main() -> None:
         
         output_payload = {
             "game": "pokemonchampions",
+            "reg": reg,                       # Serebii's page is single + shows the CURRENT reg; tag explicitly
             "scraped_at": datetime.now(timezone.utc).isoformat(),
             "items": valid_items
         }
@@ -148,4 +156,29 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    import argparse
+    ap = argparse.ArgumentParser(
+        description="Scrape Serebii [Pokémon Champions] items for a regulation. NOTE: "
+                    "Serebii's page is a SINGLE page that shows the CURRENT reg (no per-reg "
+                    "URL), so --reg only sets the output name + tag — run it while the page "
+                    "is showing the reg you want. Output: serebii_champions_items_<reg>.json."
+    )
+    ap.add_argument("--format", "--reg", default=None, dest="reg",
+                    help="Reg/format to tag the scrape (e.g. gen9championsvgc2026regmb or "
+                         "regmb). Default: the active format.")
+    args = ap.parse_args()
+
+    reg = args.reg
+    if reg is None:
+        try:
+            from v_dance.formats import default_format, reg_token
+            reg = reg_token(default_format()) or "regmb"
+        except Exception:
+            reg = "regmb"
+    else:
+        _m = re.search(r"(reg[a-z0-9]+)", reg)
+        reg = _m.group(1) if _m else reg
+
+    OUTPUT_FILE = OUTPUT_DIR / f"serebii_champions_items_{reg}.json"
+    print(f"[config] reg={reg}  output={OUTPUT_FILE.name}")
+    asyncio.run(main(reg))

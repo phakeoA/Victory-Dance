@@ -1,11 +1,18 @@
 {
     "formats": [
         {
+            "name": "[Gen 9 Champions] VGC 2026 Reg M-B",
+            "id": "gen9championsvgc2026regmb",
+            "generation": 9,
+            "game_type": "doubles",
+            "active": true
+        },
+        {
             "name": "[Gen 9 Champions] VGC 2026 Reg M-A",
             "id": "gen9championsvgc2026regma",
             "generation": 9,
             "game_type": "doubles",
-            "active": true
+            "active": false
         }
     ]
 }

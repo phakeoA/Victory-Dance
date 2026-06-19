@@ -110,8 +110,15 @@ _SCRIPTS_DIR = str(Path(__file__).resolve().parent)
 from v_dance.parser.vod_parser.pokedex import get_pokedex, norm_species
 from v_dance.parser.vod_parser.transitions import _inject_known_stats
 
-# Default Pikalytics path: belief_state.py lives at v_dance/parser/ → repo data/
-_DEFAULT_PIKALYTICS_PATH = Path(__file__).resolve().parents[2] / "data" / "pikalytics_regma.json"
+# Default Pikalytics path — resolved per the ACTIVE format (v_dance/formats.py),
+# falling back to the canonical M-A file so a newly-added reg's belief prior is
+# never silently zeroed (M-A ⊂ M-B). Auto-upgrades to pikalytics_<reg>.json once
+# that reg's data is scraped (task 17.4).
+from v_dance.formats import pikalytics_path_for as _pikalytics_path_for  # noqa: E402
+_DEFAULT_PIKALYTICS_PATH = (
+    _pikalytics_path_for()
+    or Path(__file__).resolve().parents[2] / "data" / "pikalytics_regma.json"
+)
 
 
 # ── Stat formula helpers ───────────────────────────────────────────────────────
@@ -253,7 +260,12 @@ class BeliefState:
     likely moveset, item, ability, and EV spread for any meta Pokémon.
     """
 
-    def __init__(self, json_path: str | Path = "pikalytics_regma.json"):
+    def __init__(self, json_path: str | Path | None = None):
+        # None -> resolve the ACTIVE format's belief via the format resolver
+        # (falls back to the canonical M-A file), so the no-arg ctor is not pinned
+        # to one reg.
+        if json_path is None:
+            json_path = _pikalytics_path_for() or _DEFAULT_PIKALYTICS_PATH
         self._path = Path(json_path)
         with self._path.open(encoding="utf-8") as f:
             raw = json.load(f)
@@ -330,16 +342,41 @@ class BeliefState:
         """Usage percentage [0, 100] for this species (0.0 if we have no Pikalytics data).
         A species-level prior, available identically at train and serve (15b-feat.1)."""
         entry = self._entry(species)
-        return float(entry.get("usage_pct", 0.0)) if entry else 0.0
+        # ``usage_pct`` can be present-but-null in scraped data (e.g. teammate-only entries
+        # in pikalytics_regmb.json) — ``.get(k, 0.0)`` returns None there, so coerce with
+        # ``or 0.0`` (matches usage_ranking's guard). Without this the SBDA usage feature
+        # (15b) crashes on real M-B mons. float() of None -> TypeError.
+        return float((entry.get("usage_pct") if entry else None) or 0.0)
 
     def teammates(self, species: str, top_k: int = 16) -> list[dict]:
-        """[{"name": teammate, "p": pct/100}, ...] — the species' most common teammates (co-occurrence
-        prior). Used for the team-preview attention bias (15b-feat.1b)."""
+        """[{"name": teammate, "p": weight}, ...] — the species' most common teammates (co-occurrence
+        prior), strongest first.  Used for the team-preview attention bias (15b-feat.1b).
+
+        Two scraped schemas, both supported (or this KeyErrors on the active M-B belief): M-A entries are
+        {name, pct} (a co-occurrence %); the M-B Pikalytics page dropped the % so the 17.3 scraper emits
+        {name, rank} (#1..#N ordering only).  ``p`` = pct/100 when present, else a monotone rank proxy
+        ``1/rank`` (rank1->1.0, rank10->0.1) so the {name, p} contract teammate_affinity_matrix consumes
+        holds for both regs; the prior degrades to a rank ordering on M-B, not a crash."""
         entry = self._entry(species)
         if not entry:
             return []
-        tm = sorted(entry.get("teammates", []), key=lambda x: x["pct"], reverse=True)
-        return [{"name": t["name"], "p": round(t["pct"] / 100.0, 4)} for t in tm[:top_k]]
+
+        def _weight(t: dict) -> float:
+            pct = t.get("pct")
+            if pct is not None:
+                return float(pct) / 100.0
+            rank = t.get("rank")
+            return 1.0 / float(rank) if rank else 0.0
+
+        def _sort_key(t: dict):
+            pct = t.get("pct")
+            if pct is not None:
+                return -float(pct)            # higher pct = stronger (first)
+            rank = t.get("rank")
+            return float(rank) if rank else float("inf")   # lower rank = stronger (first)
+
+        tm = sorted(entry.get("teammates", []), key=_sort_key)
+        return [{"name": t["name"], "p": round(_weight(t), 4)} for t in tm[:top_k]]
 
     def top_spread(self, species: str) -> tuple[str, list[int]]:
         """
@@ -1174,11 +1211,12 @@ def fill_blanks(
 
     needs_belief = "distribution" in fill_modes.values()
     if needs_belief and belief is None:
-        if _DEFAULT_PIKALYTICS_PATH.exists():
-            belief = BeliefState(_DEFAULT_PIKALYTICS_PATH)
+        _pika = _pikalytics_path_for() or _DEFAULT_PIKALYTICS_PATH   # resolve active format fresh
+        if _pika and _pika.exists():
+            belief = BeliefState(_pika)
         else:
             warnings.append(
-                f"No BeliefState supplied and {_DEFAULT_PIKALYTICS_PATH} missing "
+                f"No BeliefState supplied and {_pika} missing "
                 f"— distribution fill skipped"
             )
 

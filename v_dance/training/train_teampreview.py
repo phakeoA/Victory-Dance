@@ -36,9 +36,11 @@ from v_dance.training.teampreview_dataset import (  # noqa: E402
     BRING_K,
     LEAD_K,
     MON_FEAT_DIM,
+    TEAM_SIZE,
     TeamPreviewDataset,
     build_vocab,
     examples_from_folders,
+    feature_recipe,
     print_stats,
     split_by_replay,
 )
@@ -87,8 +89,12 @@ def run_epoch(model, loader, device, optimizer=None) -> Dict[str, float]:
             bring = batch["bring"].to(device)
             lead = batch["lead"].to(device)
             valid = batch["valid_bring"].to(device)
+            # 15b-train.1: the teammate-bias prior (None unless the SBDA dataset precomputed it).
+            our_aff = batch.get("our_affinity")
+            if our_aff is not None:
+                our_aff = our_aff.to(device)
 
-            bring_logits, lead_logits = model(our_idx, opp_idx, our_feat, opp_feat)
+            bring_logits, lead_logits = model(our_idx, opp_idx, our_feat, opp_feat, our_aff)
 
             # lead head: every example. bring head: only valid_bring rows.
             lead_loss = F.binary_cross_entropy_with_logits(lead_logits, lead)
@@ -134,9 +140,37 @@ def train(args: argparse.Namespace) -> dict:
     folders = list(args.data)
     if args.type_a:
         folders.extend(args.type_a)
+
+    # 15b-train.1: choose the per-mon feature recipe + (for the teammate-bias) the affinity provider.
+    # 'legacy' = the original 46-dim dex net (no belief, no schema -> byte-identical). 'sbda' = the
+    # shared tp_features extractor (FEAT_DIM, stamped feature_schema) — needs the SAME Pikalytics belief
+    # the serve path resolves, so train==serve. teammate-bias only acts inside self-attention.
+    belief = None
+    affinity_fn = None
+    if args.features == "sbda":
+        from v_dance.parser.belief_state import BeliefState
+        from v_dance.formats import pikalytics_path_for, default_format
+        fmt = args.format or default_format()
+        belief_path = Path(args.belief) if args.belief else pikalytics_path_for(fmt)
+        if not (belief_path and Path(belief_path).exists()):
+            raise SystemExit(f"[train_teampreview] --features sbda needs a Pikalytics belief; "
+                             f"missing for {fmt}: {belief_path}")
+        belief = BeliefState(belief_path)
+        if args.teammate_bias and not args.self_attn:
+            print("[train_teampreview] --teammate-bias requires self-attention (the bias acts inside "
+                  "it) -> enabling --self-attn")
+            args.self_attn = True
+        if args.teammate_bias:
+            from v_dance.training.tp_features import teammate_affinity_matrix
+            affinity_fn = lambda sp: teammate_affinity_matrix(sp, belief, n=TEAM_SIZE)  # noqa: E731
+        print(f"[train_teampreview] features=sbda belief={Path(belief_path).name} "
+              f"self_attn={args.self_attn} cross_attn={args.cross_attn} "
+              f"teammate_bias={args.teammate_bias}")
+    feat_fn, feat_dim, feature_schema = feature_recipe(args.features, belief)
+
     print(f"[train_teampreview] loading from: {folders}")
     t0 = time.time()
-    examples, stats = examples_from_folders(folders, limit_files=args.limit_files)
+    examples, stats = examples_from_folders(folders, limit_files=args.limit_files, feat_fn=feat_fn)
     print_stats(stats)
     print(f"[train_teampreview] {len(examples)} examples in {time.time()-t0:.1f}s")
     if not examples:
@@ -149,18 +183,24 @@ def train(args: argparse.Namespace) -> dict:
           f"({len({e['replay_id'] for e in train_ex})} / "
           f"{len({e['replay_id'] for e in val_ex})} replays)")
 
-    train_loader = DataLoader(TeamPreviewDataset(train_ex, vocab),
-                              batch_size=args.batch_size, shuffle=True)
-    val_loader = DataLoader(TeamPreviewDataset(val_ex, vocab),
-                            batch_size=args.batch_size, shuffle=False)
+    train_loader = DataLoader(
+        TeamPreviewDataset(train_ex, vocab, feat_dim=feat_dim, affinity_fn=affinity_fn),
+        batch_size=args.batch_size, shuffle=True)
+    val_loader = DataLoader(
+        TeamPreviewDataset(val_ex, vocab, feat_dim=feat_dim, affinity_fn=affinity_fn),
+        batch_size=args.batch_size, shuffle=False)
 
     model = build_model(
         vocab_size=len(vocab) + 1,   # +1 for the reserved PAD id 0
-        feat_dim=MON_FEAT_DIM,
+        feat_dim=feat_dim,
         emb_dim=args.emb_dim,
         hidden=args.hidden,
         dropout=args.dropout,
         device=device,
+        use_self_attn=args.self_attn,
+        use_cross_attn=args.cross_attn,
+        attn_heads=args.attn_heads,
+        use_teammate_bias=args.teammate_bias,
     )
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr,
                                  weight_decay=args.weight_decay)
@@ -170,7 +210,7 @@ def train(args: argparse.Namespace) -> dict:
     ckpt_path = out_dir / "teampreview_best.pt"
     config = {
         "vocab_size": len(vocab) + 1,
-        "feat_dim": MON_FEAT_DIM,
+        "feat_dim": feat_dim,
         "emb_dim": args.emb_dim,
         "hidden": args.hidden,
         "dropout": args.dropout,
@@ -179,7 +219,17 @@ def train(args: argparse.Namespace) -> dict:
         "lr": args.lr,
         "data": folders,
         "patience": args.patience,
+        # 15b-train.1: architecture + feature-recipe stamps so model_io.load_team_chooser rebuilds the
+        # exact net and uses_tp_features/the lockstep guard select the matching SERVE recipe. The
+        # feature_schema is stamped ONLY for SBDA (legacy carries none -> uses_tp_features False).
+        "use_self_attn": bool(args.self_attn),
+        "use_cross_attn": bool(args.cross_attn),
+        "attn_heads": args.attn_heads,
+        "use_teammate_bias": bool(args.teammate_bias),
+        "features": args.features,
     }
+    if feature_schema:
+        config["feature_schema"] = feature_schema
 
     best = -1.0
     epochs_no_improve = 0
@@ -223,6 +273,20 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap.add_argument("--type-a", nargs="+", default=None,
                     help="extra folder(s) to append (deduped). Type A is already in "
                          "the default --data; use only for ad-hoc extra data.")
+    # 15b-train.1: feature recipe + SBDA architecture (defaults reproduce the original legacy net)
+    ap.add_argument("--features", choices=["legacy", "sbda"], default="legacy",
+                    help="per-mon feature recipe: 'legacy' 46-dim dex (default) or 'sbda' tp_features")
+    ap.add_argument("--self-attn", action="store_true",
+                    help="SBDA: self-attention over our 6 (makes the synergy tags interact)")
+    ap.add_argument("--cross-attn", action="store_true",
+                    help="SBDA: our mons cross-attend to the opponent's 6")
+    ap.add_argument("--attn-heads", type=int, default=4)
+    ap.add_argument("--teammate-bias", action="store_true",
+                    help="SBDA: Pikalytics co-occurrence prior as a self-attn bias (implies --self-attn)")
+    ap.add_argument("--format", default=None,
+                    help="format whose Pikalytics belief feeds SBDA features (default: active format)")
+    ap.add_argument("--belief", default=None,
+                    help="explicit Pikalytics json for SBDA features (default: --format's resolved file)")
     ap.add_argument("--epochs", type=int, default=40)
     ap.add_argument("--batch-size", type=int, default=128)
     ap.add_argument("--lr", type=float, default=1e-3)

@@ -355,17 +355,58 @@ def build_train_configs(*, kl_coef: float = 0.5, target_kl_bc: Optional[float] =
     return ppo, train
 
 
-def resolve_train_pool(spec):
+def resolve_train_pool(spec, reg=None):
     """Expand the TRAINING-team spec into a concrete pool (task 3c.7b). ``["all"]`` (the
-    default) or any spec containing ``"all"`` => EVERY team under ``teams/Champions/``
-    (the archetype-rich draw, sec 15 — auto-includes M-B teams as they're added);
-    otherwise the given names/paths are used verbatim. Explicit specs need no torch /
-    poke-env import (so the expansion is unit-testable offline)."""
+    default) or any spec containing ``"all"`` => the LEGAL teams for ``reg`` under
+    ``teams/Champions/``; otherwise the given names/paths are used verbatim. Explicit
+    specs need no torch / poke-env import (so the expansion is unit-testable offline).
+
+    LEGALITY FILTER (``reg``): a run must only draw teams its FORMAT can field. M-A teams
+    are legal in every Champions reg (M-A ⊆ M-B), but M-B teams carry M-B-only mons/items
+    that an M-A server REJECTS. So an M-A run gets M-A teams only; an M-B run gets M-A + M-B.
+    ``reg=None`` falls back to the active default format. (Fixes the "M-A run drew M-B teams"
+    team-rejected popups.)"""
     spec = list(spec) if spec else ["all"]
     if any(str(s).lower() == "all" for s in spec):
         import v_dance.play.run_local_battle as R   # lazy: pulls poke_env
-        return R.discover_teams()
+        from v_dance.formats import reg_token, default_format
+        fmt = reg or default_format()
+        pool = set(R.discover_teams(reg=fmt))            # this reg's own subfolder
+        if reg_token(fmt) != "regma":                    # M-A base is legal in every reg upward
+            pool |= set(R.discover_teams(reg="gen9championsvgc2026regma"))
+        return sorted(pool)
     return spec
+
+
+def resolve_eval_pool(args):
+    """The EVAL team set — the controlled teams the gate scores AND you spectate each gen.
+    Priority: ``--teams`` (deprecated, overrides both) > ``--pick-eval-teams`` (native file
+    explorer) > ``--eval-teams-dir`` (a folder) > ``--eval-teams`` (the controlled default).
+    Then capped/sampled to ``--n-eval-teams`` (seeded by ``--seed``). Pick a strategy showcase
+    (perish trap / sand / rain / sun) to watch the AI handle specific archetypes in the
+    dashboard Spectate tab. The picker opens ONCE at launch."""
+    import random
+    if args.teams:                                       # deprecated explicit override (both pools)
+        return list(args.teams)
+    if getattr(args, "pick_eval_teams", False):
+        import v_dance.play.run_local_battle as R
+        pool = R.pick_team_files(R.CHAMPIONS_DIR)
+        if not pool:
+            print("[gen] no eval teams picked -> using the default controlled eval set.")
+            pool = list(args.eval_teams)
+    elif getattr(args, "eval_teams_dir", None):
+        import v_dance.play.run_local_battle as R
+        pool = R.discover_teams(root=Path(args.eval_teams_dir))
+        if not pool:
+            raise SystemExit(f"[gen] no team files found under --eval-teams-dir {args.eval_teams_dir}")
+    else:
+        pool = list(args.eval_teams)
+    n = getattr(args, "n_eval_teams", None)
+    if n and len(pool) > n:                              # sample N (seeded -> reproducible)
+        pool = sorted(random.Random(args.seed).sample(pool, n))
+    print(f"[gen] eval pool: {len(pool)} teams -> "
+          f"{', '.join(Path(t).name for t in pool[:10])}{' ...' if len(pool) > 10 else ''}")
+    return pool
 
 
 def tau_for_generation(gen: int, tau_start: float, tau_end: float,
@@ -873,8 +914,9 @@ def _launch_live(args):
         target_kl_max=args.target_kl_max)         # gen-0 tau; collect_fn re-sets per gen
     # train = full archetype-rich pool; eval = controlled set (sec 15). --teams (deprecated)
     # overrides BOTH with an explicit list.
-    train_pool = resolve_train_pool(args.teams if args.teams else args.train_teams)
-    eval_pool = list(args.teams) if args.teams else list(args.eval_teams)
+    train_pool = resolve_train_pool(args.teams if args.teams else args.train_teams,
+                                    reg=args.battle_format)
+    eval_pool = resolve_eval_pool(args)
     if not train_pool:
         print("[gen] no training teams found under teams/Champions/ — add team files "
               "or pass --train-teams <names>", file=sys.stderr)
@@ -1062,13 +1104,21 @@ if __name__ == "__main__":
                          "needs it). The scripted ladder stays at --eval-battles; only the mirror is bumped.")
     ap.add_argument("--warmup", type=int, default=5, help="critic-only warm-up updates (gen 0)")
     ap.add_argument("--ckpt", default=str(_REPO_ROOT / "ai_train_scripts" / "BC_model"
-                                          / "checkpoints" / "bc_best.pt"))
+                                          / "checkpoints_attn" / "bc_best.pt"))
     ap.add_argument("--train-teams", nargs="+", default=["all"],
                     help="TRAINING team pool: 'all' (default) = every team under "
                          "teams/Champions/ (archetype-rich draw, sec 15; auto-picks up "
                          "M-B teams as added); or explicit names/paths")
     ap.add_argument("--eval-teams", nargs="+", default=list(DEFAULT_EVAL_TEAMS),
                     help="controlled, side-balanced EVAL pool the gauntlet gate judges on")
+    ap.add_argument("--pick-eval-teams", action="store_true",
+                    help="pick the EVAL teams via the native OS file explorer (multi-select; "
+                         "Cancel falls back to the default eval set). Choose a strategy showcase "
+                         "(perish trap / sand / rain / sun) to score + SPECTATE each generation.")
+    ap.add_argument("--eval-teams-dir", default=None,
+                    help="use every team paste under this folder as the EVAL pool.")
+    ap.add_argument("--n-eval-teams", type=int, default=None,
+                    help="cap the EVAL pool to this many teams (sampled, seeded by --seed).")
     ap.add_argument("--teams", nargs="+", default=None,
                     help="(deprecated) set BOTH the train and eval pools to this explicit list")
     ap.add_argument("--team-chooser", default=str(_REPO_ROOT / "ai_train_scripts"
@@ -1176,7 +1226,23 @@ if __name__ == "__main__":
                          "logged loud) to release a frozen lineage-cycle standoff")
     ap.add_argument("--no-server", action="store_true")
     ap.add_argument("-v", "--verbose", action="store_true")
+    from v_dance import formats as _formats
+    ap.add_argument("--format", default=None, dest="battle_format",
+                    help="Champions-doubles format id to self-play (default: active = "
+                         f"{_formats.DEFAULT_FORMAT}). e.g. gen9championsvgc2026regma for M-A "
+                         "backwards-compat. SPAWN-SAFE: propagated to mp workers via env.")
     args = ap.parse_args()
+
+    # Select the format for THIS process AND its mp children (env-inherited) BEFORE
+    # any server starts or workers spawn.
+    if args.battle_format:
+        if not _formats.is_champions_doubles(args.battle_format):
+            raise SystemExit(f"--format {args.battle_format!r} is not a Champions-doubles id "
+                             f"(known: {_formats.known_formats()})")
+        _formats.set_active_format(args.battle_format)
+        import v_dance.play.run_local_battle as _R
+        _R.BATTLE_FORMAT = _formats.DEFAULT_FORMAT
+        print(f"[generation] active battle format: {_formats.DEFAULT_FORMAT}")
 
     if args.dry_run:
         _dry_run(args.generations, args.seed)

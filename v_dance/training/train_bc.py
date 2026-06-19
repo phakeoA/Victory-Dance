@@ -1,7 +1,7 @@
 """
 Behaviour-Cloning v0 trainer for Victory-Dance (VGC Reg M-A, doubles).
 
-Trains the two-head MLP policy (bc_model.BCPolicy) to imitate human actions
+Trains the two-head per-mon set-attention policy (bc_model_attn.AttnBCPolicy) to imitate human actions
 from parsed replays:
 
   * input  : 938-dim encoded state (state_before_actions)
@@ -49,7 +49,7 @@ from v_dance.training.bc_dataset import (  # noqa: E402
     print_stats,
     split_by_replay,
 )
-from v_dance.models.bc_model import build_model  # noqa: E402
+from v_dance.models.bc_model_attn import build_attn_model  # noqa: E402
 
 # Large negative used to mask illegal actions before softmax.  Finite (not
 # -inf) so an all-illegal row can't poison the backward pass; the dataset
@@ -434,12 +434,15 @@ def train(args: argparse.Namespace) -> dict:
         print(f"[train_bc] auxiliary opponent head: ON (heads={tuple(train_heads)}, "
               f"weight {args.aux_opp_weight})")
 
-    # ── Model / optimizer ─────────────────────────────────────────────────────
-    model = build_model(
+    # ── Model / optimizer (#27 attn-only: the per-mon set-attention AttnBCPolicy) ──
+    model = build_attn_model(
+        d_model=args.d_model,
+        n_heads=args.n_heads,
+        n_layers=args.n_layers,
+        dropout=args.dropout,
         heads=train_heads,
         gimmick_heads=list(HEADS),
-        hidden_dims=tuple(args.hidden),
-        dropout=args.dropout,
+        value_readout=args.value_readout,
         device=device,
     )
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -477,6 +480,9 @@ def train(args: argparse.Namespace) -> dict:
 
     from v_dance.encoders.state_encoder import get_state_layout_version
     config = {
+        # #27 attn-only: model_type drives model_io.load_bc_policy (now attn-only);
+        # the attn dims below let the loader rebuild the exact net.
+        "model_type": "attn",
         "state_dim": model.state_dim,
         "state_layout_version": get_state_layout_version(),
         "action_dim": model.action_dim,
@@ -487,7 +493,6 @@ def train(args: argparse.Namespace) -> dict:
         # gimmick head trained on pre-gimmick JSONL is at init and must NOT drive
         # live mega decisions (the serve player honours this flag).
         "gimmick_trained": bool(gcounts.sum() > 0),
-        "hidden_dims": list(args.hidden),
         "dropout": args.dropout,
         "heads": list(model.head_names),               # our (+ opp aux when on)
         "gimmick_heads": list(model.gimmick_head_names),
@@ -509,6 +514,13 @@ def train(args: argparse.Namespace) -> dict:
         "outcome_weight": bool(args.outcome_weight),
         "loss_weight": args.loss_weight,
     }
+    config.update({
+        "d_model": args.d_model,
+        "n_heads": args.n_heads,
+        "n_layers": args.n_layers,
+        "ff_mult": args.ff_mult,
+        "value_readout": args.value_readout,
+    })
 
     # ── Train loop (val-weighting OFF so val loss/acc stay true) ───────────────
     best_top1 = -1.0
@@ -573,8 +585,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap.add_argument("--batch-size", type=int, default=256)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--weight-decay", type=float, default=1e-4)
-    ap.add_argument("--hidden", type=int, nargs="+", default=[512, 256])
     ap.add_argument("--dropout", type=float, default=0.1)
+    # ── #27: the battle net is the per-mon set-attention AttnBCPolicy (attn-only) ──
+    ap.add_argument("--d-model", type=int, default=128, help="attn: per-mon token width")
+    ap.add_argument("--n-heads", type=int, default=4, help="attn: self-attention heads")
+    ap.add_argument("--n-layers", type=int, default=2, help="attn: self-attention layers")
+    ap.add_argument("--ff-mult", type=int, default=2, help="attn: feed-forward expansion")
+    ap.add_argument("--value-readout", choices=["mean", "concat_active", "cls_query"],
+                    default="mean", help="attn: value-head readout arm (#23 measured choice)")
     ap.add_argument("--class-weight", choices=["none", "balanced"], default="none",
                     help="weight the action loss by inverse class frequency to "
                          "counter majority-action bias (default: none)")
@@ -627,7 +645,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                     help="cap transitions read (smoke runs)")
     ap.add_argument("--limit-files", type=int, default=None,
                     help="cap JSONL files read (smoke runs)")
-    ap.add_argument("--out", default=str(_HERE.parents[1] / "ai_train_scripts" / "BC_model" / "checkpoints"),
+    ap.add_argument("--out", default=str(_HERE.parents[1] / "ai_train_scripts" / "BC_model" / "checkpoints_attn"),
                     help="checkpoint output directory")
     return ap.parse_args(argv)
 

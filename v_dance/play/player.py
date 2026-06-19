@@ -336,9 +336,22 @@ class VGCPlayer(VGCPlayerBase):
                             or getattr(battle, "opponent_team", {}).values())
             opp_species = [getattr(m, "species", None) for m in opp_team]
 
+            # An SBDA chooser (feature_schema=tpfeat-*) needs the SAME Pikalytics belief
+            # its synergy/teammate features were trained on; the legacy 46-dim net does
+            # not (and must not pay the belief-load cost).  Resolve the active-format
+            # belief lazily, warn (never silently) if it is unavailable.
+            belief = None
+            if _M.uses_tp_features(self._tc_cfg):
+                from v_dance.play.vgc_base import _default_belief
+                belief = _default_belief()
+                if belief is None:
+                    log.warning("Team-preview [%s]: SBDA chooser but NO belief available — "
+                                "synergy/usage features degrade to typing-only.",
+                                battle.battle_tag)
+
             order = _M.team_order(
                 self._team_chooser, self._tc_vocab, self._tc_cfg,
-                our_species, opp_species, n, self._device,
+                our_species, opp_species, n, self._device, belief=belief,
             )
             valid = [i for i in order if 0 <= i < len(team)]
             if valid and len(set(valid)) == len(valid):

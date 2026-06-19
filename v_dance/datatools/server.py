@@ -108,7 +108,13 @@ except ImportError:
     _StateEncoder = None  # type: ignore
 
 # ── Globals (loaded once at startup) ─────────────────────────────────────────
-_BELIEF_PATH = _PROJECT_ROOT / "data" / "pikalytics_regma.json"
+# Resolve the active format's belief file (falls back to the canonical M-A file);
+# the mtime-reload in _get_belief picks up a re-scrape live.
+try:
+    from v_dance.formats import pikalytics_path_for as _pika_for
+    _BELIEF_PATH = _pika_for() or (_PROJECT_ROOT / "data" / "pikalytics_regma.json")
+except Exception:
+    _BELIEF_PATH = _PROJECT_ROOT / "data" / "pikalytics_regma.json"
 
 _belief = None
 _belief_mtime = None

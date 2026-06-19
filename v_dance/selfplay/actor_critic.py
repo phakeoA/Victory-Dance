@@ -4,12 +4,12 @@ The first torch-bearing module in ``self_play``. Builds the PPO actor-critic by
 reusing the trained BC policy + value head (docs/ppo_reward_design.md sec 2 — the
 single biggest sample-efficiency lever):
 
-  * **Actor** = the loaded ``BCPolicy`` (trunk -> per-slot action heads + per-slot
-    gimmick heads). Its own ``value_head`` is VESTIGIAL here (the separate critic
-    owns the value function) and is excluded from the actor optimiser group.
-  * **Critic** = a *separate* deep-copy of ``trunk + value_head`` from the BC
-    weights. Decoupling protects the BCE-calibrated value surface from
-    policy-gradient drift / warm-start collapse (sec 2 default). ``id(critic) !=
+  * **Actor** = the loaded ``AttnBCPolicy`` (per-mon encoder + self-attention -> per-slot
+    action heads + per-slot gimmick heads). Its own ``value_head`` is VESTIGIAL here (the
+    separate critic owns the value function) and is excluded from the actor optimiser group.
+  * **Critic** = an ``AttnCritic``: a *separate* deep-copy of the whole AttnBCPolicy (its
+    value path is computed inside forward). Decoupling protects the BCE-calibrated value
+    surface from policy-gradient drift / warm-start collapse (sec 2 default). ``id(critic) !=
     id(actor)`` and the two share NO parameter tensors, so a critic update leaves
     the actor bit-identical and vice-versa.
 
@@ -39,48 +39,47 @@ import torch.nn as nn
 import v_dance.play.model_io as model_io
 
 
-class Critic(nn.Module):
-    """Separate value network: a clone of the BC ``trunk + value_head``.
+class AttnCritic(nn.Module):
+    """Separate value network for the AttnBCPolicy (#23 23-critic = ``shared_trunk``).
 
-    forward(x) -> (B,) raw win-LOGIT. ``winprob`` / ``value_pm`` map it to the two
-    use-time spaces (see module docstring). Holds its OWN parameter tensors (the
-    factory deep-copies the BC modules), so it optimises independently of the actor.
-    """
+    Holds a DEEP-COPY of the whole ``AttnBCPolicy`` and reads ``value = net(x)[2]``.
+    The attn value path needs the full mon-encoder + self-attention + global stack, so
+    a 'separable value head' would clone nearly the entire net anyway — and the deepcopy
+    gives DISJOINT parameter tensors (a critic step leaves the actor bit-identical and
+    vice-versa). forward(x) -> (B,) raw win-LOGIT; ``winprob`` / ``value_pm`` map it to the
+    two use-time spaces (see module docstring)."""
 
-    def __init__(self, trunk: nn.Module, value_head: nn.Module):
+    def __init__(self, net: nn.Module):
         super().__init__()
-        self.trunk = trunk
-        self.value_head = value_head
+        self.net = net
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.value_head(self.trunk(x)).squeeze(-1)  # (B,) raw win-logit
+        return self.net(x)[2]                               # (B,) raw win-logit
 
     def winprob(self, x: torch.Tensor) -> torch.Tensor:
-        """Win probability in [0,1] — the BCE critic target space + live readout."""
         return torch.sigmoid(self.forward(x))
 
     def value_pm(self, x: torch.Tensor) -> torch.Tensor:
-        """Value in [-1,1] (``2*sigmoid(logit)-1``) — the GAE baseline, matching the
-        +-1 terminal reward space (sec 1/3)."""
         return 2.0 * torch.sigmoid(self.forward(x)) - 1.0
 
 
-def _clone_critic(policy) -> Critic:
-    """Deep-copy ``trunk + value_head`` off the loaded BCPolicy into a fresh module.
+def _clone_critic(policy):
+    """Deep-copy the BC value surface into a fresh, decoupled critic module.
 
-    ``copy.deepcopy`` of an ``nn.Module`` allocates NEW parameter tensors with the
-    weights copied — so the critic starts identical to the BC value surface but is
-    fully decoupled from the actor's parameters."""
-    return Critic(copy.deepcopy(policy.trunk), copy.deepcopy(policy.value_head))
+    ``copy.deepcopy`` allocates NEW parameter tensors, so the critic starts identical to the
+    BC value surface but shares NO tensors with the actor (a critic step leaves the actor
+    bit-identical and vice-versa). The attn value path is computed INSIDE ``forward``, so the
+    critic deep-copies the WHOLE policy and reads ``net(x)[2]`` (the design's shared_trunk decision)."""
+    return AttnCritic(copy.deepcopy(policy))
 
 
 class ActorCritic(nn.Module):
     """PPO actor-critic = BC actor + a separate cloned critic (sec 2)."""
 
-    def __init__(self, policy, critic: Critic, head_names, gimmick_head_names,
+    def __init__(self, policy, critic: "AttnCritic", head_names, gimmick_head_names,
                  value_trained: bool):
         super().__init__()
-        self.policy = policy            # BCPolicy actor (action + gimmick heads)
+        self.policy = policy            # AttnBCPolicy actor (action + gimmick heads)
         self.critic = critic            # separate value net (sec 2 default)
         self.head_names: Tuple[str, ...] = tuple(head_names)
         self.gimmick_head_names: Tuple[str, ...] = tuple(gimmick_head_names)
@@ -151,21 +150,24 @@ class ActorCritic(nn.Module):
         restore (3c.3b revert / 3c.4 resume). ``config`` is reconstructed from the
         live policy + the current encoder layout."""
         from v_dance.encoders.state_encoder import get_state_layout_version
-        hidden = [m.out_features for m in self.policy.trunk if isinstance(m, nn.Linear)]
-        # Reconstruct dropout from the trunk: BCPolicy only INSERTS Dropout modules when
-        # dropout>0, so omitting it (default 0.0) rebuilds a dropout-free trunk whose
-        # module indices DON'T match a dropout-trained checkpoint's state_dict (the 2nd
-        # Linear lands at index 2 vs 3) -> load_state_dict fails. bc_best.pt has dropout=0.1.
-        dropout = next((float(m.p) for m in self.policy.trunk if isinstance(m, nn.Dropout)), 0.0)
+        p = self.policy
         cfg = {
-            "state_dim": self.policy.state_dim, "action_dim": self.policy.action_dim,
-            "hidden_dims": hidden, "dropout": dropout, "heads": list(self.head_names),
-            "gimmick_dim": self.policy.gimmick_dim,
+            "state_dim": p.state_dim, "action_dim": p.action_dim,
+            "gimmick_dim": p.gimmick_dim,
+            "heads": list(self.head_names),
             "gimmick_heads": list(self.gimmick_head_names),
-            "gimmick_trained": bool(getattr(self.policy, "_gimmick_trained", True)),
+            "gimmick_trained": bool(getattr(p, "_gimmick_trained", True)),
             "value_trained": bool(self.value_trained),
             "state_layout_version": get_state_layout_version(),
         }
+        # #27 attn-only: stamp the AttnBCPolicy arch so model_io rebuilds the exact net.
+        cfg["model_type"] = "attn"
+        cfg["d_model"] = p.d_model
+        cfg["n_heads"] = p.n_heads
+        cfg["n_layers"] = p.n_layers
+        cfg["ff_mult"] = p.ff_mult
+        cfg["dropout"] = p.dropout
+        cfg["value_readout"] = p.value_readout
         ck = {"model_state": self.policy.state_dict(), "config": cfg,
               "critic_state": self.critic.state_dict()}
         if generation is not None:

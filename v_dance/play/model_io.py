@@ -8,7 +8,7 @@ from ``config`` and ``load_state_dict``.  This module centralises that, plus the
 mask-aware decoding of the two-head battle policy and the team-preview scorer, so
 the logic is small, shared, and unit-testable in isolation (task #13).
 
-  battle:  load_bc_policy(path)         -> (BCPolicy, head_names)
+  battle:  load_bc_policy(path)         -> (AttnBCPolicy, head_names)
            bc_action_indices(model, heads, state_vec, mask0, mask1)
                -> (a0|None, a1|None)    # masked argmax per head, None if no legal
 
@@ -89,7 +89,7 @@ def masked_sample(
 
 # ── Battle policy (two-head BC) ───────────────────────────────────────────────
 def load_bc_policy(path, device: str = "cpu"):
-    """Rebuild the BCPolicy from a dict checkpoint and load its weights.
+    """Rebuild the AttnBCPolicy from a dict checkpoint and load its weights.
 
     Returns ``(model, head_names)``.  Back-compat: if ``path`` is a pickled
     nn.Module it is returned as-is with head_names=None.
@@ -104,7 +104,6 @@ def load_bc_policy(path, device: str = "cpu"):
             return ckpt, None
         raise ValueError(f"unrecognised BC checkpoint at {path}: {type(ckpt)}")
     cfg = ckpt.get("config", {})
-    from v_dance.models.bc_model import BCPolicy
     from v_dance.encoders.state_encoder import get_gimmick_dim, get_state_dim, get_state_layout_version
 
     # Stale-layout guard (#5): a checkpoint trained on an older tensor layout has a
@@ -128,16 +127,30 @@ def load_bc_policy(path, device: str = "cpu"):
             f"BC checkpoint state_layout_version={ckpt_ver} != current {cur_ver} "
             f"at {path} (same STATE_DIM but a different layout) — retrain required."
         )
-    model = BCPolicy(
+    # Attn-only (refactor #27): the per-mon set-attention AttnBCPolicy is THE production battle
+    # net; the flat BCPolicy was retired. A legacy flat checkpoint (no model_type=="attn") is no
+    # longer loadable — reject it loudly so the only fix (retrain on the attn arch) is unmistakable.
+    if cfg.get("model_type") != "attn":
+        raise ValueError(
+            f"BC checkpoint at {path} is not an attn checkpoint (config model_type="
+            f"{cfg.get('model_type')!r}). The flat BCPolicy was retired in the attn-only refactor "
+            f"(#27) — retrain on the attn architecture."
+        )
+    from v_dance.models.bc_model_attn import AttnBCPolicy
+    model = AttnBCPolicy(
         state_dim=cfg["state_dim"],
         action_dim=cfg["action_dim"],
-        hidden_dims=tuple(cfg.get("hidden_dims", (512, 256))),
+        gimmick_dim=cfg.get("gimmick_dim", get_gimmick_dim()),
+        d_model=cfg.get("d_model", 128),
+        n_heads=cfg.get("n_heads", 4),
+        n_layers=cfg.get("n_layers", 2),
+        ff_mult=cfg.get("ff_mult", 2),
         dropout=cfg.get("dropout", 0.0),
         heads=tuple(cfg.get("heads", ("our_a", "our_b"))),
-        gimmick_dim=cfg.get("gimmick_dim", get_gimmick_dim()),
         # Aux-opp checkpoints carry extra action heads but gimmick heads only for
         # the own slots — pass the saved set so the strict load matches.
         gimmick_heads=cfg.get("gimmick_heads"),
+        value_readout=cfg.get("value_readout", "mean"),
     )
     # A PRE-gimmick checkpoint has no ``gimmick_heads.*`` weights.  The model now
     # always carries gimmick heads, so load non-strictly for those old checkpoints
@@ -261,6 +274,20 @@ def load_team_chooser(path, device: str = "cpu"):
         raise ValueError(f"unrecognised team-chooser checkpoint at {path}")
     cfg = ckpt.get("config", {})
     vocab = ckpt.get("vocab", {})
+    # 15b-io.1 lockstep guard: an SBDA checkpoint declares feature_schema=tpfeat-vN; its
+    # feat_dim MUST match the current extractor so serving builds the SAME channels it was
+    # trained on (else the synergy tags silently zero-pad).  Fail at LOAD, like the BC
+    # stale-layout guard.  Legacy nets carry no schema → skipped → byte-identical.
+    if uses_tp_features(cfg):
+        from v_dance.training.tp_features import FEAT_DIM, FEATURE_SCHEMA_VERSION
+        schema = cfg.get("feature_schema")
+        if int(cfg.get("feat_dim", 0)) != FEAT_DIM or schema != FEATURE_SCHEMA_VERSION:
+            raise ValueError(
+                f"team-chooser checkpoint feature_schema={schema} (feat_dim={cfg.get('feat_dim')}) "
+                f"is out of lockstep with the current tp_features {FEATURE_SCHEMA_VERSION} "
+                f"(FEAT_DIM={FEAT_DIM}) at {path} — re-export + retrain the SBDA TP net on the "
+                f"current schema."
+            )
     from v_dance.models.teampreview_model import TeamPreviewModel
     model = TeamPreviewModel(
         vocab_size=cfg["vocab_size"],
@@ -279,13 +306,87 @@ def load_team_chooser(path, device: str = "cpu"):
     return model, vocab, cfg
 
 
-def _pack_side(species: Sequence[str], vocab: dict, feat_dim: int):
-    """6-slot (idx[6], feat[6,F]) tensors for one side's roster, padding to 6 and
-    matching the training encoding (vocab id by normalised species; dex features
-    from teampreview_dataset.mon_dex_features)."""
-    from v_dance.training.teampreview_dataset import mon_dex_features
+# ── Team-preview feature recipe: legacy dex-only vs SBDA tp_features (15b-io.1) ─
+def uses_tp_features(cfg: Optional[dict]) -> bool:
+    """True when a team-chooser checkpoint was trained on the SBDA per-mon feature
+    schema (``tp_features.own/opp_mon_features`` — the mechanic-tag synergy block)
+    rather than the legacy 46-dim ``mon_dex_features``.
+
+    Detected by the explicit ``feature_schema`` stamp the SBDA trainer writes;
+    legacy checkpoints have no such stamp and stay on the old path (byte-identical).
+    The feat_dim is the hard backstop the load-time lockstep guard checks."""
+    schema = (cfg or {}).get("feature_schema")
+    return bool(schema) and str(schema).startswith("tpfeat")
+
+
+class _NullBelief:
+    """A belief that knows nothing — lets the SBDA extractor still produce a valid
+    typing-grounded base (dex types/stats + type immunity/effectiveness, no
+    ability/move/usage/teammate tags) when no real ``BeliefState`` is available,
+    instead of crashing.  The serve player passes the real Pikalytics belief; this
+    is only the safety floor so a missing belief degrades gracefully (and loudly —
+    the caller warns), never silently corrupts the synergy channels."""
+    def known(self, species):  # noqa: D401
+        return False
+
+    def ability_distribution(self, species, top_k: int = 4):
+        return []
+
+    def move_distribution(self, species, top_k: int = 8):
+        return []
+
+    def usage(self, species):
+        return 0.0
+
+    def teammates(self, species, top_k: int = 16):
+        return []
+
+
+_NULL_BELIEF = _NullBelief()
+
+
+def _pack_side(species: Sequence[str], vocab: dict, feat_dim: int, *,
+               belief=None, own_known: Optional[dict] = None,
+               use_tp_features: bool = False):
+    """6-slot (idx[6], feat[6,F]) tensors for one side's roster, padding to 6.
+
+    Two feature recipes, selected by the loaded checkpoint's schema so train==serve:
+      * legacy (``use_tp_features=False``): dex features only
+        (``teampreview_dataset.mon_dex_features``) — byte-identical to the original.
+      * SBDA (``use_tp_features=True``): the SHARED ``tp_features`` extractor (the same
+        call the SBDA dataset uses), needing a ``BeliefState`` (or the null floor).
+        ``own_known`` (a ``{norm_species: OwnKnown}``) turns on the sharp OWN overlay;
+        ``None`` = symmetric belief-only base — parity-correct for a Type-B BC-pretrained
+        net, whose ``has_own_detail`` bit is always 0.
+    """
     from v_dance.parser.vod_parser.pokedex import norm_species
     idx = [0] * 6
+    if use_tp_features:
+        from v_dance.training.tp_features import (
+            FEAT_DIM, own_mon_features, opp_mon_features,
+        )
+        # LOCKSTEP guard (15b-io.1): the checkpoint's feat_dim MUST equal the current
+        # extractor's FEAT_DIM, else a schema drift would silently zero-pad the synergy
+        # channels (the exact failure the handoff warned about).  Fail loud instead.
+        if int(feat_dim) != FEAT_DIM:
+            raise ValueError(
+                f"team-chooser feat_dim={feat_dim} != tp_features.FEAT_DIM={FEAT_DIM} — the "
+                f"checkpoint's SBDA feature schema is out of lockstep with the code; re-export "
+                f"+ retrain the TP net on the current schema."
+            )
+        b = belief if belief is not None else _NULL_BELIEF
+        feat = np.zeros((6, FEAT_DIM), dtype=np.float32)
+        for i, sp in enumerate(list(species)[:6]):
+            ns = norm_species(sp)
+            idx[i] = int(vocab.get(ns, 0))     # 0 = PAD / unseen
+            if own_known is not None:
+                feat[i] = own_mon_features(ns, b, own_known.get(ns))
+            else:
+                feat[i] = opp_mon_features(ns, b)
+        return idx, feat
+
+    # legacy dex-only path (unchanged) ─────────────────────────────────────────
+    from v_dance.training.teampreview_dataset import mon_dex_features
     feat = np.zeros((6, feat_dim), dtype=np.float32)
     for i, sp in enumerate(list(species)[:6]):
         ns = norm_species(sp)
@@ -297,13 +398,20 @@ def _pack_side(species: Sequence[str], vocab: dict, feat_dim: int):
 def team_order(
     model, vocab: dict, cfg: dict,
     our_species: Sequence[str], opp_species: Sequence[str],
-    n: int, device: str = "cpu",
+    n: int, device: str = "cpu", *,
+    belief=None, own_known: Optional[dict] = None,
 ) -> List[int]:
     """Return roster indices to bring, LEADS FIRST (matching how the trainer
     labels — the first two brought are the leads), capped at ``n``.
 
     ``our_species`` / ``opp_species`` are the teampreview rosters (any species
     string form; normalised internally).  Falls back to first-n on any issue.
+
+    ``belief`` (a Pikalytics ``BeliefState``) is REQUIRED for an SBDA checkpoint
+    (``feature_schema=tpfeat-*``) so the per-mon synergy features + teammate-bias
+    prior match what the net was trained on; legacy 46-dim nets ignore it.
+    ``own_known`` optionally turns on the sharp OWN overlay (gated to the self-play
+    fine-tune; the BC-pretrained net serves overlay-off for train/serve parity).
     """
     valid = min(len(our_species), 6)
     if valid == 0:
@@ -311,15 +419,30 @@ def team_order(
     feat_dim = cfg.get("feat_dim", 46)
     bring_k = int(cfg.get("bring_k", 4))
     lead_k = int(cfg.get("lead_k", 2))
+    use_tp = uses_tp_features(cfg)
 
-    oi, of = _pack_side(our_species, vocab, feat_dim)
-    pi, pf = _pack_side(opp_species, vocab, feat_dim)
+    oi, of = _pack_side(our_species, vocab, feat_dim,
+                        belief=belief, own_known=own_known, use_tp_features=use_tp)
+    pi, pf = _pack_side(opp_species, vocab, feat_dim,
+                        belief=belief, own_known=None, use_tp_features=use_tp)
+
+    # 15b-feat.1b: feed the Pikalytics co-occurrence prior as the self-attention
+    # bias when the SBDA net was built with ``use_teammate_bias``.  Needs a belief;
+    # absent → ``our_affinity=None`` and the model runs without the prior (its
+    # forward treats None as "no bias"), so serving stays correct, just un-primed.
+    aff_t = None
+    if use_tp and getattr(model, "use_teammate_bias", False) and belief is not None:
+        from v_dance.training.tp_features import teammate_affinity_matrix
+        aff = teammate_affinity_matrix(our_species, belief, n=6)
+        aff_t = torch.as_tensor(aff[None], device=device)
+
     with torch.no_grad():
         bring_logits, lead_logits = model(
             torch.as_tensor([oi], device=device),
             torch.as_tensor([pi], device=device),
             torch.as_tensor(of[None], device=device),
             torch.as_tensor(pf[None], device=device),
+            aff_t,
         )
     bring = np.asarray(bring_logits[0].detach().cpu()).ravel()
     lead = np.asarray(lead_logits[0].detach().cpu()).ravel()

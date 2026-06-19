@@ -80,7 +80,7 @@ from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 from crawl4ai import JsonCssExtractionStrategy
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-FORMAT_SLUG  = "gen9championsvgc2026regmb"
+FORMAT_SLUG  = "gen9championsvgc2026regma"
 BASE_URL     = "https://www.pikalytics.com"
 INDEX_URL    = f"{BASE_URL}/pokedex/{FORMAT_SLUG}"
 
@@ -148,6 +148,26 @@ _TYPE_NOISE = {
     "steel","fairy","other",
 }
 
+# New-layout (2026) section boundaries: the spreads block has a PLAIN-TEXT header
+# "Nature / EV Spreads" (not a ## heading) and the page ends with an FAQ — both must
+# bound the ##-delimited sections, else 'Best Abilities' bleeds into the nature list.
+_SECTION_END_RE = re.compile(
+    r"^#{1,4}\s|Nature\s*/\s*EV Spreads|Frequently Asked Questions",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+_NATURES_ALT = (
+    "Adamant|Modest|Jolly|Timid|Brave|Quiet|Bold|Impish|Careful|Calm|Sassy|"
+    "Relaxed|Gentle|Hasty|Naive|Lax|Rash|Naughty|Lonely|Mild|Hardy|Docile|"
+    "Serious|Bashful|Quirky"
+)
+# New layout: EV spreads are bare 32-notation rows (hp/atk/def/spa/spd/spe + pct),
+# NO LONGER paired inline with a nature; natures are a separate pct-weighted list.
+_EV_ROW_RE = re.compile(
+    r"(\d+)\s*/\s*(\d+)\s*/\s*(\d+)\s*/\s*(\d+)\s*/\s*(\d+)\s*/\s*(\d+)\s+(\d+\.\d+)\s*%"
+)
+_NATURE_PCT_RE = re.compile(rf"\b({_NATURES_ALT})\b\s+(\d+\.\d+)\s*%", re.IGNORECASE)
+
 
 def _parse_section(markdown: str, header: str) -> list[dict]:
     """
@@ -180,8 +200,8 @@ def _parse_section(markdown: str, header: str) -> list[dict]:
 
     # Slice from end of that heading line to the next heading (or EOF)
     start = m.end()
-    next_heading = re.search(r"^#{1,4}\s", markdown[start:], re.MULTILINE)
-    end = start + next_heading.start() if next_heading else len(markdown)
+    nxt = _SECTION_END_RE.search(markdown, start)
+    end = nxt.start() if nxt else len(markdown)
     section_text = markdown[start:end]
 
     results: list[dict] = []
@@ -217,8 +237,8 @@ def _parse_moves(markdown: str) -> list[dict]:
     if not m:
         return []
     start = m.end()
-    next_heading = re.search(r"^#{1,4}\s", markdown[start:], re.MULTILINE)
-    end = start + next_heading.start() if next_heading else len(markdown)
+    nxt = _SECTION_END_RE.search(markdown, start)
+    end = nxt.start() if nxt else len(markdown)
     section_text = markdown[start:end]
 
     # Strip blank lines, collect non-empty content lines
@@ -255,15 +275,43 @@ def _parse_moves(markdown: str) -> list[dict]:
     return results
 
 
-def _parse_spreads(markdown: str) -> list[dict]:
-    spreads: list[dict] = []
-    for m in _SPREAD_PATTERN.finditer(markdown):
-        spreads.append({
-            "nature": m.group(1).capitalize(),
-            "evs":    [int(m.group(i)) for i in range(2, 8)],  # HP Atk Def SpA SpD Spe
-            "pct":    float(m.group(8)),
-        })
-    return spreads
+def _parse_spreads(markdown: str) -> tuple[list[dict], list[dict]]:
+    """Parse the new-layout 'Nature / EV Spreads' block.
+
+    The page no longer pairs a nature with each EV spread inline — it lists EV
+    spreads (bare hp/atk/def/spa/spd/spe 32-notation rows + pct) and natures
+    (name + pct) as TWO separate distributions. We therefore:
+      * extract the EV spreads (with pct),
+      * extract the nature distribution,
+      * attach the MODAL (most-common) nature to each EV spread so the
+        {nature, evs, pct} schema stays identical to the M-A scrape (downstream
+        belief/est-stat code is unchanged). The true nature distribution is also
+        returned separately (new ``natures`` field) so nothing is lost.
+
+    Returns (spreads, natures).
+    """
+    m = re.search(r"Nature\s*/\s*EV Spreads", markdown, re.IGNORECASE)
+    if not m:
+        return [], []
+    start = m.end()
+    nxt = re.search(r"Frequently Asked Questions|^#{1,4}\s", markdown[start:], re.MULTILINE)
+    end = start + nxt.start() if nxt else len(markdown)
+    section = re.sub(r"\s+", " ", markdown[start:end])     # collapse line-split rows
+
+    ev_rows = [
+        ([int(g) for g in row[:6]], float(row[6]))
+        for row in _EV_ROW_RE.findall(section)
+    ]
+    natures = [
+        {"nature": n.capitalize(), "pct": float(p)}
+        for (n, p) in _NATURE_PCT_RE.findall(section)
+    ]
+    modal = max(natures, key=lambda x: x["pct"])["nature"] if natures else None
+    spreads = [
+        {"nature": modal, "evs": evs, "pct": pct}          # HP Atk Def SpA SpD Spe
+        for (evs, pct) in ev_rows
+    ]
+    return spreads, natures
 
 
 def _parse_usage(markdown: str) -> Optional[float]:
@@ -292,28 +340,32 @@ def _parse_teammates(markdown: str) -> list[dict]:
         return []
 
     start = m.end()
-    next_heading = re.search(r"^#{1,4}\s", markdown[start:], re.MULTILINE)
-    end = start + next_heading.start() if next_heading else len(markdown)
+    nxt = _SECTION_END_RE.search(markdown, start)
+    end = nxt.start() if nxt else len(markdown)
     section_text = markdown[start:end]
 
+    # New layout: each teammate is a sprite-link carrying a RANK (#1..#10), not a
+    # pct (the FAQ literally renders "undefined%"). Capture name (image alt) + rank.
     for match in re.finditer(
-        r"!\[([^\]]+)\]\([^)]+\)[^\[\]]*?(\d+\.\d+)%", section_text
+        r"!\[([^\]]+)\]\([^)]*\)[^#\]]*?#(\d+)", section_text
     ):
         name = match.group(1).strip()
-        pct  = float(match.group(2))
+        rank = int(match.group(2))
         if name not in seen:
             seen.add(name)
-            teammates.append({"name": name, "pct": pct})
+            teammates.append({"name": name, "rank": rank})
     return teammates
 
 
 def _parse_mon_page(markdown: str) -> dict:
+    spreads, natures = _parse_spreads(markdown)
     return {
         "usage_pct": _parse_usage(markdown),
         "moves":     _parse_moves(markdown),
         "items":     _parse_section(markdown, "Best Items"),
         "abilities": _parse_section(markdown, "Best Abilities"),
-        "spreads":   _parse_spreads(markdown),
+        "spreads":   spreads,
+        "natures":   natures,
         "teammates": _parse_teammates(markdown),
     }
 
@@ -342,9 +394,21 @@ def _make_run_config(*, use_extraction: bool = False) -> CrawlerRunConfig:
     kwargs: dict = dict(
         cache_mode  = CacheMode.BYPASS,
         magic       = False,
+        # The Nature/EV-Spreads + Teammates blocks are LAZY JS-rendered (they land
+        # AFTER the `load` event). Single/low-concurrency fetches give the JS time to
+        # render; under high concurrency the tabs starve and pages get captured
+        # spread-less. ``networkidle`` is unusable (Pikalytics keeps persistent
+        # connections, so it never settles) — use low concurrency instead.
         wait_until  = "load",
         page_timeout= 30_000,   # ms
         max_retries = 2,
+        # NOTE: the Nature/EV-Spreads + Teammates blocks are async-rendered AFTER
+        # `load` and crawl4ai captures the HTML at an inconsistent moment, so a
+        # subset of pages come back spread-less (flaky lazy-render). Tried
+        # networkidle / delay_before_return_html / scan_full_page / in-page JS poll
+        # — each hung, errored (antibot), or stayed flaky. Reliable fix TBD (likely a
+        # targeted single-fetch RETRY pass for data-mons missing spreads, since the
+        # single --debug fetch reliably renders them). Young M-B meta is thin anyway.
     )
     if use_extraction:
         kwargs["extraction_strategy"] = JsonCssExtractionStrategy(INDEX_SCHEMA)
@@ -396,103 +460,131 @@ def fetch_smogon_roster() -> list[tuple[str, float]]:
     return []
 
 
-async def get_pokemon_list(crawler: AsyncWebCrawler, min_usage: float = 0.0) -> list[str]:
+def _load_champions_roster(format_slug: str, refresh: bool = False) -> dict[str, str]:
+    """Return {pikalytics_slug (toID): display_name} for ``format_slug``'s FULL
+    in-format roster, enumerated from the LOCAL Showdown champions mod (offline,
+    authoritative, future-reg-proof).
+
+    Replaces the old Smogon-usage roster, which DOES NOT EXIST for a freshly
+    launched reg (Smogon publishes monthly in arrears). The slug (key) is the
+    Pikalytics URL path (pure toID, no escaping); the display name (value) is the
+    OUTPUT JSON key, kept byte-identical to the M-A scrape's keys (e.g.
+    'Charizard-Mega-Y', 'Rotom-Wash', 'Mr. Rime') so downstream name-keyed code
+    (TP features / encoders) keeps matching.  Cached to
+    data/champions_roster_<reg>.json — pass ``refresh`` to regenerate.
     """
-    Return the full list of Pokémon names to scrape.
+    import subprocess
 
-    Primary source: Smogon usage stats (complete roster).
-    Merged with: links extracted from the Pikalytics index page, which only
-    server-renders the top ~50 mons but costs us nothing to include.
+    reg_m = re.search(r"(reg[a-z0-9]+)", format_slug)
+    reg = reg_m.group(1) if reg_m else "unknown"
+    cache = OUTPUT_DIR / f"champions_roster_{reg}.json"
+    if cache.exists() and not refresh:
+        with cache.open(encoding="utf-8") as f:
+            roster = json.load(f)
+        print(f"[roster] {len(roster)} species from cache {cache.name} "
+              f"(use --refresh-roster to re-enumerate).")
+        return roster
+
+    node = _SCRIPT_DIR.parents[2] / ".venv" / "node" / "node.exe"
+    node_cmd = str(node) if node.exists() else "node"
+    enum_js = _SCRIPT_DIR / "enum_champions_roster.js"
+    proc = subprocess.run(
+        [node_cmd, str(enum_js), format_slug],
+        capture_output=True, text=True, encoding="utf-8",
+    )
+    if proc.returncode != 0 or not (proc.stdout or "").strip():
+        raise RuntimeError(
+            f"roster enumeration failed for {format_slug} "
+            f"(is pokemon-showdown present + built?): {(proc.stderr or '').strip()}"
+        )
+    roster = json.loads(proc.stdout)
+    with cache.open("w", encoding="utf-8") as f:
+        json.dump(roster, f, ensure_ascii=False, indent=0)
+    print(f"[roster] {len(roster)} in-format species for {format_slug} "
+          f"(enumerated from Showdown mod; cached {cache.name}).")
+    return roster
+
+
+async def get_pokemon_list(crawler=None, min_usage: float = 0.0,
+                           refresh_roster: bool = False) -> list[tuple[str, str]]:
+    """Return [(pikalytics_slug, display_name), ...] for the FULL in-format roster,
+    enumerated from the local Showdown champions mod (see _load_champions_roster).
+
+    ``crawler`` / ``min_usage`` are accepted for call-site compatibility but unused:
+    the roster is legality-derived (complete), not usage-thresholded.
     """
-    print(f"[index] Fetching {INDEX_URL}")
-    result = await crawler.arun(INDEX_URL, config=_make_run_config(use_extraction=True))
-
-    if not result.success:
-        raise RuntimeError(f"Index page fetch failed: {result.error_message}")
-
-    raw = json.loads(result.extracted_content or "[]")
-    slug_re = re.compile(rf"/pokedex/{FORMAT_SLUG}/([^/?#]+)")
-    seen: set[str] = set()
-    names: list[str] = []
-    for item in raw:
-        href = item.get("href", "")
-        m = slug_re.search(href)
-        if m:
-            slug = urllib.parse.unquote(m.group(1))
-            if slug not in seen:
-                seen.add(slug)
-                names.append(slug)
-
-    print(f"[index] Found {len(names)} Pokémon on the index page.")
-
-    roster = fetch_smogon_roster()
-    if min_usage > 0:
-        skipped = [n for n, u in roster if u < min_usage]
-        roster  = [(n, u) for n, u in roster if u >= min_usage]
-        if skipped:
-            print(f"[roster] Skipping {len(skipped)} mons below {min_usage}% usage.")
-
-    for name, _usage in roster:
-        if name not in seen:
-            seen.add(name)
-            names.append(name)
-
-    print(f"[index] {len(names)} Pokémon total after merging Smogon roster.")
-    return names
+    roster = _load_champions_roster(FORMAT_SLUG, refresh=refresh_roster)
+    pairs = sorted(roster.items(), key=lambda kv: kv[1].lower())
+    print(f"[roster] {len(pairs)} Pokémon to scrape for {FORMAT_SLUG}.")
+    return pairs
 
 
 # ── Individual page fetching (rate-limited) ────────────────────────────────────
 
 async def _fetch_one(
-    crawler: AsyncWebCrawler,
-    name: str,
+    mon_id: str,
+    mon_name: str,
     sem: asyncio.Semaphore,
 ) -> tuple[str, dict]:
     """
-    Fetch a single mon page, honouring the semaphore and adding jitter.
-    Returns (name, parsed_data).
+    Fetch a single mon page with a FRESH crawler. The lazy Nature/EV-Spreads +
+    Teammates sections render reliably on a fresh browser but FLAKE when one
+    crawler is reused across many pages (verified: fresh-per-fetch = 100% spread
+    coverage on high-usage mons; reused crawler degrades after a handful). Retries
+    ONCE on a suspected lazy-render miss (moves present but spreads empty).
+
+    The Pikalytics URL slug is the DISPLAY name (e.g. 'Abomasnow-Mega', 'Rotom-Wash',
+    'Mr. Rime'), NOT the toID — mega/forme usage lives on the hyphenated-name page.
+    Returns (mon_name, parsed_data) keyed by the DISPLAY name.
     """
-    # Names like "Mr. Rime" need the space percent-encoded in the URL
-    url = f"{INDEX_URL}/{urllib.parse.quote(name)}"
+    url = f"{INDEX_URL}/{urllib.parse.quote(mon_name)}"
+
+    async def _attempt() -> tuple[bool, str, dict]:
+        async with AsyncWebCrawler(config=_make_browser_config()) as crawler:
+            result = await crawler.arun(url, config=_make_run_config())
+        if not result.success:
+            return False, result.error_message, {}
+        md = result.markdown.raw_markdown if result.markdown else ""
+        return True, "", _parse_mon_page(md)
 
     async with sem:
-        # Random jitter before the request — looks human, avoids burst detection
-        await asyncio.sleep(random.uniform(JITTER_MIN, JITTER_MAX))
+        await asyncio.sleep(random.uniform(JITTER_MIN, JITTER_MAX))   # human-ish jitter
+        ok, err, data = await _attempt()
+        # Retry once on a likely lazy-render miss: page loaded (has moves) but the
+        # async spread block hadn't rendered when the HTML was captured.
+        if ok and data.get("moves") and not data.get("spreads"):
+            await asyncio.sleep(random.uniform(JITTER_MIN, JITTER_MAX))
+            ok2, _err2, data2 = await _attempt()
+            if ok2 and data2.get("spreads"):
+                data = data2
 
-        result = await crawler.arun(url, config=_make_run_config())
+    if not ok:
+        print(f"    [!] {mon_name}: fetch failed — {err}")
+        return mon_name, {"error": err}
 
-    if not result.success:
-        print(f"    [!] {name}: fetch failed — {result.error_message}")
-        return name, {"error": result.error_message}
-
-    markdown = result.markdown.raw_markdown if result.markdown else ""
-    data = _parse_mon_page(markdown)
-
-    moves_n   = len(data["moves"])
-    spreads_n = len(data["spreads"])
-    print(f"    ✓ {name}: {moves_n} moves, {spreads_n} spreads")
-    return name, data
+    print(f"    ✓ {mon_name}: {len(data['moves'])} moves, {len(data['spreads'])} spreads")
+    return mon_name, data
 
 
 async def scrape_all(
-    crawler: AsyncWebCrawler,
-    names: list[str],
+    roster: list[tuple[str, str]],
     concurrency: int,
 ) -> dict[str, dict]:
     """
-    Fetch all mon pages with bounded concurrency.
-    Tasks are created upfront but the semaphore keeps at most
-    `concurrency` requests in-flight at any moment.
+    Fetch all mon pages. ``roster`` is a list of (slug_id, display_name) pairs.
+    Each fetch uses a FRESH crawler (reliable lazy-render); the semaphore caps how
+    many browsers run at once.
     """
     sem = asyncio.Semaphore(concurrency)
-    tasks = [_fetch_one(crawler, name, sem) for name in names]
+    tasks = [_fetch_one(mon_id, mon_name, sem) for (mon_id, mon_name) in roster]
     pairs = await asyncio.gather(*tasks)
     return dict(pairs)
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
-async def main(limit: int, concurrency: int, resume: bool, min_usage: float) -> None:
+async def main(limit: int, concurrency: int, resume: bool, min_usage: float,
+               refresh_roster: bool = False) -> None:
     # ── Load existing data if resuming ────────────────────────────────────────
     existing: dict = {}
     already: set[str] = set()
@@ -506,13 +598,13 @@ async def main(limit: int, concurrency: int, resume: bool, min_usage: float) -> 
 
     async with AsyncWebCrawler(config=browser_conf) as crawler:
         # ── Step 1: roster ────────────────────────────────────────────────────
-        names = await get_pokemon_list(crawler, min_usage)
+        roster = await get_pokemon_list(crawler, min_usage, refresh_roster=refresh_roster)
 
         if limit:
-            names = names[:limit]
-            print(f"[index] Limited to first {limit}.")
+            roster = roster[:limit]
+            print(f"[roster] Limited to first {limit}.")
 
-        to_scrape = [n for n in names if n not in already]
+        to_scrape = [(mid, mname) for (mid, mname) in roster if mname not in already]
         print(f"[scrape] {len(to_scrape)} mons to scrape (concurrency={concurrency}).")
 
         if not to_scrape:
@@ -525,6 +617,10 @@ async def main(limit: int, concurrency: int, resume: bool, min_usage: float) -> 
             "scraped_at": datetime.now(timezone.utc).isoformat(),
             "pokemon":    {},
         }
+        # Ensure metadata even on a --resume that started from an empty/absent file
+        # (otherwise `result = existing` is a bare {} missing format/scraped_at).
+        result.setdefault("format", FORMAT_SLUG)
+        result.setdefault("scraped_at", datetime.now(timezone.utc).isoformat())
         result.setdefault("pokemon", {})
 
         # ── Step 3: scrape in batches (incremental saves + inter-batch pause) ─
@@ -540,7 +636,7 @@ async def main(limit: int, concurrency: int, resume: bool, min_usage: float) -> 
                 f"mons {batch_start + 1}–{batch_start + len(batch)}"
             )
 
-            batch_data = await scrape_all(crawler, batch, concurrency)
+            batch_data = await scrape_all(batch, concurrency)
             result["pokemon"].update(batch_data)
 
             # Incremental save after every batch
@@ -608,7 +704,7 @@ def cli() -> None:
         pass
 
     parser = argparse.ArgumentParser(
-        description="Scrape Pikalytics Reg M-A data using Crawl4AI (v0.8.x).",
+        description="Scrape Pikalytics Champions-doubles usage data using Crawl4AI (v0.8.x).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
@@ -641,12 +737,41 @@ def cli() -> None:
             "Example: --debug-markdown kingambit"
         ),
     )
+    parser.add_argument(
+        "--format", "-f", default=None, dest="format_slug",
+        help="Champions-doubles format id to scrape (default: the active format). "
+             "e.g. gen9championsvgc2026regma for M-A. Drives the Pikalytics URL + "
+             "the output filename pikalytics_<reg>.json (lockstep).",
+    )
+    parser.add_argument(
+        "--refresh-roster", action="store_true",
+        help="Re-enumerate the roster from the Showdown mod (ignore the cached "
+             "data/champions_roster_<reg>.json).",
+    )
     args = parser.parse_args()
+
+    # Select the format and REBIND the URL + output filename in LOCKSTEP, so a scrape
+    # can never write one reg's data into another reg's file.
+    global FORMAT_SLUG, INDEX_URL, OUTPUT_FILE
+    slug = args.format_slug
+    if slug is None:
+        try:
+            from v_dance.formats import default_format
+            slug = default_format()
+        except Exception:
+            slug = FORMAT_SLUG
+    FORMAT_SLUG = slug
+    INDEX_URL = f"{BASE_URL}/pokedex/{FORMAT_SLUG}"
+    _reg_m = re.search(r"(reg[a-z0-9]+)", FORMAT_SLUG)
+    OUTPUT_FILE = OUTPUT_DIR / (f"pikalytics_{_reg_m.group(1)}.json" if _reg_m
+                               else "pikalytics_regma.json")
+    print(f"[config] format={FORMAT_SLUG}  url={INDEX_URL}  output={OUTPUT_FILE.name}")
 
     if args.debug_markdown:
         asyncio.run(_debug_markdown(args.debug_markdown))
     else:
-        asyncio.run(main(args.limit, args.concurrency, args.resume, args.min_usage))
+        asyncio.run(main(args.limit, args.concurrency, args.resume, args.min_usage,
+                         refresh_roster=args.refresh_roster))
 
 
 if __name__ == "__main__":

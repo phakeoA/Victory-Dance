@@ -98,13 +98,18 @@ def _default_belief():
         return _BELIEF_SINGLETON
     _BELIEF_LOADED = True
     try:
-        from v_dance.parser.belief_state import BeliefState, _DEFAULT_PIKALYTICS_PATH
-        if _DEFAULT_PIKALYTICS_PATH.exists():
-            _BELIEF_SINGLETON = BeliefState(_DEFAULT_PIKALYTICS_PATH)
-            log.info("Loaded default BeliefState from %s", _DEFAULT_PIKALYTICS_PATH)
+        from v_dance.parser.belief_state import BeliefState
+        from v_dance.formats import pikalytics_path_for, default_format
+        # Resolve the ACTIVE format's belief FRESH (not belief_state's import-time
+        # constant) so an entry point's --format / set_active_format takes effect
+        # before the first battle.
+        path = pikalytics_path_for(default_format())
+        if path and path.exists():
+            _BELIEF_SINGLETON = BeliefState(path)
+            log.info("Loaded BeliefState for %s from %s", default_format(), path)
         else:
-            log.warning("Pikalytics file missing (%s) — opponent est-stats will be "
-                        "zeroed (train/serve mismatch).", _DEFAULT_PIKALYTICS_PATH)
+            log.warning("Pikalytics file missing for %s — opponent est-stats will be "
+                        "zeroed (train/serve mismatch).", default_format())
     except Exception as exc:  # pragma: no cover - degrade gracefully
         log.warning("Could not load default BeliefState (%s) — opponent est-stats "
                     "will be zeroed.", exc)

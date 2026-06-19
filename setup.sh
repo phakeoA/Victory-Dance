@@ -331,7 +331,8 @@ SHOWDOWN_REPO="https://github.com/smogon/pokemon-showdown.git"
 # PINNED commit — the exact sim/protocol the bot was built + tested against (see PINS.md).
 # Showdown's master moves fast and can change the battle protocol; bumping this must be
 # followed by re-verifying the full test suite + a live self-play smoke. Empty = track master.
-SHOWDOWN_SHA="ecf39eef1e9cd2fd6ed2e9b9011b86610258d757"   # v0.11.10-1271 (smogon/master, 2026-06-17)
+SHOWDOWN_SHA="4880d3693580bd33652797cf31179c6fcdf87e50"   # Reg M-B (smogon/master, 2026-06-18; "Champions: Add Wise Glasses" #12120)
+# Reg M-A (frozen — for reproducing pre-migration runs): ecf39eef1e9cd2fd6ed2e9b9011b86610258d757 (v0.11.10-1271, 2026-06-17)
 
 if [[ -d "$SHOWDOWN_DIR/.git" ]]; then
     log "pokemon-showdown already cloned at $SHOWDOWN_DIR — skipping clone."
@@ -566,8 +567,8 @@ PS_PASSWORD=YourBotPassword
 PS_AVATAR=cynthia
 
 # Battle Config
-POKEMON_FORMAT=gen9championsvgc2026regma
-REGULATION=reg_ma
+POKEMON_FORMAT=gen9championsvgc2026regmb
+REGULATION=reg_mb
 TEAM_NAME=regma_team1
 
 # Bot Mode: ACCEPT_CHALLENGE | LADDER | CHALLENGE_USER

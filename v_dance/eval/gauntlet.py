@@ -426,6 +426,55 @@ async def run_gauntlet(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Team-pool selection (default = the whole reg pool; pick specific teams / a folder /
+# a count via the CLI or a native file-explorer dialog).
+# ══════════════════════════════════════════════════════════════════════════════
+def _pick_team_files(initialdir: Path) -> List[str]:
+    """Native OS multi-select file picker for team pastes — thin alias over the shared
+    run_local_battle.pick_team_files (also used by the self-play eval --pick-eval-teams)."""
+    import v_dance.play.run_local_battle as R
+    return R.pick_team_files(initialdir)
+
+
+def resolve_team_pool(args) -> List[str]:
+    """Decide the gauntlet's rotating team pool from the CLI, in priority order:
+      --pick-teams  : native file-explorer multi-select (Cancel -> the discovered pool)
+      --teams-dir D : every team paste under D
+      --teams a b c : explicit names/paths (the old behaviour)
+      (default)     : EVERY team under teams/Champions/<reg> — auto-grows as you add files
+    then capped/sampled to --n-teams (deterministic by --matchup-seed) when the pool is bigger.
+    """
+    import v_dance.play.run_local_battle as R
+    from v_dance import formats as _formats
+    reg = args.battle_format or _formats.DEFAULT_FORMAT
+    if args.pick_teams:
+        pool = _pick_team_files(R.CHAMPIONS_DIR)
+        if not pool:
+            print("[gauntlet] no teams picked -> using the discovered reg pool.")
+            pool = R.discover_teams(reg=reg)
+    elif args.teams_dir:
+        pool = R.discover_teams(root=Path(args.teams_dir))
+        if not pool:
+            raise SystemExit(f"[gauntlet] no team files found under --teams-dir {args.teams_dir}")
+    elif args.teams:
+        pool = list(args.teams)
+    else:
+        pool = R.discover_teams(reg=reg)             # DEFAULT: the whole reg pool
+    if not pool:
+        raise SystemExit("[gauntlet] no teams found; pass --teams / --teams-dir / --pick-teams, "
+                         "or add team files under teams/Champions/.")
+    if args.n_teams and len(pool) > args.n_teams:    # cap/sample to N (seeded -> reproducible)
+        rng = random.Random(args.matchup_seed)
+        pool = sorted(rng.sample(pool, args.n_teams))
+    if len(pool) < 2:
+        print(f"[gauntlet] WARNING: only {len(pool)} team(s); the side-balanced rotation wants "
+              ">=2 (>=4 ideal, else deterministic opponents replay the same few matchups).")
+    shown = ", ".join(Path(t).name for t in pool[:12])
+    print(f"[gauntlet] team pool: {len(pool)} teams -> {shown}{' ...' if len(pool) > 12 else ''}")
+    return pool
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="BC win-rate eval gauntlet (#3)")
     ap.add_argument("--battles", "-n", type=int, default=20,
@@ -433,12 +482,19 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap.add_argument("--opponents", nargs="+",
                     default=["random", "max_damage", "heuristic"],
                     help="opponent ladder (subset of random/max_damage/heuristic/prev_best)")
-    ap.add_argument("--teams", nargs="+",
-                    default=["team1", "WolfeGlick", "Kronomono1", "Kronomono3"],
-                    help="rotating team pool (names under teams/M-A/ or paths). Use "
-                         ">=4 teams: with DETERMINISTIC opponents a 2-team pool replays "
-                         "the same matchups, so per-opponent win-rates collapse to a "
-                         "handful of fixed outcomes instead of a real distribution.")
+    ap.add_argument("--teams", nargs="+", default=None,
+                    help="explicit rotating team pool (names under teams/Champions/ or paths). "
+                         "DEFAULT (omit this) = EVERY team under teams/Champions/<reg> — the pool "
+                         "auto-grows as you add team files. Use >=4 teams: with DETERMINISTIC "
+                         "opponents a tiny pool replays the same matchups.")
+    ap.add_argument("--teams-dir", default=None,
+                    help="use every team paste under this folder as the pool (e.g. a custom set).")
+    ap.add_argument("--pick-teams", action="store_true",
+                    help="pick the team files via the native OS file explorer "
+                         "(multi-select; Cancel falls back to the discovered pool).")
+    ap.add_argument("--n-teams", type=int, default=None,
+                    help="cap the pool to this many teams (randomly sampled, seeded by "
+                         "--matchup-seed so it's reproducible). Default: use the whole pool.")
     ap.add_argument("--ckpt", default=str(_REPO_ROOT / "ai_train_scripts" / "BC_model"
                                           / "checkpoints" / "bc_best.pt"))
     ap.add_argument("--team-chooser", default=str(_REPO_ROOT / "ai_train_scripts"
@@ -463,12 +519,24 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                     help="DEBUG logging (incl. poke-env) for diagnosing stalls")
     ap.add_argument("--run-id", default=None)
     ap.add_argument("--timestamp", default=None)
+    from v_dance import formats as _formats
+    ap.add_argument("--format", default=None, dest="battle_format",
+                    help="Champions-doubles format id to eval in (default: active = "
+                         f"{_formats.DEFAULT_FORMAT}). SPAWN-SAFE: env-propagated to workers.")
     return ap.parse_args(argv)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     from datetime import datetime
     args = parse_args(argv)
+    if args.battle_format:                       # select format for this proc + mp workers (env)
+        from v_dance import formats as _formats
+        if not _formats.is_champions_doubles(args.battle_format):
+            raise SystemExit(f"--format {args.battle_format!r} is not a Champions-doubles id "
+                             f"(known: {_formats.known_formats()})")
+        _formats.set_active_format(args.battle_format)
+        import v_dance.play.run_local_battle as _R
+        _R.BATTLE_FORMAT = _formats.DEFAULT_FORMAT
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.WARNING)
     if not args.verbose:                     # keep poke-env quiet unless diagnosing
         logging.getLogger("poke_env").setLevel(logging.WARNING)
@@ -480,9 +548,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     run_id = args.run_id or datetime.now().strftime("run-%Y%m%d-%H%M%S")
     timestamp = args.timestamp or datetime.now().isoformat(timespec="seconds")
 
+    team_pool = resolve_team_pool(args)          # default = whole reg pool; --pick-teams/-dir/-n-teams
+
     results, sources = asyncio.run(run_gauntlet(
         opponents=args.opponents,
-        team_pool=args.teams,
+        team_pool=team_pool,
         battles_per_opponent=args.battles,
         ckpt=ckpt,
         team_chooser=Path(args.team_chooser),

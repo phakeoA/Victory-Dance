@@ -95,7 +95,14 @@ except ImportError:                                          # pragma: no cover
     BeliefState = None        # type: ignore
     VodType = None            # type: ignore
 
-_DEFAULT_PIKALYTICS = _PROJECT_ROOT / "data" / "pikalytics_regma.json"
+# Default = the ACTIVE format's belief (falls back to the M-A file), so building
+# the M-B BC dataset uses the M-B prior once pikalytics_regmb.json exists without
+# the caller remembering --pikalytics.
+try:
+    from v_dance.formats import pikalytics_path_for as _pika_for
+    _DEFAULT_PIKALYTICS = _pika_for() or (_PROJECT_ROOT / "data" / "pikalytics_regma.json")
+except Exception:
+    _DEFAULT_PIKALYTICS = _PROJECT_ROOT / "data" / "pikalytics_regma.json"
 
 
 def _rosters_from_html(html_text: str) -> dict:

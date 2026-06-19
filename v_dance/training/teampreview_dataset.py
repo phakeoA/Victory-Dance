@@ -38,7 +38,7 @@ import re
 import sys
 from collections import Counter
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -105,6 +105,37 @@ def mon_dex_features(species: Optional[str]) -> np.ndarray:
     return feat
 
 
+# ── SBDA feature recipe (15b-data.1) — the SAME extractor model_io serves ─────
+def sbda_feature_fn(belief) -> Callable[[Optional[str]], np.ndarray]:
+    """Closure ``species -> (FEAT_DIM,)`` for the SBDA TP recipe — IDENTICAL to the
+    serve-side ``model_io._pack_side`` (``tp_features.opp_mon_features`` with the OWN
+    overlay OFF: a Type-B replay carries no sharp own build, so ``has_own_detail`` is 0
+    on both sides — exactly what a BC-pretrained net serves).  This shared CALL — not
+    merely a shared dim — is the train==serve lockstep the 15b plumbing exists to
+    guarantee.  Imported lazily to avoid a tp_features <-> teampreview_dataset cycle."""
+    from v_dance.training.tp_features import opp_mon_features
+    return lambda species: opp_mon_features(norm_species(species), belief)
+
+
+def feature_recipe(mode: str = "legacy", belief=None):
+    """``(feat_fn, feat_dim, feature_schema)`` for a TP feature recipe — the single place
+    the train side chooses its per-mon features, mirroring ``model_io.uses_tp_features``.
+
+    ``mode='legacy'`` -> dex-only (``MON_FEAT_DIM``=46, schema ``None``) — the original net.
+    ``mode='sbda'``   -> the shared ``tp_features`` extractor (FEAT_DIM, schema ``tpfeat-vN``);
+    requires a Pikalytics ``belief``.  The trainer (15b-train.1) stamps ``feat_dim`` +
+    ``feature_schema`` into the checkpoint config so ``model_io`` selects the matching
+    SERVE recipe and the load-time lockstep guard can reject a schema drift."""
+    if mode == "sbda":
+        from v_dance.training.tp_features import FEAT_DIM, FEATURE_SCHEMA_VERSION
+        if belief is None:
+            raise ValueError("the 'sbda' feature recipe requires a BeliefState (Pikalytics prior)")
+        return sbda_feature_fn(belief), FEAT_DIM, FEATURE_SCHEMA_VERSION
+    if mode == "legacy":
+        return mon_dex_features, MON_FEAT_DIM, None
+    raise ValueError(f"unknown TP feature mode {mode!r} (expected 'legacy' or 'sbda')")
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Raw example extraction (torch-free)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -147,7 +178,8 @@ def _label_indices(roster_norm: List[str], picks: Sequence[str]) -> Tuple[List[i
 
 
 def _example_for_side(t: dict, side: str, opp: str,
-                      stats: Optional[Counter]) -> Optional[dict]:
+                      stats: Optional[Counter],
+                      feat_fn: Callable = mon_dex_features) -> Optional[dict]:
     players = t.get("players") or {}
     me = players.get(side) or {}
     them = players.get(opp) or {}
@@ -179,8 +211,8 @@ def _example_for_side(t: dict, side: str, opp: str,
     return {
         "our_species": roster_norm,
         "opp_species": [norm_species(s) for s in opp_roster],
-        "our_feat": np.stack([mon_dex_features(s) for s in roster]),
-        "opp_feat": np.stack([mon_dex_features(s) for s in opp_roster]),
+        "our_feat": np.stack([feat_fn(s) for s in roster]),
+        "opp_feat": np.stack([feat_fn(s) for s in opp_roster]),
         "bring": bring,
         "lead": lead,
         "valid_bring": valid_bring,
@@ -193,8 +225,10 @@ def build_examples(
     files: Sequence[str],
     limit_files: Optional[int] = None,
     sides: Sequence[str] = ("p1", "p2"),
+    feat_fn: Callable = mon_dex_features,
 ) -> Tuple[List[dict], Counter]:
-    """Two examples (p1, p2) per replay file."""
+    """Two examples (p1, p2) per replay file.  ``feat_fn`` chooses the per-mon feature
+    recipe (default legacy dex-only; pass ``sbda_feature_fn(belief)`` for the SBDA net)."""
     stats: Counter = Counter()
     examples: List[dict] = []
     if limit_files is not None:
@@ -212,7 +246,7 @@ def build_examples(
         for side, opp in (("p1", "p2"), ("p2", "p1")):
             if side not in sides:
                 continue
-            ex = _example_for_side(t, side, opp, stats)
+            ex = _example_for_side(t, side, opp, stats, feat_fn)
             if ex is not None:
                 examples.append(ex)
     stats["replays"] = len({e["replay_id"] for e in examples})
@@ -223,6 +257,7 @@ def examples_from_folders(
     folders: Sequence[str],
     recursive: bool = True,
     limit_files: Optional[int] = None,
+    feat_fn: Callable = mon_dex_features,
 ) -> Tuple[List[dict], Counter]:
     files: List[str] = []
     seen: set = set()
@@ -232,7 +267,7 @@ def examples_from_folders(
             if key not in seen:
                 seen.add(key)
                 files.append(f)
-    return build_examples(files, limit_files=limit_files)
+    return build_examples(files, limit_files=limit_files, feat_fn=feat_fn)
 
 
 # ── Vocabulary ────────────────────────────────────────────────────────────────
@@ -272,14 +307,27 @@ class TeamPreviewDataset(Dataset):
         valid_bring       : float32 ()        1.0 if the 4-bring is complete
     """
 
-    def __init__(self, examples: Sequence[dict], vocab: Dict[str, int]):
+    def __init__(self, examples: Sequence[dict], vocab: Dict[str, int],
+                 feat_dim: Optional[int] = None,
+                 affinity_fn: Optional[Callable] = None):
         if not _HAS_TORCH:  # pragma: no cover
             raise RuntimeError("torch is required for TeamPreviewDataset")
         n = len(examples)
+        # feat_dim follows the example recipe (46 legacy dex / FEAT_DIM SBDA), inferred
+        # from the data unless pinned, so one Dataset class serves both nets.
+        if feat_dim is None:
+            feat_dim = int(examples[0]["our_feat"].shape[1]) if examples else MON_FEAT_DIM
+        self.feat_dim = feat_dim
+        # 15b-train.1: when the SBDA net uses the teammate-bias, the TRAIN affinity matrix must be the
+        # SAME teammate_affinity_matrix(our_species, belief) serve feeds model.forward — precompute it
+        # per example so run_epoch can pass it (train==serve for the bias too). None -> no bias input.
+        self.use_affinity = affinity_fn is not None
         self.our_idx = np.zeros((n, TEAM_SIZE), dtype=np.int64)
         self.opp_idx = np.zeros((n, TEAM_SIZE), dtype=np.int64)
-        self.our_feat = np.zeros((n, TEAM_SIZE, MON_FEAT_DIM), dtype=np.float32)
-        self.opp_feat = np.zeros((n, TEAM_SIZE, MON_FEAT_DIM), dtype=np.float32)
+        self.our_feat = np.zeros((n, TEAM_SIZE, feat_dim), dtype=np.float32)
+        self.opp_feat = np.zeros((n, TEAM_SIZE, feat_dim), dtype=np.float32)
+        if self.use_affinity:
+            self.our_affinity = np.zeros((n, TEAM_SIZE, TEAM_SIZE), dtype=np.float32)
         self.bring = np.zeros((n, TEAM_SIZE), dtype=np.float32)
         self.lead = np.zeros((n, TEAM_SIZE), dtype=np.float32)
         self.valid_bring = np.zeros((n,), dtype=np.float32)
@@ -294,6 +342,8 @@ class TeamPreviewDataset(Dataset):
             self.lead[i] = ex["lead"]
             self.valid_bring[i] = ex["valid_bring"]
             self.replay_ids.append(ex["replay_id"])
+            if self.use_affinity:
+                self.our_affinity[i] = affinity_fn(ex["our_species"])
 
         self.t_our_idx = torch.from_numpy(self.our_idx)
         self.t_opp_idx = torch.from_numpy(self.opp_idx)
@@ -302,12 +352,14 @@ class TeamPreviewDataset(Dataset):
         self.t_bring = torch.from_numpy(self.bring)
         self.t_lead = torch.from_numpy(self.lead)
         self.t_valid = torch.from_numpy(self.valid_bring)
+        if self.use_affinity:
+            self.t_our_affinity = torch.from_numpy(self.our_affinity)
 
     def __len__(self) -> int:
         return self.t_our_idx.shape[0]
 
     def __getitem__(self, idx: int) -> dict:
-        return {
+        item = {
             "our_idx": self.t_our_idx[idx],
             "opp_idx": self.t_opp_idx[idx],
             "our_feat": self.t_our_feat[idx],
@@ -316,6 +368,9 @@ class TeamPreviewDataset(Dataset):
             "lead": self.t_lead[idx],
             "valid_bring": self.t_valid[idx],
         }
+        if self.use_affinity:
+            item["our_affinity"] = self.t_our_affinity[idx]
+        return item
 
 
 def print_stats(stats: Counter) -> None:

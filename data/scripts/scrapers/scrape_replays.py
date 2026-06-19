@@ -442,6 +442,79 @@ def scrape(
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
+# ── Interactive prompts (format abbreviation + native folder picker) ─────────────
+
+def _format_choices() -> dict:
+    """Abbreviation -> full format slug. Built from the format registry when
+    available ('ma'->...regma, 'mb'->...regmb, future regs auto-appear); falls
+    back to the M-A/M-B pair."""
+    try:
+        from v_dance.formats import known_formats, reg_token
+        out = {}
+        for f in known_formats():
+            tok = reg_token(f)                       # e.g. 'regma'
+            if tok and tok.startswith("reg") and len(tok) > 3:
+                out[tok[3:]] = f                     # 'ma' -> 'gen9championsvgc2026regma'
+        if out:
+            return out
+    except Exception:
+        pass
+    return {
+        "ma": "gen9championsvgc2026regma",
+        "mb": "gen9championsvgc2026regmb",
+    }
+
+
+def _prompt_format(choices: dict) -> str:
+    """Ask the user to pick a format by abbreviation (e.g. ma / mb)."""
+    keys = sorted(choices)
+    while True:
+        print("\nSelect a format:")
+        for k in keys:
+            print(f"   {k}  ->  {choices[k]}")
+        ans = input(f"Format [{'/'.join(keys)}]: ").strip().lower()
+        ans = re.sub(r"^reg", "", ans)               # accept 'regmb' too -> 'mb'
+        if ans in choices:
+            return choices[ans]
+        if ans.startswith("gen9"):                   # a full slug typed directly
+            return ans
+        print(f"   '{ans}' not recognised — choose one of: {', '.join(keys)}")
+
+
+def _pick_directory(title: str) -> Optional[str]:
+    """Pop up the native OS folder picker; return the chosen path or None
+    (cancelled / unavailable -> caller falls back to the default)."""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        path = filedialog.askdirectory(title=title, mustexist=False)
+        root.destroy()
+        return path or None
+    except Exception as exc:
+        print(f"[warn] folder picker unavailable ({exc}); using the default location.")
+        return None
+
+
+def _prompt_int(label: str, default: int, minimum: int = 0) -> int:
+    """Prompt for an integer; Enter accepts the default, re-asks on bad input."""
+    while True:
+        ans = input(f"{label} [{default}]: ").strip()
+        if not ans:
+            return default
+        try:
+            v = int(ans)
+        except ValueError:
+            print(f"   '{ans}' is not a number — enter an integer or press Enter for {default}.")
+            continue
+        if v < minimum:
+            print(f"   must be >= {minimum}.")
+            continue
+        return v
+
+
 def cli() -> None:
     # Windows consoles often default to cp1252, which can't print ✓/–
     try:
@@ -454,16 +527,20 @@ def cli() -> None:
         description="Download rating-sorted Showdown replays into data/vods/Type_B/<format>/.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    ap.add_argument("--format", default="gen9championsvgc2026regma",
-                    help="Showdown format slug (as it appears in the replay-search URL)")
-    ap.add_argument("--target", type=int, default=3000,
-                    help="Number of NEW (not-yet-downloaded) replays to fetch")
-    ap.add_argument("--max-per-team", type=int, default=12,
+    ap.add_argument("--format", default=None,
+                    help="Format slug (e.g. gen9championsvgc2026regmb) OR an abbreviation "
+                         "(ma / mb). Omit to be PROMPTED interactively.")
+    ap.add_argument("--target", type=int, default=None,
+                    help="Number of NEW (not-yet-downloaded) replays to fetch "
+                         "(default 1000; omit to be PROMPTED).")
+    ap.add_argument("--max-per-team", type=int, default=None,
                     help="Skip a replay only if BOTH teams already appear this many "
-                         "times in the corpus (0 = no variety cap)")
+                         "times in the corpus (0 = no variety cap; default 12; omit to "
+                         "be PROMPTED).")
     ap.add_argument("--out-dir", default=None,
-                    help="Override output root (default: <repo>/data/vods/Type_B). "
-                         "The format slug is always appended as a subfolder.")
+                    help="Output root. Omit to get a native folder PICKER (Cancel = "
+                         "<repo>/data/vods/Type_B). The format slug is always appended "
+                         "as a subfolder.")
     ap.add_argument("--start-page", type=int, default=1, help="First search page to fetch")
     ap.add_argument("--max-pages", type=int, default=200, help="Safety cap on pages fetched")
     ap.add_argument("--delay-min", type=float, default=DELAY_MIN,
@@ -478,15 +555,43 @@ def cli() -> None:
                     help="List what would be downloaded without writing files")
     args = ap.parse_args()
 
-    fmt = args.format.strip().lower()
-    out_root = Path(args.out_dir).resolve() if args.out_dir else VODS_ROOT
-    out_dir = out_root / fmt
+    # Format: --format (slug or ma/mb abbreviation) or prompt interactively.
+    choices = _format_choices()
+    if args.format:
+        key = re.sub(r"^reg", "", args.format.strip().lower())
+        fmt = choices.get(key) or args.format.strip().lower()
+    else:
+        fmt = _prompt_format(choices)
+
+    # How many + variety cap: --target / --max-per-team or prompt (TEXT prompts
+    # before the GUI folder picker). Defaults: 1000 replays, 12 per team.
+    target = args.target if args.target is not None else _prompt_int(
+        "How many NEW replays to fetch", 1000, minimum=1)
+    max_per_team = args.max_per_team if args.max_per_team is not None else _prompt_int(
+        "Max replays per team (variety cap; 0 = no cap)", 12, minimum=0)
+
+    # Destination: --out-dir or pop up the native folder picker (Cancel = default).
+    # The format slug is appended as a subfolder either way.
+    if args.out_dir:
+        out_root = Path(args.out_dir).resolve()
+    else:
+        picked = _pick_directory(
+            f"Select the folder for {fmt} replays — pick the '{fmt}' folder itself "
+            f"OR a parent (a '{fmt}' subfolder is made only if needed)"
+        )
+        out_root = Path(picked).resolve() if picked else VODS_ROOT
+
+    # If the chosen folder is ALREADY the format folder, use it directly (don't
+    # double-nest); otherwise append the format slug as a subfolder.
+    out_dir = out_root if out_root.name.lower() == fmt.lower() else out_root / fmt
+    print(f"[config] format   = {fmt}")
+    print(f"[config] saving to = {out_dir}")
 
     scrape(
-        fmt, args.target, out_dir,
+        fmt, target, out_dir,
         start_page=args.start_page,
         max_pages=args.max_pages,
-        max_per_team=args.max_per_team,
+        max_per_team=max_per_team,
         dry_run=args.dry_run,
         delay_range=(args.delay_min, args.delay_max),
         page_delay_range=(args.page_delay_min, args.page_delay_max),
