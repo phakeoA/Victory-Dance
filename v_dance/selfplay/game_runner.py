@@ -206,12 +206,21 @@ class SelfPlayVGCPlayer(VGCPlayer):
             c = self._collectors.get(tag)
             if c is not None and len(c) > 0:
                 won = True if battle.won else False if getattr(battle, "lost", False) else None
-                own_team = [getattr(m, "species", "?")
-                            for m in (getattr(battle, "team", None) or {}).values()]
+                # 15b.0: prefer the TRUE TP decision captured at teampreview (real
+                # submitted bring/leads + opponent roster). own_team comes from the
+                # SAME capture so the bring indices stay consistent with the roster
+                # they index. Fall back to the battle roster + finalize's first-4
+                # default only when no decision was recorded (defensive).
+                tp = (getattr(self, "_tp_decision", None) or {}).get(tag) or {}
+                own_team = tp.get("own_team") or [
+                    getattr(m, "species", "?")
+                    for m in (getattr(battle, "team", None) or {}).values()]
                 self._finished[tag] = finalize_trajectory(
                     c, won=won, terminal_type=terminal_type_for(battle.won,
                                                                 getattr(battle, "lost", False)),
-                    own_team=own_team, n_turns=getattr(battle, "turn", len(c)))
+                    own_team=own_team, n_turns=getattr(battle, "turn", len(c)),
+                    tp_bring=tp.get("bring"), tp_leads=tp.get("leads"),
+                    opp_team=tp.get("opp_team") or ())
         except Exception:
             log.debug("self-play finalize failed (non-fatal)", exc_info=True)
         return super()._battle_finished_callback(battle)   # base (#18) saves/removes the spectate file

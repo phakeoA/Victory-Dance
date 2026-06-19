@@ -713,6 +713,11 @@ class VGCPlayerBase(Player):
         # Per-battle TOTAL forced-switch handlings (catches a loop even when the
         # turn/force_switch shifts each iteration, which the per-key counter misses).
         self._fs_battle_count: dict = {}
+        # 15b.0: the ACTUAL team-preview decision submitted this battle, keyed by
+        # battle_tag -> {bring, leads, own_team, opp_team}. Captured in teampreview()
+        # so the self-play collector can attach the TRUE TP decision + opponent roster
+        # to the trajectory (sec 14 outcome-driven TP); popped in _battle_finished_callback.
+        self._tp_decision: dict = {}
 
     # ── Subclass contract ─────────────────────────────────────────────────────
 
@@ -773,6 +778,30 @@ class VGCPlayerBase(Player):
             "Teampreview [%s] → /team %s  (%s)",
             battle.battle_tag, showdown_order, ", ".join(species_names),
         )
+
+        # 15b.0: record the ACTUAL submitted decision + rosters seen. ``order`` is the
+        # final (padded) leads-first submission, so bring = the whole order and leads =
+        # its first two (Showdown leads positions 1-2 in doubles). own_team is captured
+        # HERE so the recorded bring indices index the SAME roster they were chosen
+        # against. Best-effort — bookkeeping must never disturb the returned /team order.
+        try:
+            store = getattr(self, "_tp_decision", None)
+            if store is None:
+                store = self._tp_decision = {}
+            opp_src = (getattr(battle, "teampreview_opponent_team", None)
+                       or getattr(battle, "opponent_team", None) or [])
+            opp_mons = list(opp_src.values()) if isinstance(opp_src, dict) else list(opp_src)
+            store[battle.battle_tag] = {
+                "bring": [int(i) for i in order],
+                "leads": [int(i) for i in order[:2]],
+                "own_team": [getattr(team[i], "species", None) for i in range(len(team))],
+                "opp_team": [sp for sp in (getattr(m, "species", None) for m in opp_mons) if sp],
+            }
+            if len(store) > 256:                     # bound over a long run (defensive)
+                self._tp_decision = {battle.battle_tag: store[battle.battle_tag]}
+        except Exception:
+            log.debug("teampreview decision capture failed (non-fatal)", exc_info=True)
+
         return f"/team {showdown_order}"
 
     def choose_move(self, battle: DoubleBattle):
@@ -1072,6 +1101,13 @@ class VGCPlayerBase(Player):
 
     def _battle_finished_callback(self, battle: DoubleBattle) -> None:
         """Called by poke-env when a battle ends — back-fills outcomes in replay."""
+        # 15b.0: drop the captured TP decision for ALL players (the SelfPlay recorder
+        # reads it BEFORE calling super(); non-recording players just need the cleanup,
+        # so the per-battle dict can't grow unbounded over a long run).
+        try:
+            getattr(self, "_tp_decision", {}).pop(battle.battle_tag, None)
+        except Exception:
+            pass
         if battle.won:
             outcome = 1
         elif battle.lost:

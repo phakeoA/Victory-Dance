@@ -35,3 +35,21 @@ pokemon-showdown/
 
 # agent memory index archive (not project source)
 memory_before.md
+
+# ── kept local, not published to the public branch ───────────────────────────
+# IDE / agent config
+.vscode/
+.claude/
+# dev harnesses, workflow scripts, throwaway artifacts
+scratch/
+# fork leftovers staged for deletion
+Delete_When_Project_Done/
+# tests (run locally; not published)
+tests/
+data/scripts/tests/
+.pytest_cache/
+# design docs / notes
+docs/
+# all markdown except the root README.md
+*.md
+!/README.md

@@ -268,6 +268,11 @@ def load_team_chooser(path, device: str = "cpu"):
         emb_dim=cfg.get("emb_dim", 32),
         hidden=cfg.get("hidden", 128),
         dropout=cfg.get("dropout", 0.0),
+        # 15b-arch.1: absent in legacy configs -> False -> byte-identical mean-pool model loads unchanged.
+        use_self_attn=cfg.get("use_self_attn", False),
+        use_cross_attn=cfg.get("use_cross_attn", False),
+        attn_heads=cfg.get("attn_heads", 4),
+        use_teammate_bias=cfg.get("use_teammate_bias", False),
     )
     model.load_state_dict(ckpt["model_state"])
     model.to(device).eval()

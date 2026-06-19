@@ -326,6 +326,21 @@ class BeliefState:
             return None
         return max(entry["abilities"], key=lambda x: x["pct"])["name"]
 
+    def usage(self, species: str) -> float:
+        """Usage percentage [0, 100] for this species (0.0 if we have no Pikalytics data).
+        A species-level prior, available identically at train and serve (15b-feat.1)."""
+        entry = self._entry(species)
+        return float(entry.get("usage_pct", 0.0)) if entry else 0.0
+
+    def teammates(self, species: str, top_k: int = 16) -> list[dict]:
+        """[{"name": teammate, "p": pct/100}, ...] — the species' most common teammates (co-occurrence
+        prior). Used for the team-preview attention bias (15b-feat.1b)."""
+        entry = self._entry(species)
+        if not entry:
+            return []
+        tm = sorted(entry.get("teammates", []), key=lambda x: x["pct"], reverse=True)
+        return [{"name": t["name"], "p": round(t["pct"] / 100.0, 4)} for t in tm[:top_k]]
+
     def top_spread(self, species: str) -> tuple[str, list[int]]:
         """
         Return (nature, actual_evs_list) for the most common spread.
