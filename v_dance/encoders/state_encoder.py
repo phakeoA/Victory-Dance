@@ -61,7 +61,8 @@ TENSOR LAYOUT  (total STATE_DIM floats)
         opp side conditions multi-hot (24)
         turn normalised (1)
         trick room flag (1)
-        team counts (4)      ← own/opp living-bench, own/opp fainted (each /4)
+        turn-order block (12) ← B1.4: 4 effective-speed + 4 moves-first margins + 4 pair-confidences
+        team counts (4)      ← own/opp living-bench, own/opp fainted (each /4) — MUST stay last
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 POKEMON_FEATURES per slot (144 floats):
     hp_frac       (1)
@@ -86,7 +87,7 @@ POKEMON_FEATURES per slot (144 floats):
     is_transformed(1)    ← layout-v2; Ditto copied a forme (types/stats above
                            are the COPY's); reverts on switch-out
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-MOVE_FEATURES per move (10 floats):
+MOVE_FEATURES per move (22 floats):
     base_power / 150     (1)
     type_idx / 19        (1)   ← ordinal, not one-hot (keep dim small)
     category             (1)   ← 0=phys 0.5=spec 1=status
@@ -96,6 +97,9 @@ MOVE_FEATURES per move (10 floats):
     is_protect           (1)
     is_stab              (1)
     is_spread            (1)   ← gap #6; hits both foes (allAdjacentFoes/allAdjacent)
+    type_eff vs enemy0/1 (4)   ← B1.1: signed log2(mult)/2 + immune (0× distinct from 0.25×), ×2 enemies
+    damage vs enemy0/1   (4)   ← B1.2: [min,max] roll as frac of current HP, ×2 enemies (core: no situ. mods)
+    intrinsics           (4)   ← B1.3: contact · recoil · drain · multihit-count/5 (per-move, public)
     is_known             (1)   ← 1.0 revealed/exact · p(usage) belief-padded
                                  · 0 empty slot
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -124,6 +128,7 @@ ACTION SPACE (per active slot):
 from __future__ import annotations
 
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -248,7 +253,8 @@ NUM_FIELDS     = len(FIELD_NAMES)       # 15
 NUM_SIDE_CONDS = len(SIDE_COND_NAMES)   # 24
 NUM_BOOSTS     = 7                      # atk def spa spd spe acc eva
 NUM_MOVES      = 4
-MOVE_FEATURES  = 10   # +is_spread (gap #6); is_known stays last (MOVE_FEATURES-1)
+MOVE_FEATURES  = 22   # +4 type-eff (B1.1) +4 damage-band (B1.2) vs each of the 2 enemy actives;
+                      # +4 move intrinsics (B1.3: contact/recoil/drain/multihit); is_known stays last
 
 POKEMON_FEATURES = (
     1               # hp_frac
@@ -287,8 +293,9 @@ GLOBAL_FEATURES = (
     + NUM_SIDE_CONDS  # 24  opp
     + 1               # turn
     + 1               # trick room explicit flag
-    + 4               # team counts (layout-v2): own/opp living-bench, own/opp fainted
-)  # = 78
+    + 12              # B1.4 turn-order: 4 effective-speed + 4 moves-first margins + 4 pair-confidences
+    + 4               # team counts (layout-v2): own/opp living-bench, own/opp fainted  (MUST stay last)
+)  # = 90
 
 STATE_DIM = (ACTIVE_SLOTS + BENCH_SLOTS + OPP_BENCH_SLOTS) * POKEMON_FEATURES + GLOBAL_FEATURES
 # = 12 × 149 + 78 = 1866   (POKEMON_FEATURES 149 = 148 + 1×(NUM_ABILITY_EFFECTS 16→17))
@@ -304,7 +311,7 @@ STATE_DIM = (ACTIVE_SLOTS + BENCH_SLOTS + OPP_BENCH_SLOTS) * POKEMON_FEATURES + 
 #       statdrop_boost ability category, NUM_ABILITY_EFFECTS 16→17)
 # train_bc stamps this into the checkpoint config; model_io.load_bc_policy asserts
 # it (and the dim) match the running code.
-STATE_LAYOUT_VERSION = 4
+STATE_LAYOUT_VERSION = 8
 
 # ── Action space ───────────────────────────────────────────────────────────────
 ACTIONS_PER_SLOT = 16    # 12 move-target + 4 switch
@@ -407,6 +414,175 @@ def _dex_types(species: Optional[str]) -> list[str]:
     if not entry:
         return []
     return [_canon(t) for t in (entry.get("types") or [])]
+
+
+# ── B1/#25 type-effectiveness (resolved cross — the encoder otherwise never learns the chart) ──
+_TYPE_CHART_CACHE = None
+
+
+def _type_chart():
+    """poke-env's canonical Gen-9 chart {DEFENDING_TYPE: {ATTACKING_TYPE: multiplier}}, cached.
+    Reg-independent game rule; identical on the offline + live encoder paths (parity)."""
+    global _TYPE_CHART_CACHE
+    if _TYPE_CHART_CACHE is None:
+        from poke_env.data import GenData
+        _TYPE_CHART_CACHE = GenData.from_gen(9).type_chart
+    return _TYPE_CHART_CACHE
+
+
+def _effective_types(mon: Optional[dict]) -> list[str]:
+    """A mon's CURRENT effective types (canonical upper): TERA overrides (tera is prepared-for but
+    INACTIVE in Reg M-A) else the dex types of the current/copied forme. The SINGLE source shared by
+    the per-mon type one-hots AND the per-move type-eff, so the defender typing stays in lockstep."""
+    if not mon:
+        return []
+    if mon.get("is_terastallized") and mon.get("known_tera_type"):
+        return [_canon(mon["known_tera_type"])]
+    dex_species = (mon["transformed_into"] if (mon.get("is_transformed") and mon.get("transformed_into"))
+                   else mon.get("species"))
+    return _dex_types(dex_species) or _dex_types(mon.get("base_species")) or []
+
+
+def _type_mult(move_type: str, defender_types: list[str]) -> float:
+    """Raw type-eff multiplier (product over the defender's types) of an attacking ``move_type``;
+    1.0 when either side is unknown. Shared by the signed type-eff channel AND the damage band."""
+    if not defender_types or not move_type:
+        return 1.0
+    chart = _type_chart()
+    at = move_type.upper()
+    mult = 1.0
+    for dt in defender_types:
+        mult *= float(chart.get(dt.upper(), {}).get(at, 1.0))
+    return mult
+
+
+def _type_eff_signed_immune(move_type: str, defender_types: list[str]) -> tuple[float, float]:
+    """(signed_mult, immune) of ``move_type`` vs a defender. signed = clip(log2(mult)/2, -1, 1) for
+    mult>0 → 4×=+1 · 2×=+0.5 · 1×=0 · 0.5×=-0.5 · 0.25×=-1; a 0× TYPING immunity (Ground→Flying, tera)
+    → signed -1 AND immune 1, so 0× stays DISTINCT from 0.25×. Ability immunities (Levitate etc.)
+    fold into the resolved damage band (B1.2), not here — this is the pure typing cross."""
+    if not defender_types or not move_type:
+        return 0.0, 0.0
+    mult = _type_mult(move_type, defender_types)
+    if mult <= 0.0:
+        return -1.0, 1.0
+    return float(np.clip(math.log2(mult) / 2.0, -1.0, 1.0)), 0.0
+
+
+def _damage_band(base_power, A, D, hp_stat, hp_frac, type_mult, is_stab, is_spread,
+                 situational_mult=1.0) -> tuple[float, float]:
+    """(min, max) damage as a fraction of the defender's CURRENT HP, clamped [0,1] — the L50 Gen-9
+    formula folding base_power·(A/D)·STAB·type_mult·spread·situational(B1.2b: weather/terrain/screens/
+    item/burn)·the 0.85–1.0 roll. (0,0) for a non-damaging move or missing belief. Belief-dependent →
+    rides stats_known. Defender-ability resists (Thick Fat/Multiscale/Filter) NOT modelled."""
+    if (not base_power or base_power <= 0 or not A or not D
+            or not hp_stat or not hp_frac or hp_frac <= 0):
+        return 0.0, 0.0
+    base = ((2 * 50 / 5 + 2) * base_power * A / D) / 50.0 + 2.0
+    mult = type_mult * (1.5 if is_stab else 1.0) * (0.75 if is_spread else 1.0) * situational_mult
+    cur_hp = hp_stat * hp_frac
+    if cur_hp <= 0:
+        return 0.0, 0.0
+    return (float(np.clip(base * mult * 0.85 / cur_hp, 0.0, 1.0)),
+            float(np.clip(base * mult / cur_hp, 0.0, 1.0)))
+
+
+def _side_screens(side_dict: Optional[dict]) -> tuple:
+    """(phys_reduced, spec_reduced) — does this side have a screen reducing physical / special damage
+    (Reflect / Light Screen / Aurora Veil)? (B1.2b damage modifier.)"""
+    screens = (side_dict or {}).get("screens") or {}
+    names = {_SCREEN_TO_SC.get(k) for k, v in screens.items() if v}
+    return (("REFLECT" in names or "AURORA_VEIL" in names),
+            ("LIGHT_SCREEN" in names or "AURORA_VEIL" in names))
+
+
+def _defender_profile(mon: Optional[dict], side_screens: tuple = (False, False)) -> Optional[dict]:
+    """Uniform DEFENDER profile {types, def, spd, hp, hp_frac, grounded, screen_phys, screen_spec} for
+    the per-move type-eff + damage cross. None for an empty slot. Belief est stats; hp_frac mirrors the
+    per-mon hp encoding. grounded = static v1 (not Flying / Levitate / Air-Balloon; volatiles skipped)."""
+    if not mon:
+        return None
+    est = (mon.get("stats_estimate") or {}).get("stats") or {}
+    hp_pct = mon.get("hp_pct")
+    if hp_pct is None:
+        hp_frac = 0.0 if mon.get("seen", True) else 1.0
+    else:
+        hp_frac = max(0.0, min(hp_pct, 100.0)) / 100.0
+    types = _effective_types(mon)
+    grounded = ("FLYING" not in types and resolve_ability_json(mon)[0] != "levitate"
+                and resolve_item_json(mon)[0] != "airballoon")
+    return {"types": types, "def": est.get("def"), "spd": est.get("spd"), "hp": est.get("hp"),
+            "hp_frac": hp_frac, "grounded": grounded,
+            "screen_phys": side_screens[0], "screen_spec": side_screens[1]}
+
+
+# B1.2b weather-speed abilities → the weather they double speed in.
+_WEATHER_SPEED_ABILITY = {"swiftswim": ("RAINDANCE",), "chlorophyll": ("SUNNYDAY",),
+                          "sandrush": ("SANDSTORM",), "slushrush": ("SNOW", "HAIL")}
+
+
+def _situational_damage_mult(move_type, is_physical, weather, terrain, defender,
+                             att_burned, att_life_orb, att_choice) -> float:
+    """B1.2b damage situational multiplier: weather (Sun/Rain on Fire/Water) · terrain ×1.3 (grounded
+    defender, matching type) · screens ×0.667 (doubles) · Life Orb ×1.3 · Choice Band/Specs ×1.5 ·
+    burn ×0.5 (physical). Defender-ability resists (Thick Fat/Multiscale/Filter) NOT modelled here."""
+    mult = 1.0
+    mt = (move_type or "").upper()
+    if weather == "SUNNYDAY":
+        mult *= 1.5 if mt == "FIRE" else (0.5 if mt == "WATER" else 1.0)
+    elif weather == "RAINDANCE":
+        mult *= 1.5 if mt == "WATER" else (0.5 if mt == "FIRE" else 1.0)
+    if defender and defender.get("grounded"):
+        if (terrain == "ELECTRIC_TERRAIN" and mt == "ELECTRIC") \
+                or (terrain == "GRASSY_TERRAIN" and mt == "GRASS") \
+                or (terrain == "PSYCHIC_TERRAIN" and mt == "PSYCHIC"):
+            mult *= 1.3
+    if defender and ((is_physical and defender.get("screen_phys"))
+                     or (not is_physical and defender.get("screen_spec"))):
+        mult *= 0.667                                  # doubles screen reduction (≈2732/4096)
+    if att_life_orb:
+        mult *= 1.3
+    if att_choice:
+        mult *= 1.5                                    # Choice Band/Specs (not Scarf) boost the A stat
+    if att_burned and is_physical:
+        mult *= 0.5
+    return mult
+
+
+def _effective_speed(mon: Optional[dict], side_tailwind: bool,
+                     weather: Optional[str] = None) -> tuple[float, float]:
+    """(speed, known) — resolved in-battle speed folding the spe boost stage · paralysis ×0.5 · Choice
+    Scarf ×1.5 · Tailwind ×2 · a weather-speed ability ×2 (Swift Swim/Chlorophyll/Sand Rush/Slush Rush
+    in matching weather, B1.2b). None / no belief → (0, 0). Belief-dependent → formula-parity."""
+    if not mon:
+        return 0.0, 0.0
+    est_block = mon.get("stats_estimate") or {}
+    spe = (est_block.get("stats") or {}).get("spe")
+    if not spe:
+        return 0.0, 0.0
+    known = {"exact": 1.0, "distribution": 0.5}.get(est_block.get("mode"), 0.0)
+    stage = (mon.get("boosts") or {}).get("spe", 0) or 0
+    spe *= ((2 + stage) / 2.0) if stage >= 0 else (2.0 / (2 - stage))
+    if _canon(mon.get("status")) == "PAR":
+        spe *= 0.5
+    item_id, _ = resolve_item_json(mon)
+    if _ITEM_EFFECT_IDX.get("choice_speed") in item_effect_indices(item_id):
+        spe *= 1.5
+    if side_tailwind:
+        spe *= 2.0
+    if weather and weather in _WEATHER_SPEED_ABILITY.get(resolve_ability_json(mon)[0], ()):
+        spe *= 2.0
+    return float(spe), known
+
+
+def _moves_first(spd_a: float, spd_b: float, trick_room: bool) -> float:
+    """Soft signed margin in [-1,1]: tanh(log(spd_a/spd_b)) with the Trick-Room sign-flip (positive →
+    a moves first). 0 for a tie / missing speed — NEVER a hard ±1, so a surprise-Scarf / min-speed-TR
+    read stays representable (the panel's over-anchoring guard)."""
+    if not spd_a or not spd_b or spd_a <= 0 or spd_b <= 0:
+        return 0.0
+    m = math.tanh(math.log(spd_a / spd_b))
+    return -m if trick_room else m
 
 
 def dex_unique_ability(species: Optional[str]) -> Optional[str]:
@@ -676,10 +852,25 @@ class VodStateEncoder:
         # ── [A] Active slots: our_a, our_b, opp_a, opp_b ────────────────────
         our_active = snap.get("our_active") or {}
         opp_active = snap.get("opp_active") or {}
+        # B1/B1.2b: resolve enemy-active DEFENDER PROFILES (types/stats/HP/grounded/screens) + the global
+        # field mods (weather/terrain) ONCE — own mons attack the opp actives & vice-versa.
+        _field = snap.get("field") or {}
+        _wraw = _field.get("weather")
+        _weather = _canon(_wraw) if _wraw else None
+        _terrain = _TERRAIN_TO_FIELD.get(_field.get("terrain") or "")
+        field_mods = (_weather, _terrain)
+        _sc = snap.get("side_conditions") or {}
+        _our_scr = _side_screens(_sc.get("our_side"))
+        _opp_scr = _side_screens(_sc.get("opp_side"))
+        own_enemy = [_defender_profile(opp_active.get("opp_a"), _opp_scr),
+                     _defender_profile(opp_active.get("opp_b"), _opp_scr)]
+        opp_enemy = [_defender_profile(our_active.get("our_a"), _our_scr),
+                     _defender_profile(our_active.get("our_b"), _our_scr)]
         for key_map, prefix in ((our_active, "our"), (opp_active, "opp")):
+            enemy = own_enemy if prefix == "our" else opp_enemy
             for slot in ("a", "b"):
                 mon = key_map.get(f"{prefix}_{slot}")
-                self._write_pokemon_json(vec, cursor, mon, is_active=True)
+                self._write_pokemon_json(vec, cursor, mon, is_active=True, enemy_defenders=enemy, field_mods=field_mods)
                 cursor += POKEMON_FEATURES
 
         # ── [B] Own bench (fainted excluded — matches the live path; the
@@ -689,7 +880,8 @@ class VodStateEncoder:
         ][:BENCH_SLOTS]
         for i in range(BENCH_SLOTS):
             mon = bench[i] if i < len(bench) else None
-            self._write_pokemon_json(vec, cursor, mon, is_active=False)
+            self._write_pokemon_json(vec, cursor, mon, is_active=False, enemy_defenders=own_enemy,
+                                     field_mods=field_mods)
             cursor += POKEMON_FEATURES
 
         # ── [B2] Opponent bench (layout-v2): opp non-active roster mons.
@@ -702,7 +894,8 @@ class VodStateEncoder:
         opp_bench = (opp_seen_alive + opp_seen_fainted + opp_unseen)[:OPP_BENCH_SLOTS]
         for i in range(OPP_BENCH_SLOTS):
             mon = opp_bench[i] if i < len(opp_bench) else None
-            self._write_pokemon_json(vec, cursor, mon, is_active=False)
+            self._write_pokemon_json(vec, cursor, mon, is_active=False, enemy_defenders=opp_enemy,
+                                     field_mods=field_mods)
             cursor += POKEMON_FEATURES
 
         # ── [C] Global features ──────────────────────────────────────────────
@@ -748,6 +941,26 @@ class VodStateEncoder:
         vec[cursor] = 1.0 if trick_room else 0.0
         cursor += 1
 
+        # ── B1.4 turn-order block: 4 effective speeds + 4 moves-first margins + 4 pair-confidences.
+        # Folds spe boost/para/Scarf/Tailwind into a resolved speed and the TR sign-flip into the
+        # who-moves-first comparison. Belief-dependent (est speed) → formula-parity like damage.
+        _our_tw = ((side_conds.get("our_side") or {}).get("tailwind_turns_remaining") or 0) > 0
+        _opp_tw = ((side_conds.get("opp_side") or {}).get("tailwind_turns_remaining") or 0) > 0
+        _sp = {
+            "our_a": _effective_speed(our_active.get("our_a"), _our_tw, _weather),
+            "our_b": _effective_speed(our_active.get("our_b"), _our_tw, _weather),
+            "opp_a": _effective_speed(opp_active.get("opp_a"), _opp_tw, _weather),
+            "opp_b": _effective_speed(opp_active.get("opp_b"), _opp_tw, _weather),
+        }
+        for _k in ("our_a", "our_b", "opp_a", "opp_b"):      # 4 effective-speed channels (/600 clamped)
+            vec[cursor] = min(_sp[_k][0] / 600.0, 1.0)
+            cursor += 1
+        for _ok in ("our_a", "our_b"):                        # 4 our×opp pairs × [margin, confidence]
+            for _pk in ("opp_a", "opp_b"):
+                vec[cursor] = _moves_first(_sp[_ok][0], _sp[_pk][0], trick_room)
+                vec[cursor + 1] = _sp[_ok][1] * _sp[_pk][1]
+                cursor += 2
+
         # ── Team counts (layout-v2): living-bench + fainted per side ──────────
         # Own bench keeps brought-but-unentered stubs (all our switch-ins);
         # opp counts use only SEEN mons (information asymmetry).
@@ -784,8 +997,11 @@ class VodStateEncoder:
         start: int,
         mon: Optional[dict],
         is_active: bool,
+        enemy_defenders: Optional[list] = None,
+        field_mods: tuple = (None, None),
     ) -> None:
-        """JSON twin of _write_pokemon — same POKEMON_FEATURES layout."""
+        """JSON twin of _write_pokemon — same POKEMON_FEATURES layout. ``enemy_defenders`` = the 2 enemy
+        actives' defender profiles; ``field_mods`` = (weather, terrain) for the B1.2b damage modifiers."""
         if not mon:
             return
 
@@ -810,11 +1026,9 @@ class VodStateEncoder:
             dex_species = mon.get("species")
         base_fallback = mon.get("base_species")
 
-        # Types: tera overrides; otherwise dex types of the current/copied forme
-        if mon.get("is_terastallized") and mon.get("known_tera_type"):
-            types = [_canon(mon["known_tera_type"])]
-        else:
-            types = _dex_types(dex_species) or _dex_types(base_fallback)
+        # Types: tera overrides; otherwise dex types of the current/copied forme.
+        # _effective_types is the SINGLE source also used by the per-move type-eff (lockstep).
+        types = _effective_types(mon)
         if types and types[0] in _TYPE_IDX:
             vec[i + _TYPE_IDX[types[0]]] = 1.0
         i += NUM_TYPES
@@ -862,12 +1076,21 @@ class VodStateEncoder:
         # Moves: canonical slot order shared with the action codec — see
         # move_slots_for_mon().
         pp_used_map = mon.get("move_pp_used") or {}
+        # B1.2/B1.2b attacker context: A stat + burn + Life-Orb/Choice item (fold into the damage band).
+        _est = (mon.get("stats_estimate") or {}).get("stats") or {}
+        _aidx = item_effect_indices(resolve_item_json(mon)[0])
+        att_ctx = {"atk": _est.get("atk"), "spa": _est.get("spa"),
+                   "burned": _canon(mon.get("status")) == "BRN",
+                   "life_orb": _ITEM_EFFECT_IDX.get("life_orb") in _aidx,
+                   "choice": (_ITEM_EFFECT_IDX.get("choice") in _aidx
+                              and _ITEM_EFFECT_IDX.get("choice_speed") not in _aidx)}
         slots = move_slots_for_mon(mon)
         for m_idx in range(NUM_MOVES):
             if m_idx < len(slots):
                 name, confidence = slots[m_idx]
                 pp_used = pp_used_map.get(norm_species(name), 0)
-                self._write_move_json(vec, i, name, confidence, types, pp_used)
+                self._write_move_json(vec, i, name, confidence, types, pp_used,
+                                      enemy_defenders, att_ctx, field_mods)
             i += MOVE_FEATURES
 
         # Item + ability EFFECT categories (gap #5) — see resolve_item_json /
@@ -904,8 +1127,12 @@ class VodStateEncoder:
         confidence: float,
         user_types: list[str],
         pp_used: int = 0,
+        enemy_defenders: Optional[list] = None,
+        att_ctx: Optional[dict] = None,
+        field_mods: tuple = (None, None),
     ) -> None:
-        """JSON twin of _write_move using data/moves.json."""
+        """JSON twin of _write_move using data/moves.json. ``enemy_defenders`` = the 2 enemy actives'
+        defender profiles; ``att_ctx`` = attacker stats/burn/item; ``field_mods`` = (weather, terrain)."""
         i = start
         data = _get_moves_data().get(norm_species(move_name))
         if not data:
@@ -947,8 +1174,53 @@ class VodStateEncoder:
         i += 1
 
         # is_spread (gap #6): hits both foes (the core doubles tradeoff).
-        vec[i] = 1.0 if is_spread_target(data.get("target")) else 0.0
+        _spread = is_spread_target(data.get("target"))
+        vec[i] = 1.0 if _spread else 0.0
         i += 1
+
+        # B1.1 type-eff cross: signed multiplier + immune flag of THIS move vs each of the 2 enemy
+        # actives (the resolved chart lookup the net otherwise never learns). 4 channels = 2×[signed,immune].
+        for e in range(2):
+            d = enemy_defenders[e] if (enemy_defenders and e < len(enemy_defenders)) else None
+            signed, immune = _type_eff_signed_immune(mtype, (d.get("types") if d else []))
+            vec[i] = signed
+            vec[i + 1] = immune
+            i += 2
+
+        # B1.2 damage band + B1.2b situational mods: [min, max] roll as a fraction of each enemy
+        # active's CURRENT HP. 4 channels = 2×[min,max].
+        _phys = (data.get("category") or "").lower() == "physical"
+        _ac = att_ctx or {}
+        _A = _ac.get("atk") if _phys else _ac.get("spa")
+        _stab = mtype in user_types
+        _weather, _terrain = field_mods if field_mods else (None, None)
+        for e in range(2):
+            d = enemy_defenders[e] if (enemy_defenders and e < len(enemy_defenders)) else None
+            if d:
+                _sit = _situational_damage_mult(mtype, _phys, _weather, _terrain, d,
+                                                _ac.get("burned"), _ac.get("life_orb"), _ac.get("choice"))
+                dmin, dmax = _damage_band(
+                    data.get("basePower") or 0, _A, (d.get("def") if _phys else d.get("spd")),
+                    d.get("hp"), d.get("hp_frac"), _type_mult(mtype, d.get("types") or []),
+                    _stab, _spread, _sit)
+            else:
+                dmin, dmax = 0.0, 0.0
+            vec[i] = dmin
+            vec[i + 1] = dmax
+            i += 2
+
+        # B1.3 move intrinsics (per-move, public, from moves.json) — contact crosses with the
+        # Rocky-Helmet/Static/Flame-Body tags the encoder already has; recoil/drain shift the HP
+        # math the value head reasons over; multihit re-procs Life-Orb/Tough-Claws + ignores Sash.
+        flags = data.get("flags") or {}
+        vec[i] = 1.0 if flags.get("contact") else 0.0
+        vec[i + 1] = 1.0 if data.get("recoil") else 0.0
+        vec[i + 2] = 1.0 if data.get("drain") else 0.0
+        _mh = data.get("multihit")
+        _mh_max = (_mh[-1] if isinstance(_mh, (list, tuple)) and _mh
+                   else (_mh if isinstance(_mh, int) else 0))
+        vec[i + 3] = min(_mh_max or 0, 5) / 5.0
+        i += 4
 
         # is_known: 1.0 revealed/exact, p(usage) for belief-padded moves
         vec[i] = confidence

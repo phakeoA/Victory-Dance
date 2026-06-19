@@ -35,9 +35,20 @@ from v_dance.encoders.state_encoder import (
     ACTIVE_SLOTS, BENCH_SLOTS, OPP_BENCH_SLOTS,
     _BOOST_KEYS, _EST_STAT_NORM,
     item_effect_indices, ability_effect_indices, dex_unique_ability,
-    is_spread_target,
+    is_spread_target, _type_eff_signed_immune, _type_mult, _damage_band, _moves_first,
+    _situational_damage_mult, _WEATHER_SPEED_ABILITY,
     VodStateEncoder,
 )
+
+
+def _live_eff_types(mon) -> list:
+    """A poke-env mon's CURRENT effective type NAMES (upper) for the type-eff cross: tera overrides
+    (prepared-for, INACTIVE in Reg M-A) else its dex types. Mirrors the offline _effective_types."""
+    if mon is None:
+        return []
+    if getattr(mon, "terastallized", False) and getattr(mon, "tera_type", None):
+        return [mon.tera_type.name]
+    return [t.name for t in (mon.type_1, mon.type_2) if t is not None]
 
 # ── Opponent byte ranges in the frozen layout (slots 0,1=own active; 2,3=opp
 # active; 4-7=own bench; 8-11=opp bench).  Used by the gap-#6 opponent splice
@@ -286,6 +297,36 @@ class LiveStateEncoder:
         except ValueError:
             opp_active = [None, None]
 
+        # B1.2b: global field mods (weather/terrain) for the damage situational multiplier.
+        _weather = next((w.name for w in battle.weather), None)
+        _terrain = next((f.name for f in battle.fields if f.name.endswith("_TERRAIN")), None)
+        field_mods = (_weather, _terrain)
+
+        # B1/#25: enemy-active DEFENDER PROFILES (types/stats/HP/grounded/screens) — own mons attack the
+        # opp actives & vice-versa; is_own picks the right est-stat belief + side screens for each side.
+        _oa, _wa = list(opp_active), list(own_active)
+
+        def _prof(mon, is_own):
+            if mon is None:
+                return None
+            est = self._live_est_stats(mon, is_own)[0] or {}
+            scr = battle.side_conditions if is_own else battle.opponent_side_conditions
+            phys_scr = any(getattr(k, "name", "") in ("REFLECT", "AURORA_VEIL") and v for k, v in scr.items())
+            spec_scr = any(getattr(k, "name", "") in ("LIGHT_SCREEN", "AURORA_VEIL") and v for k, v in scr.items())
+            types = _live_eff_types(mon)
+            grounded = ("FLYING" not in types and getattr(mon, "ability", None) != "levitate"
+                        and getattr(mon, "item", None) != "airballoon")
+            return {"types": types,
+                    "def": est.get("def"), "spd": est.get("spd"),
+                    "hp": est.get("hp") or getattr(mon, "max_hp", None),
+                    "hp_frac": (mon.current_hp_fraction if mon.revealed else 1.0),
+                    "grounded": grounded, "screen_phys": phys_scr, "screen_spec": spec_scr}
+
+        own_enemy = [_prof(_oa[0] if len(_oa) > 0 else None, False),
+                     _prof(_oa[1] if len(_oa) > 1 else None, False)]
+        opp_enemy = [_prof(_wa[0] if len(_wa) > 0 else None, True),
+                     _prof(_wa[1] if len(_wa) > 1 else None, True)]
+
         own_active_set = {p for p in own_active if p is not None}
 
         for slot, mon in enumerate(list(own_active)):
@@ -294,10 +335,10 @@ class LiveStateEncoder:
             # authoritative) so the move features match the mask + the offline parser.
             mv = own_active_move_list(battle, slot, mon) if mon is not None else None
             self._write_pokemon(vec, cursor, mon, is_active=True, is_own=True,
-                                move_override=mv)
+                                move_override=mv, enemy_defenders=own_enemy, field_mods=field_mods)
             cursor += POKEMON_FEATURES
         for mon in list(opp_active):
-            self._write_pokemon(vec, cursor, mon, is_active=True, is_own=False)
+            self._write_pokemon(vec, cursor, mon, is_active=True, is_own=False, enemy_defenders=opp_enemy, field_mods=field_mods)
             cursor += POKEMON_FEATURES
 
         # ── [B] Bench slots ──────────────────────────────────────────────────
@@ -312,7 +353,7 @@ class LiveStateEncoder:
 
         for i in range(BENCH_SLOTS):
             mon = bench[i] if i < len(bench) else None
-            self._write_pokemon(vec, cursor, mon, is_active=False, is_own=True)
+            self._write_pokemon(vec, cursor, mon, is_active=False, is_own=True, enemy_defenders=own_enemy, field_mods=field_mods)
             cursor += POKEMON_FEATURES
 
         # ── [B2] Opponent bench (layout-v2): the opponent's FULL teampreview
@@ -327,7 +368,7 @@ class LiveStateEncoder:
         opp_bench = self._opp_bench_mons(battle, opp_active_set)
         for i in range(OPP_BENCH_SLOTS):
             mon = opp_bench[i] if i < len(opp_bench) else None
-            self._write_pokemon(vec, cursor, mon, is_active=False, is_own=False)
+            self._write_pokemon(vec, cursor, mon, is_active=False, is_own=False, enemy_defenders=opp_enemy, field_mods=field_mods)
             cursor += POKEMON_FEATURES
 
         # ── [C] Global features ──────────────────────────────────────────────
@@ -372,6 +413,26 @@ class LiveStateEncoder:
         # because it flips speed priority — critical strategic signal)
         vec[cursor] = 1.0 if trick_room_active else 0.0
         cursor += 1
+
+        # ── B1.4 turn-order block (mirror offline): 4 effective speeds + 4 moves-first margins + conf.
+        _own_tw = any(getattr(k, "name", "") == "TAILWIND" and v
+                      for k, v in battle.side_conditions.items())
+        _opp_tw = any(getattr(k, "name", "") == "TAILWIND" and v
+                      for k, v in battle.opponent_side_conditions.items())
+        _sp = {
+            "our_a": self._live_effective_speed(own_active[0] if len(own_active) > 0 else None, True, _own_tw, _weather),
+            "our_b": self._live_effective_speed(own_active[1] if len(own_active) > 1 else None, True, _own_tw, _weather),
+            "opp_a": self._live_effective_speed(opp_active[0] if len(opp_active) > 0 else None, False, _opp_tw, _weather),
+            "opp_b": self._live_effective_speed(opp_active[1] if len(opp_active) > 1 else None, False, _opp_tw, _weather),
+        }
+        for _k in ("our_a", "our_b", "opp_a", "opp_b"):       # 4 effective-speed channels (/600 clamped)
+            vec[cursor] = min(_sp[_k][0] / 600.0, 1.0)
+            cursor += 1
+        for _ok in ("our_a", "our_b"):                         # 4 our×opp pairs × [margin, confidence]
+            for _pk in ("opp_a", "opp_b"):
+                vec[cursor] = _moves_first(_sp[_ok][0], _sp[_pk][0], trick_room_active)
+                vec[cursor + 1] = _sp[_ok][1] * _sp[_pk][1]
+                cursor += 2
 
         # ── Team counts (layout-v2): living-bench + fainted per side ──────────
         # Opp counts use SEEN (revealed, non-active) mons only — the information
@@ -569,6 +630,27 @@ class LiveStateEncoder:
         return (seen_alive + seen_fainted + unseen)[:OPP_BENCH_SLOTS]
 
     # ── Pokémon encoder (live) ────────────────────────────────────────────────
+    def _live_effective_speed(self, mon, is_own, side_tailwind, weather=None):
+        """(speed, known) — mirror of the offline _effective_speed: est speed folding the spe boost
+        stage · paralysis ×0.5 · Choice Scarf ×1.5 · Tailwind ×2 · weather-speed ability ×2 (B1.2b)."""
+        if mon is None:
+            return 0.0, 0.0
+        est, known = self._live_est_stats(mon, is_own)
+        spe = (est or {}).get("spe")
+        if not spe:
+            return 0.0, 0.0
+        stage = (mon.boosts or {}).get("spe", 0) if getattr(mon, "boosts", None) else 0
+        spe *= ((2 + stage) / 2.0) if stage >= 0 else (2.0 / (2 - stage))
+        if getattr(getattr(mon, "status", None), "name", None) == "PAR":
+            spe *= 0.5
+        if getattr(mon, "item", None) == "choicescarf":
+            spe *= 1.5
+        if side_tailwind:
+            spe *= 2.0
+        if weather and weather in _WEATHER_SPEED_ABILITY.get(getattr(mon, "ability", None) or "", ()):
+            spe *= 2.0
+        return float(spe), known
+
     def _write_pokemon(
         self,
         vec: np.ndarray,
@@ -577,6 +659,8 @@ class LiveStateEncoder:
         is_active: bool,
         is_own: bool,
         move_override: Optional[list] = None,
+        enemy_defenders: Optional[list] = None,
+        field_mods: tuple = (None, None),
     ) -> None:
         """Write POKEMON_FEATURES floats into vec starting at `start`.
 
@@ -651,9 +735,15 @@ class LiveStateEncoder:
         # Moves (up to 4; remaining slots stay zero = unknown)
         move_list = (move_override if move_override is not None
                      else list(mon.moves.values())[:NUM_MOVES])
+        # B1.2/B1.2b attacker context: A stat + burn + Life-Orb/Choice item.
+        _est = self._live_est_stats(mon, is_own)[0] or {}
+        _it = getattr(mon, "item", None)
+        att_ctx = {"atk": _est.get("atk"), "spa": _est.get("spa"),
+                   "burned": getattr(getattr(mon, "status", None), "name", None) == "BRN",
+                   "life_orb": _it == "lifeorb", "choice": _it in ("choiceband", "choicespecs")}
         for m_idx in range(NUM_MOVES):
             if m_idx < len(move_list):
-                self._write_move(vec, i, move_list[m_idx], mon)
+                self._write_move(vec, i, move_list[m_idx], mon, enemy_defenders, att_ctx, field_mods)
             i += MOVE_FEATURES
 
         # Item + ability EFFECT categories (gap #5) — byte-identical layout to
@@ -768,8 +858,12 @@ class LiveStateEncoder:
         start: int,
         move: "Move",
         user: "Pokemon",
+        enemy_defenders: Optional[list] = None,
+        att_ctx: Optional[dict] = None,
+        field_mods: tuple = (None, None),
     ) -> None:
-        """Write MOVE_FEATURES floats into vec starting at `start`."""
+        """Write MOVE_FEATURES floats into vec starting at `start`. ``enemy_defenders`` = defender
+        profiles; ``att_ctx`` = attacker stats/burn/item; ``field_mods`` = (weather, terrain)."""
         i = start
 
         # Base power (cap at 250 since a few moves are absurdly high)
@@ -818,8 +912,51 @@ class LiveStateEncoder:
 
         # is_spread (gap #6): hits both foes — poke-env Move.target enum, mapped to
         # the same id as the offline data/moves.json target by is_spread_target.
-        vec[i] = 1.0 if is_spread_target(getattr(move, "target", None)) else 0.0
+        _spread = is_spread_target(getattr(move, "target", None))
+        vec[i] = 1.0 if _spread else 0.0
         i += 1
+
+        # B1.1 type-eff cross: signed multiplier + immune vs each of the 2 enemy actives. 4 channels.
+        _mt = move.type.name if getattr(move, "type", None) is not None else ""
+        for e in range(2):
+            d = enemy_defenders[e] if (enemy_defenders and e < len(enemy_defenders)) else None
+            signed, immune = _type_eff_signed_immune(_mt, (d.get("types") if d else []))
+            vec[i] = signed
+            vec[i + 1] = immune
+            i += 2
+
+        # B1.2 damage band + B1.2b situational mods: [min,max] roll as a fraction of each enemy active's
+        # CURRENT HP. 4 channels.
+        _phys = move.category == MoveCategory.PHYSICAL
+        _ac = att_ctx or {}
+        _A = _ac.get("atk") if _phys else _ac.get("spa")
+        _stab = getattr(move, "type", None) in user.types
+        _weather, _terrain = field_mods if field_mods else (None, None)
+        for e in range(2):
+            d = enemy_defenders[e] if (enemy_defenders and e < len(enemy_defenders)) else None
+            if d:
+                _sit = _situational_damage_mult(_mt, _phys, _weather, _terrain, d,
+                                                _ac.get("burned"), _ac.get("life_orb"), _ac.get("choice"))
+                dmin, dmax = _damage_band(
+                    getattr(move, "base_power", 0), _A, (d.get("def") if _phys else d.get("spd")),
+                    d.get("hp"), d.get("hp_frac"), _type_mult(_mt, d.get("types") or []),
+                    _stab, _spread, _sit)
+            else:
+                dmin, dmax = 0.0, 0.0
+            vec[i] = dmin
+            vec[i + 1] = dmax
+            i += 2
+
+        # B1.3 move intrinsics (per-move, public, from poke-env Move) — parity with the offline
+        # moves.json flags. contact · recoil · drain · multihit-count/5.
+        _flags = (getattr(move, "entry", None) or {}).get("flags") or {}
+        vec[i] = 1.0 if _flags.get("contact") else 0.0
+        vec[i + 1] = 1.0 if getattr(move, "recoil", 0) else 0.0
+        vec[i + 2] = 1.0 if getattr(move, "drain", 0) else 0.0
+        _nh = getattr(move, "n_hit", None)
+        _mh_max = (_nh[1] if isinstance(_nh, (list, tuple)) and len(_nh) > 1 and _nh[1] > 1 else 0)
+        vec[i + 3] = min(_mh_max, 5) / 5.0
+        i += 4
 
         # Known flag (always 1 here — zero-slot means unknown)
         vec[i] = 1.0
