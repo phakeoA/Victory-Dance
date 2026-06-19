@@ -967,6 +967,26 @@ def _launch_live(args):
         snapshot_path=args.snapshot, max_hours=args.hours)
 
 
+def _wizard_eval_team_selection(args, ask, ask_yn, repo_root):
+    """Wizard sub-step: choose the EVAL team pool — the controlled teams the gate
+    scores AND you spectate each gen. Either PICK your own via the native file
+    explorer, OR choose a COUNT sampled from the full Champions pool; blank/no keeps
+    the curated default archetype set. Mutates ``args`` in place (pick_eval_teams /
+    eval_teams_dir / n_eval_teams) — exactly the knobs resolve_eval_pool() reads.
+    ``ask``/``ask_yn`` are injected (the _wizard closures) so this is unit-testable
+    without driving the whole interactive wizard."""
+    args.pick_eval_teams = ask_yn(
+        "Pick your own EVAL teams via the file explorer? "
+        "(multi-select; N = choose a count or keep the default next)", False)
+    if not args.pick_eval_teams:
+        n_eval = ask("How many EVAL teams to use?", None,
+                     "6 = sample 6 from the full Champions pool; blank = curated default set", int)
+        if n_eval:
+            args.eval_teams_dir = str(repo_root / "teams" / "Champions")   # sample N from the FULL pool
+            args.n_eval_teams = n_eval
+    return args
+
+
 def _wizard(ap):
     """Interactive launcher so you don't have to memorise the flags: prompts for the key run
     parameters (with examples), echoes the equivalent command for next time, and returns the
@@ -1008,6 +1028,7 @@ def _wizard(ap):
                      "300 normal, 50 for a quick test (sec 16)", int)
     args.eval_battles = ask("Eval battles per scripted opponent", None,
                             "blank = auto full coverage (60/opp); 12 for a fast test", int)
+    _wizard_eval_team_selection(args, ask, ask_yn, _REPO_ROOT)
     args.max_cpu_fraction = ask("Max CPU fraction (of physical cores)", 0.5,
                                 "0.5 = half your cores", float)
     args.collect_workers = ask("Collection workers (concurrent battles)", None,
@@ -1048,6 +1069,12 @@ def _wizard(ap):
         parts.append(f"--hours {args.hours}")
     if args.eval_battles is not None:
         parts.append(f"--eval-battles {args.eval_battles}")
+    if getattr(args, "pick_eval_teams", False):
+        parts.append("--pick-eval-teams")
+    elif getattr(args, "eval_teams_dir", None):
+        parts.append(f'--eval-teams-dir "{args.eval_teams_dir}"')
+    if getattr(args, "n_eval_teams", None):
+        parts.append(f"--n-eval-teams {args.n_eval_teams}")
     if args.mirror_battles != 360:
         parts.append(f"--mirror-battles {args.mirror_battles}")
     if args.collect_workers:
@@ -1080,6 +1107,35 @@ def _wizard(ap):
 
 
 if __name__ == "__main__":
+    # Re-exec as a MODULE (`python -m v_dance.selfplay.generation`) when launched
+    # as a bare script path (`python .../generation.py`). Running the file directly
+    # puts the script's own dir on sys.path[0] and leaves __package__ unset, so the
+    # multiprocessing collection workers (spawn on Windows) would import this module
+    # differently than the parent. Re-execing through -m makes the package context +
+    # the spawn import path identical to the documented launch (project convention:
+    # launch via -m so workers don't orphan/mis-import). The child inherits stdin/
+    # stdout so the interactive wizard still works; on Ctrl-C the signal reaches the
+    # child (it shuts down cleanly), and we wait for it before exiting.
+    if not __package__:
+        import subprocess
+        _child = subprocess.Popen(
+            [sys.executable, "-m", "v_dance.selfplay.generation", *sys.argv[1:]])
+        try:
+            _rc = _child.wait()
+        except KeyboardInterrupt:
+            _rc = _child.wait()
+        raise SystemExit(_rc)
+
+    # Windows consoles default to cp1252, which can't encode the unicode in our
+    # help text / eval output (≈, →, accented mon names like Flabébé). Reconfigure
+    # to utf-8 so neither --help nor a long run crashes with UnicodeEncodeError
+    # (same idiom as bulk_parse_replays.py / the scrapers).
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError):
+            pass
+
     import argparse
 
     ap = argparse.ArgumentParser(description="Generation loop (3c.3)")
