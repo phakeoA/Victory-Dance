@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Victory-Dance — Self-Play Dashboard</title>
   <link rel="stylesheet" href="dashboard.css" />
+  <link rel="stylesheet" href="launcher.css" />
 </head>
 <body>
   <div id="hdr">
@@ -37,15 +38,45 @@
         <button class="vtab" data-tab="health">PPO / Critic Health</button>
         <button class="vtab" data-tab="spectate">🎬 Spectate</button>
         <button class="vtab" data-tab="detail">Generation Detail</button>
+        <button class="vtab" data-tab="launcher">🚀 Launcher</button>
       </div>
       <div id="tab-overview" class="tab-pane"></div>
       <div id="tab-health" class="tab-pane hidden"></div>
       <div id="tab-spectate" class="tab-pane hidden"></div>
       <div id="tab-detail" class="tab-pane hidden"></div>
+      <div id="tab-launcher" class="tab-pane hidden">
+        <div class="lc-toolbar">
+          <input type="file" id="lc-config-file" accept=".json" hidden />
+          <button id="lc-btn-load" class="btn">📂 Load config…</button>
+          <button id="lc-btn-reset" class="btn">↺ Reset to defaults</button>
+          <button id="lc-btn-export" class="btn">⬇ Export config</button>
+          <button id="lc-btn-start" class="btn pri">▶ Start run</button>
+          <button id="lc-btn-stop" class="btn">■ Stop run</button>
+        </div>
+        <p id="lc-msg" class="lc-msg" hidden></p>
+        <div class="lc-layout">
+          <div id="lc-form"><p style="color:var(--text2)">Loading config schema…</p></div>
+          <aside class="lc-status">
+            <h2>Run status</h2>
+            <table class="lc-kv">
+              <tr><td>live</td><td id="lc-st-live">—</td></tr>
+              <tr><td>phase</td><td id="lc-st-phase">—</td></tr>
+              <tr><td>generation</td><td id="lc-st-gen">—</td></tr>
+              <tr><td>games</td><td id="lc-st-games">—</td></tr>
+              <tr><td>last verdict</td><td id="lc-st-verdict">—</td></tr>
+              <tr><td>launched pid</td><td id="lc-st-pid">—</td></tr>
+            </table>
+            <div class="lc-bar-wrap"><div id="lc-st-bar" class="lc-bar"></div></div>
+            <h3>Launch log</h3>
+            <pre id="lc-st-log" class="lc-log">(no launched run yet)</pre>
+          </aside>
+        </div>
+      </div>
     </div>
   </div>
 
   <div id="notif"></div>
   <script src="dashboard.js"></script>
+  <script src="launcher.js"></script>
 </body>
 </html>

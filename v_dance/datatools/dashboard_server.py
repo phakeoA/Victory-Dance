@@ -20,6 +20,7 @@ Run:  .venv/Scripts/python.exe -m v_dance.datatools.dashboard_server [--port 517
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 from flask import Flask, Response, jsonify, request, send_from_directory
@@ -28,9 +29,13 @@ _REPO = Path(__file__).resolve().parents[2]
 _DASH_DIR = _REPO / "data" / "scripts" / "dashboard"
 _ARCHIVE_DIR = _REPO / "artifacts" / "self_play_archive"
 
+# the self-play launcher (UI) drives this module: python -m v_dance.selfplay.generation --config ...
+_GEN_MODULE = "v_dance.selfplay.generation"
+
 # only these are served from the dashboard dir (defense-in-depth alongside
 # send_from_directory's own traversal protection)
-_ALLOWED = {"dashboard.html", "dashboard.css", "dashboard.js", "demo_manifest.json"}
+_ALLOWED = {"dashboard.html", "dashboard.css", "dashboard.js", "demo_manifest.json",
+            "launcher.css", "launcher.js"}   # launcher is a dashboard TAB, loaded by dashboard.html
 
 # eval/ sub-folders whose saved .html replays the browser may serve (#H); whitelist guards the route.
 _EVAL_SECTIONS = {"league", "random", "max_damage", "heuristic", "replays", "eval"}
@@ -58,6 +63,147 @@ def _serve_json(path: Path, default: dict):
     return resp
 
 
+_SCHEMA_CACHE: dict = {}
+
+
+def _config_schema() -> dict:
+    """The launcher UI's field list: shell out to ``generation --dump-config`` (keeps torch OUT of
+    this light server), annotate each key with an inferred input type, and cache it (defaults are
+    static). Shape: ``{"sections": {sec: {field: {default, type, nullable}}}}``."""
+    if _SCHEMA_CACHE.get("data"):
+        return _SCHEMA_CACHE["data"]
+    import subprocess
+    import sys
+    import json as _json
+    try:
+        out = subprocess.run([sys.executable, "-m", _GEN_MODULE, "--dump-config"],
+                             cwd=str(_REPO), capture_output=True, text=True,
+                             encoding="utf-8", errors="replace", timeout=180,
+                             env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+        cfg = _json.loads(out.stdout)
+    except Exception as exc:                              # surface, don't crash the server
+        return {"error": f"could not load config schema: {exc}", "sections": {}}
+
+    def _typ(v):
+        if isinstance(v, bool):
+            return "bool"
+        if isinstance(v, int):
+            return "int"
+        if isinstance(v, float):
+            return "float"
+        if isinstance(v, list):
+            return "list"
+        return "str"
+
+    sections = {sec: {k: {"default": v, "type": _typ(v), "nullable": v is None}
+                      for k, v in body.items()}
+                for sec, body in cfg.items() if isinstance(body, dict)}
+    data = {"sections": sections}
+    _SCHEMA_CACHE["data"] = data
+    return data
+
+
+def _spawn_run(cfg_path: Path, log_path: Path):
+    """Spawn ``python -m generation --config <cfg>`` FULLY DETACHED from the launching console,
+    stdout+stderr -> a log file. Detached so that closing the terminal / the dashboard that started
+    it does NOT kill the run (Windows sends CTRL_CLOSE to console children). Returns the Popen
+    handle. Injectable — tests monkeypatch this to avoid a real launch."""
+    import subprocess
+    import sys
+    logf = open(log_path, "w", encoding="utf-8")
+    kwargs = {}
+    if os.name == "nt":
+        # DETACHED_PROCESS = no controlling console (survives terminal/dashboard close);
+        # CREATE_NEW_PROCESS_GROUP keeps the whole run tree-killable for /stop.
+        kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True                  # POSIX: detach from the controlling tty
+    return subprocess.Popen(
+        [sys.executable, "-m", _GEN_MODULE, "--config", str(cfg_path)],
+        cwd=str(_REPO), stdout=logf, stderr=subprocess.STDOUT,
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"}, **kwargs)
+
+
+def _pid_alive(pid) -> bool:
+    """True if process ``pid`` is currently running (no psutil dependency)."""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import subprocess
+        out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                             capture_output=True, text=True)
+        return str(pid) in (out.stdout or "")
+    try:
+        os.kill(pid, 0)                                      # POSIX: signal 0 = liveness probe
+        return True
+    except OSError:
+        return False
+
+
+def _kill_pid_tree(pid) -> None:
+    """Terminate ``pid`` and its child tree (the detached run + its mp workers + Showdown server)."""
+    if os.name == "nt":
+        import subprocess
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(int(pid))], capture_output=True)
+    else:
+        import signal
+        os.kill(int(pid), signal.SIGTERM)
+
+
+# A run that crashed / was killed leaves status.json ``live:true`` forever, which would deadlock
+# the launcher (can't start: "a run is already in progress"). Treat a live flag as STALE — i.e. the
+# writing process is gone — when status.json hasn't been updated in this many seconds. Generous so a
+# genuinely-running run (which writes status every phase / collection batch) is never falsely cleared.
+_STALE_LIVE_SECONDS = 1800.0
+
+
+def _run_is_live(archive_dir: Path) -> bool:
+    """True only if status.json reports a live run AND it's still fresh (updated within
+    ``_STALE_LIVE_SECONDS``). A crashed run's stale ``live:true`` reads as NOT live, so it can't
+    block /launch forever."""
+    st = archive_dir / "status.json"
+    if not st.exists():
+        return False
+    try:
+        import json as _json
+        import time as _time
+        s = _json.loads(st.read_text(encoding="utf-8"))
+        if not s.get("live"):
+            return False
+        ua = s.get("updated_at")
+        try:
+            return (_time.time() - float(ua)) < _STALE_LIVE_SECONDS    # live AND fresh
+        except (TypeError, ValueError):
+            return True                                                # live, no/odd timestamp -> assume live
+    except Exception:
+        return False
+
+
+def _clear_live_flag(archive_dir: Path) -> bool:
+    """Set status.json ``live:false`` (recover from a crashed run's stale flag). Returns True if it
+    WAS live (so we cleared something). A still-running process will just re-write live:true on its
+    next status write, so clearing a genuinely-live run is harmless (no-op in effect)."""
+    st = archive_dir / "status.json"
+    if not st.exists():
+        return False
+    try:
+        import json as _json
+        s = _json.loads(st.read_text(encoding="utf-8"))
+        if not s.get("live"):
+            return False
+        s["live"] = False
+        if isinstance(s.get("run"), dict):
+            s["run"]["phase"] = "idle"
+        st.write_text(_json.dumps(s), encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
 def create_app(dash_dir=_DASH_DIR, archive_dir=_ARCHIVE_DIR) -> Flask:
     # resolve to ABSOLUTE: send_from_directory (the /eval_replay file server, #H) 404s on a relative
     # directory, so a relative --archive would otherwise serve nothing.
@@ -65,6 +211,8 @@ def create_app(dash_dir=_DASH_DIR, archive_dir=_ARCHIVE_DIR) -> Flask:
     app = Flask(__name__, static_folder=None)
     app.config["DASH_DIR"] = dash_dir
     app.config["ARCHIVE_DIR"] = archive_dir
+    app.config["_LAUNCHED"] = None        # the Popen of a run started via POST /launch
+    app.config["_LAUNCH_LOG"] = None
 
     @app.route("/")
     def index():
@@ -124,6 +272,107 @@ def create_app(dash_dir=_DASH_DIR, archive_dir=_ARCHIVE_DIR) -> Flask:
         if not d.is_dir():
             return ("not found", 404)
         return send_from_directory(d, name)
+
+    # ── Self-play launcher (a dashboard TAB): config-driven, generation.py as the backend ──
+    @app.route("/config-schema")
+    def config_schema():
+        resp = jsonify(_config_schema())
+        resp.headers["Cache-Control"] = "no-store, max-age=0"
+        return resp
+
+    @app.route("/launch", methods=["POST"])
+    def launch():
+        cfg = request.get_json(silent=True)
+        if not isinstance(cfg, dict):
+            return jsonify({"ok": False, "error": "body must be a JSON object (the run config)"}), 400
+        if _run_is_live(archive_dir):
+            return jsonify({"ok": False,
+                            "error": "a run is already in progress (status.json live)"}), 409
+        prev = app.config.get("_LAUNCHED")
+        if prev is not None and prev.poll() is None:
+            return jsonify({"ok": False,
+                            "error": "a launched run is still active — stop it first"}), 409
+        import json as _json
+        import time as _time
+        stamp = _time.strftime("%Y%m%d_%H%M%S")
+        cfg_dir = archive_dir / "launch_configs"
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+        cfg_path = cfg_dir / f"config_{stamp}.json"
+        cfg_path.write_text(_json.dumps(cfg, indent=2), encoding="utf-8")
+        log_dir = archive_dir / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / f"launch_{stamp}.log"
+        try:
+            proc = _spawn_run(cfg_path, log_path)
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"spawn failed: {exc}"}), 500
+        app.config["_LAUNCHED"] = proc
+        app.config["_LAUNCH_LOG"] = str(log_path)
+        # Persist the PID so a RESTARTED dashboard (its own terminal closed) can still stop the
+        # detached run + read its state — the run outlives the launcher now.
+        try:
+            (archive_dir / "launched.pid").write_text(str(proc.pid), encoding="utf-8")
+        except Exception:
+            pass
+        return jsonify({"ok": True, "pid": proc.pid,
+                        "config": str(cfg_path), "log": str(log_path)})
+
+    @app.route("/stop", methods=["POST"])
+    def stop():
+        proc = app.config.get("_LAUNCHED")
+        if proc is not None and proc.poll() is None:
+            try:
+                _kill_pid_tree(proc.pid)                     # UI-launched run is alive -> tree-kill
+            except Exception as exc:
+                return jsonify({"ok": False, "error": str(exc)}), 500
+            _clear_live_flag(archive_dir)
+            return jsonify({"ok": True, "stopped_pid": proc.pid})
+        # No in-memory handle (e.g. the dashboard was restarted while a DETACHED run keeps going).
+        # Recover via the persisted PID: kill it if still alive, then clear the live flag.
+        pidf = archive_dir / "launched.pid"
+        if pidf.exists():
+            try:
+                pid = int((pidf.read_text(encoding="utf-8") or "0").strip())
+            except Exception:
+                pid = 0
+            if pid and _pid_alive(pid):
+                try:
+                    _kill_pid_tree(pid)
+                except Exception as exc:
+                    return jsonify({"ok": False, "error": str(exc)}), 500
+                _clear_live_flag(archive_dir)
+                return jsonify({"ok": True, "stopped_pid": pid, "via": "pidfile"})
+        # Nothing alive to kill — clear a stale live flag if present so the launcher can recover.
+        if _clear_live_flag(archive_dir):
+            return jsonify({"ok": True, "cleared_live_flag": True,
+                            "note": "no running launched process found; cleared a stale live flag."})
+        return jsonify({"ok": False, "error": "no active run to stop"}), 409
+
+    @app.route("/launch_state")
+    def launch_state():
+        proc = app.config.get("_LAUNCHED")
+        if proc is not None:
+            running, pid, rc = (proc.poll() is None), proc.pid, proc.returncode
+        else:
+            # dashboard restarted: fall back to the persisted PID of a (detached) run
+            pid, running, rc = None, False, None
+            pidf = archive_dir / "launched.pid"
+            if pidf.exists():
+                try:
+                    pid = int((pidf.read_text(encoding="utf-8") or "0").strip()) or None
+                except Exception:
+                    pid = None
+                running = bool(pid and _pid_alive(pid))
+        tail = []
+        lp = app.config.get("_LAUNCH_LOG")
+        if lp and Path(lp).exists():
+            try:
+                tail = Path(lp).read_text(encoding="utf-8", errors="replace").splitlines()[-40:]
+            except Exception:
+                tail = []
+        resp = jsonify({"running": running, "pid": pid, "returncode": rc, "log_tail": tail})
+        resp.headers["Cache-Control"] = "no-store, max-age=0"
+        return resp
 
     @app.route("/<path:fname>")
     def asset(fname):

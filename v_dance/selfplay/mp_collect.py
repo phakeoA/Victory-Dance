@@ -307,12 +307,14 @@ class CollectionPool:
             self._ex = self._factory(self.n_procs)
         return self._ex
 
-    def submit(self, payloads, worker_fn=None):
+    def submit(self, payloads, worker_fn=None, on_result=None):
         """Run a worker over ``payloads`` and return per-payload results (``None`` for a worker
         that raised or died), in submission order. ``worker_fn`` overrides the default for THIS
         submit — ProcessPoolExecutor workers run any picklable function per call, so the SAME pool
         serves both collection (``worker_collect``) and eval (``mp_eval.eval_worker``) without a
-        second set of processes."""
+        second set of processes. ``on_result(result)`` (optional) is invoked as each batch's
+        result is collected (submission order) for live progress; results are returned in
+        submission order."""
         if not payloads:
             return []
         from concurrent.futures.process import BrokenProcessPool
@@ -320,15 +322,20 @@ class CollectionPool:
         ex = self._ensure()
         futs = [ex.submit(fn, p) for p in payloads]
         results, broken = [], False
-        for f in futs:
+        for f in futs:                               # collected in submission order
             try:
-                results.append(f.result())
+                r = f.result()
             except BrokenProcessPool:
-                results.append(None)
-                broken = True
+                r, broken = None, True
             except Exception:
                 log.warning("collection worker raised — dropping its chunk(s).", exc_info=True)
-                results.append(None)
+                r = None
+            results.append(r)
+            if on_result is not None:                # live progress as each batch lands
+                try:
+                    on_result(r)
+                except Exception:
+                    log.debug("on_result progress callback failed (non-fatal)", exc_info=True)
         if broken:
             log.warning("collection pool BROKE (a worker died) — respawning on the next batch.")
             try:
@@ -423,12 +430,41 @@ def collect_with_pool(ac, league, n_games: int, *, team_pool, ckpt_path,
     payloads = [(str(ckpt_path), batch, tau, seed, team_chooser, battle_timeout, async_per_proc,
                  _ld, bool(save_replays), (_ports[i % len(_ports)] if _ports else None))
                 for i, batch in enumerate(batches)]
-    merged = merge_results(submit_fn(payloads))
+    # Live progress: report games_done to the status writer AS EACH worker batch lands (was a
+    # single update at the very END -> the dashboard sat frozen at 0/N for the whole multiprocess
+    # collect). The on_result hook fires per completed batch; a submit_fn that doesn't accept it
+    # (offline fakes) falls back to the end-of-collect reconcile below.
+    prog = {"games": 0, "decided": 0, "won": 0}
+
+    def _on_result(res):
+        if status is None or res is None:
+            return
+        prog["games"] += int(getattr(res, "n_games", 0) or 0)
+        for t in getattr(res, "trajectories", None) or []:
+            w = getattr(getattr(t, "meta", None), "won", None)
+            if w is not None:
+                prog["decided"] += 1
+                prog["won"] += 1 if w else 0
+        try:
+            status.games(prog["games"],
+                         (prog["won"] / prog["decided"]) if prog["decided"] else None)
+        except Exception:
+            log.debug("status games() progress update failed (non-fatal)", exc_info=True)
+
+    import inspect
+    try:
+        _sig = inspect.signature(submit_fn)
+        _accepts = ("on_result" in _sig.parameters
+                    or any(p.kind == p.VAR_KEYWORD for p in _sig.parameters.values()))
+    except (TypeError, ValueError):
+        _accepts = False
+    raw = submit_fn(payloads, on_result=_on_result) if _accepts else submit_fn(payloads)
+    merged = merge_results(raw)
     for snapshot_id, won in merged.pfsp:                 # PFSP update in MAIN (league stays here)
         league.record_result(snapshot_id, won)
     if status is not None:
         decided = won = 0
-        for t in merged.trajectories:                    # cosmetic live readout (≈50% by symmetry)
+        for t in merged.trajectories:                    # final reconcile (covers the no-hook path)
             w = getattr(getattr(t, "meta", None), "won", None)
             if w is not None:
                 decided += 1

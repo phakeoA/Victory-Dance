@@ -1,0 +1,31 @@
+{
+  "_comment": "Victory-Dance self-play run config. Pass with: python -m v_dance.selfplay.generation --config config.json  (--config alone implies a live run). Every section overrides defaults; an explicit CLI flag still beats the file. Delete any section/key you don't want to change. 'generation' keys are CLI flag names with dashes->underscores (--format is 'battle_format'). Unknown sections/keys fail loud. The values below are a 'push past the plateau' preset (more exploration + a steadier signal + a bigger actor step); defaults shown in _defaults.",
+  "_defaults": "generation: games=100(wizard 300) tau=1.0 tau_start=1.3 tau_anneal_gens=12 kl_coef=0.5 mirror_battles=360 | ppo: entropy_coef=0.01 clip_eps=0.2 value_coef=0.5 | train: actor_lr=3e-5 critic_lr=1e-3 ppo_epochs=4 minibatch_size=256 | gate: promote_threshold=0.55",
+
+  "generation": {
+    "games": 400,
+    "tau": 1.15,
+    "tau_start": 1.4,
+    "tau_anneal_gens": 40,
+    "kl_coef": 0.25,
+    "mirror_battles": 500,
+    "hof_champions": 8
+  },
+
+  "ppo": {
+    "entropy_coef": 0.02,
+    "clip_eps": 0.2,
+    "value_coef": 0.5
+  },
+
+  "train": {
+    "actor_lr": 1e-4,
+    "critic_lr": 1e-3,
+    "ppo_epochs": 4,
+    "minibatch_size": 256
+  },
+
+  "gate": {
+    "promote_threshold": 0.55
+  }
+}

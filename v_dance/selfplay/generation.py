@@ -327,10 +327,90 @@ def gauntlet_eval(candidate_path, *, teams, team_chooser, battles: int = 30,
     return results, GA.model_elo(results)
 
 
+def _load_run_config(path, gen_dests) -> dict:
+    """Load + validate a JSON run-config (``--config``). Sections: ``generation`` (any CLI
+    flag, keyed by argparse dest — dashes->underscores; ``--format`` is ``battle_format``),
+    ``ppo`` (PPOConfig), ``train`` (TrainConfig), ``gate`` (GateConfigV2 — the live
+    frozen-champion gate). Unknown sections/keys FAIL LOUD with the valid keys listed (a typo
+    must not silently no-op). Top-level keys starting with ``_`` (or ``comment``) are ignored,
+    so you can annotate the file. Returns the parsed dict (absent sections just absent)."""
+    import json
+    import dataclasses
+    from v_dance.selfplay.ppo import PPOConfig
+    from v_dance.selfplay.trainer import TrainConfig
+    from v_dance.selfplay.gate import GateConfigV2
+    p = Path(path)
+    if not p.is_file():
+        raise SystemExit(f"[gen] --config: file not found: {p}")
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise SystemExit(f"[gen] --config: invalid JSON in {p}: {exc}")
+    if not isinstance(data, dict):
+        raise SystemExit(f"[gen] --config: top level must be a JSON object, got {type(data).__name__}")
+    valid = {
+        "generation": set(gen_dests),
+        "ppo": {f.name for f in dataclasses.fields(PPOConfig)},
+        "train": {f.name for f in dataclasses.fields(TrainConfig)},
+        "gate": {f.name for f in dataclasses.fields(GateConfigV2)},
+    }
+    for sec, body in data.items():
+        if sec.startswith("_") or sec == "comment":
+            continue                                       # free-form annotation keys
+        if sec not in valid:
+            raise SystemExit(f"[gen] --config: unknown section {sec!r} (valid: {sorted(valid)})")
+        if not isinstance(body, dict):
+            raise SystemExit(f"[gen] --config: section {sec!r} must be a JSON object")
+        unknown = set(body) - valid[sec]
+        if unknown:
+            raise SystemExit(f"[gen] --config: unknown {sec} key(s) {sorted(unknown)}; "
+                             f"valid: {sorted(valid[sec])}")
+    return data
+
+
+def _default_run_config(ap) -> dict:
+    """Build the FULL default run-config dict (the inverse of ``_load_run_config``): the
+    ``generation`` section = every argparse default (minus the launcher-control flags), and
+    ``ppo``/``train``/``gate`` = the dataclass field defaults. Round-trips through
+    ``_load_run_config`` (every key is valid by construction). Powers ``--dump-config`` and
+    the launcher UI's schema/defaults."""
+    import dataclasses
+    from v_dance.selfplay.ppo import PPOConfig
+    from v_dance.selfplay.trainer import TrainConfig
+    from v_dance.selfplay.gate import GateConfigV2
+    _SKIP = {"help", "config", "dump_config", "dry_run", "live", "wizard"}
+    defaults = ap.parse_args([])
+    gen = {}
+    for a in ap._actions:
+        if a.dest in _SKIP:
+            continue
+        v = getattr(defaults, a.dest, None)
+        gen[a.dest] = list(v) if isinstance(v, tuple) else v
+
+    def _fields(cls) -> dict:
+        out = {}
+        for f in dataclasses.fields(cls):
+            if f.default is not dataclasses.MISSING:
+                out[f.name] = f.default
+            elif f.default_factory is not dataclasses.MISSING:   # type: ignore[attr-defined]
+                try:
+                    out[f.name] = f.default_factory()
+                except Exception:
+                    out[f.name] = None
+            else:
+                out[f.name] = None
+        return out
+
+    return {"generation": gen, "ppo": _fields(PPOConfig),
+            "train": _fields(TrainConfig), "gate": _fields(GateConfigV2)}
+
+
 def build_train_configs(*, kl_coef: float = 0.5, target_kl_bc: Optional[float] = 0.15,
                         tau: float = 1.0, min_ev: Optional[float] = None,
                         target_kl_relax_per_gen: float = 0.0,
-                        target_kl_max: Optional[float] = None):
+                        target_kl_max: Optional[float] = None,
+                        ppo_overrides: Optional[dict] = None,
+                        train_overrides: Optional[dict] = None):
     """Build the (PPOConfig, TrainConfig) for a live run with BC-prior PRESERVATION ON
     (task 3c.7a / docs sec 12 exploration-seeding item 1):
 
@@ -348,11 +428,15 @@ def build_train_configs(*, kl_coef: float = 0.5, target_kl_bc: Optional[float] =
     from v_dance.selfplay.ppo import PPOConfig
     from v_dance.selfplay.trainer import TrainConfig
     tkl = target_kl_bc if (target_kl_bc is not None and target_kl_bc > 0) else None
-    ppo = PPOConfig(kl_coef=float(kl_coef), tau=float(tau))
-    train = TrainConfig(target_kl_from_bc=tkl, min_explained_variance=min_ev,
-                        target_kl_relax_per_gen=float(target_kl_relax_per_gen),
-                        target_kl_max=target_kl_max)
-    return ppo, train
+    # --config overrides apply FIRST; the explicit (CLI-derived) values below WIN, so an
+    # explicit --kl-coef / --tau / --target-kl-bc still beats the file.
+    ppo_kw = dict(ppo_overrides or {})
+    ppo_kw.update(kl_coef=float(kl_coef), tau=float(tau))
+    train_kw = dict(train_overrides or {})
+    train_kw.update(target_kl_from_bc=tkl, min_explained_variance=min_ev,
+                    target_kl_relax_per_gen=float(target_kl_relax_per_gen),
+                    target_kl_max=target_kl_max)
+    return PPOConfig(**ppo_kw), TrainConfig(**train_kw)
 
 
 def resolve_train_pool(spec, reg=None):
@@ -911,7 +995,9 @@ def _launch_live(args):
         kl_coef=args.kl_coef, target_kl_bc=args.target_kl_bc,
         tau=args.tau_start, min_ev=args.min_ev,
         target_kl_relax_per_gen=args.target_kl_relax,
-        target_kl_max=args.target_kl_max)         # gen-0 tau; collect_fn re-sets per gen
+        target_kl_max=args.target_kl_max,
+        ppo_overrides=getattr(args, "run_cfg_ppo", None),
+        train_overrides=getattr(args, "run_cfg_train", None))   # gen-0 tau; collect_fn re-sets per gen
     # train = full archetype-rich pool; eval = controlled set (sec 15). --teams (deprecated)
     # overrides BOTH with an explicit list.
     train_pool = resolve_train_pool(args.teams if args.teams else args.train_teams,
@@ -953,6 +1039,7 @@ def _launch_live(args):
         team_chooser=args.team_chooser, archive_dir=args.archive,
         gen_cfg=GenConfig(n_games=args.games, warmup_updates=args.warmup,
                           gate=GateConfig(use_prev_best=args.prev_best),
+                          gate_v2=GateConfigV2(**(getattr(args, "run_cfg_gate", None) or {})),
                           hof=HoFConfig(enabled=args.hof, n_champions=args.hof_champions,
                                         games_per_snapshot=args.hof_games, override=args.hof_override)),
         ppo_cfg=ppo_cfg, train_cfg=train_cfg,
@@ -1139,6 +1226,16 @@ if __name__ == "__main__":
     import argparse
 
     ap = argparse.ArgumentParser(description="Generation loop (3c.3)")
+    ap.add_argument("--config", default=None,
+                    help="JSON run-config to override defaults for EVERY knob — including ones "
+                         "not otherwise on the CLI (actor_lr, entropy_coef, clip_eps, ppo_epochs, "
+                         "gate thresholds, ...). Sections: generation / ppo / train / gate. An "
+                         "explicit CLI flag still beats the file. See config.example.json. "
+                         "(--config alone implies a live run.)")
+    ap.add_argument("--dump-config", nargs="?", const="", default=None, metavar="PATH",
+                    help="print the FULL default run-config (generation/ppo/train/gate — every key "
+                         "+ its current default) as JSON and exit; with a PATH, write it there. A "
+                         "ready template for --config and the schema source for the launcher UI.")
     ap.add_argument("--dry-run", action="store_true",
                     help="simulate the loop with synthetic eval (no server / model)")
     ap.add_argument("--live", action="store_true",
@@ -1287,7 +1384,27 @@ if __name__ == "__main__":
                     help="Champions-doubles format id to self-play (default: active = "
                          f"{_formats.DEFAULT_FORMAT}). e.g. gen9championsvgc2026regma for M-A "
                          "backwards-compat. SPAWN-SAFE: propagated to mp workers via env.")
+    # --config (if given) is loaded BEFORE the final parse so its `generation` section
+    # becomes the defaults (explicit CLI flags still override); the ppo/train/gate sections
+    # are stashed and threaded into the configs (see _attach below).
+    _pre, _ = ap.parse_known_args()
+    _run_cfg = _load_run_config(_pre.config, {a.dest for a in ap._actions}) if _pre.config else {}
+    if _run_cfg.get("generation"):
+        ap.set_defaults(**_run_cfg["generation"])
     args = ap.parse_args()
+    if _run_cfg:
+        print(f"[gen] loaded --config {_pre.config}: sections "
+              f"{sorted(k for k in _run_cfg if not k.startswith('_') and k != 'comment')}")
+
+    if args.dump_config is not None:
+        import json as _json
+        _text = _json.dumps(_default_run_config(ap), indent=2)
+        if args.dump_config:                          # a PATH was given -> write it
+            Path(args.dump_config).write_text(_text, encoding="utf-8")
+            print(f"[gen] wrote default run-config to {args.dump_config}")
+        else:                                         # bare --dump-config -> stdout (clean JSON)
+            print(_text)
+        raise SystemExit(0)
 
     # Select the format for THIS process AND its mp children (env-inherited) BEFORE
     # any server starts or workers spawn.
@@ -1300,13 +1417,19 @@ if __name__ == "__main__":
         _R.BATTLE_FORMAT = _formats.DEFAULT_FORMAT
         print(f"[generation] active battle format: {_formats.DEFAULT_FORMAT}")
 
+    def _attach(a):                                   # thread the non-generation --config sections
+        a.run_cfg_ppo = _run_cfg.get("ppo")
+        a.run_cfg_train = _run_cfg.get("train")
+        a.run_cfg_gate = _run_cfg.get("gate")
+        return a
+
     if args.dry_run:
         _dry_run(args.generations, args.seed)
     elif args.wizard:
-        _launch_live(_wizard(ap))
-    elif args.live:
-        _launch_live(args)
+        _launch_live(_attach(_wizard(ap)))
+    elif args.live or args.config:                     # --config implies a live run
+        _launch_live(_attach(args))
     elif len(sys.argv) == 1 and sys.stdin.isatty():
-        _launch_live(_wizard(ap))          # bare `python -m …generation` in a terminal -> wizard
+        _launch_live(_attach(_wizard(ap)))          # bare `python -m …generation` in a terminal -> wizard
     else:
         ap.print_help()

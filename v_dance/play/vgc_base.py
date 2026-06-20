@@ -245,6 +245,41 @@ def _heuristic_team_order(battle: DoubleBattle) -> List[int]:
 # Action helpers  (pure functions, no player state)
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _norm_move_id(mid) -> str:
+    """A punctuation/case-insensitive move id, so a Choice-locked move whose
+    ``available_moves`` id differs only cosmetically from its ``mon.moves`` entry still
+    matches (the "live move-id != mon.moves" drop)."""
+    return "".join(c for c in str(mid or "").lower() if c.isalnum())
+
+
+def _move_usable_predicate(battle: DoubleBattle, slot: int):
+    """Return ``(predicate, have_authoritative)``. ``predicate(move) -> bool`` decides whether
+    ``move`` is usable THIS turn per Showdown's ``available_moves[slot]`` — which is AUTHORITATIVE
+    (it already excludes Disabled / Choice-locked-out / Taunted / Encored / 0-PP moves). Matches by
+    exact id, then NORMALISED id, then object identity, so a Choice-locked move whose
+    ``available_moves`` id — or poke-env's stale ``current_pp`` — differs from its ``mon.moves``
+    entry is NOT wrongly dropped (that drop left the slot move-less, collapsing the turn to
+    ``/choose default`` and DISCARDING the training step — the Choice-Scarf bug). When Showdown
+    exposes NO list (request-less harness / non-move request), falls back to the local
+    ``current_pp > 0`` guard so a genuinely 0-PP move is still illegal and the mask never goes
+    empty spuriously."""
+    try:
+        av = battle.available_moves
+        usable = list(av[slot]) if (slot is not None and slot < len(av)) else []
+    except (ValueError, AttributeError, IndexError, TypeError):
+        usable = []
+    if not usable:
+        return (lambda mv: getattr(mv, "current_pp", 1) != 0), False
+    ids = {m.id for m in usable}
+    norm = {_norm_move_id(m.id) for m in usable}
+    objs = {id(m) for m in usable}
+
+    def _pred(mv) -> bool:
+        return (mv.id in ids or _norm_move_id(mv.id) in norm or id(mv) in objs)
+
+    return _pred, True
+
+
 def build_legal_action_mask(battle: DoubleBattle, slot: int) -> list[bool]:
     """
     Return a 16-element bool list marking which actions are legal for `slot`.
@@ -299,17 +334,11 @@ def build_legal_action_mask(battle: DoubleBattle, slot: int) -> list[bool]:
     # legality stays consistent.  Skipped when poke-env exposes no list (empty →
     # request-less harness / non-move request) so the move mask never goes empty
     # spuriously; matched by Move.id (poke-env may hold distinct Move instances).
-    try:
-        _av = battle.available_moves
-        usable_ids = {m.id for m in _av[slot]} if slot < len(_av) else set()
-    except (ValueError, AttributeError, IndexError, TypeError):
-        usable_ids = set()
+    _usable, _ = _move_usable_predicate(battle, slot)
 
     for m_idx, move in enumerate(available_moves):
-        if move.current_pp == 0:        # serve-time only: 0-PP move is illegal
-            continue
-        if usable_ids and move.id not in usable_ids:   # Showdown-disabled / locked
-            continue
+        if not _usable(move):           # Showdown-authoritative (id / norm-id / identity); 0-PP
+            continue                    # only when Showdown exposes no list (see predicate)
         kind = _move_target_kind(move.id)
         if kind in _ALLY_KINDS:
             if kind == "adjacentAllyOrSelf" or ally_alive:
@@ -526,15 +555,13 @@ def action_to_order(action: int, battle: DoubleBattle, slot: int,
         if move_idx >= len(moves):
             return None
         move = moves[move_idx]
-        # Serve-time: a Showdown-disabled / Choice-locked / Taunted move cannot be
-        # ordered — fall back cleanly instead of emitting a rejected /choose order
-        # (mirrors the build_legal_action_mask available_moves gate; Move.id match).
-        try:
-            _av = battle.available_moves
-            _usable = {m.id for m in _av[slot]} if slot < len(_av) else set()
-        except (ValueError, AttributeError, IndexError, TypeError):
-            _usable = set()
-        if _usable and move.id not in _usable:
+        # Serve-time: a Showdown-disabled / Taunted move cannot be ordered — fall back cleanly
+        # instead of emitting a rejected /choose. Uses the SAME Showdown-authoritative predicate
+        # as build_legal_action_mask (id / normalised id / identity), so a Choice-locked move the
+        # mask allowed isn't then rejected here for a cosmetic id difference / stale current_pp
+        # (which would re-introduce the /choose default collapse the mask fix removed).
+        _usable_pred, _have_av = _move_usable_predicate(battle, slot)
+        if _have_av and not _usable_pred(move):
             return None
 
         # Foe slots are positional (opp_a/opp_b).
@@ -1063,11 +1090,16 @@ class VGCPlayerBase(Player):
             try:
                 _av = battle.available_moves
                 _avs = battle.available_switches
+                # exact move ids + PP so a RESIDUAL drop (id that isn't id/norm/identity-equal to
+                # mon.moves, or a truly-forced Struggle/recharge) is debuggable from the log.
+                _own = [(getattr(m, "id", "?"), getattr(m, "current_pp", "?"))
+                        for m in own_active_move_list(battle, slot, _mon)]
+                _use = [getattr(m, "id", "?") for m in (_av[slot] if _av and slot < len(_av) else [])]
                 _diag = (f"species={getattr(_mon, 'species', '?')} "
                          f"mon.moves={len(getattr(_mon, 'moves', {}) or {})} "
                          f"avail_moves[{slot}]={len(_av[slot]) if _av and slot < len(_av) else 'NA'} "
                          f"avail_switches[{slot}]={len(_avs[slot]) if _avs and slot < len(_avs) else 'NA'} "
-                         f"mask_legal={sum(1 for x in mask if x)}")
+                         f"mask_legal={sum(1 for x in mask if x)} own={_own} usable={_use}")
             except Exception:
                 _diag = "(diag unavailable)"
             # An ACTIVE, non-fainted slot whose ONLY codec-expressible legal action is

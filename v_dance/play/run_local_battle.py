@@ -365,6 +365,22 @@ def resolve_team_path(arg) -> Path:
     sys.exit(1)
 
 
+def _normalize_team_paste(text: str) -> str:
+    """Make a Showdown paste robust to the Champions bucket-scale export quirk where EV/IV
+    stat groups are joined by a BARE '/' with no surrounding spaces (``EVs: 32 HP/15 Def/19
+    Spe``). poke-env's strict teambuilder splits on whitespace and reads ``HP/15`` as a stat
+    name -> ``KeyError: 'hp/15'``. Insert ' / ' between a stat letter and the next value on
+    EVs:/IVs: lines only; already-spaced pastes are unchanged (idempotent). Showdown accepts
+    the spaced form too, so the team sent to the server is unaffected."""
+    import re
+    out = []
+    for line in text.splitlines():
+        if line.lstrip()[:4].lower() in ("evs:", "ivs:"):
+            line = re.sub(r"(?<=[A-Za-z])\s*/\s*(?=\d)", " / ", line)
+        out.append(line)
+    return "\n".join(out)
+
+
 def load_team(path: Path) -> str:
     if not path.exists():
         log.error("Team file not found: %s", path.resolve())
@@ -373,36 +389,62 @@ def load_team(path: Path) -> str:
     if not text:
         log.error("Team file is empty: %s", path.resolve())
         sys.exit(1)
+    text = _normalize_team_paste(text)   # tolerate the no-space EV/IV separator export quirk
     log.info("Loaded team from %s", path.resolve())
     return text
 
 
+def _normalize_team_selection(paths, repo_root) -> list[str]:
+    """Dedup + repo-relative-POSIX-ify picked team paths, ORDER-PRESERVED (files outside
+    the repo stay absolute). Pure (no GUI) so the cross-folder accumulation is unit-testable."""
+    out: list[str] = []
+    seen: set = set()
+    for p in paths:
+        pp = Path(p)
+        try:
+            rel = pp.relative_to(repo_root).as_posix()
+        except ValueError:                           # outside the repo -> absolute
+            rel = str(pp)
+        if rel not in seen:
+            seen.add(rel)
+            out.append(rel)
+    return out
+
+
 def pick_team_files(initialdir=None) -> list[str]:
     """Native OS multi-select file picker for team pastes (Ctrl/Shift-click for several).
-    Returns repo-relative POSIX paths, or [] on cancel / unavailable so the caller can fall
-    back. SHARED by the gauntlet (``--pick-teams``) and the self-play eval
-    (``--pick-eval-teams``) — pick a strategy showcase (perish trap / sand / rain / sun)
-    to score + spectate. Opens once at launch; the tkinter import is lazy (no GUI cost
-    unless used)."""
+    ACCUMULATES ACROSS FOLDERS: a native dialog only multi-selects within ONE folder, so
+    after each batch it asks whether to add more from another folder — letting you pick some
+    teams from M-A and some from M-B in one session. Returns repo-relative POSIX paths
+    (deduped, order-preserved), or [] on cancel / unavailable so the caller can fall back.
+    SHARED by the gauntlet (``--pick-teams``) and the self-play eval (``--pick-eval-teams``).
+    The tkinter import is lazy (no GUI cost unless used)."""
     try:
         import tkinter as tk
-        from tkinter import filedialog
+        from tkinter import filedialog, messagebox
         root = tk.Tk()
         root.withdraw()
         root.attributes("-topmost", True)
         idir = str(initialdir or CHAMPIONS_DIR)
-        sel = filedialog.askopenfilenames(
-            title="Select team files (Ctrl/Shift-click for multiple)",
-            initialdir=idir if Path(idir).exists() else None)
+        if not Path(idir).exists():
+            idir = None
+        collected: list[str] = []
+        while True:
+            sel = filedialog.askopenfilenames(
+                title="Select team files (Ctrl/Shift-click for several; add more folders next)",
+                initialdir=idir)
+            collected.extend(sel)
+            if sel:
+                idir = str(Path(sel[-1]).parent)     # reopen at the last-used folder
+            n = len(_normalize_team_selection(collected, _REPO_ROOT))
+            if not messagebox.askyesno(
+                    "Add more team files?",
+                    f"{n} team(s) selected so far.\n\n"
+                    "Add more from ANOTHER folder (e.g. switch between M-A and M-B)?",
+                    default=messagebox.NO):
+                break
         root.destroy()
-        out: list[str] = []
-        for p in sel:
-            pp = Path(p)
-            try:
-                out.append(pp.relative_to(_REPO_ROOT).as_posix())
-            except ValueError:                       # outside the repo -> absolute
-                out.append(str(pp))
-        return out
+        return _normalize_team_selection(collected, _REPO_ROOT)
     except Exception as exc:
         print(f"[warn] team file picker unavailable ({exc}); falling back.")
         return []

@@ -320,7 +320,7 @@ function selectGen(genNum) {
 function switchTab(tab) {
   STATE.tab = tab;
   document.querySelectorAll(".vtab").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
-  ["overview", "health", "spectate", "detail"].forEach((t) => $("tab-" + t).classList.toggle("hidden", t !== tab));
+  ["overview", "health", "spectate", "detail", "launcher"].forEach((t) => $("tab-" + t).classList.toggle("hidden", t !== tab));
   if (tab === "spectate") { renderSpectate(); loadEvalReplays(STATE.sel); }   // #H: refresh saved replays on entry
 }
 
