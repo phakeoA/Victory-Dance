@@ -240,10 +240,26 @@ ABILITY_EFFECT_NAMES = [
 _ITEM_EFFECT_IDX = {n: i for i, n in enumerate(ITEM_EFFECT_NAMES)}
 _ABIL_EFFECT_IDX = {n: i for i, n in enumerate(ABILITY_EFFECT_NAMES)}
 
-NUM_ITEM_EFFECTS    = len(ITEM_EFFECT_NAMES)      # 16
-NUM_ABILITY_EFFECTS = len(ABILITY_EFFECT_NAMES)   # 16
-ITEM_FEATURES    = NUM_ITEM_EFFECTS + 1     # effect multi-hot + 1 known/confidence
-ABILITY_FEATURES = NUM_ABILITY_EFFECTS + 1  # effect multi-hot + 1 known/confidence
+NUM_ITEM_EFFECTS    = len(ITEM_EFFECT_NAMES)      # 16  (v8 internal helpers — att_ctx life_orb/choice)
+NUM_ABILITY_EFFECTS = len(ABILITY_EFFECT_NAMES)   # 17  (v8 internal helpers)
+ITEM_FEATURES    = NUM_ITEM_EFFECTS + 1     # effect multi-hot + 1 known/confidence (v8 internal)
+ABILITY_FEATURES = NUM_ABILITY_EFFECTS + 1  # effect multi-hot + 1 known/confidence (v8 internal)
+
+# ── v9 (B1-mechanics): data-grounded mechanic substrate ──────────────────────────
+# Tag NAME counts are FIXED (dex-independent) so the flat LAYOUT is stable; the per-mon identity INDEX is
+# 1 float the model embeds; vocab sizes feed the model's nn.Embeddings (NOT the flat dim). No circular
+# import — mechanic_tags/vocab/damage_mechanics never import the encoder.
+from v_dance.encoders.mechanic_tags import (  # noqa: E402
+    NUM_MOVE_TAGS, NUM_ABILITY_TAGS, NUM_ITEM_TAGS,
+    move_tag_indices, ability_tag_indices, item_tag_indices, ABILITY_SUPPRESSED_IDX)
+from v_dance.encoders.mechanic_vocab import (  # noqa: E402
+    ability_index, move_index, item_index, ABILITY_VOCAB_SIZE, MOVE_VOCAB_SIZE, ITEM_VOCAB_SIZE)
+from v_dance.encoders import damage_mechanics as _DMG  # noqa: E402
+
+WEIGHT_FEATURES   = 1
+VOLATILE_FEATURES = 6     # rooted, trapped, has_substitute, move_restricted, can_switch, locked_action
+ITEM_BLOCK_V9     = NUM_ITEM_TAGS + 1 + 1      # tags + identity index + known
+ABILITY_BLOCK_V9  = NUM_ABILITY_TAGS + 1 + 1   # tags + identity index + known
 
 # ── Dimension constants ────────────────────────────────────────────────────────
 NUM_TYPES      = len(TYPE_NAMES)        # 20
@@ -253,8 +269,9 @@ NUM_FIELDS     = len(FIELD_NAMES)       # 15
 NUM_SIDE_CONDS = len(SIDE_COND_NAMES)   # 24
 NUM_BOOSTS     = 7                      # atk def spa spd spe acc eva
 NUM_MOVES      = 4
-MOVE_FEATURES  = 22   # +4 type-eff (B1.1) +4 damage-band (B1.2) vs each of the 2 enemy actives;
-                      # +4 move intrinsics (B1.3: contact/recoil/drain/multihit); is_known stays last
+MOVE_FEATURES  = 21 + NUM_MOVE_TAGS + 1 + 1   # v9: 21 v8-core feats (base_power/type/category/priority/
+                      # accuracy/pp/protect/stab/spread + type-eff×2 + damage-band×2 + intrinsics×4) +
+                      # 29 effect-tags + 1 identity index + is_known(last) = 21+29+1+1 = 52
 
 POKEMON_FEATURES = (
     1               # hp_frac
@@ -267,9 +284,11 @@ POKEMON_FEATURES = (
     + 1             # is_tera
     + NUM_STATUS    # status one-hot  (7)
     + NUM_BOOSTS    # stat boosts     (7)
-    + NUM_MOVES * MOVE_FEATURES  # 4 × 9 = 36
-    + ITEM_FEATURES     # item effect multi-hot + known   (gap #5)
-    + ABILITY_FEATURES  # ability effect multi-hot + known (gap #5)
+    + WEIGHT_FEATURES            # v9: normalized species weight (1)
+    + NUM_MOVES * MOVE_FEATURES  # v9: 4 × 52
+    + ITEM_BLOCK_V9              # v9: item tags + identity index + known
+    + ABILITY_BLOCK_V9          # v9: ability tags + identity index + known
+    + VOLATILE_FEATURES         # v9: per-mon volatile block (6)
     + 1             # is_active
     + 1             # is_revealed
     + 1             # is_fainted      (layout-v2: see/count KO'd mons)
@@ -294,8 +313,10 @@ GLOBAL_FEATURES = (
     + 1               # turn
     + 1               # trick room explicit flag
     + 12              # B1.4 turn-order: 4 effective-speed + 4 moves-first margins + 4 pair-confidences
+    + 11              # FIELD-DURATION (v10): turns-active age for weather/terrain/TR + per-side
+                      #   (tailwind + reflect/light_screen/aurora_veil); age>base ⇒ rock/Light-Clay 8-turn
     + 4               # team counts (layout-v2): own/opp living-bench, own/opp fainted  (MUST stay last)
-)  # = 90
+)  # = 101
 
 STATE_DIM = (ACTIVE_SLOTS + BENCH_SLOTS + OPP_BENCH_SLOTS) * POKEMON_FEATURES + GLOBAL_FEATURES
 # = 12 × 149 + 78 = 1866   (POKEMON_FEATURES 149 = 148 + 1×(NUM_ABILITY_EFFECTS 16→17))
@@ -307,11 +328,15 @@ STATE_DIM = (ACTIVE_SLOTS + BENCH_SLOTS + OPP_BENCH_SLOTS) * POKEMON_FEATURES + 
 #   2 → STATE_DIM 1806 (gap #5: per-mon item/ability effect-category blocks)
 #   3 → STATE_DIM 1854 (gap #6 is_spread move flag; gap #7 real pp_fraction — no
 #       dim change, a value not a slot)
-#   4 → STATE_DIM 1866 (state-rep #B: Defiant/Competitive split into a dedicated
-#       statdrop_boost ability category, NUM_ABILITY_EFFECTS 16→17)
+#   4 → STATE_DIM 1866 (state-rep #B: Defiant/Competitive split into statdrop_boost)
+#   8 → STATE_DIM 2454 (Epic B: type-eff/damage-band/intrinsics/turn-order; PF 197, MOVE_FEATURES 22)
+#   9 → STATE_DIM 4398 (B1-mechanics: ability/move/item identity embeddings + expanded mechanic tags +
+#       per-mon weight + volatile block + ability-type/stat/BP-aware damage band; PF 359, MOVE_FEATURES 52)
+#  10 → STATE_DIM 4409 (field-duration: +11 turns-active age channels for weather/terrain/TR + per-side
+#       tailwind/reflect/light_screen/aurora_veil; GLOBAL_FEATURES 90→101 — captures rock/Light-Clay 8-turn)
 # train_bc stamps this into the checkpoint config; model_io.load_bc_policy asserts
 # it (and the dim) match the running code.
-STATE_LAYOUT_VERSION = 8
+STATE_LAYOUT_VERSION = 10
 
 # ── Action space ───────────────────────────────────────────────────────────────
 ACTIONS_PER_SLOT = 16    # 12 move-target + 4 switch
@@ -491,9 +516,38 @@ def _side_screens(side_dict: Optional[dict]) -> tuple:
     """(phys_reduced, spec_reduced) — does this side have a screen reducing physical / special damage
     (Reflect / Light Screen / Aurora Veil)? (B1.2b damage modifier.)"""
     screens = (side_dict or {}).get("screens") or {}
-    names = {_SCREEN_TO_SC.get(k) for k, v in screens.items() if v}
+    # screens values are now turns-ACTIVE (elapsed; 0 on the set turn) — any key present is active.
+    names = {_SCREEN_TO_SC.get(k) for k in screens}
     return (("REFLECT" in names or "AURORA_VEIL" in names),
             ("LIGHT_SCREEN" in names or "AURORA_VEIL" in names))
+
+
+# v10 field-duration: the 11 turns-ACTIVE (age) channels, in fixed order, normalised to [0,1] by
+# each condition's MAX duration. age > base ⇒ an item-EXTENDED instance (weather rock / Light Clay /
+# Terrain Extender = 8 turns vs the 5/4 base). SHARED by the offline + live encoders so the age math
+# is byte-identical; only the INPUTS differ (offline reads the parser's elapsed counters; live derives
+# them from ``turn − poke-env start-turn``).
+_SCREEN_AGE_KEYS = ("reflect", "light_screen", "aurora_veil")
+# per-condition MAX duration (with the item extension) for normalising the age to [0,1].
+_AGE_MAX = {"weather": 8.0, "terrain": 8.0, "trick_room": 5.0, "tailwind": 4.0, "screen": 8.0}
+
+
+def field_duration_scalars(weather_age, terrain_age, tr_age, sides) -> list:
+    """11 floats: [weather_age, terrain_age, trick_room_age, then per side (own, opp):
+    tailwind_age, reflect_age, light_screen_age, aurora_veil_age].  ALL inputs are turns-ELAPSED
+    (age, 0 on the set turn; None/absent → 0); each is normalised by its condition's max duration.
+    ``sides`` = [own, opp], each a dict {'tailwind_age': int|None, 'screens': {name: elapsed}}.  The
+    offline encoder converts its parser counters to elapsed; the live encoder uses turn − start-turn.
+    Identical math on both paths."""
+    out = [min((weather_age or 0) / _AGE_MAX["weather"], 1.0),
+           min((terrain_age or 0) / _AGE_MAX["terrain"], 1.0),
+           min((tr_age or 0) / _AGE_MAX["trick_room"], 1.0)]
+    for side in sides:
+        out.append(min(((side or {}).get("tailwind_age") or 0) / _AGE_MAX["tailwind"], 1.0))
+        scr = (side or {}).get("screens") or {}
+        for s in _SCREEN_AGE_KEYS:
+            out.append(min((scr.get(s) or 0) / _AGE_MAX["screen"], 1.0) if s in scr else 0.0)
+    return out
 
 
 def _defender_profile(mon: Optional[dict], side_screens: tuple = (False, False)) -> Optional[dict]:
@@ -815,6 +869,20 @@ def resolve_ability_json(mon: dict) -> tuple[str, float]:
     return "", 0.0
 
 
+def resolve_active_ability_json(mon: dict) -> tuple[str, float]:
+    """The CURRENTLY-ACTIVE ability for the v9 ability block (tags + identity). For a MEGA'd mon this is
+    the mega forme's FIXED ability (Shadow Tag for Mega Gengar, Parental Bond for Mega Kangaskhan) at
+    confidence 1.0 — NOT the user-chosen base ability — so mega abilities (trapping / parental_bond / …)
+    are correctly tagged. Non-mega → resolve_ability_json (the chosen ability). Mirrors the live path,
+    which reads poke-env's mon.ability (the mega forme ability) for a mega'd mon, so the index + conf agree
+    on both paths (resolving the v8 mega-clamp 1.0-vs-0.5 asymmetry)."""
+    if mon.get("is_mega"):
+        active = mon.get("mega_ability") or mon.get("known_ability")
+        if active:
+            return norm_species(active), 1.0
+    return resolve_ability_json(mon)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 class VodStateEncoder:
     """
@@ -927,9 +995,9 @@ class VodStateEncoder:
             sc = side_conds.get(side_key) or {}
             if (sc.get("tailwind_turns_remaining") or 0) > 0:
                 vec[cursor + _SC_IDX["TAILWIND"]] = 1.0
-            for screen, turns_left in (sc.get("screens") or {}).items():
+            for screen in (sc.get("screens") or {}):      # values = turns-active; any key = present
                 name = _SCREEN_TO_SC.get(screen)
-                if name and turns_left:
+                if name:
                     vec[cursor + _SC_IDX[name]] = 1.0
             cursor += NUM_SIDE_CONDS
 
@@ -960,6 +1028,22 @@ class VodStateEncoder:
                 vec[cursor] = _moves_first(_sp[_ok][0], _sp[_pk][0], trick_room)
                 vec[cursor + 1] = _sp[_ok][1] * _sp[_pk][1]
                 cursor += 2
+
+        # ── Field-duration block (11, v10): turns-active AGE per condition. age > base ⇒ an
+        # item-extended (weather rock / Light Clay / Terrain Extender) 8-turn instance. Convert the
+        # parser's REMAINING counters (TR/tailwind) to elapsed so the math matches the live path.
+        _tr_rem = field.get("trick_room_turns_remaining") or 0
+        _fd_sides = []
+        for _sk in ("our_side", "opp_side"):
+            _s = side_conds.get(_sk) or {}
+            _tw_rem = _s.get("tailwind_turns_remaining") or 0
+            _fd_sides.append({"tailwind_age": (4 - _tw_rem) if _tw_rem > 0 else 0,
+                              "screens": _s.get("screens")})
+        for _v in field_duration_scalars(field.get("weather_turns_active"),
+                                         field.get("terrain_turns_active"),
+                                         (5 - _tr_rem) if _tr_rem > 0 else 0, _fd_sides):
+            vec[cursor] = _v
+            cursor += 1
 
         # ── Team counts (layout-v2): living-bench + fainted per side ──────────
         # Own bench keeps brought-but-unentered stubs (all our switch-ins);
@@ -1073,8 +1157,17 @@ class VodStateEncoder:
             vec[i + j] = (boosts.get(key) or 0) / 6.0
         i += NUM_BOOSTS
 
-        # Moves: canonical slot order shared with the action codec — see
-        # move_slots_for_mon().
+        # v9: normalized species weight (weight-based moves Heavy Slam/Low Kick + Heavy/Light Metal)
+        _wt = _DMG.species_weight(dex_species) or _DMG.species_weight(base_fallback) or 0.0
+        vec[i] = min(_wt / 500.0, 1.0)
+        i += 1
+
+        # Resolve the (current) ACTIVE ability once — needed for the move-type fix (Normalize/Pixilate)
+        # AND the ability block below. Mega'd mons use the mega forme ability (so Mega Gengar = Shadow Tag).
+        abil_id, abil_known = resolve_active_ability_json(mon)
+        vol = mon.get("volatiles") or {}
+
+        # Moves: canonical slot order shared with the action codec — see move_slots_for_mon().
         pp_used_map = mon.get("move_pp_used") or {}
         # B1.2/B1.2b attacker context: A stat + burn + Life-Orb/Choice item (fold into the damage band).
         _est = (mon.get("stats_estimate") or {}).get("stats") or {}
@@ -1090,23 +1183,42 @@ class VodStateEncoder:
                 name, confidence = slots[m_idx]
                 pp_used = pp_used_map.get(norm_species(name), 0)
                 self._write_move_json(vec, i, name, confidence, types, pp_used,
-                                      enemy_defenders, att_ctx, field_mods)
+                                      enemy_defenders, att_ctx, field_mods, ability_id=abil_id)
             i += MOVE_FEATURES
 
-        # Item + ability EFFECT categories (gap #5) — see resolve_item_json /
-        # resolve_ability_json + item_effect_indices / ability_effect_indices.
+        # ── v9 ITEM block: identity index + effect-tag multi-hot + known ──
         item_id, item_known = resolve_item_json(mon)
-        for idx in item_effect_indices(item_id):
+        vec[i] = float(item_index(item_id))
+        i += 1
+        for idx in item_tag_indices(item_id):
             vec[i + idx] = 1.0
-        i += NUM_ITEM_EFFECTS
+        i += NUM_ITEM_TAGS
         vec[i] = item_known
         i += 1
-        abil_id, abil_known = resolve_ability_json(mon)
-        for idx in ability_effect_indices(abil_id):
-            vec[i + idx] = 1.0
-        i += NUM_ABILITY_EFFECTS
+
+        # ── v9 ABILITY block: identity index + effect-tag multi-hot + known. Gastro Acid / Neutralizing
+        # Gas suppress the FUNCTIONAL tags but keep the identity (+ set the ability_suppressed tag). ──
+        vec[i] = float(ability_index(abil_id))
+        i += 1
+        if vol.get("ability_suppressed"):
+            vec[i + ABILITY_SUPPRESSED_IDX] = 1.0
+        else:
+            for idx in ability_tag_indices(abil_id):
+                vec[i + idx] = 1.0
+        i += NUM_ABILITY_TAGS
         vec[i] = abil_known
         i += 1
+
+        # ── v9 VOLATILE block: rooted, trapped(move), has_substitute, move_restricted, can_switch,
+        # locked_action.  can_switch = NOT(move-trapped OR rooted); ability-trapping (Shadow Tag) is a
+        # documented follow-up (the opponent's `trapping` tag already lets the net learn the interaction). ──
+        vec[i] = 1.0 if vol.get("rooted") else 0.0
+        vec[i + 1] = 1.0 if vol.get("trapped") else 0.0
+        vec[i + 2] = 1.0 if vol.get("has_substitute") else 0.0
+        vec[i + 3] = 1.0 if vol.get("move_restricted") else 0.0
+        vec[i + 4] = 0.0 if (vol.get("trapped") or vol.get("rooted")) else 1.0
+        vec[i + 5] = 1.0 if vol.get("locked_action") else 0.0
+        i += VOLATILE_FEATURES
 
         # is_active / is_revealed / is_fainted / is_transformed (layout-v2)
         vec[i] = 1.0 if is_active else 0.0
@@ -1130,9 +1242,11 @@ class VodStateEncoder:
         enemy_defenders: Optional[list] = None,
         att_ctx: Optional[dict] = None,
         field_mods: tuple = (None, None),
+        ability_id: Optional[str] = None,
     ) -> None:
         """JSON twin of _write_move using data/moves.json. ``enemy_defenders`` = the 2 enemy actives'
-        defender profiles; ``att_ctx`` = attacker stats/burn/item; ``field_mods`` = (weather, terrain)."""
+        defender profiles; ``att_ctx`` = attacker stats/burn/item; ``field_mods`` = (weather, terrain);
+        ``ability_id`` = the user's current ability (v9: effective-type change Normalize/Pixilate/-ate)."""
         i = start
         data = _get_moves_data().get(norm_species(move_name))
         if not data:
@@ -1144,6 +1258,7 @@ class VodStateEncoder:
         i += 1
 
         mtype = _canon(data.get("type"))
+        mtype = _DMG.effective_move_type(move_name, mtype, ability_id)   # v9: Normalize/Pixilate/-ate/Liquid Voice
         if mtype in _TYPE_IDX:
             vec[i] = _TYPE_IDX[mtype] / (NUM_TYPES - 1)
         i += 1
@@ -1221,6 +1336,13 @@ class VodStateEncoder:
                    else (_mh if isinstance(_mh, int) else 0))
         vec[i + 3] = min(_mh_max or 0, 5) / 5.0
         i += 4
+
+        # v9: move effect-tags (multi-hot priors) + identity index, BEFORE the trailing is_known
+        for idx in move_tag_indices(move_name):
+            vec[i + idx] = 1.0
+        i += NUM_MOVE_TAGS
+        vec[i] = float(move_index(move_name))
+        i += 1
 
         # is_known: 1.0 revealed/exact, p(usage) for belief-padded moves
         vec[i] = confidence
@@ -1403,7 +1525,18 @@ def index_to_action(idx: int) -> dict:
 #
 # Within a POKEMON_FEATURES block the 4 move sub-blocks start here (after hp,
 # both types, base+est stats, stats-known, mega, tera, status, boosts):
-_MOVE_BLOCK_REL = 1 + 2 * NUM_TYPES + 6 + 6 + 1 + 1 + 1 + NUM_STATUS + NUM_BOOSTS  # 70
+_WEIGHT_REL = 1 + 2 * NUM_TYPES + 6 + 6 + 1 + 1 + 1 + NUM_STATUS + NUM_BOOSTS  # 70 (v9 weight feature)
+_MOVE_BLOCK_REL = _WEIGHT_REL + WEIGHT_FEATURES  # 71 (v9: moves start after weight)
+
+# v9 within-mon-row offsets of the IDENTITY-INDEX columns (the model extracts + embeds these; never a
+# Linear input). Computed from the block sizes so encoder + model can't drift.
+_ITEM_BLOCK_REL    = _MOVE_BLOCK_REL + NUM_MOVES * MOVE_FEATURES   # 279
+ITEM_ID_REL        = _ITEM_BLOCK_REL                              # item identity index
+_ABILITY_BLOCK_REL = _ITEM_BLOCK_REL + ITEM_BLOCK_V9              # 304
+ABILITY_ID_REL     = _ABILITY_BLOCK_REL                           # ability identity index
+ABILITY_KNOWN_REL  = _ABILITY_BLOCK_REL + 1 + NUM_ABILITY_TAGS    # ability known/confidence (conf-scales the emb)
+# per-move identity index = 2nd-to-last float in each MOVE_FEATURES block (before is_known)
+MOVE_ID_RELS       = tuple(_MOVE_BLOCK_REL + m * MOVE_FEATURES + (MOVE_FEATURES - 2) for m in range(NUM_MOVES))
 # Own ACTIVE mons are state blocks 0 (our_a) and 1 (our_b); opp/bench moves have
 # no action head, so they are never permuted.
 

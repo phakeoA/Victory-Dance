@@ -70,6 +70,9 @@ from v_dance.encoders.state_encoder import (
     get_action_dim,
     get_gimmick_dim,
     POKEMON_FEATURES,
+    # v9 (B1-mechanics): identity-embedding vocab sizes + within-row index offsets
+    ABILITY_VOCAB_SIZE, MOVE_VOCAB_SIZE, ITEM_VOCAB_SIZE,
+    ABILITY_ID_REL, ITEM_ID_REL, ABILITY_KNOWN_REL, MOVE_ID_RELS, NUM_MOVES,
     ACTIVE_SLOTS,
     BENCH_SLOTS,
     OPP_BENCH_SLOTS,
@@ -159,9 +162,19 @@ class AttnBCPolicy(nn.Module):
             gimmick_heads = tuple(h for h in self.head_names if h in DEFAULT_HEADS)
         self.gimmick_head_names: Tuple[str, ...] = tuple(gimmick_heads)
 
-        # Shared per-mon encoder (applied identically to all 12 slots).
+        # v9 (B1-mechanics): per-mon ability/item identity + per-move identity embeddings. The encoder
+        # writes raw vocab INDICES into the flat row; the model extracts them (forward) and looks them up
+        # here, so identity is a LEARNED vector — not a raw ordinal Linear input. dims << d_model.
+        self.ability_emb_dim, self.item_emb_dim, self.move_emb_dim = 24, 16, 16
+        self.ability_emb = nn.Embedding(ABILITY_VOCAB_SIZE, self.ability_emb_dim, padding_idx=0)
+        self.item_emb = nn.Embedding(ITEM_VOCAB_SIZE, self.item_emb_dim, padding_idx=0)
+        self.move_emb = nn.Embedding(MOVE_VOCAB_SIZE, self.move_emb_dim, padding_idx=0)
+        _emb_extra = self.ability_emb_dim + self.item_emb_dim + NUM_MOVES * self.move_emb_dim
+
+        # Shared per-mon encoder (applied identically to all 12 slots). Input = the flat per-mon row
+        # (identity-index columns zeroed in forward) concatenated with the looked-up identity embeddings.
         self.mon_enc = nn.Sequential(
-            nn.Linear(self.mon_features, d_model),
+            nn.Linear(self.mon_features + _emb_extra, d_model),
             nn.LayerNorm(d_model),
             nn.GELU(),
         )
@@ -244,9 +257,27 @@ class AttnBCPolicy(nn.Module):
         # is_active=1; seen mons carry hp_frac/is_revealed; unseen-alive opp
         # stubs carry hp_frac=1) — no single feature is set for every role, so we
         # test "any nonzero".  Holds exactly on the frozen v4 layout.
-        present = mons.abs().sum(dim=-1) > 0                         # (B, slots) bool
+        present = mons.abs().sum(dim=-1) > 0                         # (B, slots) bool — BEFORE zeroing indices
 
-        tok = self.mon_enc(mons) + self.pos_emb.unsqueeze(0)        # (B, slots, d)
+        # v9: extract the identity-INDEX columns, look them up (ability conf-scaled by ability_known), and
+        # zero them out of the raw row so the large ordinal values never reach the Linear.
+        ab_idx = mons[:, :, ABILITY_ID_REL].round().long().clamp_(0, self.ability_emb.num_embeddings - 1)
+        it_idx = mons[:, :, ITEM_ID_REL].round().long().clamp_(0, self.item_emb.num_embeddings - 1)
+        ab_known = mons[:, :, ABILITY_KNOWN_REL:ABILITY_KNOWN_REL + 1]               # (B, slots, 1)
+        mv_idx = torch.stack([mons[:, :, r] for r in MOVE_ID_RELS], dim=-1) \
+            .round().long().clamp_(0, self.move_emb.num_embeddings - 1)              # (B, slots, NUM_MOVES)
+        ab_e = self.ability_emb(ab_idx) * ab_known                                   # (B, slots, d_a)
+        it_e = self.item_emb(it_idx)                                                # (B, slots, d_i)
+        mv_e = self.move_emb(mv_idx).reshape(B, self.n_mon_slots, -1)               # (B, slots, NUM_MOVES*d_m)
+
+        mons = mons.clone()
+        mons[:, :, ABILITY_ID_REL] = 0.0
+        mons[:, :, ITEM_ID_REL] = 0.0
+        for _r in MOVE_ID_RELS:
+            mons[:, :, _r] = 0.0
+        mon_in = torch.cat([mons, ab_e, it_e, mv_e], dim=-1)        # (B, slots, mon_features + emb_extra)
+
+        tok = self.mon_enc(mon_in) + self.pos_emb.unsqueeze(0)      # (B, slots, d)
 
         # Mask absent mons as KEYS.  Own actives are USUALLY present, but a
         # forced-replacement state can leave an active slot empty, so guard the

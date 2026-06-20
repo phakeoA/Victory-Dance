@@ -182,6 +182,31 @@ def is_choice_item(item: Optional[str]) -> bool:
     return bool(item) and item.strip().lower().startswith("choice")
 
 
+_MEGA_STONE_IDS: Optional[frozenset] = None
+
+
+def is_mega_stone(item: Optional[str]) -> bool:
+    """True for a Mega Stone, data-grounded from the pinned ``items.ts`` ``megaStone`` field.
+
+    Pikalytics rolls a mega's usage into its BASE species, so a mega-capable mon's #1 item is
+    its (inert, pre-mega) stone — e.g. Swampert's top item is Swampertite, Charizard's top two
+    are Charizardite Y/X.  Until the mon is CONFIRMED to mega-evolve (which stamps the stone as
+    ``known_item`` / the ``"megastone"`` placeholder at confidence 1.0), the battle-relevant prior
+    is the NON-mega variant's real item, so the belief DEMOTES stones (Swampert -> Life Orb).
+    Lazily sources the authoritative stone set from mechanic_tags so the lightweight belief import
+    path doesn't pay the dex parse unless this is actually called."""
+    global _MEGA_STONE_IDS
+    if not item:
+        return False
+    if _MEGA_STONE_IDS is None:
+        try:
+            from v_dance.encoders.mechanic_tags import _DATA_MEGA_STONES
+            _MEGA_STONE_IDS = frozenset(_DATA_MEGA_STONES)
+        except Exception:
+            _MEGA_STONE_IDS = frozenset()
+    return re.sub(r"[^a-z0-9]", "", item.lower()) in _MEGA_STONE_IDS
+
+
 def calc_stat(
     base: int,
     ev: int,
@@ -279,34 +304,65 @@ class BeliefState:
     def source_path(self) -> Path:
         return self._path
 
+    # Fields that make a Pikalytics entry USABLE. Some entries are present-but-empty
+    # shells: EVERY -Mega forme has one (Pikalytics rolls mega usage into the BASE
+    # species — the mega STONE is the base's #1 item), plus a few teammate-only rows.
+    # An empty shell must NOT shadow the real base data, so _resolve skips it.
+    _USABLE_FIELDS = ("moves", "items", "abilities", "spreads")
+
+    def _is_empty(self, entry: Optional[dict]) -> bool:
+        """True if the entry is absent or carries no usable usage data (an empty shell)."""
+        return not entry or not any(entry.get(f) for f in self._USABLE_FIELDS)
+
     # ── Name resolution ───────────────────────────────────────────────────────
     def _resolve(self, species: str) -> Optional[str]:
         """
-        Resolve a poke-env species string to the Pikalytics key.
-        Handles common mismatches: 'aerodactyl' → 'Aerodactyl',
-        'charizardmegay' → 'Charizard-Mega-Y', etc.
+        Resolve a poke-env species string to the Pikalytics key, PREFERRING a
+        non-empty entry.  Handles common mismatches ('aerodactyl' → 'Aerodactyl',
+        'charizardmegay' → 'Charizard-Mega-Y') AND the empty -Mega shells: when the
+        exact match is an empty shell, fall through to the base forme that actually
+        carries the data ('Charizard-Mega-Y' → 'Charizard', whose #1 item is
+        'Charizardite Y').  Stat-distinct formes with real entries ('Rotom-Wash',
+        'Typhlosion-Hisui') resolve exactly and are used as-is.
         """
         # Normalise: lowercase, collapse spaces/hyphens
         key = species.lower().strip()
-        if key in self._name_map:
-            return self._name_map[key]
-        # Try stripping hyphens
-        stripped = key.replace("-", "").replace(" ", "")
-        for k_lower, k_orig in self._name_map.items():
-            if k_lower.replace("-", "").replace(" ", "") == stripped:
-                return k_orig
-        # Forme-suffix fallback: cosmetic / niche formes often have no
-        # Pikalytics entry of their own ("Vivillon-Garden",
-        # "Sinistcha-Masterpiece", "Scizor-Mega") — strip trailing -Segments
-        # one at a time and use the base forme's usage data as the prior
-        # instead of skipping the mon entirely.  Stat-distinct formes with
-        # real entries ("Rotom-Wash", "Typhlosion-Hisui") resolve exactly
-        # above and never reach this loop.
-        while "-" in key:
-            key = key.rsplit("-", 1)[0]
-            if key in self._name_map:
-                return self._name_map[key]
-        return None
+        exact: Optional[str] = self._name_map.get(key)
+        if exact is None:
+            stripped = key.replace("-", "").replace(" ", "")
+            for k_lower, k_orig in self._name_map.items():
+                if k_lower.replace("-", "").replace(" ", "") == stripped:
+                    exact = k_orig
+                    break
+        # A non-empty exact match wins outright.
+        if exact is not None and not self._is_empty(self._data.get(exact)):
+            return exact
+        # When the exact match is an EMPTY shell, only borrow a non-empty BASE forme for a MEGA
+        # (Pikalytics rolls mega usage into the base — SAME mon line, so the base's moves/items/
+        # spreads are the right prior). A stat/ability-DISTINCT non-mega forme (Stunfisk-Galar,
+        # Lycanroc-Midnight, Alolan formes, …) must KEEP its own empty entry rather than borrow a
+        # different forme's data — borrowing would hand it the WRONG ability/type/spread. Cosmetic
+        # formes with NO own entry (exact is None, e.g. Vivillon-Garden) still strip to the base.
+        canon = exact or key
+        is_mega_forme = "mega" in canon.lower().replace(" ", "-").split("-")
+        if exact is not None and not is_mega_forme:
+            return exact
+        # Forme-suffix fallback: strip trailing -Segments off the CANONICAL key (so the
+        # no-hyphen 'charizardmegay' form resolves too) and prefer a NON-EMPTY base. An
+        # empty base is remembered as a last resort so behaviour for genuinely data-less
+        # cosmetic formes is unchanged.
+        base = canon.lower()
+        fallback: Optional[str] = None
+        while "-" in base:
+            base = base.rsplit("-", 1)[0]
+            cand = self._name_map.get(base)
+            if cand is not None:
+                if not self._is_empty(self._data.get(cand)):
+                    return cand
+                fallback = fallback or cand
+        # Nothing non-empty: the empty base (original behaviour) or the empty exact
+        # match, so known() stays True and downstream falls back to defaults.
+        return fallback or exact
 
     def _entry(self, species: str) -> Optional[dict]:
         key = self._resolve(species)
@@ -327,10 +383,17 @@ class BeliefState:
         )[:n]]
 
     def top_item(self, species: str) -> Optional[str]:
+        """Most likely held item, with mega STONES demoted (see is_mega_stone): a mega-capable
+        mon's #1 item is its inert pre-mega stone, so a NOT-confirmed-mega mon's prior is the best
+        NON-stone item (Swampert -> Life Orb).  Falls back to the stone only if there is no
+        alternative.  Parity twin of belief_block's item distribution (the live encoder uses this;
+        the offline encoder reads belief['items'][0]) — both demote stones identically."""
         entry = self._entry(species)
         if not entry or not entry.get("items"):
             return None
-        return max(entry["items"], key=lambda x: x["pct"])["name"]
+        ranked = sorted(entry["items"], key=lambda x: x["pct"], reverse=True)
+        nonstone = [i for i in ranked if not is_mega_stone(i["name"])]
+        return (nonstone or ranked)[0]["name"]
 
     def top_ability(self, species: str) -> Optional[str]:
         entry = self._entry(species)
@@ -560,9 +623,16 @@ class BeliefState:
             # in this format) is wrong by construction.
             items = [{"name": revealed_item, "p": 1.0, "revealed": True}]
         else:
-            items = self.item_distribution(key, top_k=top_k)
+            items = self.item_distribution(key, top_k=top_k + 4)
             if can_have_choice_item is False:
                 items = [i for i in items if not is_choice_item(i["name"])]
+            # Mega STONES are the base species' #1 item (Pikalytics rolls mega usage into the
+            # base) but are inert until the mon megas; a mon CONFIRMED to mega/hold its stone
+            # reaches the revealed_item branch above, so HERE (no reveal) it is not confirmed —
+            # demote stones to the best NON-stone prior (parity with top_item, used by the live
+            # encoder).  Keep a stone only if there is no non-stone alternative.
+            nonstone = [i for i in items if not is_mega_stone(i["name"])]
+            items = (nonstone or items)[:top_k]
 
         if revealed_ability:
             abilities = [{"name": revealed_ability, "p": 1.0, "revealed": True}]

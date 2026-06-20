@@ -59737,50 +59737,412 @@
         {
           "name": "Damp",
           "pct": 46.4
+        }
+      ],
+      "spreads": [
+        {
+          "nature": "Adamant",
+          "evs": [
+            2,
+            32,
+            0,
+            0,
+            0,
+            32
+          ],
+          "pct": 30.6
         },
         {
-          "name": "Adamant",
-          "pct": 89.9
+          "nature": "Adamant",
+          "evs": [
+            12,
+            32,
+            0,
+            0,
+            0,
+            22
+          ],
+          "pct": 4.7
         },
         {
-          "name": "Jolly",
-          "pct": 8.6
+          "nature": "Adamant",
+          "evs": [
+            0,
+            32,
+            1,
+            0,
+            1,
+            32
+          ],
+          "pct": 3.0
         },
         {
-          "name": "Brave",
+          "nature": "Adamant",
+          "evs": [
+            18,
+            30,
+            0,
+            0,
+            0,
+            18
+          ],
+          "pct": 2.8
+        },
+        {
+          "nature": "Adamant",
+          "evs": [
+            20,
+            32,
+            0,
+            0,
+            0,
+            14
+          ],
+          "pct": 2.3
+        },
+        {
+          "nature": "Adamant",
+          "evs": [
+            12,
+            20,
+            1,
+            0,
+            1,
+            32
+          ],
+          "pct": 2.0
+        },
+        {
+          "nature": "Adamant",
+          "evs": [
+            13,
+            32,
+            0,
+            0,
+            0,
+            21
+          ],
+          "pct": 1.9
+        },
+        {
+          "nature": "Adamant",
+          "evs": [
+            0,
+            32,
+            2,
+            0,
+            0,
+            32
+          ],
+          "pct": 1.8
+        },
+        {
+          "nature": "Adamant",
+          "evs": [
+            16,
+            32,
+            0,
+            0,
+            0,
+            18
+          ],
+          "pct": 1.8
+        },
+        {
+          "nature": "Adamant",
+          "evs": [
+            8,
+            32,
+            0,
+            0,
+            0,
+            26
+          ],
+          "pct": 1.8
+        },
+        {
+          "nature": "Adamant",
+          "evs": [
+            32,
+            32,
+            0,
+            0,
+            0,
+            2
+          ],
+          "pct": 1.7
+        },
+        {
+          "nature": "Adamant",
+          "evs": [
+            11,
+            32,
+            0,
+            0,
+            0,
+            23
+          ],
+          "pct": 1.6
+        },
+        {
+          "nature": "Adamant",
+          "evs": [
+            6,
+            32,
+            0,
+            0,
+            0,
+            28
+          ],
+          "pct": 1.4
+        },
+        {
+          "nature": "Adamant",
+          "evs": [
+            23,
+            32,
+            0,
+            0,
+            0,
+            11
+          ],
+          "pct": 1.3
+        },
+        {
+          "nature": "Adamant",
+          "evs": [
+            4,
+            30,
+            0,
+            0,
+            0,
+            32
+          ],
+          "pct": 1.3
+        },
+        {
+          "nature": "Adamant",
+          "evs": [
+            24,
+            20,
+            0,
+            0,
+            0,
+            22
+          ],
+          "pct": 1.2
+        },
+        {
+          "nature": "Adamant",
+          "evs": [
+            14,
+            20,
+            0,
+            0,
+            0,
+            32
+          ],
+          "pct": 1.2
+        },
+        {
+          "nature": "Adamant",
+          "evs": [
+            14,
+            32,
+            0,
+            0,
+            0,
+            20
+          ],
+          "pct": 1.1
+        },
+        {
+          "nature": "Adamant",
+          "evs": [
+            0,
+            32,
+            0,
+            0,
+            2,
+            32
+          ],
+          "pct": 0.9
+        },
+        {
+          "nature": "Adamant",
+          "evs": [
+            22,
+            32,
+            0,
+            0,
+            0,
+            12
+          ],
+          "pct": 0.9
+        },
+        {
+          "nature": "Adamant",
+          "evs": [
+            21,
+            32,
+            0,
+            0,
+            0,
+            13
+          ],
+          "pct": 0.9
+        },
+        {
+          "nature": "Adamant",
+          "evs": [
+            24,
+            32,
+            0,
+            0,
+            0,
+            10
+          ],
+          "pct": 0.8
+        },
+        {
+          "nature": "Adamant",
+          "evs": [
+            14,
+            30,
+            0,
+            0,
+            0,
+            22
+          ],
+          "pct": 0.8
+        },
+        {
+          "nature": "Adamant",
+          "evs": [
+            32,
+            32,
+            2,
+            0,
+            0,
+            0
+          ],
+          "pct": 0.7
+        },
+        {
+          "nature": "Adamant",
+          "evs": [
+            10,
+            30,
+            0,
+            0,
+            0,
+            26
+          ],
+          "pct": 0.7
+        },
+        {
+          "nature": "Adamant",
+          "evs": [
+            12,
+            30,
+            0,
+            0,
+            0,
+            24
+          ],
           "pct": 0.6
         },
         {
-          "name": "Naughty",
+          "nature": "Adamant",
+          "evs": [
+            4,
+            32,
+            0,
+            0,
+            0,
+            30
+          ],
+          "pct": 0.6
+        },
+        {
+          "nature": "Adamant",
+          "evs": [
+            0,
+            32,
+            0,
+            0,
+            0,
+            32
+          ],
+          "pct": 0.6
+        },
+        {
+          "nature": "Adamant",
+          "evs": [
+            32,
+            32,
+            0,
+            0,
+            2,
+            0
+          ],
+          "pct": 0.6
+        },
+        {
+          "nature": "Adamant",
+          "evs": [
+            32,
+            20,
+            0,
+            0,
+            0,
+            14
+          ],
+          "pct": 0.5
+        }
+      ],
+      "natures": [
+        {
+          "nature": "Adamant",
+          "pct": 89.9
+        },
+        {
+          "nature": "Jolly",
+          "pct": 8.6
+        },
+        {
+          "nature": "Brave",
+          "pct": 0.6
+        },
+        {
+          "nature": "Naughty",
           "pct": 0.2
         },
         {
-          "name": "Calm",
+          "nature": "Calm",
           "pct": 0.2
         },
         {
-          "name": "Relaxed",
+          "nature": "Relaxed",
           "pct": 0.1
         },
         {
-          "name": "Impish",
+          "nature": "Impish",
           "pct": 0.1
         },
         {
-          "name": "Lonely",
+          "nature": "Lonely",
           "pct": 0.1
         },
         {
-          "name": "Serious",
+          "nature": "Serious",
           "pct": 0.1
         },
         {
-          "name": "Modest",
+          "nature": "Modest",
           "pct": 0.1
         }
       ],
-      "spreads": [],
-      "natures": [],
       "teammates": [
         {
           "name": "Pelipper",

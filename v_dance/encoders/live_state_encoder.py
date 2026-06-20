@@ -36,9 +36,15 @@ from v_dance.encoders.state_encoder import (
     _BOOST_KEYS, _EST_STAT_NORM,
     item_effect_indices, ability_effect_indices, dex_unique_ability,
     is_spread_target, _type_eff_signed_immune, _type_mult, _damage_band, _moves_first,
-    _situational_damage_mult, _WEATHER_SPEED_ABILITY,
+    _situational_damage_mult, _WEATHER_SPEED_ABILITY, field_duration_scalars,
     VodStateEncoder,
+    # v9 (B1-mechanics): mechanic substrate (re-exported from state_encoder's namespace)
+    NUM_MOVE_TAGS, NUM_ABILITY_TAGS, NUM_ITEM_TAGS, WEIGHT_FEATURES, VOLATILE_FEATURES,
+    move_tag_indices, ability_tag_indices, item_tag_indices, ABILITY_SUPPRESSED_IDX,
+    ability_index, move_index, item_index,
 )
+from v_dance.encoders import damage_mechanics as _DMG
+from v_dance.parser.vod_parser.battle_models import volatile_flags
 
 
 def _live_eff_types(mon) -> list:
@@ -434,6 +440,53 @@ class LiveStateEncoder:
                 vec[cursor + 1] = _sp[_ok][1] * _sp[_pk][1]
                 cursor += 2
 
+        # ── Field-duration block (11, v10): turns-active AGE per condition. SOURCED from the gap-#6
+        # vod_parser RECONSTRUCTION (opp_snapshot) when available — poke-env REFRESHES battle.weather to
+        # the current turn on every ``[upkeep]`` line, so its value is unusable as a weather start-turn.
+        # The reconstruction counts turns-active with the SAME parser as training → byte-identical age.
+        # Fallback (no reconstruction, a diagnostic-only path): screens/tailwind from poke-env's STABLE
+        # start-turns; weather/terrain age 0 (poke-env can't supply it).
+        _turn = battle.turn or 0
+        _fd_field = (opp_snapshot or {}).get("field")
+        _fd_sc = (opp_snapshot or {}).get("side_conditions")
+        if _fd_field is not None and _fd_sc is not None:
+            _tr_rem = _fd_field.get("trick_room_turns_remaining") or 0
+            _fd_sides = []
+            for _sk in ("our_side", "opp_side"):
+                _s = _fd_sc.get(_sk) or {}
+                _tw_rem = _s.get("tailwind_turns_remaining") or 0
+                _fd_sides.append({"tailwind_age": (4 - _tw_rem) if _tw_rem > 0 else 0,
+                                  "screens": _s.get("screens")})
+            _fd = field_duration_scalars(_fd_field.get("weather_turns_active"),
+                                         _fd_field.get("terrain_turns_active"),
+                                         (5 - _tr_rem) if _tr_rem > 0 else 0, _fd_sides)
+        else:
+            def _age(start):
+                return max(0, _turn - start) if isinstance(start, int) else 0
+
+            def _side_ages(side_conditions):
+                tw_age, screens = 0, {}
+                for _sc, _v in side_conditions.items():
+                    _nm = getattr(_sc, "name", "")
+                    if _nm == "TAILWIND":
+                        tw_age = _age(_v)
+                    elif _nm == "REFLECT":
+                        screens["reflect"] = _age(_v)
+                    elif _nm == "LIGHT_SCREEN":
+                        screens["light_screen"] = _age(_v)
+                    elif _nm == "AURORA_VEIL":
+                        screens["aurora_veil"] = _age(_v)
+                return {"tailwind_age": tw_age, "screens": screens}
+
+            _tr_age = next((_age(v) for f, v in battle.fields.items()
+                            if getattr(f, "name", "") == "TRICK_ROOM"), 0)
+            _fd = field_duration_scalars(
+                0, 0, _tr_age,
+                [_side_ages(battle.side_conditions), _side_ages(battle.opponent_side_conditions)])
+        for _v in _fd:
+            vec[cursor] = _v
+            cursor += 1
+
         # ── Team counts (layout-v2): living-bench + fainted per side ──────────
         # Opp counts use SEEN (revealed, non-active) mons only — the information
         # asymmetry the offline path encodes (opp_seen_alive / opp_seen_fainted).
@@ -732,6 +785,18 @@ class LiveStateEncoder:
             vec[i + j] = boosts.get(key, 0) / 6.0
         i += NUM_BOOSTS
 
+        # v9: normalized species weight (weight-based moves + Heavy/Light Metal)
+        _wt = _DMG.species_weight(getattr(mon, "species", None)) or 0.0
+        vec[i] = min(_wt / 500.0, 1.0)
+        i += 1
+
+        # v9: current ability + volatile state from poke-env (Effect enum names normalise to the parser's
+        # volatile ids -> volatile_flags gives the SAME booleans as offline).
+        abil_id, abil_known = self._live_ability(mon, is_own)
+        _eff_ids = {getattr(e, "name", str(e)).lower().replace("_", "")
+                    for e in (getattr(mon, "effects", {}) or {})}
+        vf = volatile_flags(_eff_ids)
+
         # Moves (up to 4; remaining slots stay zero = unknown)
         move_list = (move_override if move_override is not None
                      else list(mon.moves.values())[:NUM_MOVES])
@@ -743,24 +808,41 @@ class LiveStateEncoder:
                    "life_orb": _it == "lifeorb", "choice": _it in ("choiceband", "choicespecs")}
         for m_idx in range(NUM_MOVES):
             if m_idx < len(move_list):
-                self._write_move(vec, i, move_list[m_idx], mon, enemy_defenders, att_ctx, field_mods)
+                self._write_move(vec, i, move_list[m_idx], mon, enemy_defenders, att_ctx,
+                                 field_mods, ability_id=abil_id)
             i += MOVE_FEATURES
 
-        # Item + ability EFFECT categories (gap #5) — byte-identical layout to
-        # encode_snapshot: poke-env's item/ability id (else the BeliefState top)
-        # collapses to the SAME effect flags via item_/ability_effect_indices.
+        # ── v9 ITEM block: identity index + effect-tag multi-hot + known ──
         item_id, item_known = self._live_item(mon, is_own)
-        for idx in item_effect_indices(item_id):
+        vec[i] = float(item_index(item_id))
+        i += 1
+        for idx in item_tag_indices(item_id):
             vec[i + idx] = 1.0
-        i += NUM_ITEM_EFFECTS
+        i += NUM_ITEM_TAGS
         vec[i] = item_known
         i += 1
-        abil_id, abil_known = self._live_ability(mon, is_own)
-        for idx in ability_effect_indices(abil_id):
-            vec[i + idx] = 1.0
-        i += NUM_ABILITY_EFFECTS
+
+        # ── v9 ABILITY block: identity index + effect-tag multi-hot + known. Gastro Acid suppresses the
+        # functional tags but keeps the identity (+ sets ability_suppressed). ──
+        vec[i] = float(ability_index(abil_id))
+        i += 1
+        if "gastroacid" in _eff_ids:
+            vec[i + ABILITY_SUPPRESSED_IDX] = 1.0
+        else:
+            for idx in ability_tag_indices(abil_id):
+                vec[i + idx] = 1.0
+        i += NUM_ABILITY_TAGS
         vec[i] = abil_known
         i += 1
+
+        # ── v9 VOLATILE block (byte-parity with offline via volatile_flags) ──
+        vec[i] = 1.0 if vf["rooted"] else 0.0
+        vec[i + 1] = 1.0 if vf["trapped"] else 0.0
+        vec[i + 2] = 1.0 if vf["has_substitute"] else 0.0
+        vec[i + 3] = 1.0 if vf["move_restricted"] else 0.0
+        vec[i + 4] = 0.0 if (vf["trapped"] or vf["rooted"]) else 1.0
+        vec[i + 5] = 1.0 if vf["locked_action"] else 0.0
+        i += VOLATILE_FEATURES
 
         # is_active slot flag
         vec[i] = 1.0 if is_active else 0.0
@@ -826,17 +908,10 @@ class LiveStateEncoder:
 
     def _live_ability(self, mon: "Pokemon", is_own: bool) -> tuple[str, float]:
         """(normalised ability id, confidence) for a live mon — parity twin of
-        resolve_ability_json.  For a mega'd mon poke-env exposes the FIXED mega
-        ability, but training encodes the user-choosable (base) ability (Bug 8),
-        so we take the BeliefState top ability of the base species instead (the
-        exact pre-mega ability is not recoverable live — a documented residual).
-        Otherwise a revealed ``mon.ability`` is 1.0, else belief top at 0.5."""
-        if self._is_mega_forme(mon):
-            if self.belief is not None:
-                top = self.belief.top_ability(self._base_species(mon))
-                if top:
-                    return norm_species(top), 0.5
-            return "", 0.0
+        resolve_active_ability_json.  v9: a mega'd mon uses poke-env's ``mon.ability`` (the FIXED mega
+        forme ability, e.g. Mega Gengar -> Shadow Tag) at 1.0, matching the offline resolve_active path,
+        so the v9 mechanic tags (trapping / parental_bond / …) fire for megas.  Otherwise a revealed
+        ``mon.ability`` is 1.0, else belief top at 0.5."""
         ab = getattr(mon, "ability", None)
         if ab:
             return norm_species(ab), 1.0
@@ -861,18 +936,23 @@ class LiveStateEncoder:
         enemy_defenders: Optional[list] = None,
         att_ctx: Optional[dict] = None,
         field_mods: tuple = (None, None),
+        ability_id: Optional[str] = None,
     ) -> None:
         """Write MOVE_FEATURES floats into vec starting at `start`. ``enemy_defenders`` = defender
-        profiles; ``att_ctx`` = attacker stats/burn/item; ``field_mods`` = (weather, terrain)."""
+        profiles; ``att_ctx`` = attacker stats/burn/item; ``field_mods`` = (weather, terrain);
+        ``ability_id`` = user's current ability (v9 effective-type change)."""
         i = start
 
         # Base power (cap at 250 since a few moves are absurdly high)
         vec[i] = min(move.base_power, 250) / 150.0
         i += 1
 
-        # Move type as ordinal index (compact; type embeddings learned by net)
-        if move.type in self._type_idx:
-            vec[i] = self._type_idx[move.type] / (NUM_TYPES - 1)
+        # Move type as ordinal index — v9 EFFECTIVE type (Normalize/Pixilate/-ate/Liquid Voice).
+        _mt = move.type.name if getattr(move, "type", None) is not None else ""
+        _mt = _DMG.effective_move_type(getattr(move, "id", None), _mt, ability_id)
+        _user_types = {t.name for t in user.types if t}
+        if _mt in _TYPE_IDX:
+            vec[i] = _TYPE_IDX[_mt] / (NUM_TYPES - 1)
         i += 1
 
         # Category: 0.0=physical, 0.5=special, 1.0=status
@@ -906,8 +986,8 @@ class LiveStateEncoder:
         vec[i] = 1.0 if move.is_protect_move else 0.0
         i += 1
 
-        # STAB: move type in user's current types (accounts for tera)
-        vec[i] = 1.0 if move.type in user.types else 0.0
+        # STAB: EFFECTIVE move type in user's current types (accounts for tera + -ate)
+        vec[i] = 1.0 if _mt in _user_types else 0.0
         i += 1
 
         # is_spread (gap #6): hits both foes — poke-env Move.target enum, mapped to
@@ -917,7 +997,7 @@ class LiveStateEncoder:
         i += 1
 
         # B1.1 type-eff cross: signed multiplier + immune vs each of the 2 enemy actives. 4 channels.
-        _mt = move.type.name if getattr(move, "type", None) is not None else ""
+        # (_mt = the EFFECTIVE move type, computed above.)
         for e in range(2):
             d = enemy_defenders[e] if (enemy_defenders and e < len(enemy_defenders)) else None
             signed, immune = _type_eff_signed_immune(_mt, (d.get("types") if d else []))
@@ -930,7 +1010,7 @@ class LiveStateEncoder:
         _phys = move.category == MoveCategory.PHYSICAL
         _ac = att_ctx or {}
         _A = _ac.get("atk") if _phys else _ac.get("spa")
-        _stab = getattr(move, "type", None) in user.types
+        _stab = _mt in _user_types
         _weather, _terrain = field_mods if field_mods else (None, None)
         for e in range(2):
             d = enemy_defenders[e] if (enemy_defenders and e < len(enemy_defenders)) else None
@@ -957,6 +1037,14 @@ class LiveStateEncoder:
         _mh_max = (_nh[1] if isinstance(_nh, (list, tuple)) and len(_nh) > 1 and _nh[1] > 1 else 0)
         vec[i + 3] = min(_mh_max, 5) / 5.0
         i += 4
+
+        # v9: move effect-tags + identity index, BEFORE the trailing is_known
+        _mid = getattr(move, "id", None)
+        for idx in move_tag_indices(_mid):
+            vec[i + idx] = 1.0
+        i += NUM_MOVE_TAGS
+        vec[i] = float(move_index(_mid))
+        i += 1
 
         # Known flag (always 1 here — zero-slot means unknown)
         vec[i] = 1.0

@@ -168,6 +168,14 @@ _EV_ROW_RE = re.compile(
 )
 _NATURE_PCT_RE = re.compile(rf"\b({_NATURES_ALT})\b\s+(\d+\.\d+)\s*%", re.IGNORECASE)
 
+# A nature is NEVER a valid ability/item name. The "Best Abilities"/"Best Items" section
+# slice is bounded by the next heading or the "Nature / EV Spreads" marker; when that block
+# is captured mid lazy-render the boundary can be missed and the nature distribution bleeds
+# into the section, so e.g. "Adamant 89.9%" parses as an ability (verified: Swampert M-B —
+# 'Adamant' even outranked the real 'Torrent'). Filter the finite nature set out defensively,
+# the same way _TYPE_NOISE drops the type-row labels.
+_NATURE_NOISE = frozenset(n.lower() for n in _NATURES_ALT.split("|"))
+
 
 def _parse_section(markdown: str, header: str) -> list[dict]:
     """
@@ -209,7 +217,7 @@ def _parse_section(markdown: str, header: str) -> list[dict]:
     for match in _PCT_PATTERN.finditer(section_text):
         name = match.group(1).strip()
         pct  = float(match.group(2))
-        if name.lower() in _TYPE_NOISE:
+        if name.lower() in _TYPE_NOISE or name.lower() in _NATURE_NOISE:
             continue
         if name not in seen:
             seen.add(name)

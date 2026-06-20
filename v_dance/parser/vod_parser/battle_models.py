@@ -15,6 +15,29 @@ from typing import Optional
 # Data structures
 # ---------------------------------------------------------------------------
 
+# v9 (B1-mechanics): volatile id -> the encoder's per-mon volatile flag it feeds. Normalised ids.
+_RESTRICT_VOL = frozenset({"taunt", "encore", "disable", "torment", "healblock", "imprison"})
+_TRAP_VOL = frozenset({"partiallytrapped", "bind", "wrap", "firespin", "whirlpool", "sandtomb",
+                       "magmastorm", "infestation", "clamp", "snaptrap", "thundercage", "jawlock",
+                       "meanlook", "block", "spiderweb", "octolock", "noretreat", "trapped"})
+_LOCK_VOL = frozenset({"mustrecharge", "lockedmove", "bide", "uproar", "rollout", "iceball",
+                       "twoturnmove", "phantomforce", "shadowforce"})
+
+
+def volatile_flags(vol_ids) -> dict:
+    """Map a set of normalised volatile ids -> the encoder's per-mon volatile booleans. SHARED by the
+    offline (PokemonSlot.to_dict) and live (live_state_encoder) paths so the volatile block is byte-parity
+    by construction. ``ability_suppressed`` is handled by the caller (Gastro Acid / Neutralizing Gas)."""
+    ids = set(vol_ids)
+    return {
+        "rooted": "ingrain" in ids,
+        "has_substitute": "substitute" in ids,
+        "move_restricted": bool(ids & _RESTRICT_VOL),
+        "trapped": bool(ids & _TRAP_VOL),
+        "locked_action": bool(ids & _LOCK_VOL),
+    }
+
+
 @dataclass
 class PokemonSlot:
     """Tracks a single Pokémon's in-battle state snapshot."""
@@ -85,6 +108,11 @@ class PokemonSlot:
     # "fooled view" the in-battle policy must learn from.
     illusion_active: bool = False            # disguise currently up (pre-|replace|)
     disguise_species: Optional[str] = None   # species the disguise appears as
+    # v9 (B1-mechanics): per-mon volatile state for the encoder's volatile block. CLEARED on switch-in
+    # (volatiles end when a mon leaves the field — handled in replay_parser._handle_switch). MOVE-based
+    # trapping only; ABILITY trapping (Shadow Tag) is derived at encode time from the opponent's ability.
+    volatiles: set = field(default_factory=set)   # active normalised volatile ids
+    ability_suppressed: bool = False              # Gastro Acid (per-mon ability suppression) in effect
 
     def key(self) -> str:
         return f"{self.player}{self.slot}"
@@ -125,6 +153,10 @@ class PokemonSlot:
             "transformed_into": self.transformed_into,
             "illusion_active": self.illusion_active,
             "disguise_species": self.disguise_species,
+            # v9 volatile block (B1-mechanics) — booleans the encoder reads directly. `trapped` is the
+            # MOVE-based component only; the encoder ORs in ability-trapping (Shadow Tag) at encode time.
+            "volatiles": {**volatile_flags(self.volatiles),
+                          "ability_suppressed": self.ability_suppressed},
             # EVs/IVs unknown for Type B — left as distribution placeholder
             "ev_spread": None,
             "iv_spread": None,
@@ -134,8 +166,13 @@ class PokemonSlot:
 
 @dataclass
 class SideConditions:
-    tailwind: int = 0        # turns remaining (0 = inactive)
-    screens: dict = field(default_factory=dict)   # reflect / light screen / aurora veil
+    tailwind: int = 0        # turns REMAINING (0 = inactive); base 4, no item extension
+    # screens: {reflect/light_screen/aurora_veil: turns ACTIVE (elapsed, 0 on set)} — counted UP and
+    # removed ONLY by the explicit |-sideend| event (not auto-expired at 5), so a Light Clay 8-turn
+    # screen is tracked correctly. The elapsed value IS the field-duration signal: elapsed > 5 ⇒ the
+    # setter held Light Clay (8-turn), inferrable identically offline (parser counts) and live
+    # (poke-env start-turn). See state_encoder field-duration block.
+    screens: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -148,11 +185,15 @@ class SideConditions:
 class FieldConditions:
     weather: Optional[str] = None
     terrain: Optional[str] = None
-    trick_room: int = 0      # turns remaining
+    trick_room: int = 0      # turns remaining; base 5, no item extension
+    weather_turns: int = 0   # turns ACTIVE (elapsed); >5 ⇒ a weather-rock 8-turn instance
+    terrain_turns: int = 0   # turns ACTIVE (elapsed); >5 ⇒ a Terrain-Extender 8-turn instance
 
     def to_dict(self) -> dict:
         return {
             "weather": self.weather,
             "terrain": self.terrain,
             "trick_room_turns_remaining": self.trick_room,
+            "weather_turns_active": self.weather_turns,
+            "terrain_turns_active": self.terrain_turns,
         }

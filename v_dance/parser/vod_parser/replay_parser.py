@@ -47,6 +47,11 @@ def _perceived_roster_name(display: Optional[str]) -> str:
     return display
 
 
+# Items that change hands SILENTLY (no |-item|/|-enditem|) and so are held by at most one mon at a
+# time — used to clear a stale known_item off a former holder when the item resurfaces elsewhere.
+_TRANSFER_ONLY_ITEMS = frozenset({"Sticky Barb"})
+
+
 # ---------------------------------------------------------------------------
 # Parser
 # ---------------------------------------------------------------------------
@@ -169,6 +174,13 @@ class ShowdownReplayParser:
         if cmd != "-ability":
             self._learn_ability_from_tags(parts)
 
+        # Items announce themselves by their effect (Life Orb recoil, Leftovers/Black Sludge
+        # heal, Rocky Helmet contact, Flame/Toxic Orb status) via a "[from] item:" tag — learn the
+        # HELD item from it. |-item|/|-enditem| carry the item in a field, not this tag, so they
+        # are handled separately and never double-counted here.
+        if cmd not in ("-item", "-enditem"):
+            self._learn_item_from_tags(parts)
+
         # ---- metadata ----
         if cmd == "player":
             # |player|p1|steven he vgc|101|1733
@@ -215,6 +227,19 @@ class ShowdownReplayParser:
             self._current_turn_replacements = []
             self._last_move_action = None
             self._execution_index = 0
+            # Field-duration: advance turns-ACTIVE at the START of each turn, anchored on the SET turn,
+            # so a pre-|turn|1 lead weather/terrain (Drought / Electric Surge on switch-in) reads
+            # age = current_turn − set_turn, matching poke-env's ``turn − start-turn`` on the live path.
+            # Done here (NOT at upkeep) so the snapshot below reflects the same elapsed both paths see.
+            if self.field_conditions.weather:
+                self.field_conditions.weather_turns += 1
+            if self.field_conditions.terrain:
+                self.field_conditions.terrain_turns += 1
+            for sc in self.side_conditions.values():
+                for k in list(sc.screens):       # screens count UP; cap at the 8-turn Light Clay max
+                    sc.screens[k] += 1
+                    if sc.screens[k] > 8:
+                        del sc.screens[k]
             # Capture state BEFORE any actions mutate it
             self._state_before = {
                 "p1": self._snapshot_state("p1"),
@@ -292,6 +317,12 @@ class ShowdownReplayParser:
                 "status": cured,
             })
 
+        elif cmd == "-start":
+            self._handle_volatile(parts, start=True)
+
+        elif cmd == "-end":
+            self._handle_volatile(parts, start=False)
+
         elif cmd == "-sidestart":
             self._handle_sidestart(parts)
 
@@ -300,7 +331,13 @@ class ShowdownReplayParser:
 
         elif cmd == "-weather":
             weather_val = parts[2] if len(parts) > 2 else None
-            self.field_conditions.weather = None if weather_val in (None, "none") else weather_val
+            new_w = None if weather_val in (None, "none") else weather_val
+            if new_w != self.field_conditions.weather:
+                # New weather (or cleared) → restart the elapsed counter. Repeated
+                # ``|-weather|X|[upkeep]`` lines carry the same token and are ignored here;
+                # the ``upkeep`` command increments the counter while weather is active.
+                self.field_conditions.weather = new_w
+                self.field_conditions.weather_turns = 0
 
         elif cmd == "-fieldstart":
             raw = parts[2] if len(parts) > 2 else ""
@@ -310,6 +347,7 @@ class ShowdownReplayParser:
                 # Bug 4 fix: store a normalised token ("electric", "grassy",
                 # "misty", "psychic"), not the raw effect string.
                 self.field_conditions.terrain = self._normalize_terrain(raw)
+                self.field_conditions.terrain_turns = 0
 
         elif cmd == "-fieldend":
             raw = parts[2] if len(parts) > 2 else ""
@@ -317,6 +355,7 @@ class ShowdownReplayParser:
                 self.field_conditions.trick_room = 0
             elif "terrain" in raw.lower():
                 self.field_conditions.terrain = None
+                self.field_conditions.terrain_turns = 0
 
         # ---- item reveals ----
         elif cmd == "-item":
@@ -336,18 +375,17 @@ class ShowdownReplayParser:
             # |-ability|p1a: Aerodactyl|Unnerve  (ability activation / reveal)
             self._handle_ability_reveal(parts)
 
+        elif cmd == "-activate":
+            # Symbiosis (silent ally item pass) is the one -activate that moves an item;
+            # the line names giver, item and receiver, so record the hand-off.
+            self._handle_activate(parts)
+
         elif cmd == "upkeep":
-            # Decrement all time-based counters
+            # tailwind / trick room = REMAINING (base 4 / 5, no item extension); their age is derived
+            # at encode time as base − remaining. Weather/terrain/screens count UP at turn-start (above).
             for sc in self.side_conditions.values():
                 if sc.tailwind > 0:
                     sc.tailwind -= 1
-                # Decrement screen timers
-                expired = [k for k, v in sc.screens.items() if v <= 1]
-                for k in expired:
-                    del sc.screens[k]
-                for k in list(sc.screens):
-                    if sc.screens[k] > 1:
-                        sc.screens[k] -= 1
             if self.field_conditions.trick_room > 0:
                 self.field_conditions.trick_room -= 1
 
@@ -510,6 +548,9 @@ class ShowdownReplayParser:
         if slot_key in self.active_slots and self.active_slots[slot_key] is not mon:
             outgoing = self.active_slots[slot_key]
             outgoing.boosts = {}
+            # v9: volatiles + ability suppression end when the mon leaves the field.
+            outgoing.volatiles = set()
+            outgoing.ability_suppressed = False
             # Transform reverts the instant the mon leaves the field, so the
             # outgoing mon is its real self again on the bench.
             outgoing.is_transformed = False
@@ -519,6 +560,11 @@ class ShowdownReplayParser:
         # Incoming mon always starts with neutral boosts (covers |drag| too,
         # and guards against any stale state on the reused PokemonSlot).
         mon.boosts = {}
+        # v9 (B1-mechanics): volatiles (Substitute/Ingrain/Taunt/Encore/partial-trap/…) and ability
+        # suppression (Gastro Acid) end when a mon leaves the field — the incoming mon starts clean
+        # (also guards a reused PokemonSlot).
+        mon.volatiles = set()
+        mon.ability_suppressed = False
         # A switch-in starts a fresh stay on the field — a Choice lock from a
         # previous stint no longer applies, so the working move set restarts.
         mon.stint_moves = []
@@ -943,6 +989,28 @@ class ShowdownReplayParser:
             "stages": amount,
         })
 
+    def _handle_volatile(self, parts: list[str], start: bool) -> None:
+        """|-start| / |-end| volatile tracking (v9 B1-mechanics): Substitute, Ingrain, Taunt/Encore/
+        Disable/Torment, the partial-trap moves, Mean Look/Block, Gastro Acid, recharge/locked states.
+        Feeds the per-mon volatile block; cleared on switch-in."""
+        if len(parts) < 4:
+            return
+        mon = self.active_slots.get(self._slot_key_from_ident(parts[2]))
+        if mon is None:
+            return
+        raw = parts[3]
+        # strip a "move: " / "ability: " / "item: " prefix, then normalise to a Showdown id
+        name = raw.split(":", 1)[-1] if ":" in raw else raw
+        vid = "".join(c for c in name.lower() if c.isalnum())
+        if not vid:
+            return
+        if start:
+            mon.volatiles.add(vid)
+        else:
+            mon.volatiles.discard(vid)
+        if vid == "gastroacid":
+            mon.ability_suppressed = start
+
     def _handle_sidestart(self, parts: list[str]) -> None:
         # |-sidestart|p2: speedyturtle87|move: Tailwind
         raw_side = parts[2]
@@ -952,11 +1020,11 @@ class ShowdownReplayParser:
         if "Tailwind" in effect:
             self.side_conditions[pid].tailwind = 4
         elif "Reflect" in effect:
-            self.side_conditions[pid].screens["reflect"] = 5
+            self.side_conditions[pid].screens["reflect"] = 0          # turns ACTIVE (elapsed)
         elif "Light Screen" in effect:
-            self.side_conditions[pid].screens["light_screen"] = 5
+            self.side_conditions[pid].screens["light_screen"] = 0
         elif "Aurora Veil" in effect:
-            self.side_conditions[pid].screens["aurora_veil"] = 5
+            self.side_conditions[pid].screens["aurora_veil"] = 0
 
     def _handle_sideend(self, parts: list[str]) -> None:
         raw_side = parts[2]
@@ -1060,6 +1128,66 @@ class ShowdownReplayParser:
         if not re.fullmatch(r"p[12][ab]", slot_key):
             return
         self._record_ability(slot_key, ability, self._species_from_ident(holder))
+
+    def _handle_activate(self, parts: list[str]) -> None:
+        """Record a Symbiosis item hand-off (the only -activate that moves an item).
+
+            |-activate|p2a: Florges|ability: Symbiosis|Leftovers|[of] p2b: Flapple
+
+        The transfer is otherwise SILENT (no |-item|/|-enditem|), so without this the GIVER keeps a
+        stale known_item and the RECEIVER's new item stays invisible. Mark the giver itemless (it
+        passed its only item) and set the receiver's known held item.
+        """
+        if len(parts) < 5 or parts[3] != "ability: Symbiosis":
+            return
+        item = parts[4].strip()
+        of_ident = next((p[len("[of]"):].strip() for p in parts[5:] if p.startswith("[of]")), None)
+        giver = self._slot_key_from_ident(parts[2])
+        receiver = self._slot_key_from_ident(of_ident) if of_ident else ""
+        if giver in self.active_slots:
+            self.active_slots[giver].item_consumed = True       # gave its item away → itemless
+        if item and receiver in self.active_slots:
+            self.active_slots[receiver].known_item = item
+            self.active_slots[receiver].item_consumed = False   # now holds the passed item
+
+    def _learn_item_from_tags(self, parts: list[str]) -> None:
+        """Learn a HELD item revealed by its OWN effect via a ``[from] item:`` tag.
+
+        Many items announce themselves when they trigger, with no |-item| line::
+
+            |-damage|p1a: X|90/100|[from] item: Life Orb               (recoil — X holds it)
+            |-heal|p2a: Y|100/100|[from] item: Leftovers              (heal — Y holds it)
+            |-damage|p1a: Atk|80/100|[from] item: Rocky Helmet|[of] p2b: Def   (Def holds it)
+            |-status|p1a: Z|brn|[from] item: Flame Orb
+
+        The holder is the ``[of]`` mon when present (reactive items — Rocky Helmet /
+        Jaboca / Rowap — hurt a DIFFERENT mon), otherwise the subject of the line.
+        Sets ``known_item`` (the held identity) but does NOT mark it consumed —
+        |-enditem| owns consumption, and a Sitrus/Sash also emits its own |-enditem|.
+        """
+        item = None
+        of_ident = None
+        for p in parts[2:]:
+            if p.startswith("[from] item:"):
+                item = p.split(":", 1)[1].strip()
+            elif p.startswith("[of]"):
+                of_ident = p[len("[of]"):].strip()
+        if not item:
+            return
+        holder = of_ident or (parts[2] if len(parts) > 2 else "")
+        slot_key = self._slot_key_from_ident(holder)
+        if not re.fullmatch(r"p[12][ab]", slot_key):
+            return
+        if slot_key in self.active_slots:
+            self.active_slots[slot_key].known_item = item
+            # Sticky Barb transfers SILENTLY on contact (no |-item|/|-enditem|): when it surfaces on a
+            # NEW holder via its residual self-damage, the PRIOR holder lost it. Clear the stale label so
+            # the former holder isn't encoded as DEFINITELY holding it. Scoped to transfer-prone items
+            # only — a common item like Leftovers can legitimately be on two mons at once.
+            if item in _TRANSFER_ONLY_ITEMS:
+                for k, m in self.active_slots.items():
+                    if k != slot_key and m.known_item == item:
+                        m.known_item = None
 
     def _record_ability(
         self,
