@@ -220,6 +220,14 @@ class LiveStateEncoder:
             self._weather_idx = _enum_to_idx(Weather, _WEATHER_IDX)
             self._field_idx   = _enum_to_idx(Field, _FIELD_IDX)
             self._sc_idx      = _enum_to_idx(SideCondition, _SC_IDX)
+            # The offline parser tracks ONLY Tailwind + the 3 screens, so the corpus NEVER sets the
+            # hazard / Safeguard / Mist side-condition channels (constant 0.0). Restrict the live emit
+            # to the SAME channels (by index) so train==serve — emitting a live hazard bit the net
+            # only ever saw as 0.0 is an out-of-distribution feed on the un-spliced SC globals.
+            self._offline_sc_idx = frozenset(
+                _SC_IDX[n] for n in ("TAILWIND", "REFLECT", "LIGHT_SCREEN", "AURORA_VEIL")
+                if n in _SC_IDX
+            )
             # Gen-9 pokedex for the mega-forme detector (see _is_mega_forme).
             self._pokedex = GenData.from_gen(9).pokedex if GenData else {}
 
@@ -398,17 +406,21 @@ class LiveStateEncoder:
         # value is a layer count (stackable) OR the turn a condition started
         # (non-stackable) — NOT turns remaining — so its magnitude is not
         # comparable to the offline path.  Both paths therefore encode a presence
-        # bit.  (NB: the offline parser currently tracks only tailwind + screens,
-        # so entry-hazard slots still diverge — a separate parser-coverage gap.)
+        # bit.  RESTRICTED to the offline-tracked channels (Tailwind + 3 screens):
+        # the parser does not track hazards/Safeguard/Mist, so emitting them live
+        # would feed the net 1.0 on channels it only ever saw as 0.0 in training
+        # (these SC globals are NOT corrected by the gap-#6 opponent splice).
         for sc, val in battle.side_conditions.items():
-            if sc in self._sc_idx and val:
-                vec[cursor + self._sc_idx[sc]] = 1.0
+            idx = self._sc_idx.get(sc)
+            if val and idx in self._offline_sc_idx:
+                vec[cursor + idx] = 1.0
         cursor += NUM_SIDE_CONDS
 
-        # Opponent side conditions
+        # Opponent side conditions (same offline-tracked restriction)
         for sc, val in battle.opponent_side_conditions.items():
-            if sc in self._sc_idx and val:
-                vec[cursor + self._sc_idx[sc]] = 1.0
+            idx = self._sc_idx.get(sc)
+            if val and idx in self._offline_sc_idx:
+                vec[cursor + idx] = 1.0
         cursor += NUM_SIDE_CONDS
 
         # Turn (cap at 60 for normalisation)
@@ -480,8 +492,14 @@ class LiveStateEncoder:
 
             _tr_age = next((_age(v) for f, v in battle.fields.items()
                             if getattr(f, "name", "") == "TRICK_ROOM"), 0)
+            # Terrain carries a STABLE poke-env start-turn in battle.fields (like Trick Room), so
+            # derive its age here instead of zeroing it — closing the terrain half of the fallback
+            # gap for free.  Weather has NO stable start-turn (poke-env refreshes battle.weather each
+            # upkeep), so it stays 0 on this reconstruction-failure-only fallback path.
+            _terrain_age = next((_age(v) for f, v in battle.fields.items()
+                                 if getattr(f, "name", "").endswith("_TERRAIN")), 0)
             _fd = field_duration_scalars(
-                0, 0, _tr_age,
+                0, _terrain_age, _tr_age,
                 [_side_ages(battle.side_conditions), _side_ages(battle.opponent_side_conditions)])
         for _v in _fd:
             vec[cursor] = _v
@@ -696,11 +714,16 @@ class LiveStateEncoder:
         spe *= ((2 + stage) / 2.0) if stage >= 0 else (2.0 / (2 - stage))
         if getattr(getattr(mon, "status", None), "name", None) == "PAR":
             spe *= 0.5
-        if getattr(mon, "item", None) == "choicescarf":
+        # Resolve item/ability through the BELIEF-aware helpers — NOT raw poke-env attrs — so this
+        # mirrors the offline _effective_speed (resolve_item_json / resolve_ability_json), which for an
+        # unrevealed OPPONENT falls back to the Pikalytics top prior. Reading raw mon.item/mon.ability
+        # here (unknown_item / None for an unrevealed opp) silently dropped the Choice Scarf ×1.5 and
+        # weather-speed ×2 that TRAINING applied → a 1.5-2× serve-only who-moves-first divergence.
+        if self._live_item(mon, is_own)[0] == "choicescarf":      # choice_speed effect is unique to Scarf
             spe *= 1.5
         if side_tailwind:
             spe *= 2.0
-        if weather and weather in _WEATHER_SPEED_ABILITY.get(getattr(mon, "ability", None) or "", ()):
+        if weather and weather in _WEATHER_SPEED_ABILITY.get(self._live_ability(mon, is_own)[0], ()):
             spe *= 2.0
         return float(spe), known
 

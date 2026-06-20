@@ -1160,8 +1160,12 @@ class ShowdownReplayParser:
             |-damage|p1a: Atk|80/100|[from] item: Rocky Helmet|[of] p2b: Def   (Def holds it)
             |-status|p1a: Z|brn|[from] item: Flame Orb
 
-        The holder is the ``[of]`` mon when present (reactive items — Rocky Helmet /
-        Jaboca / Rowap — hurt a DIFFERENT mon), otherwise the subject of the line.
+        The holder is the ``[of]`` mon ONLY on ``-damage``/``-status`` lines (reactive
+        contact-punish items — Rocky Helmet / Jaboca / Rowap — hurt a DIFFERENT mon and
+        emit the HOLDER as ``[of]``). On a ``-heal`` line the item heals its OWN holder
+        (the line subject) and Showdown emits the damaged FOE as ``[of]`` (e.g. Shell Bell:
+        ``|-heal|<HOLDER>|hp|[from] item: Shell Bell|[of] <VICTIM>``), so ``[of]`` there is
+        the victim, NOT the holder — trusting it would label the opponent with the item.
         Sets ``known_item`` (the held identity) but does NOT mark it consumed —
         |-enditem| owns consumption, and a Sitrus/Sash also emits its own |-enditem|.
         """
@@ -1174,7 +1178,9 @@ class ShowdownReplayParser:
                 of_ident = p[len("[of]"):].strip()
         if not item:
             return
-        holder = of_ident or (parts[2] if len(parts) > 2 else "")
+        cmd = parts[1] if len(parts) > 1 else ""
+        use_of = cmd in ("-damage", "-status")     # [of] is the holder only for damage/status reactors
+        holder = of_ident if (use_of and of_ident) else (parts[2] if len(parts) > 2 else "")
         slot_key = self._slot_key_from_ident(holder)
         if not re.fullmatch(r"p[12][ab]", slot_key):
             return

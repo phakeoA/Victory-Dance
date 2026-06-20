@@ -123,17 +123,45 @@ def _rosters_from_html(html_text: str) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _load_belief(pika_path: Path | None):
-    """Load the Pikalytics BeliefState, or return None (graceful) if missing."""
+    """Load the Pikalytics BeliefState for opponent enrichment.
+
+    FAIL-LOUD on a SPECIFIED-but-missing path: returning None here would let
+    ``fill_blanks`` silently auto-load the ACTIVE format's prior (regmb) instead —
+    so a typo'd / bare-token ``--pikalytics regma`` (``Path('regma').exists()`` is
+    False) would bake the WRONG-ERA distribution into an M-A re-export with no error.
+    A missing requested era is an operator mistake, not a graceful degradation, so we
+    exit non-zero. Only ``pika_path is None`` (the flag genuinely omitted) or absent
+    belief_state.py stays graceful.
+    """
     if BeliefState is None:
         print("[warn] belief_state.py unavailable — exporting without Pikalytics "
               "enrichment (opponent distribution blocks will be empty).")
         return None
-    if not pika_path or not pika_path.exists():
-        print(f"[warn] Pikalytics file not found at {pika_path} — exporting "
-              "without belief enrichment.")
+    if pika_path is None:
+        print("[warn] no --pikalytics path given — fill_blanks will fall back to the "
+              "ACTIVE format's prior.")
         return None
-    print(f"[belief] loading {pika_path} ...")
+    if not pika_path.exists():
+        raise SystemExit(
+            f"[FATAL] --pikalytics path does not exist: {pika_path}\n"
+            f"        Pass the FULL path (e.g. data/pikalytics_regma.json), not a bare era token.\n"
+            f"        Refusing to silently fall back to the active-format prior (wrong-era bake risk)."
+        )
+    print(f"[belief] loading Pikalytics prior: {pika_path}  <-- confirm this era matches the input data")
     return BeliefState(pika_path)
+
+
+def _legacy_twin_to_clean(out_path: Path, legacy_path: Path, overwrite: bool) -> Path | None:
+    """Under --overwrite, the stale stem-named twin of a now-replay_id-named export must be removed.
+
+    Output is named ``{replay_id}.jsonl`` but a legacy export used ``{html.stem}.jsonl``. --overwrite
+    only rewrites the rid-named file in place; a leftover stem-named twin for the SAME replay would
+    survive, leaving two files with the SAME internal replay_id → corpus_qa's duplicate-replay_id
+    HARD fail (and a double-weighted game in BC). Returns the legacy path to unlink, or None.
+    """
+    if overwrite and legacy_path != out_path and legacy_path.exists():
+        return legacy_path
+    return None
 
 
 def _players_for(source_type: str, override: str | None) -> list[str]:
@@ -433,6 +461,11 @@ def main() -> int:
             print(f"[{idx}/{len(replays)}] empty (0 turns) {html.name}")
             continue
 
+        # Under --overwrite, drop a stale stem-named twin so we don't strand a duplicate replay_id.
+        _twin = _legacy_twin_to_clean(out_path, legacy_path, args.overwrite)
+        if _twin is not None:
+            _twin.unlink()
+            print(f"[{idx}/{len(replays)}] cleaned legacy twin  {_twin.name}")
         # Same serialization as server.py /export: one JSON object per line.
         out_path.write_text(
             "\n".join(json.dumps(t, ensure_ascii=False) for t in transitions),

@@ -623,14 +623,19 @@ class BeliefState:
             # in this format) is wrong by construction.
             items = [{"name": revealed_item, "p": 1.0, "revealed": True}]
         else:
-            items = self.item_distribution(key, top_k=top_k + 4)
+            # Build over the FULL item list (not top_k+4) so the stone-demotion below matches
+            # top_item's full-list semantics: a species whose only non-stone item ranks past the
+            # top_k+4 window would otherwise keep its inert stone as items[0] HERE while top_item
+            # (the live encoder path) returns the real item — a latent live/offline divergence.
+            items = self.item_distribution(key, top_k=10 ** 6)
             if can_have_choice_item is False:
                 items = [i for i in items if not is_choice_item(i["name"])]
             # Mega STONES are the base species' #1 item (Pikalytics rolls mega usage into the
             # base) but are inert until the mon megas; a mon CONFIRMED to mega/hold its stone
             # reaches the revealed_item branch above, so HERE (no reveal) it is not confirmed —
             # demote stones to the best NON-stone prior (parity with top_item, used by the live
-            # encoder).  Keep a stone only if there is no non-stone alternative.
+            # encoder).  Keep a stone only if there is no non-stone alternative.  Demote over the
+            # FULL list, THEN truncate to top_k.
             nonstone = [i for i in items if not is_mega_stone(i["name"])]
             items = (nonstone or items)[:top_k]
 
