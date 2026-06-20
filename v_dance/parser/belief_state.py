@@ -156,6 +156,56 @@ NATURE_BOOSTS: dict[str, tuple[str, str]] = {
 
 STAT_ORDER = ["hp", "atk", "def", "spa", "spd", "spe"]
 
+
+# ── Pikalytics new-layout spread↔nature decoupling (#8) ───────────────────────────────
+# Pikalytics' current page lists EV spreads and natures as TWO SEPARATE distributions (no
+# per-spread pairing), so the scraper stamps the single MODAL nature onto every spread. For
+# a mixed phys/special mon that mislabels spreads (a physical spread tagged with a -Atk
+# special nature), biasing the est-stats. We recover a per-spread nature from the spread's EV
+# investment + the preserved ``natures`` distribution: a physical spread (more Atk than SpA
+# EVs) takes the most-popular nature that does NOT lower Atk; a special spread the most-popular
+# that does NOT lower SpA; a neutral/defensive spread keeps the modal. A NO-OP when spreads
+# already carry real per-spread natures (M-A: 240 real / 0 broadcast) or the natures dist is
+# single — so M-A data is never disturbed.
+_BROADCAST_MIN_PCT = 5.0   # a nature counts toward "varied" only above this usage %
+
+
+def _best_nature_for_spread(evs_bucket: list[int], ranked_natures: list[dict]) -> Optional[str]:
+    """Most plausible nature for one EV spread: the highest-pct nature whose stat DROP does not
+    nerf the spread's attacking investment. ``ranked_natures`` is pre-sorted by pct desc.
+    ``evs_bucket`` = [hp,atk,def,spa,spd,spe] (bucket scale; only the Atk-vs-SpA ordering matters)."""
+    if not ranked_natures:
+        return None
+    atk_ev = evs_bucket[1] if len(evs_bucket) > 1 else 0
+    spa_ev = evs_bucket[3] if len(evs_bucket) > 3 else 0
+    if atk_ev == spa_ev:
+        return ranked_natures[0]["nature"]               # neutral/defensive → modal
+    forbidden = "atk" if atk_ev > spa_ev else "spa"      # don't lower the spread's offence stat
+    for n in ranked_natures:
+        if NATURE_BOOSTS.get(n["nature"], ("", ""))[1] != forbidden:
+            return n["nature"]
+    return ranked_natures[0]["nature"]                   # fallback (no compatible nature)
+
+
+def _resolve_spread_natures(entry: dict) -> None:
+    """In-place: when a Pikalytics entry has the modal nature broadcast onto EVERY spread (the
+    new-layout decoupling, #8), re-derive each spread's nature from its EVs + the preserved
+    ``natures`` distribution. No-op for real per-spread natures (M-A) or a single-nature mon."""
+    spreads = entry.get("spreads") or []
+    natures = entry.get("natures") or []
+    if len(spreads) < 2 or not natures:
+        return
+    if len({s.get("nature") for s in spreads}) != 1:
+        return   # already real per-spread natures (M-A) — leave untouched
+    ranked = sorted(natures, key=lambda n: n.get("pct", 0) or 0, reverse=True)
+    if sum(1 for n in ranked if (n.get("pct", 0) or 0) >= _BROADCAST_MIN_PCT) < 2:
+        return   # the natures dist is effectively single → nothing better to assign
+    for s in spreads:
+        nn = _best_nature_for_spread(s.get("evs") or [], ranked)
+        if nn:
+            s["nature"] = nn
+
+
 # pokedex.json stores base stats under long keys
 _DEX_STAT_KEYS = {
     "hp": "hp", "atk": "attack", "def": "defense",
@@ -295,6 +345,10 @@ class BeliefState:
         with self._path.open(encoding="utf-8") as f:
             raw = json.load(f)
         self._data: dict[str, dict] = raw.get("pokemon", {})
+        # #8: recover per-spread natures where Pikalytics' new layout decoupled spread↔nature
+        # (broadcast modal). No-op for M-A (real per-spread natures); fixes the regmb spreads.
+        for _entry in self._data.values():
+            _resolve_spread_natures(_entry)
         # Build a case-insensitive lookup index
         self._name_map: dict[str, str] = {
             k.lower(): k for k in self._data
