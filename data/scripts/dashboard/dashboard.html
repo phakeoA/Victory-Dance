@@ -6,6 +6,7 @@
   <title>Victory-Dance — Self-Play Dashboard</title>
   <link rel="stylesheet" href="dashboard.css" />
   <link rel="stylesheet" href="launcher.css" />
+  <link rel="stylesheet" href="console.css" />
 </head>
 <body>
   <div id="hdr">
@@ -39,6 +40,7 @@
         <button class="vtab" data-tab="spectate">🎬 Spectate</button>
         <button class="vtab" data-tab="detail">Generation Detail</button>
         <button class="vtab" data-tab="launcher">🚀 Launcher</button>
+        <button class="vtab" data-tab="console">📟 Console</button>
       </div>
       <div id="tab-overview" class="tab-pane"></div>
       <div id="tab-health" class="tab-pane hidden"></div>
@@ -72,11 +74,24 @@
           </aside>
         </div>
       </div>
+      <div id="tab-console" class="tab-pane hidden">
+        <div class="cons-toolbar">
+          <span id="cons-badge" class="cons-badge off">no run</span>
+          <span id="cons-file" class="cons-file">(waiting for a launched run…)</span>
+          <span class="cons-spacer"></span>
+          <button id="cons-btn-pause" class="btn">⏸ Pause</button>
+          <button id="cons-btn-bottom" class="btn">⤓ Jump to bottom</button>
+          <button id="cons-btn-copy" class="btn">⧉ Copy</button>
+          <button id="cons-btn-clear" class="btn">🗑 Clear</button>
+        </div>
+        <pre id="cons-out" class="cons-out"></pre>
+      </div>
     </div>
   </div>
 
   <div id="notif"></div>
   <script src="dashboard.js"></script>
   <script src="launcher.js"></script>
+  <script src="console.js"></script>
 </body>
 </html>

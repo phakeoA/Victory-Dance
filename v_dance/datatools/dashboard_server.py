@@ -32,10 +32,15 @@ _ARCHIVE_DIR = _REPO / "artifacts" / "self_play_archive"
 # the self-play launcher (UI) drives this module: python -m v_dance.selfplay.generation --config ...
 _GEN_MODULE = "v_dance.selfplay.generation"
 
+# Console tab: serve at most this many trailing bytes on the first (offset-less) /launch_log poll, so
+# a multi-MB run log doesn't ship whole; subsequent polls fetch only the NEW bytes since the offset.
+_LOG_TAIL_BYTES = 200_000
+
 # only these are served from the dashboard dir (defense-in-depth alongside
 # send_from_directory's own traversal protection)
 _ALLOWED = {"dashboard.html", "dashboard.css", "dashboard.js", "demo_manifest.json",
-            "launcher.css", "launcher.js"}   # launcher is a dashboard TAB, loaded by dashboard.html
+            "launcher.css", "launcher.js",   # launcher is a dashboard TAB, loaded by dashboard.html
+            "console.css", "console.js"}     # console is a dashboard TAB (live run stdout/stderr)
 
 # eval/ sub-folders whose saved .html replays the browser may serve (#H); whitelist guards the route.
 _EVAL_SECTIONS = {"league", "random", "max_damage", "heuristic", "replays", "eval"}
@@ -113,15 +118,22 @@ def _spawn_run(cfg_path: Path, log_path: Path):
     logf = open(log_path, "w", encoding="utf-8")
     kwargs = {}
     if os.name == "nt":
-        # DETACHED_PROCESS = no controlling console (survives terminal/dashboard close);
-        # CREATE_NEW_PROCESS_GROUP keeps the whole run tree-killable for /stop.
-        kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        # CREATE_NO_WINDOW: the run gets its OWN HIDDEN console -> (1) no popup terminal, and its
+        # children (the mp workers + the Node Showdown server) inherit that hidden console so THEY
+        # don't pop windows either; (2) it's not attached to the launching console, so closing the
+        # terminal/dashboard doesn't kill it. (DETACHED_PROCESS gave NO console, which made those
+        # console children each spawn a NEW visible window — the cmd popups.) CREATE_NEW_PROCESS_GROUP
+        # keeps the whole tree killable for /stop.
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         kwargs["start_new_session"] = True                  # POSIX: detach from the controlling tty
+    # PYTHONUNBUFFERED: stdout to a FILE is block-buffered by default, so a run's output would only
+    # reach the log in ~4-8 KB chunks and the Console tab would lag far behind. Force unbuffered so the
+    # live tail streams promptly, "like a terminal". (Overhead is negligible — the loop prints rarely.)
     return subprocess.Popen(
         [sys.executable, "-m", _GEN_MODULE, "--config", str(cfg_path)],
         cwd=str(_REPO), stdout=logf, stderr=subprocess.STDOUT,
-        env={**os.environ, "PYTHONIOENCODING": "utf-8"}, **kwargs)
+        env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}, **kwargs)
 
 
 def _pid_alive(pid) -> bool:
@@ -202,6 +214,37 @@ def _clear_live_flag(archive_dir: Path) -> bool:
         return True
     except Exception:
         return False
+
+
+def _launch_running(app, archive_dir: Path) -> bool:
+    """True if a launcher-spawned run is currently alive — the in-memory Popen if we still hold it,
+    else the persisted PID (survives a dashboard restart). Mirrors /launch_state's liveness check."""
+    proc = app.config.get("_LAUNCHED")
+    if proc is not None:
+        return proc.poll() is None
+    pidf = archive_dir / "launched.pid"
+    if pidf.exists():
+        try:
+            pid = int((pidf.read_text(encoding="utf-8") or "0").strip()) or None
+        except Exception:
+            pid = None
+        return bool(pid and _pid_alive(pid))
+    return False
+
+
+def _resolve_launch_log(app, archive_dir: Path):
+    """Resolve the active run's stdout/stderr log Path (or None). Prefer the in-memory path of the
+    run we launched; else the NEWEST logs/launch_*.log so a dashboard restarted AFTER the launch can
+    still tail the detached run."""
+    cur = app.config.get("_LAUNCH_LOG")
+    if cur and Path(cur).exists():
+        return Path(cur)
+    logs = archive_dir / "logs"
+    if logs.is_dir():
+        cands = sorted(logs.glob("launch_*.log"), key=lambda p: p.stat().st_mtime)
+        if cands:
+            return cands[-1]
+    return None
 
 
 def create_app(dash_dir=_DASH_DIR, archive_dir=_ARCHIVE_DIR) -> Flask:
@@ -371,6 +414,41 @@ def create_app(dash_dir=_DASH_DIR, archive_dir=_ARCHIVE_DIR) -> Flask:
             except Exception:
                 tail = []
         resp = jsonify({"running": running, "pid": pid, "returncode": rc, "log_tail": tail})
+        resp.headers["Cache-Control"] = "no-store, max-age=0"
+        return resp
+
+    @app.route("/launch_log")
+    def launch_log():
+        # Console TAB: incremental tail of the launched run's stdout/stderr log (it goes to a HIDDEN
+        # console, so this is the only way to watch a UI-launched run "like a terminal"). The client
+        # passes the ?path it currently holds + the byte ?offset it has consumed; we return only the
+        # NEW bytes since that offset. First poll (no offset), a run change (path mismatch), or a
+        # rotated/truncated file (offset past EOF) -> resync from the last _LOG_TAIL_BYTES with
+        # reset=true so the UI clears its buffer.
+        lp = _resolve_launch_log(app, archive_dir)
+        running = _launch_running(app, archive_dir)
+        if lp is None:
+            resp = jsonify({"available": False, "running": running, "path": None,
+                            "offset": 0, "size": 0, "data": "", "reset": False})
+            resp.headers["Cache-Control"] = "no-store, max-age=0"
+            return resp
+        try:
+            size = lp.stat().st_size
+        except OSError:
+            size = 0
+        off = request.args.get("offset", type=int)
+        req_path = request.args.get("path")
+        reset = off is None or off > size or (req_path is not None and req_path != lp.name)
+        start = max(0, size - _LOG_TAIL_BYTES) if reset else off
+        data = ""
+        try:
+            with open(lp, "rb") as f:
+                f.seek(start)
+                data = f.read(max(0, size - start)).decode("utf-8", errors="replace")
+        except Exception:
+            data = ""
+        resp = jsonify({"available": True, "running": running, "path": lp.name,
+                        "offset": size, "size": size, "data": data, "reset": reset})
         resp.headers["Cache-Control"] = "no-store, max-age=0"
         return resp
 

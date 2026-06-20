@@ -1,0 +1,19 @@
+/* Console — the dashboard's "Console" TAB: a full-height terminal view of the launched run's
+   stdout/stderr. Everything is scoped under #tab-console and reuses dashboard.css's CSS variables
+   (no :root redefinition, no class clashes). */
+#tab-console .cons-toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+#tab-console .cons-spacer { flex: 1; }
+#tab-console .cons-file { font: 11px ui-monospace, monospace; color: var(--text2);
+  max-width: 42ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+#tab-console .cons-badge { font-size: 10px; padding: 2px 9px; border-radius: 10px; border: 1px solid var(--bdr);
+  color: var(--text2); background: var(--surf2); text-transform: uppercase; letter-spacing: .04em; }
+#tab-console .cons-badge.on { color: var(--green); border-color: var(--green); background: rgba(76, 175, 125, .14); }
+#tab-console .cons-badge.done { color: var(--yellow); border-color: var(--yellow); background: rgba(245, 200, 66, .12); }
+#tab-console .cons-badge.off { color: var(--text3); }
+
+#tab-console .cons-out { background: #0d1326; border: 1px solid var(--bdr); border-radius: var(--rad);
+  padding: 12px 14px; font: 12px/1.5 ui-monospace, "Cascadia Code", Consolas, monospace; color: #cdd6e4;
+  height: calc(100vh - 230px); min-height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+  tab-size: 4; margin: 0; }
+#tab-console .cons-out::selection { background: rgba(74, 144, 217, .35); }

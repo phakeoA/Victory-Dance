@@ -38,9 +38,42 @@
       det.appendChild(grid);
       root.appendChild(det);
     }
+    // the "resume" checkbox enables/explains the adjacent resume_gen box
+    const rbox = $("lcf_generation_resume");
+    if (rbox) rbox.addEventListener("change", syncResumeGen);
+    syncResumeGen();
+  }
+
+  // The "resume" field is a UI CHECKBOX (not the legacy explicit-path text box): checked => resume
+  // from a previous run; the adjacent "resume_gen" box says WHICH generation (blank => latest, wired
+  // in collectConfig). The explicit-file resume path is a terminal/power-user path now.
+  function resumeToggleEl(sec, key) {
+    const wrap = document.createElement("div");
+    wrap.className = "lc-field bool";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.id = `lcf_${sec}_${key}`;
+    input.dataset.section = sec;
+    input.dataset.field = key;
+    input.dataset.type = "resume_toggle";
+    const label = document.createElement("label");
+    label.htmlFor = input.id;
+    label.textContent = "resume (from a previous run)";
+    wrap.appendChild(input);
+    wrap.appendChild(label);
+    return wrap;
+  }
+
+  // resume_gen only matters when resume is checked — reflect that in the box's state + placeholder.
+  function syncResumeGen() {
+    const box = $("lcf_generation_resume"), gen = $("lcf_generation_resume_gen");
+    if (!box || !gen) return;
+    gen.disabled = !box.checked;
+    gen.placeholder = box.checked ? "(blank = latest)" : "(resume off)";
   }
 
   function fieldEl(sec, key, spec) {
+    if (sec === "generation" && key === "resume") return resumeToggleEl(sec, key);
     const wrap = document.createElement("div");
     wrap.className = "lc-field" + (spec.type === "bool" ? " bool" : "");
     const id = `lcf_${sec}_${key}`;
@@ -86,26 +119,42 @@
 
   function collectConfig() {
     const cfg = {};
+    let resumeOn = false;
     for (const input of document.querySelectorAll("#lc-form input")) {
+      if (input.dataset.type === "resume_toggle") { resumeOn = input.checked; continue; }
       const v = coerce(input);
       if (v === undefined) continue;
       const sec = input.dataset.section, key = input.dataset.field;
       (cfg[sec] = cfg[sec] || {})[key] = v;
     }
+    // resume checkbox is the MASTER switch; resume_gen picks the generation (blank => latest)
+    if (resumeOn) {
+      const gen = (cfg.generation = cfg.generation || {});
+      if (gen.resume_gen === undefined || gen.resume_gen === "") gen.resume_gen = "latest";
+    } else if (cfg.generation) {
+      delete cfg.generation.resume_gen;   // not resuming -> a stray typed gen must not trigger a resume
+    }
     return cfg;
   }
 
   function applyConfig(cfg) {
+    // reflect "resume?" from the loaded config (a resume_gen, or a legacy explicit resume path => on)
+    const g = (cfg && cfg.generation) || {};
+    const rbox = $("lcf_generation_resume");
+    if (rbox && rbox.dataset.type === "resume_toggle")
+      rbox.checked = (g.resume_gen != null && g.resume_gen !== "") || (g.resume != null && g.resume !== "");
     for (const sec of Object.keys(cfg || {})) {
       if (typeof cfg[sec] !== "object" || cfg[sec] === null) continue;   // skip _comment etc.
       for (const key of Object.keys(cfg[sec])) {
         const input = $(`lcf_${sec}_${key}`);
         if (!input) continue;
+        if (input.dataset.type === "resume_toggle") continue;           // checkbox handled above
         const val = cfg[sec][key];
         if (input.dataset.type === "bool") input.checked = !!val;
         else input.value = Array.isArray(val) ? val.join(", ") : (val == null ? "" : String(val));
       }
     }
+    syncResumeGen();
   }
 
   async function loadSchema() {
