@@ -107,6 +107,7 @@ async def abandon_server_state(model_player, opponent) -> None:
     proceeds. Duck-typed (``battles`` / ``ps_client.send_message`` / ``username``) so the module
     stays import-light and the cleanup unit-tests offline against fake players."""
     # 1) forfeit each unfinished battle in its room (the server ends the room → reclaims it).
+    abandoned = 0   # distinct unfinished battles we abandon-by-forfeit (counted from OUR view only)
     for p in (model_player, opponent):
         if p is None:
             continue
@@ -117,9 +118,21 @@ async def abandon_server_state(model_player, opponent) -> None:
         for tag, battle in battles.items():
             try:
                 if battle is not None and not getattr(battle, "finished", True):
+                    if p is model_player:
+                        abandoned += 1          # count once per battle (model's view), not per side
                     await p.ps_client.send_message("/forfeit", tag)
             except Exception:
                 log.debug("forfeit of %s failed (non-fatal)", tag, exc_info=True)
+    # fs-monitor: record the watchdog/abandon forfeits on the model player's source_counts so they
+    # flow through the existing per-gen aggregation (a runner-issued /forfeit never touches the
+    # player's choose_move, so without this the stalled-chunk forfeits would be invisible).
+    if abandoned:
+        sc = getattr(model_player, "_source_counts", None)
+        if sc is not None:
+            try:
+                sc["abandon_forfeit"] += abandoned
+            except Exception:
+                log.debug("abandon_forfeit tally failed (non-fatal)", exc_info=True)
     # 2) cancel the model's outgoing challenge to the opponent (sent but never accepted).
     if model_player is not None and opponent is not None:
         try:

@@ -346,13 +346,22 @@ function renderLiveBar() {
     ? `<div class="lbar"><div class="lbar-track"><div class="lbar-fill" style="width:${w.toFixed(0)}%"></div></div></div>`
     : `<div class="lbar"><div class="lbar-track"><div class="lbar-fill lbar-indet"></div></div></div>`;
   const wr = r.running_p1_winrate;
+  // fs-monitor: forceSwitch / forced-default / forfeit edge events (the model did NOT drive the
+  // decision). Headline = run-wide total; hover shows this-gen + the per-category breakdown.
+  const fsTot = r.fs_monitor_total || {}, fsGen = r.fs_monitor || {};
+  const fsTotal = fsTot.total || 0;
+  const fsBreak = Object.keys(fsTot).filter((k) => k !== "total" && fsTot[k])
+    .map((k) => `${k}: ${fsTot[k]}`).join(" · ") || "none yet";
+  const fsTip = `forceSwitch / forced-default / forfeit edge events (model did not drive the turn)` +
+    ` — this gen: ${fsGen.total || 0} · cumulative: ${fsBreak}`;
   bar.classList.remove("hidden");
   bar.innerHTML =
     `<div><div class="lb-phase">Gen ${r.generation ?? "?"} · ${esc(PHASE_LABEL[r.phase] || r.phase || "")}</div>` +
     `<div class="lb-sub">${hasProg ? done + "/" + total + " games" : "&nbsp;"}${r.n_generations ? " · target " + r.n_generations + " gens" : ""}${r.last_verdict ? " · last gen: " + esc(r.last_verdict) : ""}</div></div>` +
     prog +
     `<div class="lb-stat"><div class="v">${wr == null ? "—" : (wr * 100).toFixed(0) + "%"}</div><div class="l">p1 win (running)</div></div>` +
-    `<div class="lb-stat"><div class="v">${liveBattleList().length}</div><div class="l">live battles</div></div>`;
+    `<div class="lb-stat"><div class="v">${liveBattleList().length}</div><div class="l">live battles</div></div>` +
+    `<div class="lb-stat" title="${esc(fsTip)}"><div class="v">${fsTotal}</div><div class="l">edge events</div></div>`;
 }
 
 // #18 multi-battle spectate: STATE.liveBattles maps tag -> {tag,p1,p2,turn,n_lines,parsed}.

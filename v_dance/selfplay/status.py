@@ -172,6 +172,20 @@ class LiveStatus:
             self.data["run"]["last_verdict"] = last_verdict
         self._write(force=True)
 
+    def set_gen_counts(self, counts: dict) -> None:
+        """fs-monitor: record THIS generation's tally of force-switch / forced-default / forfeit
+        edge events (the times the model did NOT drive a decision) + accumulate a run-wide total,
+        so the dashboard can confirm these stay rare. ``counts`` = {event: int}. Per-gen, rare +
+        important → forced write."""
+        counts = {str(k): int(v) for k, v in (counts or {}).items()}
+        r = self.data["run"]
+        r["fs_monitor"] = counts                                  # this generation's tally
+        total = dict(r.get("fs_monitor_total") or {})
+        for k, v in counts.items():
+            total[k] = int(total.get(k, 0)) + v                  # run-wide cumulative
+        r["fs_monitor_total"] = total
+        self._write(force=True)
+
     def finish_run(self) -> None:
         self.data["live"] = False
         self.data["run"]["phase"] = "done"

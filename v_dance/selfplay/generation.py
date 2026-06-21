@@ -56,6 +56,48 @@ DEFAULT_EVAL_TEAMS = (
 )
 
 
+# fs-monitor: per-gen EDGE events = every collection source where the model did NOT drive the
+# decision (the live player records them in ``_source_counts``; surfaced to status.json so the rate
+# is watchable). The edge set is DERIVED as the COMPLEMENT of the model-driven sources (minus
+# teampreview + bookkeeping) — so a NEW non-model fallback label is captured AUTOMATICALLY, no hand-
+# list to drift. ``_FS_MONITOR_KEYS`` is only the preferred DISPLAY ORDER + a STABLE core (always
+# present, seeded 0) so status.json's schema is gen-stable.
+#   forced_default       turn → /choose default (empty legal mask / cross-slot switch collision —
+#                        only a codec-inexpressible forced move, e.g. Struggle, remained)
+#   retry                a rejected order was replaced by a RANDOM legal perturbation that executed
+#   retry_default        a rejected-order retry storm was exhausted → /choose default
+#   forced_switch_escape a forceSwitch loop was broken with /choose default
+#   forfeit              a forceSwitch loop was broken by FORFEITING the battle (model backstop)
+#   abandon_forfeit      a STALLED chunk was abandoned: the watchdog /forfeit'd its hung battles
+#   forced_switch        a post-faint replacement fell back to the RANDOM picker (model returned none)
+#   rejected_resample    a rejected order was resampled to a fresh legal MODEL action
+#   model_error          a model inference call threw → deterministic first-legal fallback executed
+#   no_model             no model loaded → deterministic first-legal fallback (defence-in-depth)
+_FS_MONITOR_KEYS = ("forced_default", "retry", "retry_default", "forced_switch_escape",
+                    "forfeit", "abandon_forfeit", "forced_switch", "rejected_resample",
+                    "model_error", "no_model")
+# Mirror of game_runner.MODEL_DRIVEN_SOURCES (kept LOCAL so this module stays torch-free for
+# --dry-run; the set is stable — the complement is what makes the monitor robust to new edge labels).
+_MODEL_DRIVEN_SOURCES = ("model", "forced_switch_model")
+# Non-edge source keys excluded from the complement: model-driven decisions + bookkeeping counters.
+_NON_EDGE_SOURCE_KEYS = frozenset(_MODEL_DRIVEN_SOURCES) | {"games"}
+
+
+def fs_monitor_counts(sources: dict) -> dict:
+    """The per-gen edge-event tally: every NON-model-driven source in ``sources`` (the COMPLEMENT of
+    the model-driven set, minus teampreview ``tp_*`` and bookkeeping), with a ``total``. The known
+    keys are always present (seeded 0) for a stable status.json schema; any NEW non-model label is
+    captured too (so the monitor can't silently drop a future fallback source)."""
+    fs = {k: 0 for k in _FS_MONITOR_KEYS}                      # stable core, seeded 0
+    for k, v in (sources or {}).items():
+        k = str(k)
+        if k in _NON_EDGE_SOURCE_KEYS or k.startswith("tp_"):
+            continue
+        fs[k] = int(v or 0)                                    # known OR newly-seen non-model source
+    fs["total"] = sum(fs.values())                            # fs holds only edge keys at this point
+    return fs
+
+
 # ── generation orchestration ──────────────────────────────────────────────────
 def run_generation(
     actor_critic, trainer, league: OpponentLeague, history: GenerationHistory, *,
@@ -77,7 +119,12 @@ def run_generation(
     gen = history.generation
 
     trajectories, sources = collect_fn(actor_critic, league, gen)
+    # fs-monitor: surface this gen's force-switch / forced-default / forfeit edge tally (was computed
+    # by the live player + aggregated across workers, then discarded) into status.json so the rate is
+    # watchable instead of buried in the log.
+    fs_counts = fs_monitor_counts(sources)
     if status is not None:
+        status.set_gen_counts(fs_counts)
         status.phase("updating", generation=gen)
     if gen == 0 and cfg.warmup_updates > 0 and trajectories:
         trainer.warmup_critic(trajectories, cfg.warmup_updates)
@@ -151,7 +198,8 @@ def run_generation(
             "scripted_win_rate": (sw / sg) if sg else None, "model_elo": elo,
             "champion_elo": history.champion_elo, "mirror_win_rate": mirror_rate,
             "league_size": len(league.snapshots), "gate": gate_stats, "hof": hof_stats,
-            "n_trajectories": len(trajectories), "update_stats": update_stats}
+            "n_trajectories": len(trajectories), "update_stats": update_stats,
+            "fs_monitor": fs_counts}
 
 
 def print_generation_report(rep: dict) -> None:
@@ -167,6 +215,14 @@ def print_generation_report(rep: dict) -> None:
     print(f"  gen {rep['generation']:>2} | {rep['n_trajectories']:>4} trajs | "
           f"scripted {wr_s:>6}{mwr_s} | Elo {elo_s:>5}{celo_s} | {rep['verdict'].upper():7s}{reason_s} | "
           f"league={rep['league_size']}")
+    # fs-monitor: only surface the edge tally when something actually fired (keeps the happy path quiet).
+    # Display-order keys first, then any dynamically-captured non-model label not in the known set.
+    fs = rep.get("fs_monitor") or {}
+    if fs.get("total"):
+        keys = [k for k in _FS_MONITOR_KEYS if fs.get(k)]
+        keys += [k for k in fs if k not in _FS_MONITOR_KEYS and k != "total" and fs.get(k)]
+        parts = ", ".join(f"{k}={fs[k]}" for k in keys)
+        print(f"        fs-monitor: {fs['total']} edge event(s) — {parts}")
 
 
 # ── live wiring (reuses the validated runner + gauntlet; USER runs the smoke) ──

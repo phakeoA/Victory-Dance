@@ -54,7 +54,7 @@ _REPO_ROOT = _HERE.parent
 from poke_env.battle import DoubleBattle
 from poke_env.player import Player
 from poke_env.player.battle_order import (
-    DefaultBattleOrder, DoubleBattleOrder, PassBattleOrder,
+    DefaultBattleOrder, DoubleBattleOrder, ForfeitBattleOrder, PassBattleOrder,
 )
 
 # After this many perturbations on one turn (all rejected by Showdown), our legal
@@ -154,6 +154,9 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
         # per-source decision tally (model / retry / forced_switch / model_error …)
         # so a run can show, at a glance, that the AI — not randomness — is driving.
         self._source_counts: "Counter[str]" = Counter()
+        # battle tags already counted as a forfeit (so a server re-request before our /forfeit
+        # is processed does not inflate the per-battle forfeit tally — fs-monitor #5).
+        self._forfeited_tags: set = set()
         # latest Showdown |error| text per battle tag — surfaced in the rejection
         # warnings so a mask desync shows the REASON ("Can't move: X is disabled",
         # "trapped", "Invalid choice", …) instead of an opaque "REJECTED".
@@ -393,7 +396,22 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
         # too many handlings — guarantees the battle can't hang.
         escape = self._force_switch_escape(battle)
         if escape is not None:
-            self._source_counts["forced_switch_escape"] += 1
+            # Distinguish the two escape outcomes for the fs-monitor: a FORFEIT (battle abandoned
+            # after too many forced-switch handlings) vs a /choose default (Showdown resolves the
+            # replacement). Both mean the model did NOT drive this decision. A forfeit can be
+            # RE-REQUESTED by the server before it processes our /forfeit (re-entering this path for
+            # the SAME battle), so count forfeit ONCE per battle tag — a forfeited-battle tally, not
+            # a forfeit-re-request tally; the /choose default escape has no such re-entry inflation.
+            if isinstance(escape, ForfeitBattleOrder):
+                seen = getattr(self, "_forfeited_tags", None)
+                if seen is None:
+                    seen = self._forfeited_tags = set()
+                tag = _norm_tag(getattr(battle, "battle_tag", None))
+                if tag not in seen:
+                    seen.add(tag)
+                    self._source_counts["forfeit"] += 1
+            else:
+                self._source_counts["forced_switch_escape"] += 1
             self._discard_rl_decision(battle, "replacement")   # escape executes, not the model
             return escape
 
