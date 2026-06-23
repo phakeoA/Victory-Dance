@@ -75,6 +75,34 @@ def _species_weights() -> Dict[str, float]:
 SPECIES_WEIGHT: Dict[str, float] = _species_weights()
 
 
+def _nfe_species() -> set:
+    """Set of NOT-fully-evolved species ids (a non-empty pokedex `evos` list) — for Eviolite (v11 B3).
+    Parsed once from pokedex.ts exactly like _species_weights so BOTH encoders share ONE source = parity by
+    construction. (Showdown filters evos by obtainability; verified 0 gen-9 mismatches vs plain non-empty evos.)"""
+    p = _DEX / "pokedex.ts"
+    out: set = set()
+    if not p.exists():
+        return out
+    text = p.read_text(encoding="utf-8", errors="replace")
+    starts = [m.start() for m in re.finditer(r"(?m)^\t(\w+): \{", text)]
+    starts.append(len(text))
+    for i in range(len(starts) - 1):
+        block = text[starts[i]:starts[i + 1]]
+        sid = _norm(re.match(r"\t(\w+):", block).group(1))
+        m = re.search(r"evos:\s*\[([^\]]*)\]", block)
+        if m and m.group(1).strip():
+            out.add(sid)
+    return out
+
+
+NFE_SPECIES: set = _nfe_species()
+
+
+def is_nfe(species: Optional[str]) -> bool:
+    """True iff ``species`` is not-fully-evolved (Eviolite applies). Shared by both encoders (parity)."""
+    return bool(species) and _norm(species) in NFE_SPECIES
+
+
 def species_weight(species: Optional[str]) -> Optional[float]:
     """Weight in kg for a species (None if unknown). Used for the per-mon weight feature + weight-based BP."""
     if not species:

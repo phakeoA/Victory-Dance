@@ -248,12 +248,16 @@ class VGCPlayer(VGCPlayerBase):
             # retry.  Keep the slot with the stronger mega preference (the mega−none
             # logit margin) and drop the other to GIMMICK_NONE (the analogue of the
             # cross-slot SWITCH dedup in _select_actions).
-            if out[0] == GIMMICK_MEGA and out[1] == GIMMICK_MEGA:
+            # v11 Phase D: generalize the dedup to ANY SAME non-none gimmick — both slots picking mega OR
+            # both picking tera is illegal (each is once-per-battle), so drop the weaker-margin slot. A
+            # slot0-mega + slot1-tera turn is LEGAL (different gimmicks, DoubleBattleOrder.join_orders only
+            # filters same-gimmick pairs) and is NOT dropped here.
+            if out[0] != GIMMICK_NONE and out[0] == out[1]:
                 try:
-                    margin0 = float(glog[0][GIMMICK_MEGA]) - float(glog[0][GIMMICK_NONE])
-                    margin1 = float(glog[1][GIMMICK_MEGA]) - float(glog[1][GIMMICK_NONE])
+                    margin0 = float(glog[0][out[0]]) - float(glog[0][GIMMICK_NONE])
+                    margin1 = float(glog[1][out[1]]) - float(glog[1][GIMMICK_NONE])
                 except Exception:
-                    margin0, margin1 = 1.0, 0.0      # any error → keep slot 0's mega
+                    margin0, margin1 = 1.0, 0.0      # any error → keep slot 0's gimmick
                 out[1 if margin0 >= margin1 else 0] = GIMMICK_NONE
             return out[0], out[1]
         except Exception as exc:

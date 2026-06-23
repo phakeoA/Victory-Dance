@@ -73,11 +73,12 @@ from v_dance.encoders.state_encoder import (
     GIMMICK_DIM,
     GIMMICK_NONE,
     GIMMICK_MEGA,
+    GIMMICK_TERA,
     _species_is_mega_capable,
 )
 from v_dance.encoders.live_state_encoder import (
     LiveStateEncoder, own_bench_mons, own_active_move_list, own_switch_slot,
-    team_has_megaed_live,
+    team_has_megaed_live, team_has_teraed_live,
 )
 
 log = logging.getLogger(__name__)
@@ -446,7 +447,7 @@ def build_replacement_mask(battle: DoubleBattle, slot: int) -> list[bool]:
 
 
 def build_gimmick_legal_mask(battle: DoubleBattle, slot: int) -> list[bool]:
-    """Serve-time gimmick legality for ``slot``: ``[none_legal, mega_legal]``.
+    """Serve-time gimmick legality for ``slot``: ``[none_legal, mega_legal, tera_legal]`` (v11 Phase D).
 
     BYTE-PARITY with training (state_encoder.build_gimmick_mask): bucket 0 (none)
     is legal for any present, non-fainted active slot; bucket 1 (mega) is legal
@@ -471,7 +472,24 @@ def build_gimmick_legal_mask(battle: DoubleBattle, slot: int) -> list[bool]:
     base = getattr(mon, "base_species", None) or getattr(mon, "species", "")
     if _species_is_mega_capable(base) and not team_has_megaed_live(battle):
         row[GIMMICK_MEGA] = True
+    if not team_has_teraed_live(battle):        # v11 Phase D: no species/item gate (every mon can tera)
+        row[GIMMICK_TERA] = True
     return row
+
+
+def _live_can_tera(battle: DoubleBattle, slot: int) -> bool:
+    """v11 Phase D: authoritative serve-time tera legality for ``slot`` from poke-env's ``battle.can_tera``
+    (per-active-slot bool, re-derived each request → already once-per-game-aware). The FINAL safety gate so
+    an illegal tera order is never sent, independent of the (capability-based) gimmick mask the model chose
+    under. Robust to the bool vs per-slot-list shapes across poke-env versions; any error → no tera.
+    (Tera is mod-disabled in Champions → can_tera is always falsy today; forward-compat with _live_can_mega.)"""
+    try:
+        ct = battle.can_tera
+    except (ValueError, AttributeError):
+        return False
+    if isinstance(ct, (list, tuple)):
+        return bool(ct[slot]) if slot < len(ct) else False
+    return bool(ct)
 
 
 # Diagnostic counter: how many times the gap-#6 reconstruction let the codec aim
@@ -515,11 +533,13 @@ def action_to_order(action: int, battle: DoubleBattle, slot: int,
     indirectly (both move actions decode to None under an Illusion and each
     independently substitutes the first legal switch in ``_safe_order``'s fallback).
 
-    ``gimmick`` (GIMMICK_NONE / GIMMICK_MEGA) is the decoded gimmick decision for
-    this slot.  A move is ordered with ``mega=True`` ONLY when the gimmick is mega
-    AND ``battle.can_mega_evolve[slot]`` confirms it is currently legal — otherwise
-    the plain move is ordered, so a rejected /choose is never emitted.  Switches
-    never gimmick.  Tera / Z-move / Dynamax are never set (not in this format).
+    ``gimmick`` (GIMMICK_NONE / GIMMICK_MEGA / GIMMICK_TERA) is the decoded gimmick decision for this
+    slot.  A move is ordered with ``mega=True`` (resp. ``terastallize=True``) ONLY when the gimmick is mega
+    (resp. tera) AND ``battle.can_mega_evolve[slot]`` (resp. ``battle.can_tera[slot]``) confirms it is
+    currently legal — otherwise the plain move is ordered, so a rejected /choose is never emitted. do_mega
+    and do_tera are mutually exclusive (one int gimmick).  Switches never gimmick.  ⚠ v11 Phase D: tera
+    ordering is WIRED but INERT — the Champions mod hard-disables tera (canTerastallize → null) so can_tera
+    is always falsy; the capability is forward-compat.  Z-move / Dynamax are not in this format.
 
     ``opp_present_recon`` ({0: bool, 1: bool}) is the gap-#6 RECONSTRUCTED opponent
     slot occupancy.  During a same-species Zoroark illusion poke-env can MERGE the
@@ -547,6 +567,7 @@ def action_to_order(action: int, battle: DoubleBattle, slot: int,
         # Mega is a checkbox on the chosen move — applied only when the model
         # picked it AND poke-env confirms it is legal right now (item + team).
         do_mega = (gimmick == GIMMICK_MEGA) and _live_can_mega(battle, slot)
+        do_tera = (gimmick == GIMMICK_TERA) and _live_can_tera(battle, slot)   # v11 Phase D (mutually excl.)
         move_idx, target_code = MOVE_TARGET_PAIRS[action]
         # SAME list as the encoder + the mask (own_active_move_list): mon.moves
         # normally, the request's real moves when illusion leaves mon.moves empty
@@ -573,7 +594,7 @@ def action_to_order(action: int, battle: DoubleBattle, slot: int,
             if direct is not None:
                 # poke-env has THIS exact foe → deliberate target by mon.
                 return Player.create_order(
-                    move, mega=do_mega,
+                    move, mega=do_mega, terastallize=do_tera,
                     move_target=battle.to_showdown_target(move, direct))
 
             # poke-env lost this exact slot to a same-species illusion merge.  If
@@ -586,7 +607,7 @@ def action_to_order(action: int, battle: DoubleBattle, slot: int,
                 global _ILLUSION_DELIBERATE_TARGETS
                 _ILLUSION_DELIBERATE_TARGETS += 1
                 return Player.create_order(
-                    move, mega=do_mega,
+                    move, mega=do_mega, terastallize=do_tera,
                     move_target=(battle.OPPONENT_1_POSITION if bucket == 0
                                  else battle.OPPONENT_2_POSITION))
 
@@ -595,12 +616,12 @@ def action_to_order(action: int, battle: DoubleBattle, slot: int,
             # redirects to the only living foe); spread/self/field need no target.
             if opp_present:
                 return Player.create_order(
-                    move, mega=do_mega,
+                    move, mega=do_mega, terastallize=do_tera,
                     move_target=battle.to_showdown_target(move, opp_present[0]))
             if _move_target_kind(move.id) in _CHOOSABLE_SINGLE:
-                return Player.create_order(move, mega=do_mega,
+                return Player.create_order(move, mega=do_mega, terastallize=do_tera,
                                            move_target=battle.OPPONENT_1_POSITION)
-            return Player.create_order(move, mega=do_mega)   # spread/self/field
+            return Player.create_order(move, mega=do_mega, terastallize=do_tera)   # spread/self/field
 
         # ── ally (bucket 2) ──────────────────────────────────────────────────
         ally_slot = 1 - slot
@@ -614,7 +635,7 @@ def action_to_order(action: int, battle: DoubleBattle, slot: int,
         # normal/any move aimed at the ally, e.g. a Justified self-hit).
         pos = (battle.POKEMON_1_POSITION if ally_slot == 0
                else battle.POKEMON_2_POSITION)
-        return Player.create_order(move, mega=do_mega, move_target=pos)
+        return Player.create_order(move, mega=do_mega, terastallize=do_tera, move_target=pos)
 
     else:
         bench_idx = action - SWITCH_OFFSET
@@ -869,13 +890,13 @@ class VGCPlayerBase(Player):
             source    = source,
         )
 
-        # Forced-move escape: an active slot with an EMPTY legal mask can only play a move the
-        # 16-action codec can't express (Struggle / recharge / a forced 2-turn continuation).
-        # Passing it is illegal and — in this retry-less root path (scripted opponents) — LOOPS
-        # until the watchdog (the 835×-Sylveon flood). /choose default lets Showdown play the
-        # only legal move. Covers EVERY player (the spliced model player checks this too).
+        # Forced-move turn: an active slot with an EMPTY legal mask can only play a move the 16-action
+        # codec can't express (Struggle / recharge / a forced 2-turn continuation). If a PARTNER slot
+        # still has a real choice, preserve its decision (forced move + partner order); only when EVERY
+        # active slot is forced does the model have nothing to drive → /choose default. (Was a blanket
+        # whole-turn /choose default that discarded the free partner's decision.)
         if self._active_empty_mask(battle):
-            return DefaultBattleOrder()
+            return self._forced_aware_double_order(battle, action_s0, action_s1, g0, g1)
         order_s0 = self._safe_order(action_s0, battle, slot=0, gimmick=g0)
         # Slot-1 must not switch in the same mon slot-0 is switching in ("slot N can
         # only switch in once") — thread slot-0's switch command so slot-1's decode
@@ -1135,6 +1156,72 @@ class VGCPlayerBase(Player):
             if not any(build_legal_action_mask(battle, slot)):
                 return True
         return False
+
+    @staticmethod
+    def _any_active_free(battle: DoubleBattle) -> bool:
+        """True if some ACTIVE, non-fainted slot has a NON-empty 16-action legal mask — a real model
+        decision worth preserving. False ⇒ every active slot is forced into a synthetic move (recharge/
+        Struggle) the codec can't express, so the model has NO decision and /choose default is correct."""
+        try:
+            active = battle.active_pokemon
+        except (ValueError, AttributeError):
+            return False
+        for slot in range(min(2, len(active))):
+            mon = active[slot] if slot < len(active) else None
+            if mon is None or getattr(mon, "fainted", False):
+                continue
+            if any(build_legal_action_mask(battle, slot)):
+                return True
+        return False
+
+    @staticmethod
+    def _forced_single_order(battle: DoubleBattle, slot: int) -> Optional[SingleBattleOrder]:
+        """The forced SYNTHETIC move (recharge after Hyper Beam/Giga Impact/…, or Struggle) for an
+        ACTIVE slot whose 16-action codec mask is empty: order ``available_moves[slot][0]`` directly
+        (recharge/Struggle auto-target — no codec slot, no move_target). Returns None when
+        ``available_moves[slot]`` is empty (Commander/Dondozo — genuinely no action) or the slot is
+        empty/fainted, so the caller falls back to /choose default for that degenerate case."""
+        try:
+            active = battle.active_pokemon
+            mon = active[slot] if slot < len(active) else None
+        except (ValueError, IndexError):
+            return None
+        if mon is None or getattr(mon, "fainted", False):
+            return None
+        try:
+            av = battle.available_moves
+            moves = av[slot] if av and slot < len(av) else []
+        except (ValueError, IndexError):
+            moves = []
+        if not moves:
+            return None
+        return Player.create_order(moves[0])
+
+    def _forced_aware_double_order(self, battle: DoubleBattle, action_s0: int, action_s1: int,
+                                   g0: int = GIMMICK_NONE, g1: int = GIMMICK_NONE,
+                                   opp_present_recon: Optional[dict] = None):
+        """Build the turn's order when ≥1 active slot is FORCED into a synthetic move (recharge/Struggle)
+        the codec can't express, WHILE a partner slot has a genuine choice — PRESERVING the partner's
+        model decision instead of collapsing the WHOLE turn to /choose default (which plays the free slot
+        randomly). Per slot: a free slot → the model's ``_safe_order``; an empty-mask forced slot → its
+        ``_forced_single_order``. Returns DefaultBattleOrder when EVERY active slot is forced (no model
+        decision) or a forced slot has no expressible action (Commander) / a free slot's only order
+        collides — the proven whole-turn escape. ``g0``/``g1`` apply the model's gimmick to a free slot."""
+        if not self._any_active_free(battle):
+            return DefaultBattleOrder()          # every active slot forced → no decision → proven escape
+        o0 = self._safe_order(action_s0, battle, slot=0, gimmick=g0,
+                              opp_present_recon=opp_present_recon)
+        taken = _switch_order_target(o0)
+        o1 = self._safe_order(action_s1, battle, slot=1, gimmick=g1,
+                              opp_present_recon=opp_present_recon,
+                              taken_switch_targets={taken} if taken else None)
+        if o0 is None:
+            o0 = self._forced_single_order(battle, 0)
+        if o1 is None:
+            o1 = self._forced_single_order(battle, 1)
+        if o0 is None or o1 is None:
+            return DefaultBattleOrder()           # a slot has NO expressible action → proven escape
+        return DoubleBattleOrder(o0, o1)
 
     def _battle_finished_callback(self, battle: DoubleBattle) -> None:
         """Called by poke-env when a battle ends — back-fills outcomes in replay."""

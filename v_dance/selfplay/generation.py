@@ -866,7 +866,12 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
         RS.save_snapshot(RS.snapshot_path_for(archive, completed), actor_critic=ac, trainer=trainer,
                          league=league, history=history, ppo_cfg=trainer.cfg, train_cfg=trainer.tcfg,
                          gen_cfg=gen_cfg, seed=seed)
-        RS.prune_snapshots(archive, keep_snapshots)
+        if not keep_snapshots or keep_snapshots <= 0:
+            # 0 / None = retain EVERY per-gen snapshot so any generation can be resumed (--resume-gen N).
+            print(f"   snapshots: keeping ALL (keep_snapshots={keep_snapshots}) — "
+                  f"{len(RS.list_snapshots(archive))} on disk; resume any with --resume-gen N")
+        else:
+            RS.prune_snapshots(archive, keep_snapshots)
 
     # 22f: a POOL of K Showdown servers (ports 8000..8000+K-1). Spreading the worker processes
     # across them keeps any single server from saturating under concurrency (#22) or bloating over a

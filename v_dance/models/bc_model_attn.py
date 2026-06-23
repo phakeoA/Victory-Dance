@@ -97,7 +97,7 @@ class AttnBCPolicy(nn.Module):
     Args:
         state_dim:    input width (frozen STATE_DIM == 1866).
         action_dim:   move/switch logits per head (frozen ACTION_DIM == 16).
-        gimmick_dim:  gimmick logits per head (GIMMICK_DIM == 2, {none, mega}).
+        gimmick_dim:  gimmick logits per head (GIMMICK_DIM == 3, {none, mega, tera}; v11 Phase D).
         d_model:      per-mon token width (default 128).
         n_heads:      attention heads (default 4).
         n_layers:     stacked self-attention layers (default 2).

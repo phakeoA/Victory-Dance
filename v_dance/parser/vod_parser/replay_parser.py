@@ -29,6 +29,10 @@ from v_dance.parser.vod_parser.pokedex import get_pokedex, is_mega_species_name,
 # when Species Clause makes a duplicate-active species provably an Illusion.
 _ILLUSION_SPECIES = {"zoroark", "zoroarkhisui"}
 
+# v11 P3: the 7 boost stats in canonical order (== state_encoder._BOOST_KEYS; defined LOCALLY to avoid a
+# parser->encoder import). Order is irrelevant for the whole-dict clear/set/copy/swap/invert ops below.
+_ALL_BOOST_STATS = ("atk", "def", "spa", "spd", "spe", "accuracy", "evasion")
+
 
 def _perceived_roster_name(display: Optional[str]) -> str:
     """Map a PERCEIVED active species onto the base name the teampreview roster
@@ -50,6 +54,20 @@ def _perceived_roster_name(display: Optional[str]) -> str:
 # Items that change hands SILENTLY (no |-item|/|-enditem|) and so are held by at most one mon at a
 # time — used to clear a stale known_item off a former holder when the item resurfaces elsewhere.
 _TRANSFER_ONLY_ITEMS = frozenset({"Sticky Barb"})
+
+# v11 A.3: moves that increment poke-env's consecutive-Protect counter (poke_env battle/move.py
+# _PROTECT_COUNTER_MOVES = _PROTECT_MOVES | {wideguard, quickguard, endure}). The offline counter is
+# driven from the |move| line to byte-match poke-env Pokemon.moved (pokemon.py:462-465). NOTE this is
+# DISTINCT from the per-move ``is_protect`` set below (which omits endure/kingsshield/obstruct and
+# includes matblock); Mat Block does NOT increment the counter.
+_PROTECT_COUNTER_MOVES = frozenset({
+    "protect", "detect", "endure", "spikyshield", "kingsshield",
+    "banefulbunker", "burningbulwark", "obstruct", "maxguard",
+    "silktrap", "wideguard", "quickguard",
+})
+# |move|-line suffixes poke-env reads as a FAILED move (abstract_battle.py:589-595); a failed
+# protect-counter move resets the counter to 0 (never increments).
+_MOVE_FAILED_SUFFIXES = frozenset({"[miss]", "[still]", "[notarget]"})
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +258,14 @@ class ShowdownReplayParser:
                     sc.screens[k] += 1
                     if sc.screens[k] > 8:
                         del sc.screens[k]
+            # v11 C.3: active-turns +1 for every mon on the field at turn-start (mirrors poke-env
+            # end_turn, called per active mon on |turn|). A fainted-but-not-yet-replaced slot does NOT
+            # advance (it is leaving); its replacement is reset to 0 by _handle_switch and reaches 1 on
+            # the NEXT |turn|. Done BEFORE the snapshot so first_turn=(active_turns==1) reflects the
+            # decision state both paths see.
+            for _m in self.active_slots.values():
+                if not _m.is_fainted:
+                    _m.active_turns += 1
             # Capture state BEFORE any actions mutate it
             self._state_before = {
                 "p1": self._snapshot_state("p1"),
@@ -269,6 +295,16 @@ class ShowdownReplayParser:
         elif cmd == "detailschange":
             self._handle_mega(parts)
 
+        elif cmd == "-formechange":
+            # |-formechange|p1a: Aegislash|Aegislash-Blade  — NON-permanent forme (Stance Change/Forecast/
+            # Hunger Switch). isPermanent formes (Mimikyu-Busted, Palafin-Hero, Eiscue-Noice) arrive as
+            # |detailschange| above. Same [ident, species] shape → reuse _handle_mega's non-mega branch
+            # (mutates mon.species, no is_mega). In-meta: Aegislash Stance (the Atk/Def-SpA swap). Reversion
+            # (Blade→Shield) is a free -formechange|…|Aegislash line; a SILENT switch-out revert keeps the
+            # forme stats on BOTH encoders (poke-env's _update_from_details early-returns on identical switch
+            # details → keeps Blade), so parity holds with NO switch-in species reset.
+            self._handle_mega(parts)
+
         elif cmd == "-mega":
             # |-mega|p1a: Floette|Floette|Floettite  — explicit stone reveal
             self._handle_mega_stone(parts)
@@ -278,6 +314,9 @@ class ShowdownReplayParser:
 
         elif cmd == "-damage" or cmd == "-heal":
             self._handle_damage(parts, cmd)
+
+        elif cmd == "-sethp":          # v11 P4: Pain Split etc. — set HP directly (poke-env set_hp)
+            self._handle_sethp(parts)
 
         elif cmd == "faint":
             slot_key = self._slot_key_from_ident(parts[2])
@@ -289,8 +328,36 @@ class ShowdownReplayParser:
                 "species": fainted_species,
             })
 
+        elif cmd == "cant":
+            # |cant|p1a: X|flinch (and other reasons) — poke-env cant_move resets the consecutive-
+            # Protect counter (pokemon.py:189-191). v11 A.3: mirror that and nothing else.
+            slot_key = self._slot_key_from_ident(parts[2]) if len(parts) > 2 else None
+            if slot_key in self.active_slots:
+                self.active_slots[slot_key].protect_counter = 0
+
+        elif cmd == "-singleturn" or cmd == "-singlemove":
+            self._handle_singleturn(parts, cmd)
+
         elif cmd == "-boost" or cmd == "-unboost":
             self._handle_boost(parts, cmd)
+
+        # v11 P3: the remaining boost-mutation messages (parser-only; offline boosts dict mirrors poke-env)
+        elif cmd == "-clearboost":
+            self._handle_clearboost(parts)
+        elif cmd == "-clearallboost":
+            self._handle_clearallboost()
+        elif cmd == "-clearnegativeboost":
+            self._handle_clear_signed(parts, "neg")
+        elif cmd == "-clearpositiveboost":
+            self._handle_clear_signed(parts, "pos")
+        elif cmd == "-setboost":
+            self._handle_setboost(parts)
+        elif cmd == "-copyboost":
+            self._handle_copyboost(parts)
+        elif cmd == "-swapboost":
+            self._handle_swapboost(parts)
+        elif cmd == "-invertboost":
+            self._handle_invertboost(parts)
 
         elif cmd == "-status":
             slot_key = self._slot_key_from_ident(parts[2])
@@ -329,6 +396,12 @@ class ShowdownReplayParser:
         elif cmd == "-sideend":
             self._handle_sideend(parts)
 
+        elif cmd == "-swapsideconditions":
+            # |-swapsideconditions (Court Change) — swap ALL side conditions (hazards/screens/tailwind)
+            # between the two sides, mirroring poke-env (abstract_battle swaps the two dicts).
+            self.side_conditions["p1"], self.side_conditions["p2"] = (
+                self.side_conditions["p2"], self.side_conditions["p1"])
+
         elif cmd == "-weather":
             weather_val = parts[2] if len(parts) > 2 else None
             new_w = None if weather_val in (None, "none") else weather_val
@@ -343,6 +416,17 @@ class ShowdownReplayParser:
             raw = parts[2] if len(parts) > 2 else ""
             if "Trick Room" in raw:
                 self.field_conditions.trick_room = 5
+            elif "Gravity" in raw:
+                # v11 C.2e: base 5; the Persistent ability extends to 7
+                # (|-fieldstart|move: Gravity|[persistent]).
+                self.field_conditions.gravity = (
+                    7 if any("persistent" in str(p).lower() for p in parts) else 5)
+            elif "Magic Room" in raw:                    # v11 P5: base 5; Persistent -> 7 (same as Gravity)
+                self.field_conditions.magic_room = (
+                    7 if any("persistent" in str(p).lower() for p in parts) else 5)
+            elif "Wonder Room" in raw:
+                self.field_conditions.wonder_room = (
+                    7 if any("persistent" in str(p).lower() for p in parts) else 5)
             elif "terrain" in raw.lower():
                 # Bug 4 fix: store a normalised token ("electric", "grassy",
                 # "misty", "psychic"), not the raw effect string.
@@ -353,6 +437,12 @@ class ShowdownReplayParser:
             raw = parts[2] if len(parts) > 2 else ""
             if "Trick Room" in raw:
                 self.field_conditions.trick_room = 0
+            elif "Gravity" in raw:
+                self.field_conditions.gravity = 0
+            elif "Magic Room" in raw:                    # v11 P5
+                self.field_conditions.magic_room = 0
+            elif "Wonder Room" in raw:
+                self.field_conditions.wonder_room = 0
             elif "terrain" in raw.lower():
                 self.field_conditions.terrain = None
                 self.field_conditions.terrain_turns = 0
@@ -388,6 +478,12 @@ class ShowdownReplayParser:
                     sc.tailwind -= 1
             if self.field_conditions.trick_room > 0:
                 self.field_conditions.trick_room -= 1
+            if self.field_conditions.gravity > 0:        # v11 C.2e
+                self.field_conditions.gravity -= 1
+            if self.field_conditions.magic_room > 0:     # v11 P5
+                self.field_conditions.magic_room -= 1
+            if self.field_conditions.wonder_room > 0:
+                self.field_conditions.wonder_room -= 1
 
     # ------------------------------------------------------------------
     # Sub-handlers
@@ -551,10 +647,15 @@ class ShowdownReplayParser:
             # v9: volatiles + ability suppression end when the mon leaves the field.
             outgoing.volatiles = set()
             outgoing.ability_suppressed = False
+            outgoing.protect_counter = 0          # v11 A.3: counter resets on switch-out (poke-env)
+            outgoing.taunt = False                # v11 exact-mask: move-restrictions end on leaving
+            outgoing.disabled_move = None
+            outgoing.encore_move = None
             # Transform reverts the instant the mon leaves the field, so the
             # outgoing mon is its real self again on the bench.
             outgoing.is_transformed = False
             outgoing.transformed_into = None
+            outgoing.runtime_types = None      # v11 P2: typechange ends on leaving the field (poke-env switch_out)
 
         self.active_slots[slot_key] = mon
         # Incoming mon always starts with neutral boosts (covers |drag| too,
@@ -565,6 +666,12 @@ class ShowdownReplayParser:
         # (also guards a reused PokemonSlot).
         mon.volatiles = set()
         mon.ability_suppressed = False
+        mon.protect_counter = 0          # v11 A.3: counter resets on switch-in (poke-env switch_out)
+        mon.active_turns = 0             # v11 C.3: switch-in starts a fresh stay (==1 next |turn|)
+        mon.times_attacked = 0           # v11 C.4: per-stint Rage Fist hit counter resets on switch-in
+        mon.taunt = False                # v11 exact-mask: move-restrictions end on switch-in
+        mon.disabled_move = None
+        mon.encore_move = None
         # A switch-in starts a fresh stay on the field — a Choice lock from a
         # previous stint no longer applies, so the working move set restarts.
         mon.stint_moves = []
@@ -574,6 +681,7 @@ class ShowdownReplayParser:
         # the field returns un-transformed.)
         mon.is_transformed = False
         mon.transformed_into = None
+        mon.runtime_types = None          # v11 P2: incoming mon starts with its real types (no typechange)
         # Illusion: reset on every switch-in, then flag if THIS switch-in was a
         # disguised Zoroark (the pre-scan paired it with a later |replace|).
         # Opponents see `disguise_species` until the disguise breaks.
@@ -734,6 +842,12 @@ class ShowdownReplayParser:
             mon.is_transformed = True
             mon.transformed_into = into_species
             mon.ever_transformed = True
+            # v11 P2: transform overwrites poke-env _temporary_types with the copied dex types; offline
+            # resolves those via transformed_into, so clear any prior typechange (transform branch wins).
+            mon.runtime_types = None
+            tgt = self._slot_key_from_ident(target_ident)   # v11 C.4: transform copies timesAttacked
+            if tgt in self.active_slots:
+                mon.times_attacked = self.active_slots[tgt].times_attacked
 
         self._current_turn_actions.append({
             "event": "transform",
@@ -868,6 +982,23 @@ class ShowdownReplayParser:
         # Record the move on the Pokémon's revealed_moves list
         if user_slot in self.active_slots:
             mon = self.active_slots[user_slot]
+            # A [from]-tagged move was CALLED by another effect (Sleep Talk, Dancer, Instruct, Copycat,
+            # locked-move continuations) — the player never selected it.  Used by both the Choice-lock
+            # logic below and the v11 A.3 protect-counter (poke-env does not count a called move).
+            called = any(p.startswith("[from]") for p in parts[4:] if p)
+
+            # v11 A.3: consecutive-Protect counter — byte-parity with poke-env Pokemon.moved
+            # (pokemon.py:462-465): increment a self-selected, non-failed protect-counter move; else
+            # reset to 0.  Driven from the |move| line (NOT |-singleturn|/|-fail|).  Runs regardless of
+            # is_transformed (poke-env updates the counter on the copied move too).  ``failed`` is read
+            # only from the |move|-line suffix, exactly as poke-env does.  ([from]-called protect-family
+            # moves — e.g. a Sleep-Talk'd Protect — are a documented near-zero residual: excluded here.)
+            move_failed = any(p in _MOVE_FAILED_SUFFIXES for p in parts[4:] if p)
+            if norm_species(move_name) in _PROTECT_COUNTER_MOVES and not move_failed and not called:
+                mon.protect_counter += 1
+            else:
+                mon.protect_counter = 0
+
             # Transform (Ditto/Imposter, Mew, …): while transformed the mon is
             # using the COPIED foe's moves with its borrowed stats.  Those moves
             # belong to the target, not this mon, so they must not enter its
@@ -880,12 +1011,9 @@ class ShowdownReplayParser:
                 if move_name and move_name not in mon.revealed_moves:
                     mon.revealed_moves.append(move_name)
                 # Choice-item constraint (see PokemonSlot.can_have_choice_item):
-                # a [from]-tagged move was CALLED by another effect (Sleep Talk,
-                # Dancer, Instruct, locked-move continuations) — the player never
-                # selected it, so it proves nothing about a Choice lock.  Struggle
-                # is excluded too: a choice-locked mon Struggles once its locked
-                # move runs out of PP.
-                called = any(p.startswith("[from]") for p in parts[4:] if p)
+                # the move must be self-selected (not `called` above) and not
+                # Struggle (a choice-locked mon Struggles once its locked move
+                # runs out of PP).
                 if move_name and not called and move_name.lower() != "struggle":
                     if move_name not in mon.stint_moves:
                         mon.stint_moves.append(move_name)
@@ -956,6 +1084,19 @@ class ShowdownReplayParser:
             source_species = self._last_move_action.get("user_species")
             source_move = self._last_move_action.get("move")
 
+        # v11 C.4: count DIRECT damaging-move hits toward Rage Fist BP. The SAME [from] filter that gates
+        # source_move above excludes chip/recoil/confusion/Stealth-Rock/Rocky-Helmet/Pain-Split/Future-
+        # Sight (all carry [from]). A multi-hit move emits one bare |-damage| per hit → +N (matches
+        # Showdown timesAttacked += hit). The self-hit guard drops bare self-cost lines (Substitute
+        # creation, Belly Drum, Curse) where the user damages itself with no [from] tag. PARITY: the live
+        # path sources this same count from the shared offline parse (C.4 Architecture B), so there is no
+        # second filter to drift. (We exclude Future Sight via [from] for parity, accepting the minor
+        # fidelity gap vs Showdown which would count its delayed hit.)
+        if (cmd == "-damage" and not has_from_tag and slot_key in self.active_slots
+                and not (self._last_move_action
+                         and self._last_move_action.get("user_slot") == slot_key)):
+            self.active_slots[slot_key].times_attacked += 1
+
         event = {
             "event": cmd.lstrip("-"),   # "damage" or "heal"
             "slot": slot_key,
@@ -969,6 +1110,22 @@ class ShowdownReplayParser:
         self._current_turn_damage_events.append(event)
         self._current_turn_actions.append(event)
 
+    def _handle_sethp(self, parts: list[str]) -> None:
+        """|-sethp|MON|X/Y (Pain Split) — set HP directly (poke-env Pokemon.set_hp / set_hp_status). Mirrors
+        the HP-setting half of _handle_damage: parse the numerator/denominator and keep the denominator
+        current so to_dict()'s hp_pct stays a true percentage even for real-HP (X/Y, Y!=100) replays
+        (gap #5). Status is NOT set here — the offline parser sources status from the dedicated -status /
+        -curestatus / faint events (consistent with _handle_damage, whose _parse_hp also strips the suffix);
+        Pain Split's -sethp carries no status. NOT counted toward times_attacked (it is not a direct hit)."""
+        if len(parts) < 4:
+            return
+        slot_key = self._slot_key_from_ident(parts[2])
+        hp_current, hp_max = self._parse_hp(parts[3])
+        if slot_key in self.active_slots and hp_current is not None:
+            self.active_slots[slot_key].hp_current = hp_current
+            if hp_max:
+                self.active_slots[slot_key].hp_max = hp_max
+
     def _handle_boost(self, parts: list[str], cmd: str) -> None:
         # |-boost|p1a: Floette|spa|1
         ident = parts[2]
@@ -980,7 +1137,8 @@ class ShowdownReplayParser:
         slot_key = self._slot_key_from_ident(ident)
         if slot_key in self.active_slots:
             current = self.active_slots[slot_key].boosts.get(stat, 0)
-            self.active_slots[slot_key].boosts[stat] = current + amount
+            # v11 P3: clamp to [-6, +6] to match poke-env Pokemon.boost() (the logged stages stay RAW)
+            self.active_slots[slot_key].boosts[stat] = max(-6, min(6, current + amount))
 
         self._current_turn_actions.append({
             "event": "stat_change",
@@ -988,6 +1146,76 @@ class ShowdownReplayParser:
             "stat": stat,
             "stages": amount,
         })
+
+    # ── v11 P3: boost-manipulation messages (parser-only — the live encoder reads poke-env's native
+    # mon.boosts, so each handler just mirrors the matching poke-env Pokemon/Battle method in value) ──
+    def _handle_clearboost(self, parts: list[str]) -> None:
+        """|-clearboost|MON — zero all 7 stages (poke-env Pokemon.clear_boosts). Trailing [from]/[of] ignored."""
+        slot = self._slot_key_from_ident(parts[2]) if len(parts) > 2 else ""
+        if slot in self.active_slots:
+            self.active_slots[slot].boosts = {s: 0 for s in _ALL_BOOST_STATS}
+
+    def _handle_clearallboost(self) -> None:
+        """|-clearallboost (Haze) — zero EVERY active mon both sides (poke-env DoubleBattle.clear_all_boosts).
+        active_slots holds exactly the active mons, so benched mons are untouched."""
+        for slot in self.active_slots:
+            self.active_slots[slot].boosts = {s: 0 for s in _ALL_BOOST_STATS}
+
+    def _handle_clear_signed(self, parts: list[str], sign: str) -> None:
+        """|-clearnegativeboost|MON (White Herb) / |-clearpositiveboost|MON — zero only the negative /
+        positive stages (poke-env Pokemon.clear_negative_boosts / clear_positive_boosts)."""
+        slot = self._slot_key_from_ident(parts[2]) if len(parts) > 2 else ""
+        if slot not in self.active_slots:
+            return
+        b = self.active_slots[slot].boosts
+        for stat, val in list(b.items()):
+            if (sign == "neg" and val < 0) or (sign == "pos" and val > 0):
+                b[stat] = 0
+
+    def _handle_setboost(self, parts: list[str]) -> None:
+        """|-setboost|MON|STAT|AMOUNT (Anger Point sets atk +6, Belly Drum +6) — ABSOLUTE set (poke-env
+        Pokemon.set_boost), NOT additive. Clamped to [-6,6] defensively (protocol guarantees that range)."""
+        slot = self._slot_key_from_ident(parts[2]) if len(parts) > 2 else ""
+        stat = parts[3] if len(parts) > 3 else ""
+        amount = int(parts[4]) if (len(parts) > 4 and parts[4].lstrip("-").isdigit()) else 0
+        if slot in self.active_slots and stat:
+            self.active_slots[slot].boosts[stat] = max(-6, min(6, amount))
+
+    def _handle_copyboost(self, parts: list[str]) -> None:
+        """|-copyboost|SOURCE|TARGET (Psych Up) — TARGET (parts[3]) RECEIVES a copy of SOURCE (parts[2]),
+        matching poke-env get_pokemon(target).copy_boosts(source). Direction is NOT symmetric."""
+        if len(parts) < 4:
+            return
+        src = self._slot_key_from_ident(parts[2])
+        tgt = self._slot_key_from_ident(parts[3])
+        if src in self.active_slots and tgt in self.active_slots:
+            s = self.active_slots[src].boosts
+            self.active_slots[tgt].boosts = {st: s.get(st, 0) for st in _ALL_BOOST_STATS}
+
+    def _handle_swapboost(self, parts: list[str]) -> None:
+        """|-swapboost|SOURCE|TARGET|STATS (Heart/Guard/Power Swap) — SYMMETRIC exchange. If '[from]' is in
+        the STATS arg (parts[4]; full-swap moves like Heart Swap send no explicit list) swap all 7, else the
+        ', '-split named subset — matching poke-env (abstract_battle.py:1045-1061, split on ', ')."""
+        if len(parts) < 4:
+            return
+        src = self._slot_key_from_ident(parts[2])
+        tgt = self._slot_key_from_ident(parts[3])
+        if src not in self.active_slots or tgt not in self.active_slots:
+            return
+        stats_arg = parts[4] if len(parts) > 4 else ""
+        stats = (list(_ALL_BOOST_STATS) if ("[from]" in stats_arg or not stats_arg)
+                 else [s for s in stats_arg.split(", ") if s])
+        sb = self.active_slots[src].boosts
+        tb = self.active_slots[tgt].boosts
+        for st in stats:
+            sb[st], tb[st] = tb.get(st, 0), sb.get(st, 0)
+
+    def _handle_invertboost(self, parts: list[str]) -> None:
+        """|-invertboost|MON (Topsy-Turvy) — negate every stage (poke-env Pokemon.invert_boosts)."""
+        slot = self._slot_key_from_ident(parts[2]) if len(parts) > 2 else ""
+        if slot in self.active_slots:
+            b = self.active_slots[slot].boosts
+            self.active_slots[slot].boosts = {st: -v for st, v in b.items()}
 
     def _handle_volatile(self, parts: list[str], start: bool) -> None:
         """|-start| / |-end| volatile tracking (v9 B1-mechanics): Substitute, Ingrain, Taunt/Encore/
@@ -1004,12 +1232,79 @@ class ShowdownReplayParser:
         vid = "".join(c for c in name.lower() if c.isalnum())
         if not vid:
             return
+        # v11 P2: TYPECHANGE (Protean/Libero/Color Change/Soak/Conversion/Burn Up/Double Shock) REPLACES
+        # the mon's types. Stored in a dedicated field (NOT the volatile set), read by _effective_types at
+        # 2nd precedence (tera > runtime_types > dex). Mirrors poke-env's typechange handler.
+        if vid == "typechange":
+            mon.runtime_types = self._resolve_typechange(parts) if start else None
+            return
         if start:
             mon.volatiles.add(vid)
+            # v11 exact-mask: capture the SPECIFIC restricted move so the offline action mask can drop
+            # the exact illegal slot. Disable names the move in parts[4]; Encore names none → it locks to
+            # the LAST self-selected move (stint_moves[-1], appended in _handle_move BEFORE this -start).
+            if vid == "disable":
+                mon.disabled_move = parts[4] if len(parts) > 4 else None
+            elif vid == "encore":
+                mon.encore_move = mon.stint_moves[-1] if mon.stint_moves else None
+            elif vid == "taunt":
+                mon.taunt = True
         else:
             mon.volatiles.discard(vid)
+            if vid == "disable":
+                mon.disabled_move = None
+            elif vid == "encore":
+                mon.encore_move = None
+            elif vid == "taunt":
+                mon.taunt = False
         if vid == "gastroacid":
             mon.ability_suppressed = start
+
+    def _resolve_typechange(self, parts: list[str]) -> Optional[list]:
+        """Resolve the RESULT types of a |-start|MON|typechange| line, mirroring poke-env's handler
+        (abstract_battle.py:799-806): if parts[5] is an '[of] SOURCE' tag (Reflect Type) copy that
+        source's CURRENT effective types; else the slash-joined type string in parts[4] (e.g. 'Water'
+        or 'Normal/Water'). Returns None on a truncated/unresolvable line (fail-safe: no drift)."""
+        if len(parts) > 5 and parts[5].startswith("[of] "):
+            src = self.active_slots.get(self._slot_key_from_ident(parts[5][5:]))
+            return (self._slot_effective_types(src) or None) if src is not None else None
+        if len(parts) > 4 and parts[4]:
+            return [t for t in parts[4].split("/") if t] or None
+        return None
+
+    def _slot_effective_types(self, mon) -> list:
+        """A slot's CURRENT effective types (for the Reflect-Type [of] copy), matching the encoder's
+        _effective_types precedence: tera > runtime typechange > transform dex > species dex. Uses the
+        SHARED pokedex (the same source as the encoder's _dex_types) so the copied types stay parity-clean."""
+        if mon is None:
+            return []
+        if mon.is_terastallized and mon.known_tera_type:
+            return [mon.known_tera_type]
+        if mon.runtime_types:
+            return list(mon.runtime_types)
+        dex = get_pokedex()
+        if not dex:
+            return []
+        species = mon.transformed_into if (mon.is_transformed and mon.transformed_into) else mon.species
+        e = dex.entry(species) or (dex.entry(mon.base_species) if mon.base_species else None)
+        return list(e.get("types") or []) if e else []
+
+    def _handle_singleturn(self, parts: list[str], cmd: str) -> None:
+        """v11 A.3: |-singleturn| / |-singlemove| audit hook. These mark THIS-turn-only effects
+        (Protect/Wide Guard/Helping Hand/Follow Me/redirection/flinch/…) that Showdown clears by the
+        next turn-start snapshot, so they are NOT decision-state and must NOT be encoded. We record a
+        transient audit entry only — it must NOT mutate mon.volatiles (which persist to switch and would
+        drift vs poke-env's end-of-turn clearing) and must NOT drive the protect_counter (that is sourced
+        from the |move| line in _handle_move). The persistent Protect signal is protect_counter."""
+        if len(parts) < 4:
+            return
+        slot_key = self._slot_key_from_ident(parts[2])
+        name = parts[3].split(":", 1)[-1].strip() if parts[3] else ""
+        self._current_turn_actions.append({
+            "event": cmd.lstrip("-"),     # "singleturn" / "singlemove"
+            "slot": slot_key,
+            "effect": name,
+        })
 
     def _handle_sidestart(self, parts: list[str]) -> None:
         # |-sidestart|p2: speedyturtle87|move: Tailwind
@@ -1017,28 +1312,62 @@ class ShowdownReplayParser:
         effect = parts[3] if len(parts) > 3 else ""
         pid = raw_side.split(":")[0].strip()
 
+        sc = self.side_conditions[pid]
         if "Tailwind" in effect:
-            self.side_conditions[pid].tailwind = 4
+            sc.tailwind = 4
         elif "Reflect" in effect:
-            self.side_conditions[pid].screens["reflect"] = 0          # turns ACTIVE (elapsed)
+            sc.screens["reflect"] = 0          # turns ACTIVE (elapsed)
         elif "Light Screen" in effect:
-            self.side_conditions[pid].screens["light_screen"] = 0
+            sc.screens["light_screen"] = 0
         elif "Aurora Veil" in effect:
-            self.side_conditions[pid].screens["aurora_veil"] = 0
+            sc.screens["aurora_veil"] = 0
+        # v11 C.1: entry hazards. NOTE "Spikes" is a substring of "Toxic Spikes" → match Toxic FIRST.
+        # Spikes/Toxic Spikes STACK (one |-sidestart| per layer, parity w/ poke-env's +1); cap 3 / 2.
+        elif "Stealth Rock" in effect:
+            sc.stealth_rock = True
+        elif "Toxic Spikes" in effect:
+            sc.toxic_spikes = min(2, sc.toxic_spikes + 1)
+        elif "Spikes" in effect:
+            sc.spikes = min(3, sc.spikes + 1)
+        elif "Sticky Web" in effect:
+            sc.sticky_web = True
+        # v11 C.2b gap-fix: persistent team-protection side conditions.
+        elif "Safeguard" in effect:
+            sc.safeguard = True
+        elif "Mist" in effect:
+            sc.mist = True
+        elif "Lucky Chant" in effect:
+            sc.lucky_chant = True
 
     def _handle_sideend(self, parts: list[str]) -> None:
         raw_side = parts[2]
         effect = parts[3] if len(parts) > 3 else ""
         pid = raw_side.split(":")[0].strip()
 
+        sc = self.side_conditions[pid]
         if "Tailwind" in effect:
-            self.side_conditions[pid].tailwind = 0
+            sc.tailwind = 0
         elif "Reflect" in effect:
-            self.side_conditions[pid].screens.pop("reflect", None)
+            sc.screens.pop("reflect", None)
         elif "Light Screen" in effect:
-            self.side_conditions[pid].screens.pop("light_screen", None)
+            sc.screens.pop("light_screen", None)
         elif "Aurora Veil" in effect:
-            self.side_conditions[pid].screens.pop("aurora_veil", None)
+            sc.screens.pop("aurora_veil", None)
+        # v11 C.1: hazard removal (Defog / Rapid Spin / Court Change / Tidy Up) clears ALL layers at once.
+        elif "Stealth Rock" in effect:
+            sc.stealth_rock = False
+        elif "Toxic Spikes" in effect:          # match Toxic before Spikes (substring)
+            sc.toxic_spikes = 0
+        elif "Spikes" in effect:
+            sc.spikes = 0
+        elif "Sticky Web" in effect:
+            sc.sticky_web = False
+        elif "Safeguard" in effect:
+            sc.safeguard = False
+        elif "Mist" in effect:
+            sc.mist = False
+        elif "Lucky Chant" in effect:
+            sc.lucky_chant = False
 
     def _handle_item_reveal(self, parts: list[str], revealed: bool, consumed: bool = False) -> None:
         # |-item|p2a: Sneasler|White Herb
@@ -1080,6 +1409,7 @@ class ShowdownReplayParser:
         if slot_key in self.active_slots:
             self.active_slots[slot_key].known_tera_type = tera_type
             self.active_slots[slot_key].is_terastallized = True
+            self.active_slots[slot_key].runtime_types = None   # v11 P2: tera clears poke-env _temporary_types
 
         self._current_turn_actions.append({
             "event": "terastallize",
@@ -1431,9 +1761,6 @@ class ShowdownReplayParser:
             # formes) are involuntary, not a player decision, and are deliberately
             # NOT joined.  The flag is added ONLY when a mega actually occurred, so
             # non-mega move actions serialise byte-identically to before.
-            # TODO(tera): when the format adds Terastallization, join the
-            # (currently inert) -terastallize events here the same way to feed a
-            # future 3-way gimmick head {none, mega, tera}.
             megaed_slots = {
                 ev.get("slot")
                 for ev in self._current_turn_actions
@@ -1444,6 +1771,20 @@ class ShowdownReplayParser:
                 for act in out:
                     if act["action"] == "move" and act["slot"] in megaed_slots:
                         act["mega"] = True
+            # v11 Phase D: tera label-join, EXACT mirror of the mega join. _handle_tera appends
+            # {"event": "terastallize", "slot": ...} identically to mega_evolution. ⚠ INERT today (tera is
+            # mod-disabled → teraed_slots is always empty), so non-tera move actions serialise byte-identically;
+            # the path is ready if the Champions mod ever flips canTerastallize.
+            teraed_slots = {
+                ev.get("slot")
+                for ev in self._current_turn_actions
+                if ev.get("event") == "terastallize"
+                and (ev.get("slot") or "").startswith(player)
+            }
+            if teraed_slots:
+                for act in out:
+                    if act["action"] == "move" and act["slot"] in teraed_slots:
+                        act["tera"] = True
             return out
 
         turn_snapshot = {

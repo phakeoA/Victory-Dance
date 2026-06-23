@@ -24,7 +24,7 @@
     "hof_games": 180,
     "hof_override": false,
     "keep_replay_buffers": 200,
-    "keep_snapshots": 100,
+    "keep_snapshots": 0,
     "kl_coef": 0.05,
     "max_cpu_fraction": 0.8,
     "max_vram_gb": 6,

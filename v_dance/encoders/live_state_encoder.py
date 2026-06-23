@@ -36,10 +36,19 @@ from v_dance.encoders.state_encoder import (
     _BOOST_KEYS, _EST_STAT_NORM,
     item_effect_indices, ability_effect_indices, dex_unique_ability,
     is_spread_target, _type_eff_signed_immune, _type_mult, _damage_band, _moves_first,
-    _situational_damage_mult, _WEATHER_SPEED_ABILITY, field_duration_scalars,
+    _situational_damage_mult, _WEATHER_SPEED_ABILITY, field_duration_scalars, _ability_immunizes,
+    _ability_damage_mult, _DEF_HIT_MOVES, _ability_trapped, _is_grounded, _ground_immune, _move_immune,
+    _item_active,                                   # v11 P5: Magic Room item-suppression gate (shared)
+    _expected_crit_mult,                            # v11 N4: expected-crit band multiplier (shared)
+    _immunity_neg_ctx, _move_hit_range,
+    champ_bp, champ_type, champ_acc_raw, _canon,   # v11 N1: Champions move overrides (shared, parity)
+    _disguise_intact,                              # v11 B1: Mimikyu Disguise intact-block (shared, parity)
+    _accuracy_modifiers, _move_always_hit, _move_is_ohko, _per_enemy_hit_chance,  # v11 B2/B2b (shared, parity)
+    _TYPE_BOOST_TYPE, _RESIST_BERRY_TYPE, _BAND_ITEM_MULT,   # v11 B3: item band mults (shared, parity)
     VodStateEncoder,
     # v9 (B1-mechanics): mechanic substrate (re-exported from state_encoder's namespace)
     NUM_MOVE_TAGS, NUM_ABILITY_TAGS, NUM_ITEM_TAGS, WEIGHT_FEATURES, VOLATILE_FEATURES,
+    _PROTECT_COUNTER_CAP,
     move_tag_indices, ability_tag_indices, item_tag_indices, ABILITY_SUPPRESSED_IDX,
     ability_index, move_index, item_index,
 )
@@ -49,10 +58,18 @@ from v_dance.parser.vod_parser.battle_models import volatile_flags
 
 def _live_eff_types(mon) -> list:
     """A poke-env mon's CURRENT effective type NAMES (upper) for the type-eff cross: tera overrides
-    (prepared-for, INACTIVE in Reg M-A) else its dex types. Mirrors the offline _effective_types."""
+    (ACTIVE in Champions), else a runtime TYPECHANGE, else its dex types. Mirrors the offline
+    _effective_types precedence (tera > typechange > transform > dex). ⚠ v11 N2/D7: poke-env's attribute
+    is `is_terastallized` (the old `terastallized` was a NONEXISTENT attr → getattr always False → live
+    used PRE-tera typing on every post-tera turn). ⚠ v11 P2: NO functional change needed for typechange —
+    poke-env's mon.type_1/type_2 properties (pokemon.py:1360-1394) already fold _temporary_types
+    (Protean/Libero/Soak/Burn Up/Reflect Type) at exactly the 2nd precedence (tera > _temporary_types >
+    dex), AND tera forces type_2=None. So reading type_1/type_2 below mirrors the offline runtime_types
+    branch by construction; the offline parser captures the SAME typechange protocol line that drives
+    _temporary_types live."""
     if mon is None:
         return []
-    if getattr(mon, "terastallized", False) and getattr(mon, "tera_type", None):
+    if getattr(mon, "is_terastallized", False) and getattr(mon, "tera_type", None):
         return [mon.tera_type.name]
     return [t.name for t in (mon.type_1, mon.type_2) if t is not None]
 
@@ -160,6 +177,15 @@ def team_has_megaed_live(battle) -> bool:
     return any(is_mega_forme_live(m, dex) for m in team.values())
 
 
+def team_has_teraed_live(battle) -> bool:
+    """v11 Phase D: True iff any own mon has already terastallized this game (tera is once-per-game per
+    side). Live analogue of state_encoder._own_team_has_teraed (offline ``is_terastallized``); reads
+    poke-env Pokemon.is_terastallized over battle.team. (Tera is mod-disabled in Champions → always
+    False today; forward-compat with the mega twin.)"""
+    team = getattr(battle, "team", None) or {}
+    return any(getattr(m, "is_terastallized", False) for m in team.values())
+
+
 def _enum_to_idx(enum_cls, idx_map: dict[str, int]) -> dict:
     """Map live poke-env enum members onto frozen indices by member name."""
     out = {}
@@ -225,8 +251,21 @@ class LiveStateEncoder:
             # to the SAME channels (by index) so train==serve — emitting a live hazard bit the net
             # only ever saw as 0.0 is an out-of-distribution feed on the un-spliced SC globals.
             self._offline_sc_idx = frozenset(
-                _SC_IDX[n] for n in ("TAILWIND", "REFLECT", "LIGHT_SCREEN", "AURORA_VEIL")
+                _SC_IDX[n] for n in ("TAILWIND", "REFLECT", "LIGHT_SCREEN", "AURORA_VEIL",
+                                     "STEALTH_ROCK", "SPIKES", "TOXIC_SPIKES", "STICKY_WEB",   # v11 C.1
+                                     "SAFEGUARD", "MIST", "LUCKY_CHANT")                       # v11 C.2b
                 if n in _SC_IDX
+            )
+            # v11 C.2e: the FIELD block had NO offline-tracked guard (unlike the SC block) — the offline
+            # encoder only ever sets the 4 terrains + TRICK_ROOM + (now) GRAVITY, but poke-env's
+            # battle.fields can also carry MAGIC_ROOM / WONDER_ROOM / HEAL_BLOCK / FAIRY_LOCK /
+            # NEUTRALIZING_GAS, which the live encoder used to emit as a spurious 1.0 (train/serve drift).
+            # Restrict the live field emit to the SAME channels the offline parser populates.
+            self._offline_field_idx = frozenset(
+                _FIELD_IDX[n] for n in ("ELECTRIC_TERRAIN", "GRASSY_TERRAIN", "MISTY_TERRAIN",
+                                        "PSYCHIC_TERRAIN", "TRICK_ROOM", "GRAVITY",
+                                        "MAGIC_ROOM", "WONDER_ROOM")        # v11 P5
+                if n in _FIELD_IDX
             )
             # Gen-9 pokedex for the mega-forme detector (see _is_mega_forme).
             self._pokedex = GenData.from_gen(9).pokedex if GenData else {}
@@ -320,6 +359,17 @@ class LiveStateEncoder:
         # opp actives & vice-versa; is_own picks the right est-stat belief + side screens for each side.
         _oa, _wa = list(opp_active), list(own_active)
 
+        # v11 B.1b: per-side tailwind + Trick Room resolved ONCE (mirror offline) — feed the move-block
+        # who-moves-first channel (defender eff_speed + attacker att_ctx.eff_speed) and the GLOBAL block.
+        _own_tw = any(getattr(k, "name", "") == "TAILWIND" and v
+                      for k, v in battle.side_conditions.items())
+        _opp_tw = any(getattr(k, "name", "") == "TAILWIND" and v
+                      for k, v in battle.opponent_side_conditions.items())
+        _tr = any(getattr(f, "name", "") == "TRICK_ROOM" for f in battle.fields)
+        _gravity = any(getattr(f, "name", "") == "GRAVITY" for f in battle.fields)   # v11 C.2e
+        _magic_room = any(getattr(f, "name", "") == "MAGIC_ROOM" for f in battle.fields)     # v11 P5
+        _wonder_room = any(getattr(f, "name", "") == "WONDER_ROOM" for f in battle.fields)   # v11 P5
+
         def _prof(mon, is_own):
             if mon is None:
                 return None
@@ -328,13 +378,53 @@ class LiveStateEncoder:
             phys_scr = any(getattr(k, "name", "") in ("REFLECT", "AURORA_VEIL") and v for k, v in scr.items())
             spec_scr = any(getattr(k, "name", "") in ("LIGHT_SCREEN", "AURORA_VEIL") and v for k, v in scr.items())
             types = _live_eff_types(mon)
-            grounded = ("FLYING" not in types and getattr(mon, "ability", None) != "levitate"
-                        and getattr(mon, "item", None) != "airballoon")
+            _ab = self._live_ability(mon, is_own)[0]
+            _it = _item_active(self._live_item(mon, is_own)[0], _magic_room)   # v11 P5: MR suppresses items
+            # v11 C.2c: grounding volatiles from poke-env effects (byte-parity with offline volatile_flags).
+            _eff = {getattr(e, "name", str(e)).lower().replace("_", "")
+                    for e in (getattr(mon, "effects", {}) or {})}
+            _pvf = volatile_flags(_eff)
+            _levit, _fg = _pvf["levitating"], _pvf["force_grounded"]
+            _fg_g = _fg or _gravity            # v11 C.2e: Gravity grounds everything (isGrounded-first)
+            grounded = _is_grounded(types, _ab, _it, _levit, _fg_g)
             return {"types": types,
                     "def": est.get("def"), "spd": est.get("spd"),
                     "hp": est.get("hp") or getattr(mon, "max_hp", None),
                     "hp_frac": (mon.current_hp_fraction if mon.revealed else 1.0),
-                    "grounded": grounded, "screen_phys": phys_scr, "screen_spec": spec_scr}
+                    # v11 A.1: the ACTIVE ability (belief-aware) for damage-band immunity — parity twin
+                    # of the offline _defender_profile's resolve_active_ability_json.
+                    "ability": _ab,
+                    "grounded": grounded, "screen_phys": phys_scr, "screen_spec": spec_scr,
+                    # v11 C.2c: Ground-move immunity (Air Balloon / Magnet Rise / Telekinesis) + Tar Shot.
+                    "ground_immune": _ground_immune(_it, _levit, _fg_g), "tar_shot": _pvf["tar_shot"],
+                    # v11 C.2d: type-immunity NEGATION inputs (parity twin of the offline profile).
+                    "force_grounded": _fg_g or _it == "ironball", "ring_target": _it == "ringtarget",
+                    "foresight": _pvf["foresight"], "miracleeye": _pvf["miracleeye"],
+                    # v11 B1: intact Mimikyu Disguise (ability + full HP; the busted species is invisible to
+                    # poke-env so we key on hp_frac, parity twin of the offline _defender_profile).
+                    "intact_disguise": _disguise_intact(_ab, mon.current_hp_fraction if mon.revealed else 1.0),
+                    # v11 B.1b: resolved in-battle speed for the move-block who-moves-first channel.
+                    "eff_speed": self._live_effective_speed(mon, is_own,
+                                                            _own_tw if is_own else _opp_tw,
+                                                            _weather, _magic_room)[0],
+                    # v11 B.2: target Atk (Foul Play), raw weight (Low Kick/Heavy Slam), +boost sum
+                    # (Punishment) — parity twin of the offline _defender_profile.
+                    "atk": est.get("atk"),
+                    # v11 A4: poke-env mon.weight is mega/forme/transform-aware (it keeps mon.species at the
+                    # BASE forme post-mega but DOES update _weightkg); offline mutates species → species_weight
+                    # is correct there. Read mon.weight to restore parity, falling back to species_weight.
+                    "weight": (getattr(mon, "weight", None)
+                               or _DMG.species_weight(getattr(mon, "species", None)) or 0.0),
+                    "pos_boosts": sum(v for v in (mon.boosts or {}).values() if v > 0),
+                    # v11 B2b: defender-side accuracy/evasion inputs (parity twin of the offline profile).
+                    "eva_stage": (mon.boosts or {}).get("evasion", 0),
+                    "confused": _pvf["confused"],
+                    "no_guard": _ab == "noguard",
+                    "evasion_item": _it in ("brightpowder", "laxincense"),
+                    # v11 B3: defensive items (parity twin of the offline _defender_profile).
+                    "assault_vest": _it == "assaultvest",
+                    "evio": _it == "eviolite" and _DMG.is_nfe(getattr(mon, "species", None)),
+                    "resist_berry": _RESIST_BERRY_TYPE.get(_it)}
 
         own_enemy = [_prof(_oa[0] if len(_oa) > 0 else None, False),
                      _prof(_oa[1] if len(_oa) > 1 else None, False)]
@@ -343,16 +433,38 @@ class LiveStateEncoder:
 
         own_active_set = {p for p in own_active if p is not None}
 
+        # v11 B.2 gap-fix (Last Respects): per-side fainted count for the move's BP (50+50×faints). SAME
+        # logic as the parity-proven team-count block below (own brought/request fainted; opp seen-fainted —
+        # opp actives are alive at decision time, so the active-exclusion there is a no-op for the count).
+        _own_req = _request_own_state(battle)
+        _own_fnt = (sum(1 for a, f in _own_req.values() if f) if _own_req is not None
+                    else sum(1 for p in brought_team_mons(battle) if p.fainted))
+        _opp_fnt = sum(1 for p in getattr(battle, "opponent_team", {}).values()
+                       if self._is_seen(p) and p.fainted)
+        # v11 C.4 (Architecture B): the OWN-side Rage Fist hit count rides the SAME offline parse that
+        # builds opp_snapshot (state_before[own_role].our_active carries times_attacked from to_dict) — so
+        # there is NO second live filter to drift. Index our_a→slot 0, our_b→slot 1 (the own-active loop's
+        # enumerate order). Bench own = 0 (reset-on-switch-in convention); opp byte ranges are spliced over.
+        _oa_snap = (opp_snapshot or {}).get("our_active") or {}
+        _own_ta = {0: (_oa_snap.get("our_a") or {}).get("times_attacked", 0),
+                   1: (_oa_snap.get("our_b") or {}).get("times_attacked", 0)}
+
         for slot, mon in enumerate(list(own_active)):
             # #1b: under an own-side Illusion the active object's moves can be empty
             # while the |request| holds the real ones — encode those (request-
             # authoritative) so the move features match the mask + the offline parser.
             mv = own_active_move_list(battle, slot, mon) if mon is not None else None
             self._write_pokemon(vec, cursor, mon, is_active=True, is_own=True,
-                                move_override=mv, enemy_defenders=own_enemy, field_mods=field_mods)
+                                move_override=mv, enemy_defenders=own_enemy, field_mods=field_mods,
+                                side_tailwind=_own_tw, trick_room=_tr, gravity=_gravity,
+                                fainted_allies=_own_fnt, times_attacked=_own_ta.get(slot, 0),
+                                magic_room=_magic_room, wonder_room=_wonder_room)
             cursor += POKEMON_FEATURES
         for mon in list(opp_active):
-            self._write_pokemon(vec, cursor, mon, is_active=True, is_own=False, enemy_defenders=opp_enemy, field_mods=field_mods)
+            self._write_pokemon(vec, cursor, mon, is_active=True, is_own=False, enemy_defenders=opp_enemy,
+                                field_mods=field_mods, side_tailwind=_opp_tw, trick_room=_tr, gravity=_gravity,
+                                fainted_allies=_opp_fnt,
+                                magic_room=_magic_room, wonder_room=_wonder_room)
             cursor += POKEMON_FEATURES
 
         # ── [B] Bench slots ──────────────────────────────────────────────────
@@ -367,7 +479,10 @@ class LiveStateEncoder:
 
         for i in range(BENCH_SLOTS):
             mon = bench[i] if i < len(bench) else None
-            self._write_pokemon(vec, cursor, mon, is_active=False, is_own=True, enemy_defenders=own_enemy, field_mods=field_mods)
+            self._write_pokemon(vec, cursor, mon, is_active=False, is_own=True, enemy_defenders=own_enemy,
+                                field_mods=field_mods, side_tailwind=_own_tw, trick_room=_tr, gravity=_gravity,
+                                fainted_allies=_own_fnt,
+                                magic_room=_magic_room, wonder_room=_wonder_room)
             cursor += POKEMON_FEATURES
 
         # ── [B2] Opponent bench (layout-v2): the opponent's FULL teampreview
@@ -382,7 +497,10 @@ class LiveStateEncoder:
         opp_bench = self._opp_bench_mons(battle, opp_active_set)
         for i in range(OPP_BENCH_SLOTS):
             mon = opp_bench[i] if i < len(opp_bench) else None
-            self._write_pokemon(vec, cursor, mon, is_active=False, is_own=False, enemy_defenders=opp_enemy, field_mods=field_mods)
+            self._write_pokemon(vec, cursor, mon, is_active=False, is_own=False, enemy_defenders=opp_enemy,
+                                field_mods=field_mods, side_tailwind=_opp_tw, trick_room=_tr, gravity=_gravity,
+                                fainted_allies=_opp_fnt,
+                                magic_room=_magic_room, wonder_room=_wonder_room)
             cursor += POKEMON_FEATURES
 
         # ── [C] Global features ──────────────────────────────────────────────
@@ -398,29 +516,28 @@ class LiveStateEncoder:
         for f in battle.fields:
             if f.name == "TRICK_ROOM":
                 trick_room_active = True
-            if f in self._field_idx:
-                vec[cursor + self._field_idx[f]] = 1.0
+            idx = self._field_idx.get(f)
+            if idx is not None and idx in self._offline_field_idx:   # v11 C.2e: offline-tracked only
+                vec[cursor + idx] = 1.0
         cursor += NUM_FIELDS
 
-        # Side conditions — BINARY presence (1.0 = active), gap #5.  poke-env's
-        # value is a layer count (stackable) OR the turn a condition started
-        # (non-stackable) — NOT turns remaining — so its magnitude is not
-        # comparable to the offline path.  Both paths therefore encode a presence
-        # bit.  RESTRICTED to the offline-tracked channels (Tailwind + 3 screens):
-        # the parser does not track hazards/Safeguard/Mist, so emitting them live
-        # would feed the net 1.0 on channels it only ever saw as 0.0 in training
-        # (these SC globals are NOT corrected by the gap-#6 opponent splice).
+        # Side conditions. poke-env's value is a LAYER COUNT (stackable: Spikes/Toxic Spikes) OR the turn
+        # a condition started (non-stackable) — NOT turns remaining. v11 C.1: Spikes/Toxic Spikes encode
+        # the normalised layer count (parity with the offline parser's layer count); everything else is a
+        # presence bit. RESTRICTED to the offline-tracked channels (_offline_sc_idx = Tailwind + 3 screens
+        # + 4 hazards): emitting an un-tracked SC live would feed the net 1.0 on a channel it only saw as
+        # 0.0 in training (these SC globals are NOT corrected by the gap-#6 opponent splice).
         for sc, val in battle.side_conditions.items():
             idx = self._sc_idx.get(sc)
             if val and idx in self._offline_sc_idx:
-                vec[cursor + idx] = 1.0
+                vec[cursor + idx] = self._sc_value(sc, val)
         cursor += NUM_SIDE_CONDS
 
         # Opponent side conditions (same offline-tracked restriction)
         for sc, val in battle.opponent_side_conditions.items():
             idx = self._sc_idx.get(sc)
             if val and idx in self._offline_sc_idx:
-                vec[cursor + idx] = 1.0
+                vec[cursor + idx] = self._sc_value(sc, val)
         cursor += NUM_SIDE_CONDS
 
         # Turn (cap at 60 for normalisation)
@@ -433,10 +550,7 @@ class LiveStateEncoder:
         cursor += 1
 
         # ── B1.4 turn-order block (mirror offline): 4 effective speeds + 4 moves-first margins + conf.
-        _own_tw = any(getattr(k, "name", "") == "TAILWIND" and v
-                      for k, v in battle.side_conditions.items())
-        _opp_tw = any(getattr(k, "name", "") == "TAILWIND" and v
-                      for k, v in battle.opponent_side_conditions.items())
+        # (_own_tw/_opp_tw resolved once above for B.1b.)
         _sp = {
             "our_a": self._live_effective_speed(own_active[0] if len(own_active) > 0 else None, True, _own_tw, _weather),
             "our_b": self._live_effective_speed(own_active[1] if len(own_active) > 1 else None, True, _own_tw, _weather),
@@ -700,8 +814,20 @@ class LiveStateEncoder:
                 unseen.append(stub)
         return (seen_alive + seen_fainted + unseen)[:OPP_BENCH_SLOTS]
 
+    @staticmethod
+    def _sc_value(sc, val) -> float:
+        """v11 C.1: a side-condition channel value. Spikes/Toxic Spikes encode the normalised LAYER count
+        (poke-env val IS the layer count for these) — parity with the offline parser's layer count;
+        everything else (screens/Tailwind/SR/Web) is a presence bit."""
+        name = getattr(sc, "name", "")
+        if name == "SPIKES":
+            return min(val, 3) / 3.0
+        if name == "TOXIC_SPIKES":
+            return min(val, 2) / 2.0
+        return 1.0
+
     # ── Pokémon encoder (live) ────────────────────────────────────────────────
-    def _live_effective_speed(self, mon, is_own, side_tailwind, weather=None):
+    def _live_effective_speed(self, mon, is_own, side_tailwind, weather=None, magic_room=False):
         """(speed, known) — mirror of the offline _effective_speed: est speed folding the spe boost
         stage · paralysis ×0.5 · Choice Scarf ×1.5 · Tailwind ×2 · weather-speed ability ×2 (B1.2b)."""
         if mon is None:
@@ -712,19 +838,29 @@ class LiveStateEncoder:
             return 0.0, 0.0
         stage = (mon.boosts or {}).get("spe", 0) if getattr(mon, "boosts", None) else 0
         spe *= ((2 + stage) / 2.0) if stage >= 0 else (2.0 / (2 - stage))
-        if getattr(getattr(mon, "status", None), "name", None) == "PAR":
+        # v11 B.1 (#4): Quick Feet ×1.5 on ANY status, negating the para ×0.5 (parity with offline).
+        _statused = getattr(mon, "status", None) is not None
+        if self._live_ability(mon, is_own)[0] == "quickfeet" and _statused:
+            spe *= 1.5
+        elif getattr(getattr(mon, "status", None), "name", None) == "PAR":
             spe *= 0.5
         # Resolve item/ability through the BELIEF-aware helpers — NOT raw poke-env attrs — so this
         # mirrors the offline _effective_speed (resolve_item_json / resolve_ability_json), which for an
         # unrevealed OPPONENT falls back to the Pikalytics top prior. Reading raw mon.item/mon.ability
         # here (unknown_item / None for an unrevealed opp) silently dropped the Choice Scarf ×1.5 and
         # weather-speed ×2 that TRAINING applied → a 1.5-2× serve-only who-moves-first divergence.
-        if self._live_item(mon, is_own)[0] == "choicescarf":      # choice_speed effect is unique to Scarf
+        if _item_active(self._live_item(mon, is_own)[0], magic_room) == "choicescarf":  # v11 P5: MR suppresses Scarf
             spe *= 1.5
         if side_tailwind:
             spe *= 2.0
         if weather and weather in _WEATHER_SPEED_ABILITY.get(self._live_ability(mon, is_own)[0], ()):
             spe *= 2.0
+        # v11 B.1 (#4): Protosynthesis/Quark Drive ×1.5 when boosting SPEED — gated on the SPE-suffixed
+        # poke-env effect (parity with offline volatile_flags.paradox_speed: identical normalised id).
+        _eff_ids = {getattr(e, "name", str(e)).lower().replace("_", "")
+                    for e in (getattr(mon, "effects", {}) or {})}
+        if _eff_ids & {"protosynthesisspe", "quarkdrivespe"}:
+            spe *= 1.5
         return float(spe), known
 
     def _write_pokemon(
@@ -737,12 +873,21 @@ class LiveStateEncoder:
         move_override: Optional[list] = None,
         enemy_defenders: Optional[list] = None,
         field_mods: tuple = (None, None),
+        side_tailwind: bool = False,
+        trick_room: bool = False,
+        gravity: bool = False,
+        fainted_allies: int = 0,
+        times_attacked: int = 0,
+        magic_room: bool = False,
+        wonder_room: bool = False,
     ) -> None:
         """Write POKEMON_FEATURES floats into vec starting at `start`.
 
         ``move_override`` (own active mons only) supplies the move list when poke-env's
         ``mon.moves`` is an Illusion-stale empty (#1b — see own_active_move_list); None
-        ⇒ the default ``mon.moves`` ordering, so every other slot is unchanged."""
+        ⇒ the default ``mon.moves`` ordering, so every other slot is unchanged.
+        ``gravity`` (v11 C.2e) force-grounds this mon (Arena Trap) + boosts move accuracy.
+        ``fainted_allies`` (v11 B.2 gap-fix) = this mon's side faint count → Last Respects BP."""
         # Empty / unrevealed slot → all zeros (already zeroed by np.zeros)
         if mon is None:
             return
@@ -808,8 +953,11 @@ class LiveStateEncoder:
             vec[i + j] = boosts.get(key, 0) / 6.0
         i += NUM_BOOSTS
 
-        # v9: normalized species weight (weight-based moves + Heavy/Light Metal)
-        _wt = _DMG.species_weight(getattr(mon, "species", None)) or 0.0
+        # v9: normalized species weight (weight-based moves + Heavy/Light Metal). v11 A4: read poke-env's
+        # mega/forme/transform-aware mon.weight (mon.species stays BASE post-mega → species_weight would read
+        # the base weight). This _wt feeds BOTH the weight channel below AND att_ctx.weight (Low Kick/Heavy
+        # Slam variable-BP) — fix once here, both consumers corrected. species_weight is the fallback.
+        _wt = getattr(mon, "weight", None) or _DMG.species_weight(getattr(mon, "species", None)) or 0.0
         vec[i] = min(_wt / 500.0, 1.0)
         i += 1
 
@@ -825,21 +973,42 @@ class LiveStateEncoder:
                      else list(mon.moves.values())[:NUM_MOVES])
         # B1.2/B1.2b attacker context: A stat + burn + Life-Orb/Choice item.
         _est = self._live_est_stats(mon, is_own)[0] or {}
-        _it = getattr(mon, "item", None)
+        _it = _item_active(getattr(mon, "item", None), magic_room)   # v11 P5: Magic Room suppresses items
         att_ctx = {"atk": _est.get("atk"), "spa": _est.get("spa"),
                    "burned": getattr(getattr(mon, "status", None), "name", None) == "BRN",
-                   "life_orb": _it == "lifeorb", "choice": _it in ("choiceband", "choicespecs")}
+                   "statused": getattr(mon, "status", None) is not None,   # v11 A.2: Guts on ANY status
+                   "life_orb": _it == "lifeorb", "choice": _it in ("choiceband", "choicespecs"),
+                   # v11 B.1b: this mon's resolved speed + Trick Room for the who-moves-first channel.
+                   "eff_speed": self._live_effective_speed(mon, is_own, side_tailwind,
+                                                           field_mods[0] if field_mods else None,
+                                                           magic_room)[0],
+                   "trick_room": trick_room,
+                   "wonder_room": wonder_room,             # v11 P5: swaps Def<->SpD in the band
+                   # v11 B.2: damage-band R1 context (parity twin of the offline att_ctx).
+                   "def": _est.get("def"), "weight": _wt,
+                   "hp_frac": (mon.current_hp_fraction if mon.revealed else 1.0),
+                   "pos_boosts": sum(v for v in (mon.boosts or {}).values() if v > 0),
+                   "fainted_allies": fainted_allies,     # v11 B.2 gap-fix: Last Respects BP
+                   "times_attacked": times_attacked,     # v11 C.4: Rage Fist BP
+                   "loaded_dice": _it == "loadeddice",    # v11 A1: 2-5 moves hit 4-5
+                   "acc_stage": (mon.boosts or {}).get("accuracy", 0),  # v11 B2: attacker accuracy stage
+                   "wide_lens": _it == "widelens",        # v11 B2: Wide Lens ×1.1 accuracy
+                   "expert_belt": _it == "expertbelt",    # v11 B3: ×1.2 super-effective
+                   "type_boost": _TYPE_BOOST_TYPE.get(_it),  # v11 B3: ×1.2 matching-type move
+                   "scope_lens": _it in ("scopelens", "razorclaw")}  # v11 N4: +1 crit stage (P5: gated via _it)
         for m_idx in range(NUM_MOVES):
             if m_idx < len(move_list):
                 self._write_move(vec, i, move_list[m_idx], mon, enemy_defenders, att_ctx,
-                                 field_mods, ability_id=abil_id)
+                                 field_mods, ability_id=abil_id, gravity=gravity)
             i += MOVE_FEATURES
 
         # ── v9 ITEM block: identity index + effect-tag multi-hot + known ──
+        # v11 P5: under Magic Room an ACTIVE mon's item is HELD but non-functional → keep identity + known,
+        # ZERO the EFFECT tags (parity twin of the offline path).
         item_id, item_known = self._live_item(mon, is_own)
         vec[i] = float(item_index(item_id))
         i += 1
-        for idx in item_tag_indices(item_id):
+        for idx in item_tag_indices(_item_active(item_id, magic_room and is_active)):
             vec[i + idx] = 1.0
         i += NUM_ITEM_TAGS
         vec[i] = item_known
@@ -859,13 +1028,45 @@ class LiveStateEncoder:
         i += 1
 
         # ── v9 VOLATILE block (byte-parity with offline via volatile_flags) ──
+        # v11 B.3: ability-trapping (Shadow Tag / Arena Trap / Magnet Pull on an opposing active) zeroes
+        # can_switch — parity twin of the offline computation (same shared _ability_trapped logic).
+        _mtypes = _live_eff_types(mon)
+        _item_id = self._live_item(mon, is_own)[0]
+        _mab = self._live_ability(mon, is_own)[0]
+        _trap = _ability_trapped(
+            "GHOST" in _mtypes, "STEEL" in _mtypes,
+            _is_grounded(_mtypes, _mab, _item_id, vf["levitating"],
+                         vf["force_grounded"] or gravity),    # v11 C.2c grounding + C.2e Gravity
+            _mab == "shadowtag", _item_id == "shedshell",
+            [d.get("ability") for d in (enemy_defenders or []) if d])
         vec[i] = 1.0 if vf["rooted"] else 0.0
         vec[i + 1] = 1.0 if vf["trapped"] else 0.0
         vec[i + 2] = 1.0 if vf["has_substitute"] else 0.0
         vec[i + 3] = 1.0 if vf["move_restricted"] else 0.0
-        vec[i + 4] = 0.0 if (vf["trapped"] or vf["rooted"]) else 1.0
+        vec[i + 4] = 0.0 if (vf["trapped"] or vf["rooted"] or _trap) else 1.0
         vec[i + 5] = 1.0 if vf["locked_action"] else 0.0
+        # v11 A.3: consecutive-Protect counter read DIRECTLY from poke-env (pokemon.py:1236) — NOT via
+        # volatile_flags (a set→bool helper that cannot carry an int). Same clamp/divisor as offline.
+        vec[i + 6] = min(getattr(mon, "protect_counter", 0) or 0, _PROTECT_COUNTER_CAP) / _PROTECT_COUNTER_CAP
+        # v11 C.2/C.2b: read straight off vf (pure id-set functions → byte-parity with offline).
+        vec[i + 7] = 1.0 if vf["residual_damage"] else 0.0
+        vec[i + 8] = 1.0 if vf["confused"] else 0.0
+        vec[i + 9] = vf["perish_norm"]
+        vec[i + 10] = 1.0 if vf["drowsy"] else 0.0
+        # v11 C.3: first_turn read DIRECTLY from poke-env (pokemon.py:1018, first_turn = _active_turns == 1)
+        # — NOT via vf (a set→bool helper with no access to _active_turns), mirroring the A.3 protect_counter
+        # precedent. getattr default False covers stub/unrevealed mons (active_turns 0 → False).
+        vec[i + 11] = 1.0 if getattr(mon, "first_turn", False) else 0.0
         i += VOLATILE_FEATURES
+
+        # v11 Phase D (D9): tera_type one-hot (NUM_TYPES) — parity twin of the offline write. REVEALED tera
+        # type only (same condition as _live_eff_types): set iff is_terastallized AND tera_type. ⚠ Tera is
+        # mod-disabled → PERMANENTLY ZERO today (can_tera always falsy); forward-compat.
+        if getattr(mon, "is_terastallized", False) and getattr(mon, "tera_type", None):
+            _tt = _TYPE_IDX.get(_canon(mon.tera_type.name))
+            if _tt is not None:
+                vec[i + _tt] = 1.0
+        i += NUM_TYPES
 
         # is_active slot flag
         vec[i] = 1.0 if is_active else 0.0
@@ -960,19 +1161,23 @@ class LiveStateEncoder:
         att_ctx: Optional[dict] = None,
         field_mods: tuple = (None, None),
         ability_id: Optional[str] = None,
+        gravity: bool = False,
     ) -> None:
         """Write MOVE_FEATURES floats into vec starting at `start`. ``enemy_defenders`` = defender
         profiles; ``att_ctx`` = attacker stats/burn/item; ``field_mods`` = (weather, terrain);
-        ``ability_id`` = user's current ability (v9 effective-type change)."""
+        ``ability_id`` = user's current ability (v9 effective-type change). ``gravity`` (v11 C.2e)
+        boosts numeric move accuracy ×6840/4096 (the Gravity-Hypnosis payoff)."""
         i = start
+        _mid = getattr(move, "id", None)           # v11 N1: move-id key (Champions overrides + the type-eff cross)
 
-        # Base power (cap at 250 since a few moves are absurdly high)
-        vec[i] = min(move.base_power, 250) / 150.0
+        # Base power (cap at 250 since a few moves are absurdly high). v11 N1: Champions BP override.
+        vec[i] = min(champ_bp(_mid, move.base_power), 250) / 150.0
         i += 1
 
         # Move type as ordinal index — v9 EFFECTIVE type (Normalize/Pixilate/-ate/Liquid Voice).
         _mt = move.type.name if getattr(move, "type", None) is not None else ""
-        _mt = _DMG.effective_move_type(getattr(move, "id", None), _mt, ability_id)
+        _mt = _canon(champ_type(_mid, _mt))        # v11 N1: Champions type override (snaptrap Grass→Steel)
+        _mt = _DMG.effective_move_type(_mid, _mt, ability_id)
         _user_types = {t.name for t in user.types if t}
         if _mt in _TYPE_IDX:
             vec[i] = _TYPE_IDX[_mt] / (NUM_TYPES - 1)
@@ -992,8 +1197,20 @@ class LiveStateEncoder:
         vec[i] = move.priority / 7.0
         i += 1
 
-        # Accuracy (already 0–1 float; always-hit moves return 1.0)
-        vec[i] = move.accuracy
+        # Accuracy (already 0–1 float; always-hit moves return 1.0). v11 N1: a Champions accuracy override is
+        # in RAW moves.ts form (percent int / True) → normalize to live's 0–1 float so both encoders emit equal.
+        _acc_ov = champ_acc_raw(_mid, None)
+        acc = move.accuracy if _acc_ov is None else (1.0 if _acc_ov is True else _acc_ov / 100.0)
+        if gravity and acc < 1.0:        # v11 C.2e: Gravity ×6840/4096 on numeric accuracy, cap 1.0
+            acc = min(acc * (6840.0 / 4096.0), 1.0)
+        _base_acc = acc                  # v11 B2b: post-Gravity numeric base for the per-enemy hit-chance
+        if not _move_always_hit(_mid):   # v11 B2: attacker-side accuracy mods (skip always-hit moves)
+            _ac2 = att_ctx or {}
+            acc = _accuracy_modifiers(acc, ability_id=ability_id,
+                                      is_physical=move.category == MoveCategory.PHYSICAL,
+                                      is_ohko=_move_is_ohko(_mid),
+                                      acc_stage=_ac2.get("acc_stage", 0), wide_lens=_ac2.get("wide_lens", False))
+        vec[i] = acc
         i += 1
 
         # PP fraction (gap #7): real remaining PP / max.  The VOD parser now counts
@@ -1020,10 +1237,16 @@ class LiveStateEncoder:
         i += 1
 
         # B1.1 type-eff cross: signed multiplier + immune vs each of the 2 enemy actives. 4 channels.
-        # (_mt = the EFFECTIVE move type, computed above.)
+        # (_mt = the EFFECTIVE move type, computed above; _mid computed at the top of the writer.)
+        _neg = _immunity_neg_ctx(enemy_defenders, ability_id, _mid)   # v11 C.2d (None per slot = legacy)
         for e in range(2):
             d = enemy_defenders[e] if (enemy_defenders and e < len(enemy_defenders)) else None
-            signed, immune = _type_eff_signed_immune(_mt, (d.get("types") if d else []))
+            if d and _move_immune(_mt, d, ability_id, _mid):
+                signed, immune = -1.0, 1.0          # ability 0× (A.1/A.1b) OR Ground-immune (C.2c)
+            else:
+                signed, immune = _type_eff_signed_immune(_mt, (d.get("types") if d else []), _neg[e])
+                if d and _mt == "FIRE" and immune == 0.0 and d.get("tar_shot"):
+                    signed = float(np.clip(signed + 0.5, -1.0, 1.0))   # v11 C.2c: Tar Shot +1 step (×2)
             vec[i] = signed
             vec[i + 1] = immune
             i += 2
@@ -1035,20 +1258,73 @@ class LiveStateEncoder:
         _A = _ac.get("atk") if _phys else _ac.get("spa")
         _stab = _mt in _user_types
         _weather, _terrain = field_mods if field_mods else (None, None)
+        _hits_def = _phys or _mid in _DEF_HIT_MOVES                 # v11 B.2 stat-override (Psyshock family)
+        _raw_bp = champ_bp(_mid, getattr(move, "base_power", 0))   # v11 N1: Champions BP override (band + variable-BP)
+        # v11 A1: multi-hit band scaling (parity twin of offline — shared _move_hit_range + same Skill Link/
+        # Loaded Dice adjustments). A 2-5 move's min = min-hits × low-roll, max = max-hits × high.
+        _hmin, _hmax = _move_hit_range(_mid)
+        if ability_id == "skilllink" and _hmin != _hmax:
+            _hmin = _hmax
+        elif _ac.get("loaded_dice") and (_hmin, _hmax) == (2, 5):
+            _hmin = 4
+        # v11 N4: expected-crit multiplier (parity twin of offline — defender-independent, computed once).
+        _crit = _expected_crit_mult(_mid, ability_id, _ac.get("scope_lens"))
         for e in range(2):
             d = enemy_defenders[e] if (enemy_defenders and e < len(enemy_defenders)) else None
-            if d:
+            if d and not _move_immune(_mt, d, ability_id, _mid):
+                _tmult = _type_mult(_mt, d.get("types") or [], _neg[e])   # v11 C.2d negation
+                if _mt == "FIRE" and d.get("tar_shot"):
+                    _tmult *= 2.0                                  # v11 C.2c: Tar Shot Fire ×2
+                _abm = _ability_damage_mult(                       # v11 A.2 ability damage multipliers
+                    _mid, ability_id, d.get("ability"), eff_move_type=_mt, is_stab=_stab,
+                    is_physical=_phys, type_mult=_tmult, hp_frac=d.get("hp_frac") or 0.0,
+                    att_burned=bool(_ac.get("burned")), att_statused=bool(_ac.get("statused")),
+                    is_spread=_spread,                             # v11 A2: Parental Bond eligibility
+                    fainted_allies=_ac.get("fainted_allies", 0),  # v11 A3: Supreme Overlord faint-count
+                    defender_intact_disguise=d.get("intact_disguise", False),  # v11 B1: Disguise block
+                    weather=_weather)                             # v11 G5/G6: Sand Force / Solar Power
                 _sit = _situational_damage_mult(_mt, _phys, _weather, _terrain, d,
-                                                _ac.get("burned"), _ac.get("life_orb"), _ac.get("choice"))
+                                                _ac.get("burned"), _ac.get("life_orb"), _ac.get("choice"),
+                                                hits_def=_hits_def) * _abm
+                # v11 B3 attacker item band mults + B3b defender resist berry (parity twin of the offline writer).
+                if _ac.get("type_boost") == _mt:
+                    _sit *= _BAND_ITEM_MULT
+                if _ac.get("expert_belt") and _tmult > 1.0:
+                    _sit *= _BAND_ITEM_MULT
+                _rb = d.get("resist_berry")
+                if _rb == _mt and (_mt == "NORMAL" or _tmult > 1.0):
+                    _sit *= 0.5
+                _sit *= _crit                                   # v11 N4: expected-crit EV (band crit-blind otherwise)
+                _bp = _DMG.variable_base_power(                     # v11 B.2 variable base power
+                    _mid, _raw_bp,
+                    attacker_weight=_ac.get("weight"), target_weight=d.get("weight"),
+                    attacker_hp_frac=_ac.get("hp_frac"),
+                    attacker_speed=_ac.get("eff_speed"), target_speed=d.get("eff_speed"),
+                    attacker_pos_boosts=_ac.get("pos_boosts", 0), target_pos_boosts=d.get("pos_boosts", 0),
+                    fainted_allies=_ac.get("fainted_allies", 0),   # v11 B.2 gap-fix: Last Respects
+                    times_hit=_ac.get("times_attacked", 0))        # v11 C.4: Rage Fist
+                _Aov = (_ac.get("def") if _mid == "bodypress"      # v11 B.2 offensive-stat override
+                        else d.get("atk") if _mid == "foulplay" else _A)
+                _wr = bool(_ac.get("wonder_room"))   # v11 P5: Wonder Room swaps the DEFENSIVE stat (Def<->SpD)
                 dmin, dmax = _damage_band(
-                    getattr(move, "base_power", 0), _A, (d.get("def") if _phys else d.get("spd")),
-                    d.get("hp"), d.get("hp_frac"), _type_mult(_mt, d.get("types") or []),
-                    _stab, _spread, _sit)
+                    _bp, _Aov, (d.get("def") if (_hits_def ^ _wr) else d.get("spd")),
+                    d.get("hp"), d.get("hp_frac"), _tmult,
+                    _stab, _spread, _sit, hits_min=_hmin, hits_max=_hmax)   # v11 A1: multi-hit
             else:
-                dmin, dmax = 0.0, 0.0
+                dmin, dmax = 0.0, 0.0                # empty slot OR defender-ability immunity → 0 damage
             vec[i] = dmin
             vec[i + 1] = dmax
             i += 2
+
+        # v11 B.1b: priority-aware who-moves-first vs each enemy active (2 channels; parity with offline).
+        _att_spd = _ac.get("eff_speed") or 0.0
+        _prio = getattr(move, "priority", 0) or 0
+        _tr = bool(_ac.get("trick_room"))
+        for e in range(2):
+            d = enemy_defenders[e] if (enemy_defenders and e < len(enemy_defenders)) else None
+            if d:
+                vec[i] = _moves_first(_att_spd, d.get("eff_speed") or 0.0, _tr, prio_delta=_prio)
+            i += 1
 
         # B1.3 move intrinsics (per-move, public, from poke-env Move) — parity with the offline
         # moves.json flags. contact · recoil · drain · multihit-count/5.
@@ -1060,6 +1336,22 @@ class LiveStateEncoder:
         _mh_max = (_nh[1] if isinstance(_nh, (list, tuple)) and len(_nh) > 1 and _nh[1] > 1 else 0)
         vec[i + 3] = min(_mh_max, 5) / 5.0
         i += 4
+
+        # v11 B2b: per-enemy realized HIT CHANCE vs each enemy active (parity twin of the offline writer).
+        _ah_b2b = _move_always_hit(_mid)
+        _oh_b2b = _move_is_ohko(_mid)
+        for e in range(2):
+            d = enemy_defenders[e] if (enemy_defenders and e < len(enemy_defenders)) else None
+            if d is None:
+                vec[i] = 0.0
+            elif _ah_b2b:
+                vec[i] = 1.0
+            else:
+                vec[i] = _per_enemy_hit_chance(
+                    _base_acc, attacker_ability=ability_id, acc_stage=_ac.get("acc_stage", 0),
+                    wide_lens=_ac.get("wide_lens", False), is_physical=_phys, is_ohko=_oh_b2b,
+                    defender=d, move_id=_mid, weather=_weather)
+            i += 1
 
         # v9: move effect-tags + identity index, BEFORE the trailing is_known
         _mid = getattr(move, "id", None)

@@ -24,7 +24,7 @@ import numpy as np
 
 _SCRIPTS = Path(__file__).resolve().parent
 from v_dance.encoders.state_encoder import (  # noqa: E402
-    POKEMON_FEATURES, NUM_MOVES, MOVE_FEATURES,
+    POKEMON_FEATURES, NUM_MOVES, MOVE_FEATURES, NUM_TYPES,
     ITEM_BLOCK_V9, ABILITY_BLOCK_V9, VOLATILE_FEATURES, _MOVE_BLOCK_REL,
     SWITCH_OFFSET, move_slots_for_mon, _move_target_kind, _ALLY_KINDS,
 )
@@ -32,10 +32,10 @@ from v_dance.encoders.state_encoder import (  # noqa: E402
 # Offset of the first MOVE feature block within a POKEMON slot — the CANONICAL value from the encoder
 # (v9: after the per-mon weight feature), so it can't silently drift from POKEMON_FEATURES.
 MOVE_BLOCK_START = _MOVE_BLOCK_REL
-# Sanity (v9): the 4 move blocks are followed by the item + ability blocks (identity + tags + known),
-# the 6-float volatile block, then exactly 4 tail flags.
+# Sanity (v9; v11 Phase D D9): the 4 move blocks are followed by the item + ability blocks (identity + tags
+# + known), the volatile block, the tera_type one-hot (NUM_TYPES), then exactly 4 tail flags.
 assert (MOVE_BLOCK_START + NUM_MOVES * MOVE_FEATURES
-        + ITEM_BLOCK_V9 + ABILITY_BLOCK_V9 + VOLATILE_FEATURES + 4 == POKEMON_FEATURES), (
+        + ITEM_BLOCK_V9 + ABILITY_BLOCK_V9 + VOLATILE_FEATURES + NUM_TYPES + 4 == POKEMON_FEATURES), (
     f"move-block offset {MOVE_BLOCK_START} inconsistent with POKEMON_FEATURES "
     f"{POKEMON_FEATURES}"
 )

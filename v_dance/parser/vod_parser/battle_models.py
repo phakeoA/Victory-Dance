@@ -22,19 +22,48 @@ _TRAP_VOL = frozenset({"partiallytrapped", "bind", "wrap", "firespin", "whirlpoo
                        "meanlook", "block", "spiderweb", "octolock", "noretreat", "trapped"})
 _LOCK_VOL = frozenset({"mustrecharge", "lockedmove", "bide", "uproar", "rollout", "iceball",
                        "twoturnmove", "phantomforce", "shadowforce"})
+# v11 C.2: ongoing residual-DAMAGE volatiles (lose HP each turn; switching cleanses) — grouped into ONE
+# switch-pressure flag. Curse fires this id ONLY for the Ghost 1/4-HP variant (the non-Ghost stat-drop
+# Curse deletes its volatileStatus). All four normalise identically offline (parser) and live (poke-env).
+_RESIDUAL_VOL = frozenset({"leechseed", "saltcure", "curse", "nightmare"})
 
 
 def volatile_flags(vol_ids) -> dict:
-    """Map a set of normalised volatile ids -> the encoder's per-mon volatile booleans. SHARED by the
-    offline (PokemonSlot.to_dict) and live (live_state_encoder) paths so the volatile block is byte-parity
-    by construction. ``ability_suppressed`` is handled by the caller (Gastro Acid / Neutralizing Gas)."""
+    """Map a set of normalised volatile ids -> the encoder's per-mon volatile booleans/scalars. SHARED by
+    the offline (PokemonSlot.to_dict) and live (live_state_encoder) paths so the volatile block is byte-
+    parity by construction. ``ability_suppressed`` is handled by the caller (Gastro Acid / Neutralizing
+    Gas). ``perish_norm`` is a FLOAT in [0,1] (not a bool)."""
     ids = set(vol_ids)
+    _perish = [n for n in (3, 2, 1, 0) if f"perish{n}" in ids]   # the countdown ACCUMULATES; lowest = now
     return {
         "rooted": "ingrain" in ids,
         "has_substitute": "substitute" in ids,
         "move_restricted": bool(ids & _RESTRICT_VOL),
         "trapped": bool(ids & _TRAP_VOL),
         "locked_action": bool(ids & _LOCK_VOL),
+        # v11 B.1: Protosynthesis/Quark Drive (incl. Booster Energy) boosting SPEED — the stat suffix is
+        # in the volatile id (|-start|MON|protosynthesisspe). NOT a volatile-block channel; consumed only
+        # by _effective_speed (×1.5). Byte-parity: poke-env Effect.PROTOSYNTHESISSPE normalises identically.
+        "paradox_speed": bool(ids & {"protosynthesisspe", "quarkdrivespe"}),
+        # ── v11 C.2: dropped-volatile channels (pure id-set functions ⇒ offline/live byte-parity) ──
+        "residual_damage": bool(ids & _RESIDUAL_VOL),    # Leech Seed / Salt Cure / Ghost-Curse / Nightmare
+        "confused": "confusion" in ids,                  # 33% self-hit risk
+        # perish_norm: perish0→1.0 (faint imminent) · perish1→0.75 · perish2→0.5 · perish3→0.25 · none→0.0
+        "perish_norm": (4 - min(_perish)) / 4.0 if _perish else 0.0,
+        # v11 C.2b gap-fix: Yawn — the mon falls asleep NEXT turn unless it switches (a switch-or-sleep
+        # signal). 'yawn' lingers in the id set until the |-end| Showdown emits when sleep lands.
+        "drowsy": "yawn" in ids,
+        # v11 C.2c grounding gap-fix — NOT volatile-block channels; consumed by _is_grounded / the band's
+        # Ground-immunity + Tar-Shot type-eff (like paradox_speed). Byte-parity: ids normalise identically.
+        "levitating": bool(ids & {"magnetrise", "telekinesis"}),   # temporarily UNgrounded (Ground-immune)
+        "force_grounded": bool(ids & {"smackdown", "ingrain"}),    # forced grounded (overrides Flying/Levitate)
+        "tar_shot": "tarshot" in ids,                              # +1 step Fire effectiveness (×2)
+        # v11 C.2d type-immunity NEGATION (consumed by the move-writer's chart negation, NOT channels —
+        # like the grounding flags above). Foresight/Odor Sleuth both apply the 'foresight' volatile →
+        # Normal/Fighting vs Ghost 0×→1×; Miracle Eye → Psychic vs Dark 0×→1×. Byte-parity: ids normalise
+        # identically (poke-env Effect.FORESIGHT / Effect.MIRACLE_EYE map to the same ids).
+        "foresight": "foresight" in ids,
+        "miracleeye": "miracleeye" in ids,
     }
 
 
@@ -101,6 +130,12 @@ class PokemonSlot:
     transformed_into: Optional[str] = None   # species currently copied, if any
     ever_transformed: bool = False           # latched: transformed at any point
     #   (match-level signal for revealed_info — never reverts)
+    # v11 P2: runtime TYPE CHANGE that REPLACES the type list (Protean/Libero/Color Change/Soak/
+    # Conversion/Conversion2/Burn Up/Double Shock — any |-start|MON|typechange|). A type-name list
+    # (the encoder re-canons it); None = no active typechange. Mirrors poke-env Pokemon._temporary_types:
+    # SET by the typechange protocol line, CLEARED on switch-out/in, terastallize and transform.
+    # _effective_types reads it at 2nd precedence: tera > runtime_types > transform > dex.
+    runtime_types: Optional[list] = None
     # Illusion (Zoroark): the parser tracks the TRUE identity (so moves credit
     # correctly), but an OPPONENT is fooled into seeing the disguise until a hit
     # breaks it (|replace|).  These let _snapshot_state present the disguise on
@@ -113,6 +148,28 @@ class PokemonSlot:
     # trapping only; ABILITY trapping (Shadow Tag) is derived at encode time from the opponent's ability.
     volatiles: set = field(default_factory=set)   # active normalised volatile ids
     ability_suppressed: bool = False              # Gastro Acid (per-mon ability suppression) in effect
+    # v11 A.3: consecutive-Protect counter (poke-env Pokemon.protect_counter). Driven from the |move|
+    # line; resets on switch / a non-protect move / |cant|. The one |-singleturn| signal that survives
+    # to the next decision snapshot and is exposed identically by poke-env (so it is parity-safe).
+    protect_counter: int = 0
+    # v11 C.3: active-turns counter mirroring poke-env Pokemon._active_turns. RESET to 0 on switch-IN
+    # (replay_parser._handle_switch incoming branch); +1 in the |turn| handler for every ACTIVE,
+    # non-fainted slot, BEFORE the decision snapshot. first_turn = (active_turns == 1) gates Fake Out /
+    # First Impression / Mat Block. poke-env: _active_turns inits 0, is zeroed in switch_OUT (NOT
+    # switch_in), +=1 in end_turn() (one per active mon per |turn|), first_turn = (_active_turns == 1).
+    # NOT reset on switch-out here (poke-env freezes a benched mon's value) → a benched slot's first_turn
+    # stays frozen identically on both paths.
+    active_turns: int = 0
+    # v11 C.4: per-stint Rage Fist hit counter (Showdown Pokemon.timesAttacked). +1 per DIRECT damaging-
+    # move |-damage| hit (chip/recoil/confusion/Future-Sight carry [from] → excluded; self-cost lines
+    # guarded); reset 0 on switch-IN (offline twin of clearVolatile). Feeds Rage Fist BP = 50+50×count.
+    times_attacked: int = 0
+    # v11 exact-mask: specific move-restriction capture, split out of the bundled `move_restricted`
+    # volatile bool so the OFFLINE action mask can drop the EXACT illegal slot (the bundle can't tell
+    # taunt from encore from disable). MASK-ONLY metadata (NOT encoder feature channels); reset on switch.
+    taunt: bool = False                    # |-start|MON|move: Taunt  (blocks status moves)
+    disabled_move: Optional[str] = None    # the move named by |-start|MON|Disable|<Move>
+    encore_move: Optional[str] = None      # move Encore locks into (derived from the last self-selected move)
 
     def key(self) -> str:
         return f"{self.player}{self.slot}"
@@ -149,14 +206,25 @@ class PokemonSlot:
             "mega_ability": self.mega_ability,
             "can_have_choice_item": self.can_have_choice_item,
             "move_pp_used": dict(self.move_pp_used),
+            "times_attacked": self.times_attacked,        # v11 C.4: Rage Fist BP (top-level → att_ctx)
+            "stint_moves": list(self.stint_moves),        # v11 exact-mask: known-Choice lock target
             "is_transformed": self.is_transformed,
             "transformed_into": self.transformed_into,
+            "runtime_types": list(self.runtime_types) if self.runtime_types else None,  # v11 P2 typechange
             "illusion_active": self.illusion_active,
             "disguise_species": self.disguise_species,
             # v9 volatile block (B1-mechanics) — booleans the encoder reads directly. `trapped` is the
-            # MOVE-based component only; the encoder ORs in ability-trapping (Shadow Tag) at encode time.
+            # MOVE-based component only; ability-trapping (Shadow Tag) is NOT yet OR'd into can_switch
+            # (a documented Phase-B follow-up — the encoder currently uses move-trap | rooted only).
+            # protect_counter (v11 A.3) is a non-flag scalar carried here alongside ability_suppressed.
             "volatiles": {**volatile_flags(self.volatiles),
-                          "ability_suppressed": self.ability_suppressed},
+                          "ability_suppressed": self.ability_suppressed,
+                          "protect_counter": self.protect_counter,
+                          "first_turn": self.active_turns == 1,   # v11 C.3
+                          # v11 exact-mask (MASK-ONLY — consumed by build_action_mask, NOT a feature channel):
+                          "taunt": self.taunt,
+                          "disabled_move": self.disabled_move,
+                          "encore_move": self.encore_move},
             # EVs/IVs unknown for Type B — left as distribution placeholder
             "ev_spread": None,
             "iv_spread": None,
@@ -173,11 +241,31 @@ class SideConditions:
     # setter held Light Clay (8-turn), inferrable identically offline (parser counts) and live
     # (poke-env start-turn). See state_encoder field-duration block.
     screens: dict = field(default_factory=dict)
+    # v11 C.1: entry hazards on THIS side (hit a mon SWITCHING IN). Stealth Rock / Sticky Web are 1-layer
+    # (bool); Spikes (0-3) / Toxic Spikes (0-2) STACK — store the layer count (parity with poke-env's
+    # STACKABLE_CONDITIONS). Persist until removed (Defog / Rapid Spin / Court Change); no turn decay.
+    stealth_rock: bool = False
+    spikes: int = 0
+    toxic_spikes: int = 0
+    sticky_web: bool = False
+    # v11 C.2b gap-fix: persistent team-protection side conditions (5 turns) that had a SIDE_COND channel
+    # but were never populated. Safeguard = status immunity, Mist = stat-drop/Intimidate immunity,
+    # Lucky Chant = crit immunity. Presence bits (no field-duration channel for these).
+    safeguard: bool = False
+    mist: bool = False
+    lucky_chant: bool = False
 
     def to_dict(self) -> dict:
         return {
             "tailwind_turns_remaining": self.tailwind,
             "screens": dict(self.screens),
+            "stealth_rock": self.stealth_rock,
+            "spikes": self.spikes,
+            "toxic_spikes": self.toxic_spikes,
+            "sticky_web": self.sticky_web,
+            "safeguard": self.safeguard,
+            "mist": self.mist,
+            "lucky_chant": self.lucky_chant,
         }
 
 
@@ -188,6 +276,9 @@ class FieldConditions:
     trick_room: int = 0      # turns remaining; base 5, no item extension
     weather_turns: int = 0   # turns ACTIVE (elapsed); >5 ⇒ a weather-rock 8-turn instance
     terrain_turns: int = 0   # turns ACTIVE (elapsed); >5 ⇒ a Terrain-Extender 8-turn instance
+    gravity: int = 0         # v11 C.2e: turns remaining; base 5 (7 if announced [persistent]); no item ext
+    magic_room: int = 0      # v11 P5: turns remaining; base 5 (7 if [persistent]); suppresses ALL item effects
+    wonder_room: int = 0     # v11 P5: turns remaining; base 5 (7 if [persistent]); swaps Def<->SpD in the band
 
     def to_dict(self) -> dict:
         return {
@@ -196,4 +287,7 @@ class FieldConditions:
             "trick_room_turns_remaining": self.trick_room,
             "weather_turns_active": self.weather_turns,
             "terrain_turns_active": self.terrain_turns,
+            "gravity_turns_remaining": self.gravity,
+            "magic_room_turns_remaining": self.magic_room,
+            "wonder_room_turns_remaining": self.wonder_room,
         }

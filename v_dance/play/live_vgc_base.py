@@ -215,9 +215,17 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
         # resolve the whole turn with /choose default (Showdown plays the forced move) instead
         # of the retry-storm + rejected Pass. Normal turns (non-empty mask) are unaffected.
         if self._active_empty_mask(battle):
-            self._source_counts["forced_default"] += 1
+            # An active slot is forced into a synthetic move (recharge/Struggle) the codec can't express.
+            # Its empty mask makes it unrecordable for RL → drop the step. But if a PARTNER slot has a
+            # real choice, PRESERVE its model decision (forced move + partner order) instead of collapsing
+            # the WHOLE turn to /choose default (which plays the free slot randomly = policy-destructive).
             self._discard_rl_decision(battle, "turn")
-            return DefaultBattleOrder()
+            g0, g1 = self._select_gimmicks(battle, state_vec, action_s0, action_s1)
+            order = self._forced_aware_double_order(battle, action_s0, action_s1, g0, g1,
+                                                    opp_present_recon)
+            self._source_counts["forced_default" if isinstance(order, DefaultBattleOrder)
+                                else "forced_partial"] += 1
+            return order
 
         # ── Retry exploration ───────────────────────────────────────────────
         # poke-env re-calls choose_move (without the battle advancing) when
