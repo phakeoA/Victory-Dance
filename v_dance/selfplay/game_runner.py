@@ -114,12 +114,16 @@ def finalize_trajectory(collector: TrajectoryCollector, *, won: Optional[bool],
     traj = collector.finish(own_team=list(own_team), opp_team=list(opp_team),
                             tp_bring=bring, tp_leads=leads, won=won,
                             terminal_type=terminal_type, n_turns=int(n_turns))
-    place_terminal_reward(traj)
+    # T3.1: a FALLBACK trajectory (backstop-forfeit) carries no terminal reward — it must be
+    # discarded from the batch, not rewarded. place_terminal_reward asserts is_trainable, so skip it.
+    if traj.meta.is_trainable:
+        place_terminal_reward(traj)
     return traj
 
 
 # ── recording live player ──────────────────────────────────────────────────────
 from v_dance.play.player import VGCPlayer  # noqa: E402  (local spliced player)
+from v_dance.play.live_vgc_base import _norm_tag  # noqa: E402  (T3.1: match the forfeit-tag key)
 from v_dance.play.vgc_base import (  # noqa: E402
     build_legal_action_mask, build_replacement_mask, build_gimmick_legal_mask,
 )
@@ -144,6 +148,8 @@ class SelfPlayVGCPlayer(VGCPlayer):
                          live_dir=live_dir, save_replays=save_replays, **kwargs)
         self._ac = actor_critic
         self._model = actor_critic.policy            # drive with the live actor
+        self._collect_sample = True                  # #9/#9b: sample gimmick + forced-replacement at tau (match recorded log-prob)
+        self._record_masks = True                    # #10/#11: log the deduped behaviour mask the model sampled under
         self._model_heads = actor_critic.head_names
         self._tau = float(tau)
         self._collectors: dict = {}                  # battle_tag -> TrajectoryCollector
@@ -162,11 +168,18 @@ class SelfPlayVGCPlayer(VGCPlayer):
         if source not in _MODEL_SOURCES:
             return  # retry / fallback / escape are not the model's decision
         try:
+            # #10/#11: prefer the per-slot mask the model was ACTUALLY sampled under (carries the cross-slot
+            # switch/replacement dedup), stashed by _select_actions/_select_replacement_actions; fall back to
+            # a fresh build per slot when absent (e.g. a non-recorded edge).
+            _sm = getattr(self, "_sampling_masks", None)
+            _stash = _sm.pop((battle.battle_tag, decision_type), None) if _sm is not None else None
             if decision_type == "replacement":
-                m0, m1 = build_replacement_mask(battle, 0), build_replacement_mask(battle, 1)
+                m0 = _stash[0] if (_stash and _stash[0] is not None) else build_replacement_mask(battle, 0)
+                m1 = _stash[1] if (_stash and _stash[1] is not None) else build_replacement_mask(battle, 1)
                 gm0 = gm1 = None
             else:
-                m0, m1 = build_legal_action_mask(battle, 0), build_legal_action_mask(battle, 1)
+                m0 = _stash[0] if (_stash and _stash[0] is not None) else build_legal_action_mask(battle, 0)
+                m1 = _stash[1] if (_stash and _stash[1] is not None) else build_legal_action_mask(battle, 1)
                 gm0, gm1 = build_gimmick_legal_mask(battle, 0), build_gimmick_legal_mask(battle, 1)
             c = self._collector_for(battle)
             # De-dup (3c.1c): poke-env re-calls for the SAME (turn, decision_type) only
@@ -203,6 +216,12 @@ class SelfPlayVGCPlayer(VGCPlayer):
     def _battle_finished_callback(self, battle):
         try:
             tag = battle.battle_tag
+            # #10/#11: drop any per-battle sampling-mask stashes for a last turn that was selected but not
+            # recorded (discarded forced-partial/retry), so the dict can't accrete over a long run.
+            _sm = getattr(self, "_sampling_masks", None)
+            if _sm is not None:
+                for _dt in ("turn", "replacement"):
+                    _sm.pop((tag, _dt), None)
             c = self._collectors.get(tag)
             if c is not None and len(c) > 0:
                 won = True if battle.won else False if getattr(battle, "lost", False) else None
@@ -215,9 +234,15 @@ class SelfPlayVGCPlayer(VGCPlayer):
                 own_team = tp.get("own_team") or [
                     getattr(m, "species", "?")
                     for m in (getattr(battle, "team", None) or {}).values()]
+                # T3.1: if WE forfeited this battle as a loop-guard backstop, it is NOT a real loss —
+                # tag it FALLBACK (won=None) so finalize skips the −1 and run_generation drops BOTH
+                # perspectives by battle_id (the opponent's mirror +1 is equally mislabeled). The base
+                # _handle_force_switch records the forfeit in self._forfeited_tags keyed by _norm_tag.
+                _forfeited = _norm_tag(tag) in getattr(self, "_forfeited_tags", ())
+                _tt = "fallback" if _forfeited else terminal_type_for(
+                    battle.won, getattr(battle, "lost", False))
                 self._finished[tag] = finalize_trajectory(
-                    c, won=won, terminal_type=terminal_type_for(battle.won,
-                                                                getattr(battle, "lost", False)),
+                    c, won=None if _forfeited else won, terminal_type=_tt,
                     own_team=own_team, n_turns=getattr(battle, "turn", len(c)),
                     tp_bring=tp.get("bring"), tp_leads=tp.get("leads"),
                     opp_team=tp.get("opp_team") or ())

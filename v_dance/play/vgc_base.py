@@ -1006,6 +1006,20 @@ class VGCPlayerBase(Player):
         """Handle a forceSwitch request (loop-guarded — see _force_switch_escape)."""
         escape = self._force_switch_escape(battle)
         if escape is not None:
+            # #4-ext: record a backstop-FORFEIT tag for the ROOT lineage too (scripted/random opponents that
+            # don't use the Splicing handler), so the self-play recorder can FALLBACK-discard a battle the
+            # OPPONENT forfeited instead of crediting us a spurious +1. Mirrors SplicingVGCPlayerBase's
+            # populate; inline the '>'-strip (== _norm_tag) to avoid a circular import from live_vgc_base.
+            if isinstance(escape, ForfeitBattleOrder):
+                seen = getattr(self, "_forfeited_tags", None)
+                if seen is None:
+                    seen = self._forfeited_tags = set()
+                _t = str(getattr(battle, "battle_tag", "") or "").strip().lstrip(">").strip()
+                if _t not in seen:
+                    seen.add(_t)
+                    _sc = getattr(self, "_source_counts", None)   # root scripted/random players lack it
+                    if _sc is not None:
+                        _sc["forfeit"] += 1
             return escape
         return self._build_force_switch_order(battle)
 

@@ -119,6 +119,26 @@ def run_generation(
     gen = history.generation
 
     trajectories, sources = collect_fn(actor_critic, league, gen)
+    # T3.1: drop FALLBACK trajectories (loop-guard backstop-forfeits) + their mislabeled zero-sum
+    # mirror, by battle_id, before they reach PPO (a forfeited battle is an engineering escape, not a
+    # game — rewarding either side corrupts credit assignment, sec 1). reward.py is torch-free.
+    from v_dance.selfplay.reward import drop_fallback_pairs, model_driven_fraction  # noqa: E402
+    _n0 = len(trajectories)
+    trajectories = drop_fallback_pairs(trajectories)
+    if len(trajectories) != _n0:
+        log.warning("gen %d: dropped %d FALLBACK/mirror trajectories (backstop-forfeits)",
+                    gen, _n0 - len(trajectories))
+    # T3.2: MODEL-DRIVEN% guard (sec 1) the live path previously never ran. SOFT by design: a strict
+    # 0.99 hard-fail would crash the run on benign forced-default turns (recharge / Struggle / Choice-
+    # lock all legitimately count as non-model, and rejected-resamples over-count). So WARN below 0.95
+    # and HARD-FAIL only on a CATASTROPHIC drop (< 0.75) = a genuine desync flood corrupting the corpus.
+    _md = model_driven_fraction(sources)
+    if _md < 0.95:
+        log.warning("gen %d: MODEL-DRIVEN%% %.3f < 0.95 — watch the forced-default/desync rate "
+                    "(sources=%s)", gen, _md, dict(sources))
+    assert _md >= 0.75, (
+        f"gen {gen}: MODEL-DRIVEN% {_md:.3f} < 0.75 — self-play corpus corrupted by a desync flood "
+        f"(sources={dict(sources)}); aborting before PPO trains on garbage (sec 1)")
     # fs-monitor: surface this gen's force-switch / forced-default / forfeit edge tally (was computed
     # by the live player + aggregated across workers, then discarded) into status.json so the rate is
     # watchable instead of buried in the log.
@@ -180,6 +200,16 @@ def run_generation(
         restore_fn(actor_critic, history.best_path)   # collapse recovery (optimisers reset too)
         league.reset_pfsp()
         history.h2h_history = []                 # abandon the climb (restored policy == champion)
+
+    # T4.2: a REVERTED candidate gen{N}.pt was written by save_fn but never admitted to the league, so
+    # cleanup_fn (which only deletes EVICTED league snapshots) never reaches it → a ~21MB orphan per
+    # collapse-revert. Unlink it here (live run only; guarded to never touch the restored champion).
+    if (verdict == "revert" and cleanup_fn is not None and candidate
+            and str(candidate) != str(history.best_path)):
+        try:
+            Path(candidate).unlink(missing_ok=True)
+        except OSError:
+            log.debug("could not unlink reverted candidate %s", candidate, exc_info=True)
 
     # Bound the league (between gens — safe vs in-flight chunk id lookups); cleanup_fn (live
     # only) deletes the evicted checkpoint files (champions are kept, so the rollback target
@@ -275,6 +305,7 @@ async def collect_with_league(actor_critic, league: OpponentLeague, n_games: int
     import v_dance.play.run_local_battle as R
     from poke_env import AccountConfiguration
     from v_dance.play import parallel_battles as PB
+    from v_dance.play.live_vgc_base import _norm_tag   # #4: match the opponent's forfeit-tag key
     from v_dance.eval.gauntlet import _make_opponent
     from v_dance.selfplay.game_runner import SelfPlayVGCPlayer
 
@@ -325,6 +356,17 @@ async def collect_with_league(actor_critic, league: OpponentLeague, n_games: int
         finally:
             source_counts.update(getattr(our, "_source_counts", {}) or {})
             our_trajs = our.finished_trajectories()
+            # #4 (T3.1 extension): for a NON-recording opponent (snapshot / scripted), if IT backstop-
+            # forfeited a battle, OUR +1 win there is spurious (an engineering escape, not real skill) —
+            # tag our trajectory FALLBACK so drop_fallback_pairs discards it. kind=='latest' is already
+            # handled: the opponent SelfPlayVGCPlayer marks its OWN trajectory FALLBACK and both
+            # perspectives share battle_id.
+            if kind != "latest":
+                _opp_ff = getattr(opp, "_forfeited_tags", None)
+                if _opp_ff:
+                    for _t in our_trajs.values():
+                        if _norm_tag(_t.meta.battle_id) in _opp_ff:
+                            _t.meta.terminal_type = "fallback"
             trajectories.extend(our_trajs.values())
             prog["games"] += cn
             for _t in our_trajs.values():
@@ -1286,6 +1328,7 @@ if __name__ == "__main__":
 
     import argparse
 
+    from v_dance.play.model_io import DEFAULT_BC_CHECKPOINT, DEFAULT_TP_CHECKPOINT  # shared prod paths
     ap = argparse.ArgumentParser(description="Generation loop (3c.3)")
     ap.add_argument("--config", default=None,
                     help="JSON run-config to override defaults for EVERY knob — including ones "
@@ -1317,8 +1360,7 @@ if __name__ == "__main__":
                          "bar needs ~360 to hold false-promote ~3%% AND the mirror-collapse revert "
                          "needs it). The scripted ladder stays at --eval-battles; only the mirror is bumped.")
     ap.add_argument("--warmup", type=int, default=5, help="critic-only warm-up updates (gen 0)")
-    ap.add_argument("--ckpt", default=str(_REPO_ROOT / "ai_train_scripts" / "BC_model"
-                                          / "checkpoints_attn" / "bc_best.pt"))
+    ap.add_argument("--ckpt", default=str(DEFAULT_BC_CHECKPOINT))
     ap.add_argument("--train-teams", nargs="+", default=["all"],
                     help="TRAINING team pool: 'all' (default) = every team under "
                          "teams/Champions/ (archetype-rich draw, sec 15; auto-picks up "
@@ -1335,8 +1377,7 @@ if __name__ == "__main__":
                     help="cap the EVAL pool to this many teams (sampled, seeded by --seed).")
     ap.add_argument("--teams", nargs="+", default=None,
                     help="(deprecated) set BOTH the train and eval pools to this explicit list")
-    ap.add_argument("--team-chooser", default=str(_REPO_ROOT / "ai_train_scripts"
-                    / "teamPreview_model" / "checkpoints" / "teampreview_best.pt"))
+    ap.add_argument("--team-chooser", default=str(DEFAULT_TP_CHECKPOINT))
     ap.add_argument("--archive", default=str(_REPO_ROOT / "artifacts" / "self_play_archive"))
     ap.add_argument("--tau", type=float, default=1.0,
                     help="FINAL/baseline collection temperature the anneal settles to (also the "

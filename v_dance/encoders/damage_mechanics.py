@@ -164,7 +164,8 @@ def variable_base_power(move_id: Optional[str], static_bp: float, *,
     if mid in ("heavyslam", "heatcrash") and attacker_weight and target_weight:
         return _heavy_slam_bp(attacker_weight, target_weight)
     if mid == "gyroball" and attacker_speed and target_speed:
-        return min(150.0, max(1.0, float(int(25 * target_speed / max(1.0, attacker_speed)))))
+        # Showdown: floor(25 * tgt_spe / usr_spe) + 1, clamped to [1,150] (moves.ts gyroball). The +1 was missing.
+        return min(150.0, max(1.0, float(int(25 * target_speed / max(1.0, attacker_speed)) + 1)))
     if mid == "electroball" and attacker_speed and target_speed:
         return float(_electro_ball_bp(attacker_speed, target_speed))
     if mid in ("eruption", "waterspout", "dragonenergy") and attacker_hp_frac is not None:

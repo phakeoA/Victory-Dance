@@ -35,8 +35,9 @@ _HERE = Path(__file__).resolve().parent
 _REPO_ROOT = _HERE.parent
 from poke_env.battle import DoubleBattle  # noqa: E402
 
-from v_dance.play.vgc_base import VGCPlayerBase, build_legal_action_mask  # noqa: E402
-from v_dance.encoders.state_encoder import SWITCH_OFFSET, NUM_MOVES  # noqa: E402
+from v_dance.play.vgc_base import (  # noqa: E402
+    VGCPlayerBase, build_legal_action_mask, own_active_move_list)
+from v_dance.encoders.state_encoder import SWITCH_OFFSET  # noqa: E402
 
 log = logging.getLogger(__name__)
 
@@ -55,12 +56,15 @@ def _active_mon(battle: DoubleBattle, slot: int):
 
 
 def _move_for(battle: DoubleBattle, slot: int, move_idx: int):
-    """The Move object behind move-index ``move_idx`` for ``slot`` — same ordering
-    (``list(mon.moves.values())[:NUM_MOVES]``) the codec / action mask use."""
+    """The Move object behind move-index ``move_idx`` for ``slot``. T4.5: use the SAME
+    ``own_active_move_list`` the legality mask + order codec use — not raw ``mon.moves`` — so the score
+    and the mask reference identical move indices. Under an own-side Illusion mon.moves is empty while
+    the mask/codec fall back to the request-authoritative ``available_moves``; the old raw read scored
+    every legal move bucket _NO_MOVE there, degrading the scripted opponent to a near-random pick."""
     mon = _active_mon(battle, slot)
     if mon is None:
         return None
-    moves = list(mon.moves.values())[:NUM_MOVES]
+    moves = own_active_move_list(battle, slot, mon)
     return moves[move_idx] if move_idx < len(moves) else None
 
 

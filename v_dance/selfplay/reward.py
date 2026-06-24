@@ -56,6 +56,25 @@ def assert_model_driven(source_counts: Dict[str, int], threshold: float = 0.99) 
     return frac
 
 
+def drop_fallback_pairs(trajectories: List[Trajectory]) -> List[Trajectory]:
+    """T3.1: drop FALLBACK trajectories (loop-guard backstop-forfeits) AND their zero-sum mirror —
+    the SAME battle_id recorded from the OTHER perspective, which sees a (mislabeled) +1 win. A
+    forfeited battle is an engineering escape, not a game; rewarding EITHER side corrupts credit
+    assignment (sec 1). The live collection path flattens both perspectives into one flat list, so we
+    drop by battle_id rather than by pairing. ``is_trainable`` is False only for FALLBACK (HORIZON_CUT
+    bootstraps and is kept). Defensive: anything without a readable ``meta`` is conservatively KEPT —
+    never silently drop data we cannot classify."""
+    def _meta(t):
+        return getattr(t, "meta", None)
+
+    bad = {m.battle_id for t in trajectories
+           if (m := _meta(t)) is not None and not m.is_trainable}
+    if not bad:
+        return trajectories
+    return [t for t in trajectories
+            if (m := _meta(t)) is None or m.battle_id not in bad]
+
+
 def prepare_batch(
     trajectories: List[Trajectory], *,
     source_counts: Optional[Dict[str, int]] = None,

@@ -43,6 +43,8 @@ from poke_env import AccountConfiguration
 from v_dance.play.player import VGCPlayer              # local_battle/player.py (spliced)
 from v_dance.play.random_player import RandomVGCPlayer  # local_battle/random_player.py (spliced)
 from v_dance import formats                            # single source of truth for the active format
+from v_dance.play.model_io import (DEFAULT_BC_CHECKPOINT,   # single source of truth for the prod checkpoints
+                                   DEFAULT_TP_CHECKPOINT)   # (shared with generation.py / gauntlet.py)
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -471,8 +473,8 @@ def make_player(
     username: str,
     team: str,
     *,
-    model_path: Path = _REPO_ROOT / "ai_train_scripts" / "BC_model" / "checkpoints" / "bc_best.pt",
-    team_chooser_path: Path = _REPO_ROOT / "ai_train_scripts" / "teamPreview_model" / "checkpoints" / "teampreview_best.pt",
+    model_path: Path = DEFAULT_BC_CHECKPOINT,
+    team_chooser_path: Path = DEFAULT_TP_CHECKPOINT,
     max_concurrent_battles: int = 1,
     live_dir=None, save_replays: bool = False,
     replay_dir=None, replay_label=None,
@@ -544,8 +546,8 @@ async def run(
                     "--team1/--team2 for distinct teams.", team1_path)
 
     # ── Trained checkpoints (set to None to fall back to a random player) ─────
-    battle_model_path = _REPO_ROOT / "ai_train_scripts" / "BC_model" / "checkpoints" / "bc_best.pt"
-    team_chooser_path = _REPO_ROOT / "ai_train_scripts" / "teamPreview_model" / "checkpoints" / "teampreview_best.pt"
+    battle_model_path = DEFAULT_BC_CHECKPOINT
+    team_chooser_path = DEFAULT_TP_CHECKPOINT
     for _p in (battle_model_path, team_chooser_path):
         if not _p.exists():
             log.warning("checkpoint missing: %s — that player will use the random fallback.", _p)

@@ -244,7 +244,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     _prep = Path("data") / "vods" / "Prepared_training_data" / "Regulation_MA"
     default_data = [str(_prep / f"Jsonl_Type{t}") for t in ("A", "B", "C", "D")]
     ap.add_argument("--data", nargs="+", default=default_data)
-    ap.add_argument("--ckpt", default=str(_HERE / "checkpoints" / "bc_best.pt"))
+    # T4.1: default to the PRODUCTION battle-net checkpoint (was _HERE/"checkpoints"/"bc_best.pt" =
+    # v_dance/training/checkpoints, which does not exist). Matches model_io.DEFAULT_BC_CHECKPOINT.
+    ap.add_argument("--ckpt", default=str(
+        _HERE.parents[1] / "ai_train_scripts" / "BC_model" / "checkpoints_attn" / "bc_best.pt"))
     ap.add_argument("--val-frac", type=float, default=0.1,
                     help="MUST match the training run to reproduce its val split")
     ap.add_argument("--seed", type=int, default=0)

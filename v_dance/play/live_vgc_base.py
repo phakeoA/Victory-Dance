@@ -151,6 +151,12 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
         # doesn't loop forever when Showdown reports a choice "[Unavailable]"
         # (e.g. a trapped switch / disabled move our approximate mask allows).
         self._tried_actions: dict = {}
+        # T3.3: per-(battle,turn) count of forced-aware partial-order builds (recharge/Struggle on one
+        # slot + a free partner). If that partial order keeps getting REJECTED (a free-slot mask desync),
+        # poke-env re-calls choose_move with the same (battle,turn) and the branch would rebuild the
+        # same rejected order forever — this counter escalates it to /choose default after N, mirroring
+        # the retry path's _MAX_TURN_RETRIES escape (the _active_empty_mask branch has no other guard).
+        self._forced_aware_attempts: dict = {}
         # per-source decision tally (model / retry / forced_switch / model_error …)
         # so a run can show, at a glance, that the AI — not randomness — is driving.
         self._source_counts: "Counter[str]" = Counter()
@@ -220,6 +226,22 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
             # real choice, PRESERVE its model decision (forced move + partner order) instead of collapsing
             # the WHOLE turn to /choose default (which plays the free slot randomly = policy-destructive).
             self._discard_rl_decision(battle, "turn")
+            # T3.3 loop-guard: poke-env re-calls choose_move with the SAME (battle,turn) when Showdown
+            # REJECTS our order (a rare free-slot mask desync). This branch had no escalation — unlike the
+            # retry path and the forceSwitch backstop — so a rejected partial order could rebuild forever
+            # (a retry-storm bounded only by the stall watchdog). After _MAX_TURN_RETRIES rebuilds for the
+            # same (battle,turn), fall back to /choose default (always accepted; model not driving).
+            fa_key = (battle.battle_tag, battle.turn)
+            fa_n = self._forced_aware_attempts.get(fa_key, 0)
+            self._forced_aware_attempts[fa_key] = fa_n + 1
+            if len(self._forced_aware_attempts) > 512:        # bound over a long run
+                self._forced_aware_attempts = {fa_key: fa_n + 1}
+            if fa_n >= _MAX_TURN_RETRIES:
+                log.warning("Turn %d [%s] forced-aware order rejected %d× — '/choose default' "
+                            "(forced-move + free-slot mask desync; model not driving).",
+                            battle.turn, battle.battle_tag, fa_n)
+                self._source_counts["retry_default"] += 1
+                return DefaultBattleOrder()
             g0, g1 = self._select_gimmicks(battle, state_vec, action_s0, action_s1)
             order = self._forced_aware_double_order(battle, action_s0, action_s1, g0, g1,
                                                     opp_present_recon)

@@ -163,6 +163,16 @@ async def _collect_specs(ac, specs: List[ChunkSpec], *, tau: float, seed: int,
         finally:
             source_counts.update(getattr(our, "_source_counts", {}) or {})
             our_trajs = our.finished_trajectories()
+            # #4 (T3.1 extension): a NON-recording opponent (snapshot/scripted) that backstop-forfeited
+            # makes OUR +1 win there spurious → tag our trajectory FALLBACK so drop_fallback_pairs discards
+            # it. (latest is handled by the opp SelfPlayVGCPlayer's own FALLBACK + shared battle_id.) Inline
+            # the tag-normalize (strip leading '>') to keep this module poke-env-free, matching _norm_tag.
+            if spec.kind != "latest":
+                _opp_ff = getattr(opp, "_forfeited_tags", None)
+                if _opp_ff:
+                    for _t in our_trajs.values():
+                        if (str(_t.meta.battle_id or "").strip().lstrip(">").strip()) in _opp_ff:
+                            _t.meta.terminal_type = "fallback"
             trajectories.extend(our_trajs.values())
             games["n"] += len(our_trajs)
             if spec.kind == "latest":

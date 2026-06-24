@@ -94,12 +94,23 @@ class VGCPlayer(VGCPlayerBase):
 
         # Serve-side action sampling (TIER-4).  temperature<=0 → deterministic
         # masked argmax (the default, unchanged behaviour); >0 → temperature /
-        # top-p nucleus sampling over the legal actions.  Gimmick + forced
-        # replacement stay deterministic (argmax).
+        # top-p nucleus sampling over the legal actions.  Forced replacement stays
+        # deterministic (argmax).
         self._temperature = float(temperature)
         self._top_p       = float(top_p)
         self._rng = (np.random.default_rng(sample_seed)
                      if self._temperature > 0.0 else None)
+        # #9 + #9b: whether to SAMPLE the model's stochastic sub-decisions (gimmick AND forced-replacement)
+        # at self._temperature instead of argmax. Default False (eval/serve = deterministic). Self-play
+        # collection sets it True so the PLAYED decision matches its tau-recorded behaviour log-prob (else it
+        # is logged as tau-sampled but chosen greedily → off-policy gradient + zero exploration on that head).
+        self._collect_sample = False
+        # #10/#11: when recording (self-play), stash the per-slot legal mask the model was ACTUALLY sampled
+        # under — including the cross-slot switch/replacement dedup (slot 1's colliding switch removed) —
+        # keyed by (battle_tag, decision_type), so _record_rl_decision logs the true behaviour mask instead
+        # of rebuilding an un-deduped one (which over-states slot 1's legal set on collision turns).
+        self._record_masks = False
+        self._sampling_masks: dict = {}
 
         # ── Load battle model (dict checkpoint → reconstruct + load_state_dict) ─
         if model_path is not None and _TORCH_AVAILABLE:
@@ -202,6 +213,10 @@ class VGCPlayer(VGCPlayerBase):
                     self._model, self._model_heads, state_vec, mask0, mask1, self._device,
                     temperature=self._temperature, top_p=self._top_p, rng=self._rng,
                 )
+            # #10: stash the masks the model was sampled under (mask1 carries the cross-slot switch dedup)
+            # so the recorded behaviour mask matches the sampling distribution.
+            if getattr(self, "_record_masks", False):
+                self._sampling_masks[(battle.battle_tag, "turn")] = (mask0, mask1)
             # None ⟺ all-zero mask ⟺ empty/fainted slot → 0 (passes via _safe_order).
             return (a0 if a0 is not None else 0,
                     a1 if a1 is not None else 0,
@@ -238,7 +253,11 @@ class VGCPlayer(VGCPlayerBase):
                     out.append(GIMMICK_NONE)        # switch / no action never megas
                     continue
                 gmask = build_gimmick_legal_mask(battle, slot)
-                g = _M.masked_argmax(glog[slot], gmask)
+                # #9: self-play samples at tau (matches the recorded behaviour log-prob + explores mega);
+                # eval/serve uses deterministic argmax. masked_sample(temperature<=0) == masked_argmax.
+                g = (_M.masked_sample(glog[slot], gmask, temperature=self._temperature, rng=self._rng)
+                     if getattr(self, "_collect_sample", False)
+                     else _M.masked_argmax(glog[slot], gmask))
                 out.append(g if g is not None else GIMMICK_NONE)
             # Cross-slot mega dedup: Showdown allows only ONE Mega Evolution per
             # BATTLE (so at most one per turn).  The two gimmick heads decide
@@ -293,6 +312,7 @@ class VGCPlayer(VGCPlayerBase):
             l0, l1 = _M.head_logits(self._model, self._model_heads, state_vec, self._device)
             logits = (l0, l1)
             out: List[Optional[int]] = [None, None]
+            rep_masks: List = [None, None]   # #11: per-slot mask actually argmaxed under (with dedup)
             taken: set = set()      # bench indices already assigned (dedupe slots)
             forced_any = False
             for slot in (0, 1):
@@ -302,7 +322,12 @@ class VGCPlayer(VGCPlayerBase):
                 mask = build_replacement_mask(battle, slot)
                 for i in taken:
                     mask[SWITCH_OFFSET + i] = False
-                a = _M.masked_argmax(logits[slot], mask)
+                rep_masks[slot] = mask
+                # #9b: sample the replacement at tau in self-play (match the recorded log-prob + explore),
+                # deterministic argmax in eval/serve. masked_sample(temperature<=0) == masked_argmax.
+                a = (_M.masked_sample(logits[slot], mask, temperature=self._temperature, rng=self._rng)
+                     if getattr(self, "_collect_sample", False)
+                     else _M.masked_argmax(logits[slot], mask))
                 if a is None:
                     # Forced slot but the brought bench is exhausted (Pattern A): PASS
                     # this slot (out[slot] stays None).  This is the model's decision,
@@ -313,6 +338,8 @@ class VGCPlayer(VGCPlayerBase):
                 taken.add(a - SWITCH_OFFSET)
             if not forced_any:
                 return None         # nothing to replace → defer (defensive; caller gates on any(force))
+            if getattr(self, "_record_masks", False):
+                self._sampling_masks[(battle.battle_tag, "replacement")] = (rep_masks[0], rep_masks[1])
             return out[0], out[1], "forced_switch_model"
         except Exception as exc:
             log.warning("Model replacement selection failed (%s) — using random.", exc)

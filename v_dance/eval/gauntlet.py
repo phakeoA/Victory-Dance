@@ -476,6 +476,7 @@ def resolve_team_pool(args) -> List[str]:
 
 # ══════════════════════════════════════════════════════════════════════════════
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    from v_dance.play.model_io import DEFAULT_BC_CHECKPOINT, DEFAULT_TP_CHECKPOINT  # shared prod paths
     ap = argparse.ArgumentParser(description="BC win-rate eval gauntlet (#3)")
     ap.add_argument("--battles", "-n", type=int, default=20,
                     help="battles per opponent (split across the team pool)")
@@ -495,10 +496,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap.add_argument("--n-teams", type=int, default=None,
                     help="cap the pool to this many teams (randomly sampled, seeded by "
                          "--matchup-seed so it's reproducible). Default: use the whole pool.")
-    ap.add_argument("--ckpt", default=str(_REPO_ROOT / "ai_train_scripts" / "BC_model"
-                                          / "checkpoints" / "bc_best.pt"))
-    ap.add_argument("--team-chooser", default=str(_REPO_ROOT / "ai_train_scripts"
-                    / "teamPreview_model" / "checkpoints" / "teampreview_best.pt"))
+    ap.add_argument("--ckpt", default=str(DEFAULT_BC_CHECKPOINT))
+    ap.add_argument("--team-chooser", default=str(DEFAULT_TP_CHECKPOINT))
     ap.add_argument("--prev-best", default=None,
                     help="checkpoint for the prev_best mirror opponent (if used)")
     ap.add_argument("--history", default=str(DEFAULT_HISTORY))

@@ -429,9 +429,13 @@ def _defender_profile(mon: Optional[dict], side_screens: tuple = (False, False),
             "resist_berry": _RESIST_BERRY_TYPE.get(_item)}
 
 
-# B1.2b weather-speed abilities → the weather they double speed in.
+# B1.2b weather-speed abilities → the weather they double speed in. ⚠ These key on the RAW poke-env /
+# parser weather token that _effective_speed / _live_effective_speed actually receive (un-aliased: offline
+# _canon(parser_token), live Weather.name), NOT the encoder's canonical one-hot token. For gen-9 SNOW that
+# raw token is "SNOWSCAPE" (poke-env Weather.SNOWSCAPE; Showdown emits |-weather|Snowscape) — the old
+# "SNOW" was the canonical-one-hot alias target and never matched here, so Slush Rush never boosted.
 _WEATHER_SPEED_ABILITY = {"swiftswim": ("RAINDANCE",), "chlorophyll": ("SUNNYDAY",),
-                          "sandrush": ("SANDSTORM",), "slushrush": ("SNOW", "HAIL")}
+                          "sandrush": ("SANDSTORM",), "slushrush": ("SNOWSCAPE", "HAIL")}
 
 # v11 B.2: SPECIAL moves that hit the target's physical DEF instead of SpD (overrideDefensiveStat:'def').
 _DEF_HIT_MOVES = frozenset({"psyshock", "psystrike", "secretsword"})
@@ -614,22 +618,25 @@ def _effective_speed(mon: Optional[dict], side_tailwind: bool,
     stage = (mon.get("boosts") or {}).get("spe", 0) or 0
     spe *= ((2 + stage) / 2.0) if stage >= 0 else (2.0 / (2 - stage))
     # v11 B.1 (#4): Quick Feet ×1.5 on ANY status AND it NEGATES the paralysis ×0.5 (Showdown skips the
-    # para Spe cut for Quick Feet holders — so a paralyzed Quick Feet mon is ×1.5, not ×0.75). Resolve the
-    # ability through the belief-aware resolver (parity with the weather-speed branch below).
+    # para Spe cut for Quick Feet holders — so a paralyzed Quick Feet mon is ×1.5, not ×0.75).
+    # T2.1 parity fix: resolve through resolve_ACTIVE_ability_json (the mega forme's ability), NOT the
+    # base resolve_ability_json — the live path uses poke-env mon.ability (= the active/mega ability), so a
+    # mega whose forme ability is a speed ability differing from its base (e.g. Mega Swampert: Torrent→Swift
+    # Swim) diverged offline↔live on eff_speed under weather. Active resolver matches live + is correct.
     _status = _canon(mon.get("status"))
-    if resolve_ability_json(mon)[0] == "quickfeet" and _status:
+    if resolve_active_ability_json(mon)[0] == "quickfeet" and _status:
         spe *= 1.5
     elif _status == "PAR":
         spe *= 0.5
     item_id, _ = resolve_item_json(mon)
     item_id = _item_active(item_id, magic_room,               # v11 P5: Magic Room suppresses Choice Scarf
-                           klutz=resolve_ability_json(mon)[0] == "klutz",   # v11 Klutz
+                           klutz=resolve_active_ability_json(mon)[0] == "klutz",   # v11 Klutz (T2.1: active)
                            embargo=bool((mon.get("volatiles") or {}).get("embargo")))  # v11 Embargo
     if _ITEM_EFFECT_IDX.get("choice_speed") in item_effect_indices(item_id):
         spe *= 1.5
     if side_tailwind:
         spe *= 2.0
-    if weather and weather in _WEATHER_SPEED_ABILITY.get(resolve_ability_json(mon)[0], ()):
+    if weather and weather in _WEATHER_SPEED_ABILITY.get(resolve_active_ability_json(mon)[0], ()):  # T2.1: active
         spe *= 2.0
     # v11 B.1 (#4): Protosynthesis/Quark Drive (incl. Booster Energy) ×1.5 when boosting SPEED — gated on
     # the SPE-suffixed paradox volatile (volatile_flags.paradox_speed). A non-spe paradox boost (atk/spa/…)

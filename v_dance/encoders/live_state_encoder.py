@@ -46,7 +46,7 @@ from v_dance.encoders.state_encoder import (
     VodStateEncoder,
     # v9 (B1-mechanics): mechanic substrate (re-exported from state_encoder's namespace)
     NUM_MOVE_TAGS, NUM_ABILITY_TAGS, NUM_ITEM_TAGS, VOLATILE_FEATURES,
-    _PROTECT_COUNTER_CAP,
+    _PROTECT_COUNTER_CAP, _PROTECT_MOVES,           # T1.3: offline is_protect set (parity, not poke-env's)
     move_tag_indices, ability_tag_indices, item_tag_indices, ABILITY_SUPPRESSED_IDX,
     ability_index, move_index, item_index,
 )
@@ -984,7 +984,13 @@ class LiveStateEncoder:
                      else list(mon.moves.values())[:NUM_MOVES])
         # B1.2/B1.2b attacker context: A stat + burn + Life-Orb/Choice item.
         _est = self._live_est_stats(mon, is_own)[0] or {}
-        _it = _item_active(getattr(mon, "item", None), magic_room,   # v11 P5: Magic Room
+        # T1.1 parity fix: resolve the attacker-context item through the BELIEF-aware _live_item (matching
+        # the offline resolve_item_json and the item-identity block at line ~1029 and _live_effective_speed),
+        # NOT raw mon.item. For an unrevealed mon raw mon.item is "unknown_item" → every att_ctx item flag
+        # below was False, dropping the believed Life Orb / Choice / Expert Belt / type-boost / Loaded Dice /
+        # Wide Lens / Scope Lens bands that TRAINING applied. (No-op for own mons + opp-spliced mons; corrects
+        # the rare degraded-splice opponent path.)
+        _it = _item_active(self._live_item(mon, is_own)[0], magic_room,   # v11 P5: Magic Room
                            klutz=abil_id == "klutz",                 # v11 Klutz: suppress held item
                            embargo="embargo" in _eff_ids)            # v11 Embargo volatile
         att_ctx = {"atk": _est.get("atk"), "spa": _est.get("spa"),
@@ -1239,8 +1245,13 @@ class LiveStateEncoder:
         vec[i] = (move.current_pp / mx) if mx else 1.0
         i += 1
 
-        # Protect-family move flag (high strategic value in doubles)
-        vec[i] = 1.0 if move.is_protect_move else 0.0
+        # Protect-family move flag (high strategic value in doubles).
+        # T1.3 parity fix: key on the OFFLINE _PROTECT_MOVES set (= the corpus/parser set), NOT
+        # poke-env's Move.is_protect_move. The two disagree on 5 moves — poke-env EXCLUDES Wide Guard
+        # / Quick Guard (they live in its _SIDE_PROTECT_MOVES) and INCLUDES Endure / King's Shield /
+        # Obstruct — so an OWN mon (not opp-spliced) carrying e.g. Wide Guard got is_protect=0 live vs
+        # 1 in training. move.id is already the normalised toID form (== norm_species(move_name)).
+        vec[i] = 1.0 if getattr(move, "id", "") in _PROTECT_MOVES else 0.0
         i += 1
 
         # STAB: EFFECTIVE move type in user's current types (accounts for tera + -ate)

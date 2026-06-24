@@ -198,6 +198,11 @@ def promotion_gate_v2(*, scripted_wins: int, scripted_games: int,
     floor = (high_water - cfg.floor_margin) if high_water is not None else None
     collapsed = floor is not None and scr_upper < floor
 
+    # T4.3 (convention, by design): mirror_games is the player's n_finished_battles = wins+losses+TIES,
+    # so a TIE counts in the denominator but not as a win — p_mir is "fraction of finished games WON".
+    # That is intentional for a "must DECISIVELY beat the frozen champion" bar (a draw is not a win);
+    # the collapse-revert side is symmetric (a tie is not a loss via mir_upper). Ties are rare in VGC and
+    # hit candidate + champion alike in symmetric self-play, so the bias is negligible — NOT changed.
     p_mir = mirror_wins / mirror_games if mirror_games else 0.0
     se_mir = math.sqrt(p_mir * (1 - p_mir) / max(1, mirror_games))
     mir_lower = p_mir - cfg.promote_z * se_mir

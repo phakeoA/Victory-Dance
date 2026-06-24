@@ -19,14 +19,20 @@ the logic is small, shared, and unit-testable in isolation (task #13).
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 
-# ── Path bootstrap: the model packages + data/scripts (encoders/pokedex) ──────
-_REPO_ROOT = Path(__file__).resolve().parent.parent
+# ── Canonical PRODUCTION checkpoints — the single source of truth so generation.py / gauntlet.py /
+#    run_local_battle.py (and any future caller) never drift apart again.  #27 deleted the flat
+#    BC_model/checkpoints/ dir → ``checkpoints_attn`` is THE battle net; the team-preview production net
+#    is the legacy 46-dim ``checkpoints/teampreview_best.pt`` (the SBDA net at ``checkpoints_sbda`` is NOT
+#    production until it wins a head-to-head — it lost 37% vs legacy on 2026-06-24).
+_AI_TRAIN = Path(__file__).resolve().parents[2] / "ai_train_scripts"
+DEFAULT_BC_CHECKPOINT = _AI_TRAIN / "BC_model" / "checkpoints_attn" / "bc_best.pt"
+DEFAULT_TP_CHECKPOINT = _AI_TRAIN / "teamPreview_model" / "checkpoints" / "teampreview_best.pt"
+
 try:
     import torch
     _TORCH = True

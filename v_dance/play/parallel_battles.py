@@ -91,8 +91,10 @@ def _to_id(name) -> str:
         return "".join(ch for ch in str(name).lower() if ch.isalnum())
 
 
-async def abandon_server_state(model_player, opponent) -> None:
-    """Best-effort cleanup of SERVER-side state for an ABANDONED chunk (22e).
+async def abandon_server_state(model_player, opponent) -> int:
+    """Best-effort cleanup of SERVER-side state for an ABANDONED chunk (22e). Returns the number of
+    unfinished battles we abandon-by-forfeit (from the model's view) so the caller can fold them into
+    its finished tally (T4.4).
 
     When ``play_pairing``'s stall watchdog gives up on a chunk, the battles still in flight and
     any challenge that was sent-but-never-accepted are left HUNG on the shared Showdown server.
@@ -140,6 +142,7 @@ async def abandon_server_state(model_player, opponent) -> None:
                 f"/cancelchallenge {_to_id(getattr(opponent, 'username', ''))}")
         except Exception:
             log.debug("cancelchallenge failed (non-fatal)", exc_info=True)
+    return abandoned
 
 
 async def play_pairing(model_player, opponent, n: int, *,
@@ -160,6 +163,7 @@ async def play_pairing(model_player, opponent, n: int, *,
     ``battle_timeout`` <= 0 / ``None`` disables the watchdog (await to completion)."""
     won_before = model_player.n_won_battles
     fin_before = model_player.n_finished_battles
+    abandoned_n = 0          # T4.4: stall-abandoned (forfeited) battles, folded into the finished tally
     task = asyncio.ensure_future(model_player.battle_against(opponent, n_battles=n))
 
     if battle_timeout and battle_timeout > 0:
@@ -191,7 +195,7 @@ async def play_pairing(model_player, opponent, n: int, *,
                 # 22e: reclaim the hung battle rooms + stale challenge SERVER-side before the
                 # caller tears the sockets down — otherwise they linger and bloat the shared
                 # server (and, pre-22d, collided with the next gen's reused names).
-                await abandon_server_state(model_player, opponent)
+                abandoned_n = await abandon_server_state(model_player, opponent)
                 break
         # RETRIEVE a completed task's exception so it isn't logged as "Task exception was never
         # retrieved" (the scary-looking but harmless dropped-connection traceback in the log).
@@ -203,8 +207,12 @@ async def play_pairing(model_player, opponent, n: int, *,
     else:
         await task
 
+    # T4.4: the stall watchdog FORFEITS the in-flight battles (a forfeit IS a loss), but those
+    # /forfeit messages are not server-acked before we tear the socket down, so n_finished_battles
+    # misses them. Fold the abandoned count into the finished delta (as non-wins) so a stalled chunk
+    # doesn't silently shrink the eval denominator / bias the per-opponent rate + Elo.
     return (model_player.n_won_battles - won_before,
-            model_player.n_finished_battles - fin_before)
+            model_player.n_finished_battles - fin_before + abandoned_n)
 
 
 async def close_players(*players) -> None:

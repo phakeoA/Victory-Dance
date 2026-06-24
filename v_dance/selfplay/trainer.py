@@ -33,10 +33,14 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 import torch
 from torch.nn.utils import clip_grad_norm_
 
+import logging
+
 from v_dance.selfplay import policy_eval, ppo as P
 from v_dance.selfplay.gae import DEFAULT_GAMMA, DEFAULT_LAM, compute_batch_gae
 from v_dance.selfplay.ppo import PPOConfig, make_reference_policy
 from v_dance.selfplay.value_space import assert_gae_identity, assert_transitions_value_space
+
+log = logging.getLogger(__name__)
 
 
 def explained_variance(values, returns) -> float:
@@ -167,17 +171,32 @@ class PPOTrainer:
             return {"halted": False, "halt_reason": "empty batch", "n_steps": 0}
         agg: List[Dict[str, float]] = []
         halted, reason = False, None
+        nonfinite_skips = 0     # defensive: minibatches dropped for a NaN/inf loss or grad (never step them)
         for _epoch in range(self.tcfg.ppo_epochs):
             for mb in self._minibatches(len(txns)):
                 mb_txns = [txns[i] for i in mb]
                 loss, st = P.ppo_loss_from_batch(self.ac, mb_txns, adv[mb], ret[mb],
                                                  cfg=self.cfg, ref_policy=self.ref,
                                                  device=self.device)
+                # NaN/inf GUARD (no isfinite check existed anywhere in the train path): a single degenerate
+                # minibatch would otherwise poison the weights AND the Adam moments AND every per-gen snapshot,
+                # which the gate's policy-only revert cannot clean (esp. at gen 0). Skip such a minibatch
+                # entirely — never backward/step on non-finite values — and surface the count.
+                if not bool(torch.isfinite(loss)):
+                    log.error("PPO update: non-finite LOSS on a minibatch — skipping it (no backward/step) "
+                              "to protect the weights + optimizer state.")
+                    nonfinite_skips += 1
+                    continue
                 self.actor_opt.zero_grad()
                 self.critic_opt.zero_grad()
                 loss.backward()
-                clip_grad_norm_(self.ac.actor_parameters(), self.tcfg.max_grad_norm)
-                clip_grad_norm_(self.ac.critic_parameters(), self.tcfg.max_grad_norm)
+                gn_a = clip_grad_norm_(self.ac.actor_parameters(), self.tcfg.max_grad_norm)
+                gn_c = clip_grad_norm_(self.ac.critic_parameters(), self.tcfg.max_grad_norm)
+                if not (bool(torch.isfinite(gn_a)) and bool(torch.isfinite(gn_c))):
+                    log.error("PPO update: non-finite GRAD norm (actor=%s critic=%s) — skipping the optimizer "
+                              "step to protect the weights + optimizer state.", float(gn_a), float(gn_c))
+                    nonfinite_skips += 1
+                    continue
                 self.actor_opt.step()
                 self.critic_opt.step()
                 agg.append(st)
@@ -192,6 +211,11 @@ class PPOTrainer:
         ev = self._critic_ev(txns, ret)
         stats["explained_variance"] = ev
         stats["n_steps"] = len(txns)
+        stats["nonfinite_skips"] = nonfinite_skips
+        if nonfinite_skips:
+            log.warning("PPO update: %d minibatch(es) skipped this gen for non-finite loss/grad.", nonfinite_skips)
+        if nonfinite_skips and not agg:        # every minibatch was non-finite → NO weights changed
+            halted, reason = True, f"all minibatches non-finite ({nonfinite_skips}) — no update applied"
         if not halted and self.tcfg.min_explained_variance is not None \
                 and ev < self.tcfg.min_explained_variance:
             halted, reason = True, f"explained_variance {ev:.3f} < {self.tcfg.min_explained_variance}"

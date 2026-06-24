@@ -300,7 +300,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--limit-files", type=int, default=None)
-    ap.add_argument("--out", default=str(_HERE / "checkpoints"))
+    # T4.1: default to the PRODUCTION TP dir that model_io.DEFAULT_TP_CHECKPOINT serves from (was
+    # _HERE/"checkpoints" = v_dance/training/checkpoints, a dir nothing loads → a retrained TP silently
+    # landed where it was never served). Mirrors train_bc.py's _HERE.parents[1]/ai_train_scripts pattern.
+    ap.add_argument("--out", default=str(
+        _HERE.parents[1] / "ai_train_scripts" / "teamPreview_model" / "checkpoints"))
     return ap.parse_args(argv)
 
 
