@@ -64,6 +64,9 @@ def volatile_flags(vol_ids) -> dict:
         # identically (poke-env Effect.FORESIGHT / Effect.MIRACLE_EYE map to the same ids).
         "foresight": "foresight" in ids,
         "miracleeye": "miracleeye" in ids,
+        # v11: Embargo volatile — suppresses the holder's item effects for 5 turns (consumed by the
+        # _item_active gate, NOT a volatile-block channel). Pure id-set membership ⇒ offline/live byte-parity.
+        "embargo": "embargo" in ids,
     }
 
 

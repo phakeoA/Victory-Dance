@@ -13,7 +13,6 @@ is required for this module's encode(battle); the offline path never imports it.
 from __future__ import annotations
 
 import re
-import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -30,14 +29,13 @@ from v_dance.encoders.state_encoder import (
     _TYPE_IDX, _STATUS_IDX, _WEATHER_IDX, _FIELD_IDX, _SC_IDX,
     NUM_TYPES, NUM_STATUS, NUM_WEATHER, NUM_FIELDS, NUM_SIDE_CONDS,
     NUM_BOOSTS, NUM_MOVES, MOVE_FEATURES,
-    NUM_ITEM_EFFECTS, NUM_ABILITY_EFFECTS,
     POKEMON_FEATURES, STATE_DIM, ACTION_DIM,
     ACTIVE_SLOTS, BENCH_SLOTS, OPP_BENCH_SLOTS,
     _BOOST_KEYS, _EST_STAT_NORM,
-    item_effect_indices, ability_effect_indices, dex_unique_ability,
+    dex_unique_ability,
     is_spread_target, _type_eff_signed_immune, _type_mult, _damage_band, _moves_first,
-    _situational_damage_mult, _WEATHER_SPEED_ABILITY, field_duration_scalars, _ability_immunizes,
-    _ability_damage_mult, _DEF_HIT_MOVES, _ability_trapped, _is_grounded, _ground_immune, _move_immune,
+    _situational_damage_mult, _WEATHER_SPEED_ABILITY, field_duration_scalars,
+    _ability_damage_mult, _DEF_HIT_MOVES, _GRASSY_WEAKENED, _ability_trapped, _is_grounded, _ground_immune, _move_immune,
     _item_active,                                   # v11 P5: Magic Room item-suppression gate (shared)
     _expected_crit_mult,                            # v11 N4: expected-crit band multiplier (shared)
     _immunity_neg_ctx, _move_hit_range,
@@ -47,7 +45,7 @@ from v_dance.encoders.state_encoder import (
     _TYPE_BOOST_TYPE, _RESIST_BERRY_TYPE, _BAND_ITEM_MULT,   # v11 B3: item band mults (shared, parity)
     VodStateEncoder,
     # v9 (B1-mechanics): mechanic substrate (re-exported from state_encoder's namespace)
-    NUM_MOVE_TAGS, NUM_ABILITY_TAGS, NUM_ITEM_TAGS, WEIGHT_FEATURES, VOLATILE_FEATURES,
+    NUM_MOVE_TAGS, NUM_ABILITY_TAGS, NUM_ITEM_TAGS, VOLATILE_FEATURES,
     _PROTECT_COUNTER_CAP,
     move_tag_indices, ability_tag_indices, item_tag_indices, ABILITY_SUPPRESSED_IDX,
     ability_index, move_index, item_index,
@@ -379,10 +377,12 @@ class LiveStateEncoder:
             spec_scr = any(getattr(k, "name", "") in ("LIGHT_SCREEN", "AURORA_VEIL") and v for k, v in scr.items())
             types = _live_eff_types(mon)
             _ab = self._live_ability(mon, is_own)[0]
-            _it = _item_active(self._live_item(mon, is_own)[0], _magic_room)   # v11 P5: MR suppresses items
             # v11 C.2c: grounding volatiles from poke-env effects (byte-parity with offline volatile_flags).
             _eff = {getattr(e, "name", str(e)).lower().replace("_", "")
                     for e in (getattr(mon, "effects", {}) or {})}
+            _it = _item_active(self._live_item(mon, is_own)[0], _magic_room,   # v11 P5: MR
+                               klutz=_ab == "klutz",                          # v11 Klutz: suppress held item
+                               embargo="embargo" in _eff)                     # v11 Embargo volatile
             _pvf = volatile_flags(_eff)
             _levit, _fg = _pvf["levitating"], _pvf["force_grounded"]
             _fg_g = _fg or _gravity            # v11 C.2e: Gravity grounds everything (isGrounded-first)
@@ -449,22 +449,29 @@ class LiveStateEncoder:
         _own_ta = {0: (_oa_snap.get("our_a") or {}).get("times_attacked", 0),
                    1: (_oa_snap.get("our_b") or {}).get("times_attacked", 0)}
 
-        for slot, mon in enumerate(list(own_active)):
+        _own_list = list(own_active)
+        for slot, mon in enumerate(_own_list):
             # #1b: under an own-side Illusion the active object's moves can be empty
             # while the |request| holds the real ones — encode those (request-
             # authoritative) so the move features match the mask + the offline parser.
             mv = own_active_move_list(battle, slot, mon) if mon is not None else None
+            # v11 Victory Star: the ACTIVE ally's ability (other slot) — boosts this mon's accuracy.
+            _ally = _own_list[1 - slot] if len(_own_list) > 1 else None
+            _ally_ab = self._live_ability(_ally, True)[0] if _ally is not None else None
             self._write_pokemon(vec, cursor, mon, is_active=True, is_own=True,
                                 move_override=mv, enemy_defenders=own_enemy, field_mods=field_mods,
                                 side_tailwind=_own_tw, trick_room=_tr, gravity=_gravity,
                                 fainted_allies=_own_fnt, times_attacked=_own_ta.get(slot, 0),
-                                magic_room=_magic_room, wonder_room=_wonder_room)
+                                magic_room=_magic_room, wonder_room=_wonder_room, ally_ability=_ally_ab)
             cursor += POKEMON_FEATURES
-        for mon in list(opp_active):
+        _opp_list = list(opp_active)
+        for slot, mon in enumerate(_opp_list):
+            _ally = _opp_list[1 - slot] if len(_opp_list) > 1 else None
+            _ally_ab = self._live_ability(_ally, False)[0] if _ally is not None else None
             self._write_pokemon(vec, cursor, mon, is_active=True, is_own=False, enemy_defenders=opp_enemy,
                                 field_mods=field_mods, side_tailwind=_opp_tw, trick_room=_tr, gravity=_gravity,
                                 fainted_allies=_opp_fnt,
-                                magic_room=_magic_room, wonder_room=_wonder_room)
+                                magic_room=_magic_room, wonder_room=_wonder_room, ally_ability=_ally_ab)
             cursor += POKEMON_FEATURES
 
         # ── [B] Bench slots ──────────────────────────────────────────────────
@@ -551,11 +558,12 @@ class LiveStateEncoder:
 
         # ── B1.4 turn-order block (mirror offline): 4 effective speeds + 4 moves-first margins + conf.
         # (_own_tw/_opp_tw resolved once above for B.1b.)
-        _sp = {
-            "our_a": self._live_effective_speed(own_active[0] if len(own_active) > 0 else None, True, _own_tw, _weather),
-            "our_b": self._live_effective_speed(own_active[1] if len(own_active) > 1 else None, True, _own_tw, _weather),
-            "opp_a": self._live_effective_speed(opp_active[0] if len(opp_active) > 0 else None, False, _opp_tw, _weather),
-            "opp_b": self._live_effective_speed(opp_active[1] if len(opp_active) > 1 else None, False, _opp_tw, _weather),
+        _sp = {  # v11 E4-fix: pass _magic_room (parity with offline) so the global turn-order speed suppresses
+                 # Choice Scarf under Magic Room; Klutz/Embargo are gated inside _live_effective_speed.
+            "our_a": self._live_effective_speed(own_active[0] if len(own_active) > 0 else None, True, _own_tw, _weather, _magic_room),
+            "our_b": self._live_effective_speed(own_active[1] if len(own_active) > 1 else None, True, _own_tw, _weather, _magic_room),
+            "opp_a": self._live_effective_speed(opp_active[0] if len(opp_active) > 0 else None, False, _opp_tw, _weather, _magic_room),
+            "opp_b": self._live_effective_speed(opp_active[1] if len(opp_active) > 1 else None, False, _opp_tw, _weather, _magic_room),
         }
         for _k in ("our_a", "our_b", "opp_a", "opp_b"):       # 4 effective-speed channels (/600 clamped)
             vec[cursor] = min(_sp[_k][0] / 600.0, 1.0)
@@ -849,7 +857,11 @@ class LiveStateEncoder:
         # unrevealed OPPONENT falls back to the Pikalytics top prior. Reading raw mon.item/mon.ability
         # here (unknown_item / None for an unrevealed opp) silently dropped the Choice Scarf ×1.5 and
         # weather-speed ×2 that TRAINING applied → a 1.5-2× serve-only who-moves-first divergence.
-        if _item_active(self._live_item(mon, is_own)[0], magic_room) == "choicescarf":  # v11 P5: MR suppresses Scarf
+        _eff_ids = {getattr(e, "name", str(e)).lower().replace("_", "")
+                    for e in (getattr(mon, "effects", {}) or {})}
+        if _item_active(self._live_item(mon, is_own)[0], magic_room,          # v11 P5: MR suppresses Scarf
+                        klutz=self._live_ability(mon, is_own)[0] == "klutz",  # v11 Klutz
+                        embargo="embargo" in _eff_ids) == "choicescarf":      # v11 Embargo
             spe *= 1.5
         if side_tailwind:
             spe *= 2.0
@@ -857,8 +869,6 @@ class LiveStateEncoder:
             spe *= 2.0
         # v11 B.1 (#4): Protosynthesis/Quark Drive ×1.5 when boosting SPEED — gated on the SPE-suffixed
         # poke-env effect (parity with offline volatile_flags.paradox_speed: identical normalised id).
-        _eff_ids = {getattr(e, "name", str(e)).lower().replace("_", "")
-                    for e in (getattr(mon, "effects", {}) or {})}
         if _eff_ids & {"protosynthesisspe", "quarkdrivespe"}:
             spe *= 1.5
         return float(spe), known
@@ -880,6 +890,7 @@ class LiveStateEncoder:
         times_attacked: int = 0,
         magic_room: bool = False,
         wonder_room: bool = False,
+        ally_ability: Optional[str] = None,
     ) -> None:
         """Write POKEMON_FEATURES floats into vec starting at `start`.
 
@@ -973,7 +984,9 @@ class LiveStateEncoder:
                      else list(mon.moves.values())[:NUM_MOVES])
         # B1.2/B1.2b attacker context: A stat + burn + Life-Orb/Choice item.
         _est = self._live_est_stats(mon, is_own)[0] or {}
-        _it = _item_active(getattr(mon, "item", None), magic_room)   # v11 P5: Magic Room suppresses items
+        _it = _item_active(getattr(mon, "item", None), magic_room,   # v11 P5: Magic Room
+                           klutz=abil_id == "klutz",                 # v11 Klutz: suppress held item
+                           embargo="embargo" in _eff_ids)            # v11 Embargo volatile
         att_ctx = {"atk": _est.get("atk"), "spa": _est.get("spa"),
                    "burned": getattr(getattr(mon, "status", None), "name", None) == "BRN",
                    "statused": getattr(mon, "status", None) is not None,   # v11 A.2: Guts on ANY status
@@ -995,7 +1008,9 @@ class LiveStateEncoder:
                    "wide_lens": _it == "widelens",        # v11 B2: Wide Lens ×1.1 accuracy
                    "expert_belt": _it == "expertbelt",    # v11 B3: ×1.2 super-effective
                    "type_boost": _TYPE_BOOST_TYPE.get(_it),  # v11 B3: ×1.2 matching-type move
-                   "scope_lens": _it in ("scopelens", "razorclaw")}  # v11 N4: +1 crit stage (P5: gated via _it)
+                   "scope_lens": _it in ("scopelens", "razorclaw"),  # v11 N4: +1 crit stage (P5: gated via _it)
+                   # v11: Victory Star ×1.1 accuracy — the holder OR its active ally has the ability.
+                   "victory_star": abil_id == "victorystar" or ally_ability == "victorystar"}
         for m_idx in range(NUM_MOVES):
             if m_idx < len(move_list):
                 self._write_move(vec, i, move_list[m_idx], mon, enemy_defenders, att_ctx,
@@ -1008,7 +1023,8 @@ class LiveStateEncoder:
         item_id, item_known = self._live_item(mon, is_own)
         vec[i] = float(item_index(item_id))
         i += 1
-        for idx in item_tag_indices(_item_active(item_id, magic_room and is_active)):
+        for idx in item_tag_indices(_item_active(item_id, magic_room and is_active,
+                                                 klutz=abil_id == "klutz", embargo="embargo" in _eff_ids)):
             vec[i + idx] = 1.0
         i += NUM_ITEM_TAGS
         vec[i] = item_known
@@ -1209,7 +1225,8 @@ class LiveStateEncoder:
             acc = _accuracy_modifiers(acc, ability_id=ability_id,
                                       is_physical=move.category == MoveCategory.PHYSICAL,
                                       is_ohko=_move_is_ohko(_mid),
-                                      acc_stage=_ac2.get("acc_stage", 0), wide_lens=_ac2.get("wide_lens", False))
+                                      acc_stage=_ac2.get("acc_stage", 0), wide_lens=_ac2.get("wide_lens", False),
+                                      victory_star=_ac2.get("victory_star", False))   # v11 Victory Star
         vec[i] = acc
         i += 1
 
@@ -1285,7 +1302,8 @@ class LiveStateEncoder:
                     weather=_weather)                             # v11 G5/G6: Sand Force / Solar Power
                 _sit = _situational_damage_mult(_mt, _phys, _weather, _terrain, d,
                                                 _ac.get("burned"), _ac.get("life_orb"), _ac.get("choice"),
-                                                hits_def=_hits_def) * _abm
+                                                hits_def=_hits_def,
+                                                grassy_eq=_mid in _GRASSY_WEAKENED) * _abm  # v11 G7
                 # v11 B3 attacker item band mults + B3b defender resist berry (parity twin of the offline writer).
                 if _ac.get("type_boost") == _mt:
                     _sit *= _BAND_ITEM_MULT
@@ -1350,7 +1368,8 @@ class LiveStateEncoder:
                 vec[i] = _per_enemy_hit_chance(
                     _base_acc, attacker_ability=ability_id, acc_stage=_ac.get("acc_stage", 0),
                     wide_lens=_ac.get("wide_lens", False), is_physical=_phys, is_ohko=_oh_b2b,
-                    defender=d, move_id=_mid, weather=_weather)
+                    defender=d, move_id=_mid, weather=_weather,
+                    victory_star=_ac.get("victory_star", False))   # v11 Victory Star
             i += 1
 
         # v9: move effect-tags + identity index, BEFORE the trailing is_known
