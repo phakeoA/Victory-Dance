@@ -98,8 +98,24 @@ async def _eval_specs(candidate, prev_best, team_chooser, specs: List[EvalSpec],
         try:
             w, f = await play_pairing(model_player, opp, spec.n,
                                       battle_timeout=battle_timeout, label=spec.kind)
-            acc[spec.kind][0] += w
-            acc[spec.kind][1] += f
+            # A backstop-forfeit (forced-switch loop-guard → ForfeitBattleOrder) is an engineering
+            # escape, NOT a skill result, yet poke-env scores it as a finished WIN for the other side.
+            # Discard such battles from BOTH numerator and denominator so they don't bias the gate: an
+            # OPP (champion) forfeit is otherwise a spurious candidate WIN — a ONE-DIRECTIONAL push
+            # toward PROMOTE that poisons the frozen-champion lineage — and a CANDIDATE forfeit a
+            # spurious loss. Collection drops these via drop_fallback_pairs (mp_collect ~170); eval has
+            # no trajectory, so adjust the (w, f) tally here. `_forfeited_tags` is fresh per chunk
+            # (players are rebuilt per spec), deduped one-entry-per-battle (live_vgc_base ~440), and the
+            # two sides' sets are battle-disjoint (the first forfeit ends the battle). `_forfeited_tags`
+            # is tagged at DECISION time (when ForfeitBattleOrder is returned), while `w` only counts a
+            # SERVER-ACKED win, so in the rare stall-abandon window (an opp forfeit issued but wedged, then
+            # folded into the FINISHED delta as a non-win by the watchdog) opp_ff can exceed the reflected
+            # wins. Clamp non-negative so one such chunk can never push a negative tally into the gate
+            # (the f-side already nets to real_finished >= 0; the clamp there is belt-and-suspenders).
+            opp_ff = len(getattr(opp, "_forfeited_tags", None) or ())
+            own_ff = len(getattr(model_player, "_forfeited_tags", None) or ())
+            acc[spec.kind][0] += max(0, w - opp_ff)
+            acc[spec.kind][1] += max(0, f - opp_ff - own_ff)
         finally:
             source.update(getattr(model_player, "_source_counts", {}) or {})
             for k, v in (getattr(model_player, "_tp_source", {}) or {}).items():

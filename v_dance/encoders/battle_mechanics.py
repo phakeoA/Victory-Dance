@@ -110,9 +110,23 @@ def _gen9_moves() -> dict:
 # Move). These id-keyed helpers overlay the modded value. move_id == norm_species(name) (offline) == Move.id
 # (live) → the overlay is byte-identical on both paths (parity by construction). Imported by the live twin.
 # Champions-only by construction (the battle encoder is hard-scoped to Champions; see champions_move_overrides).
+# Scraper-baked BP approximations (data/scripts/scrapers/update_moves.py hand-edits moves.json): the OFFLINE
+# corpus represents Acrobatics as its no-item 110 (halved when the holder has an item) and Return as its
+# max-friendship 102. poke-env's LIVE Move.base_power returns the UN-baked 55 / 0, so without this overlay an
+# OWN mon carrying these serves a BP channel + damage band that diverge from the trained corpus (the opp side
+# is already neutralized by _splice_opponent). Consulted INSIDE champ_bp so BOTH encoders apply it identically
+# (parity by construction); the values MATCH what moves.json already bakes, so the offline corpus is unchanged
+# (no re-export / retrain) — this only lifts the LIVE own-mon path up to the value the net was trained on.
+_BAKED_BP = {"acrobatics": 110, "return": 102}
+
+
 def champ_bp(move_id: Optional[str], std):
-    """Champions basePower override for ``move_id`` (else ``std``). Feeds the band + the Technician/-ate gates."""
-    return CHAMP_BP.get(move_id or "", std)
+    """Champions basePower override for ``move_id`` (else the scraper-baked ``_BAKED_BP``, else ``std``).
+    Feeds the band + the Technician/-ate gates."""
+    mid = move_id or ""
+    if mid in CHAMP_BP:
+        return CHAMP_BP[mid]
+    return _BAKED_BP.get(mid, std)
 
 
 def champ_type(move_id: Optional[str], std):
