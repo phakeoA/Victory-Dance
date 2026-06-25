@@ -18,8 +18,8 @@ numbers line up with a training run.  Loads the saved dict checkpoint, runs the
 frozen action heads over the held-out states, and reports — it never trains.
 
 CLI (repo root):
-    .venv\\Scripts\\python.exe ai_train_scripts/BC_model/eval_buckets.py \\
-        --ckpt ai_train_scripts/BC_model/checkpoints/bc_best.pt
+    .venv\\Scripts\\python.exe -m v_dance.training.eval_buckets \\
+        --ckpt ai_train_scripts/BC_model/checkpoints_attn/battle_selfplay_gen141.pt
 """
 
 from __future__ import annotations
@@ -247,7 +247,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     # T4.1: default to the PRODUCTION battle-net checkpoint (was _HERE/"checkpoints"/"bc_best.pt" =
     # v_dance/training/checkpoints, which does not exist). Matches model_io.DEFAULT_BC_CHECKPOINT.
     ap.add_argument("--ckpt", default=str(
-        _HERE.parents[1] / "ai_train_scripts" / "BC_model" / "checkpoints_attn" / "bc_best.pt"))
+        _HERE.parents[1] / "ai_train_scripts" / "BC_model" / "checkpoints_attn" / "battle_selfplay_gen141.pt"))
     ap.add_argument("--val-frac", type=float, default=0.1,
                     help="MUST match the training run to reproduce its val split")
     ap.add_argument("--seed", type=int, default=0)

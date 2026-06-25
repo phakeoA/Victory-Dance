@@ -998,7 +998,7 @@ def _dry_run(n_generations: int = 6, seed: int = 0) -> None:
     """Simulate the generation loop with synthetic eval (rising then noisy then a dip),
     so the gate / promote / hold / revert / league-growth logic is visible without a
     server or the model. No torch / poke-env needed."""
-    league = OpponentLeague(latest_path="bc_best.pt")
+    league = OpponentLeague(latest_path="battle_selfplay_gen141.pt")
     history = GenerationHistory()
 
     # a fake trainer/ac/refresh/restore that just record calls

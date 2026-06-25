@@ -441,7 +441,7 @@ def main(argv=None) -> int:
     ap.add_argument("--teams", nargs="+",
                     default=["team1", "WolfeGlick", "Kronomono1", "Kronomono3"])
     ap.add_argument("--ckpt", default=str(_REPO_ROOT / "ai_train_scripts" / "BC_model"
-                                          / "checkpoints" / "bc_best.pt"))
+                                          / "checkpoints_attn" / "battle_selfplay_gen141.pt"))
     ap.add_argument("--tau", type=float, default=1.0, help="collection temperature (>0)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--matchup-seed", type=int, default=0)

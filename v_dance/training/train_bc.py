@@ -476,7 +476,7 @@ def train(args: argparse.Namespace) -> dict:
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
-    ckpt_path = out_dir / "bc_best.pt"
+    ckpt_path = out_dir / "battle_base.pt"   # the BC imitation base battle net (<type>_<variant> scheme)
 
     from v_dance.encoders.state_encoder import get_state_layout_version
     config = {
@@ -645,8 +645,15 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                     help="cap transitions read (smoke runs)")
     ap.add_argument("--limit-files", type=int, default=None,
                     help="cap JSONL files read (smoke runs)")
-    ap.add_argument("--out", default=str(_HERE.parents[1] / "ai_train_scripts" / "BC_model" / "checkpoints_attn"),
-                    help="checkpoint output directory")
+    # rename-wiring: default to the BC-ANCHOR home that the self-play configs' 'ckpt' read
+    # (checkpoints_attn_pre_gen141/battle_base.pt), NOT the production serving dir checkpoints_attn/ (which
+    # holds the self-play champion battle_selfplay_gen141.pt). A bare retrain produces battle_base.pt whose
+    # only consumer is the KL-to-BC anchor — so it must land where that anchor is read, else it is an orphan
+    # (neither served nor anchored). Back up the current battle_base.pt first if you want to keep it (the
+    # established checkpoints_attn_pre_* backup pattern).
+    ap.add_argument("--out",
+                    default=str(_HERE.parents[1] / "ai_train_scripts" / "BC_model" / "checkpoints_attn_pre_gen141"),
+                    help="checkpoint output dir (default: the BC-anchor home the self-play configs read)")
     return ap.parse_args(argv)
 
 

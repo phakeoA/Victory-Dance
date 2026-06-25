@@ -96,7 +96,8 @@ class ActorCritic(nn.Module):
         ``require_value_trained`` (default True): refuse a checkpoint whose value
         head was never trained on outcome labels — initialising the critic from an
         untrained head is just xavier noise and forfeits the whole sample-efficiency
-        rationale of sec 2. The production v3 ``bc_best.pt`` has value_trained=True.
+        rationale of sec 2. The production ``battle_selfplay_gen141.pt`` (and the BC anchor
+        ``battle_base.pt``) have value_trained=True.
         """
         policy, head_names = model_io.load_bc_policy(path, device)
         vt = model_io.value_trained(policy)

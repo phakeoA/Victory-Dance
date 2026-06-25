@@ -26,12 +26,16 @@ import numpy as np
 
 # ── Canonical PRODUCTION checkpoints — the single source of truth so generation.py / gauntlet.py /
 #    run_local_battle.py (and any future caller) never drift apart again.  #27 deleted the flat
-#    BC_model/checkpoints/ dir → ``checkpoints_attn`` is THE battle net; the team-preview production net
-#    is the legacy 46-dim ``checkpoints/teampreview_best.pt`` (the SBDA net at ``checkpoints_sbda`` is NOT
-#    production until it wins a head-to-head — it lost 37% vs legacy on 2026-06-24).
+#    Models use a ``<type>_<variant>[_genN].pt`` naming scheme (2026-06-25). PRODUCTION serves the self-play
+#    champion + SBDA pair: battle net ``checkpoints_attn/battle_selfplay_gen141.pt`` (gen141) and team-preview
+#    ``checkpoints/teampreview_sbda.pt`` (SBDA tpfeat-v6, feat_dim 253) — this pair beat the old prod
+#    (BC base + legacy 46-dim TP) 61.8% over 1480 M-B battles. Variants kept alongside: ``checkpoints_attn_pre_gen141/
+#    battle_base.pt`` (the BC imitation anchor) + ``checkpoints_pre_sbda/teampreview_base.pt`` (legacy 46-dim).
+#    ⚠ Self-play TRAINING must point its base ckpt at ``battle_base.pt`` (the BC anchor), NOT these served
+#    files, or the KL-to-BC reference re-anchors to gen141 — see the configs' _comment.
 _AI_TRAIN = Path(__file__).resolve().parents[2] / "ai_train_scripts"
-DEFAULT_BC_CHECKPOINT = _AI_TRAIN / "BC_model" / "checkpoints_attn" / "bc_best.pt"
-DEFAULT_TP_CHECKPOINT = _AI_TRAIN / "teamPreview_model" / "checkpoints" / "teampreview_best.pt"
+DEFAULT_BC_CHECKPOINT = _AI_TRAIN / "BC_model" / "checkpoints_attn" / "battle_selfplay_gen141.pt"
+DEFAULT_TP_CHECKPOINT = _AI_TRAIN / "teamPreview_model" / "checkpoints" / "teampreview_sbda.pt"
 
 try:
     import torch

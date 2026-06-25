@@ -223,7 +223,7 @@ def make_league_opponent(spec: Tuple[str, object], *, username: str, team,
 # ── manual demo (no server): print the sampling distribution ──────────────────
 def _demo(n: int = 5000, seed: int = 0) -> None:
     rng = np.random.default_rng(seed)
-    league = OpponentLeague(latest_path="checkpoints/bc_best.pt")
+    league = OpponentLeague(latest_path="checkpoints_attn/battle_selfplay_gen141.pt")
     # three past snapshots: latest beats gen1, even vs gen2, LOSES to gen3
     for sid, gen, wins, games in [("gen1", 1, 80, 100), ("gen2", 2, 50, 100), ("gen3", 3, 25, 100)]:
         s = league.admit(sid, f"archive/{sid}.pt", gen, elo=1000 + gen * 30)

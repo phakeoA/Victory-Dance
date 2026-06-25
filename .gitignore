@@ -42,6 +42,8 @@ memory_before.md
 .claude/
 # dev harnesses, workflow scripts, throwaway artifacts
 scratch/
+# personal run-configs (kept local; config.example.json stays tracked as the template/schema reference)
+config/
 # fork leftovers staged for deletion
 Delete_When_Project_Done/
 # tests (run locally; not published)

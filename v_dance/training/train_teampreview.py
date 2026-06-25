@@ -207,7 +207,8 @@ def train(args: argparse.Namespace) -> dict:
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
-    ckpt_path = out_dir / "teampreview_best.pt"
+    # <type>_<variant> scheme: SBDA vs legacy base, by the --features mode (avoids the old generic best.pt)
+    ckpt_path = out_dir / ("teampreview_sbda.pt" if args.features == "sbda" else "teampreview_base.pt")
     config = {
         "vocab_size": len(vocab) + 1,
         "feat_dim": feat_dim,
@@ -300,12 +301,18 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--limit-files", type=int, default=None)
-    # T4.1: default to the PRODUCTION TP dir that model_io.DEFAULT_TP_CHECKPOINT serves from (was
-    # _HERE/"checkpoints" = v_dance/training/checkpoints, a dir nothing loads → a retrained TP silently
-    # landed where it was never served). Mirrors train_bc.py's _HERE.parents[1]/ai_train_scripts pattern.
-    ap.add_argument("--out", default=str(
-        _HERE.parents[1] / "ai_train_scripts" / "teamPreview_model" / "checkpoints"))
-    return ap.parse_args(argv)
+    # T4.1 + rename-wiring: default each --features mode to the dir its CONSUMER reads, so a default retrain is
+    # never an orphan. sbda -> checkpoints/ (served by model_io.DEFAULT_TP_CHECKPOINT as teampreview_sbda.pt);
+    # legacy -> checkpoints_pre_sbda/ (read by scratch/tp_headtohead_eval.py TP_LEGACY as teampreview_base.pt).
+    # (Was a single checkpoints/ default, so a legacy retrain's teampreview_base.pt landed in a dir nothing read.)
+    ap.add_argument("--out", default=None,
+                    help="checkpoint output dir (default: checkpoints/ for --features sbda, "
+                         "checkpoints_pre_sbda/ for legacy — each mode's consumer dir)")
+    args = ap.parse_args(argv)
+    if args.out is None:
+        _tp = _HERE.parents[1] / "ai_train_scripts" / "teamPreview_model"
+        args.out = str(_tp / ("checkpoints" if args.features == "sbda" else "checkpoints_pre_sbda"))
+    return args
 
 
 if __name__ == "__main__":
