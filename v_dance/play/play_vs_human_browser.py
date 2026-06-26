@@ -230,6 +230,7 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
     loop = asyncio.get_running_loop()
     busy = False                 # serving a battle right now (one at a time)
     busy_since = 0.0             # loop.time() when we accepted — for the watchdog
+    hb_next = 0.0                # loop.time() of the next "still serving" heartbeat (stall visibility)
     active_tag = None            # the battle room we're currently serving (None until its first frame)
     pending = None               # a challenger (our format) seen while busy — accepted once free
     seen_wrong_fmt: set = set()  # (challenger, fmt) pairs already warned about (dedup the repeated frames)
@@ -248,6 +249,7 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
             challenger, pending = pending, None
             try:
                 busy, busy_since, active_tag = True, loop.time(), None
+                hb_next = busy_since + 15.0                           # first heartbeat 15s after accept
                 ai_name, src = await _pick_ai_team(page, ai_pool, ai_team_pin)
                 ai_team = load_team(resolve_team_path(ai_name))
                 host.player.update_team(ai_team)                     # decision core uses this team
@@ -263,6 +265,12 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
         try:
             payload = await asyncio.wait_for(frame_q.get(), timeout=1.0)
         except asyncio.TimeoutError:
+            # Heartbeat while serving: if we accepted a battle but no frames are arriving, surface the
+            # stall (battle never started / frames not captured / desync) instead of failing silently.
+            if busy and loop.time() >= hb_next:
+                print(f"[ai] …still serving battle (tag={active_tag}); "
+                      f"{loop.time() - busy_since:.0f}s since accept, no frames arriving")
+                hb_next = loop.time() + 15.0
             continue
         try:
             # 1) note any incoming challenge in OUR format (remember it even while busy)
@@ -295,7 +303,8 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
                         _credit(host, active_tag, result, tally)
                         host.end_battle(active_tag)
                         busy, active_tag = False, None
-                        print(f"[ai] battle done — tally: AI {tally['ai']} / you {tally['you']} / draws {tally['draw']}")
+                        print(f"[ai] battle done in {loop.time() - busy_since:.0f}s — "
+                              f"tally: AI {tally['ai']} / you {tally['you']} / draws {tally['draw']}")
             errors = 0                                               # a clean iteration resets the failure streak
         except Exception as exc:                                     # a transport hiccup must not kill the loop
             errors += 1
@@ -306,7 +315,8 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
                 return
 
 
-async def run(headed: bool, human_name: str, self_test: bool, ai_team_pin: str | None = None) -> dict:
+async def run(headed: bool, human_name: str, self_test: bool, ai_team_pin: str | None = None,
+              self_test_battles: int = 1) -> dict:
     from playwright.async_api import async_playwright
 
     teams = _load_pool()
@@ -335,9 +345,14 @@ async def run(headed: bool, human_name: str, self_test: bool, ai_team_pin: str |
                 from v_dance.play.run_local_battle import make_player
                 from v_dance.play.parallel_battles import close_players
                 opp = make_player("BrowserOpp", teams[1][1], max_concurrent_battles=1)
-                ch = asyncio.run_coroutine_threadsafe(opp.send_challenges(_AI_NAME, 1), POKE_LOOP)
+                # Re-challenge regression: send_test_battles SEQUENTIAL challenges (each waits for the prior
+                # battle to finish), exercising the consumer's accept→play→free→accept-again path that a
+                # single-battle smoke never covered.
+                ch = asyncio.run_coroutine_threadsafe(
+                    opp.send_challenges(_AI_NAME, self_test_battles), POKE_LOOP)
                 try:
-                    await asyncio.wait_for(_wait_total(tally, 1), timeout=180)
+                    await asyncio.wait_for(_wait_total(tally, self_test_battles),
+                                           timeout=450 * self_test_battles)  # > 600s watchdog → a hang is caught+logged
                 except asyncio.TimeoutError:
                     print("[play] self-test TIMEOUT")
                     if ch.done() and ch.exception():               # the CHALLENGE failed, not the AI
@@ -384,6 +399,8 @@ def main() -> None:
                     help="pin the AI to this team NAME every battle (default: the team you OPEN in the AI "
                          "window's Teambuilder, or random if none is open).")
     ap.add_argument("--self-test", action="store_true", help="headless smoke vs a poke-env opponent (no human).")
+    ap.add_argument("--self-test-battles", type=int, default=1,
+                    help="number of SEQUENTIAL self-test battles (>=2 exercises the re-challenge path).")
     ap.add_argument("--headed", dest="headed", action="store_true", default=True, help="show the browser (default).")
     ap.add_argument("--headless", dest="headed", action="store_false", help="run headless.")
     args = ap.parse_args()
@@ -393,7 +410,7 @@ def main() -> None:
     proc = start_showdown()
     try:
         tally = asyncio.run(run(headed=headed, human_name=args.human_name, self_test=args.self_test,
-                                ai_team_pin=args.ai_team))
+                                ai_team_pin=args.ai_team, self_test_battles=args.self_test_battles))
     except KeyboardInterrupt:
         print("\n[play] Ctrl-C — shutting down …")
         tally = None
@@ -401,9 +418,10 @@ def main() -> None:
         stop_showdown(proc)
         print("[play] Showdown server stopped.")
     if args.self_test:
-        ok = tally is not None and (tally["ai"] + tally["you"] + tally["draw"]) >= 1
-        print(f"[self-test] VERDICT: {'PASS — AI played a full battle through the browser' if ok else 'FAIL'} "
-              f"(tally {tally})")
+        n = args.self_test_battles
+        ok = tally is not None and (tally["ai"] + tally["you"] + tally["draw"]) >= n
+        print(f"[self-test] VERDICT: {f'PASS — AI played {n} full battle(s) through the browser' if ok else 'FAIL'} "
+              f"(tally {tally}, wanted {n})")
         raise SystemExit(0 if ok else 1)
 
 

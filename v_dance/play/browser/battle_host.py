@@ -79,6 +79,11 @@ class BattleHost:
     ):
         self._loop = loop
         self._outgoing: List[Outgoing] = []
+        # Battles we've already torn down (end_battle). A late stray frame for one of these (e.g. the
+        # opponent's |l|/leave or post-|win| chat) must NOT be routed to poke-env: _handle_battle_message
+        # sends any non-init battle message through _get_battle(), which BLOCKS FOREVER on a tag no longer
+        # in _battles → the single-threaded feed (and the whole consumer loop) wedges. Skip such frames.
+        self._ended: set = set()
         # Serialize feed_async on the player's loop so the per-frame ``_outgoing[before:]`` accounting is
         # sound even if a caller ever overlaps frames (the shipped consumer feeds one-at-a-time, but the
         # online roadmap may drain in parallel). Lazily created on the player's loop (see _get_lock).
@@ -121,6 +126,13 @@ class BattleHost:
         """Push ONE raw websocket text frame through poke-env's own routing, on the player's loop.
         Returns the (room, message) decisions produced by this frame (usually 0 or 1). Serialized per
         host so concurrent feeds can't cross-attribute decisions via the ``_outgoing`` slice."""
+        # A stray frame for an ALREADY-ENDED battle (late |l|/leave/chat after |win|) would route through
+        # poke-env's _get_battle() and block forever on _battle_start_condition (the tag is gone from
+        # _battles) — wedging this feed and the entire consumer loop. Drop it before it reaches poke-env.
+        if raw_frame.startswith(">battle"):
+            tag = raw_frame.split("\n", 1)[0].lstrip(">")
+            if tag in self._ended:
+                return []
         async with self._get_lock():
             before = len(self._outgoing)               # captured INSIDE the lock so it can't race
             await self.player.ps_client._handle_message(raw_frame)
@@ -144,6 +156,7 @@ class BattleHost:
         """Reclaim a finished battle's state so a long session doesn't accumulate every battle's protocol
         log + captured commands. The transport calls this when it sees the battle's ``|win|``/``|tie|``."""
         tag = (tag or "").lstrip(">")
+        self._ended.add(tag)                           # gate late stray frames for this tag (see feed_async)
         self.player._battles.pop(tag, None)
         proto = getattr(self.player, "_proto_log", None)
         if isinstance(proto, dict):

@@ -26,15 +26,21 @@ import numpy as np
 
 # ── Canonical PRODUCTION checkpoints — the single source of truth so generation.py / gauntlet.py /
 #    run_local_battle.py (and any future caller) never drift apart again.  #27 deleted the flat
-#    Models use a ``<type>_<variant>[_genN].pt`` naming scheme (2026-06-25). PRODUCTION serves the self-play
-#    champion + SBDA pair: battle net ``checkpoints_attn/battle_selfplay_gen141.pt`` (gen141) and team-preview
-#    ``checkpoints/teampreview_sbda.pt`` (SBDA tpfeat-v6, feat_dim 253) — this pair beat the old prod
-#    (BC base + legacy 46-dim TP) 61.8% over 1480 M-B battles. Variants kept alongside: ``checkpoints_attn_pre_gen141/
-#    battle_base.pt`` (the BC imitation anchor) + ``checkpoints_pre_sbda/teampreview_base.pt`` (legacy 46-dim).
-#    ⚠ Self-play TRAINING must point its base ckpt at ``battle_base.pt`` (the BC anchor), NOT these served
-#    files, or the KL-to-BC reference re-anchors to gen141 — see the configs' _comment.
+#    Models use a ``<type>_<variant>[_genN].pt`` naming scheme (2026-06-25).
+#    ⚠ ENCODER-v18 INTERIM (2026-06-26): the self-play champion ``checkpoints_attn/battle_selfplay_gen141.pt``
+#    (gen141) is a v17 model and is UNLOADABLE on the current v18 encoder — the stale-layout guard in
+#    load_bc_policy() rejects it (STATE_DIM / layout-version mismatch). Until a v18 self-play champion exists,
+#    PRODUCTION serves the v18 BC anchor ``checkpoints_attn_pre_gen141/battle_base.pt`` (retrained on
+#    M-A + M-B + Bo3, layout v18, STATE_DIM 4961, val top1 0.536). ⟵ once a v18 champion exists, restore the
+#    champion path on the DEFAULT_BC_CHECKPOINT line below.
+#    Team-preview: ``checkpoints/teampreview_sbda.pt`` (SBDA tpfeat-v6, feat_dim 253) is UNAFFECTED by the v18
+#    bump and still serves — the gen141+SBDA pair beat the old prod (BC base + legacy 46-dim TP) 61.8% over
+#    1480 M-B battles. Variant kept alongside: ``checkpoints_pre_sbda/teampreview_base.pt`` (legacy 46-dim).
+#    ⚠ Self-play TRAINING points its base/KL-anchor ckpt at ``battle_base.pt`` (the BC anchor) — which is now
+#    ALSO the interim served file; this is fine (the anchor IS the best v18 model we have). See the configs.
 _AI_TRAIN = Path(__file__).resolve().parents[2] / "ai_train_scripts"
-DEFAULT_BC_CHECKPOINT = _AI_TRAIN / "BC_model" / "checkpoints_attn" / "battle_selfplay_gen141.pt"
+# INTERIM v18 serve (see note above): v17 gen141 is unloadable on v18 → serve the v18 BC anchor battle_base.pt.
+DEFAULT_BC_CHECKPOINT = _AI_TRAIN / "BC_model" / "checkpoints_attn_pre_gen141" / "battle_base.pt"
 DEFAULT_TP_CHECKPOINT = _AI_TRAIN / "teamPreview_model" / "checkpoints" / "teampreview_sbda.pt"
 
 try:
