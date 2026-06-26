@@ -1257,3 +1257,82 @@ def resolve_active_ability_json(mon: dict) -> tuple[str, float]:
         if active:
             return norm_species(active), 1.0
     return resolve_ability_json(mon)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# v18 (Option 1): redundant condition-setting (per-move feature).
+# SHARED so the offline + live encoders compute it byte-identically (parity).
+# Goal: teach the net that re-casting an ALREADY-ACTIVE non-stackable condition
+# (Light Screen, Rain Dance, …) usually wastes a turn — WITHOUT forbidding it, so
+# the legit double-screen (predicted Brick Break / about-to-expire) stays learnable.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Moves that set a NON-STACKABLE condition on the USER'S OWN side (re-casting while
+# active = redundant). Trick Room is EXCLUDED (re-casting TOGGLES it off); entry
+# hazards are EXCLUDED (opp-side + stackable — a different, noisier judgement).
+_REDUNDANT_OWN_SIDE_MOVE: dict = {
+    "lightscreen": "LIGHT_SCREEN", "reflect": "REFLECT", "auroraveil": "AURORA_VEIL",
+    "tailwind": "TAILWIND", "safeguard": "SAFEGUARD", "mist": "MIST", "luckychant": "LUCKY_CHANT",
+    # rare same-effect screen moves (LGPE-era partner moves; in the dex, defensively mapped)
+    "glitzyglow": "LIGHT_SCREEN", "baddybad": "REFLECT",
+}
+# the canonical SIDE_COND names the redundancy bit cares about (both encoders filter their active-side
+# set to these, so the frozensets match for the same battle → parity).
+_REDUNDANT_OWN_SIDE_NAMES = frozenset(_REDUNDANT_OWN_SIDE_MOVE.values())
+# Weather/terrain SETTING moves → a normalised condition key (matched against the
+# currently-active field, normalised the same way — alias-proof across both paths).
+_REDUNDANT_WEATHER_MOVE: dict = {
+    "raindance": "rain", "sunnyday": "sun", "sandstorm": "sand", "snowscape": "snow",
+    "hail": "snow",   # gen9 Hail sets snow (Chilly Reception EXCLUDED — it also switches, so a re-cast has value)
+}
+_REDUNDANT_TERRAIN_MOVE: dict = {
+    "electricterrain": "electric", "grassyterrain": "grassy",
+    "mistyterrain": "misty", "psychicterrain": "psychic",
+}
+
+
+def _weather_key(tok) -> Optional[str]:
+    """Normalise any weather token (offline 'RainDance'/'SNOWSCAPE', live Weather.name) to a key."""
+    if not tok:
+        return None
+    t = "".join(c for c in str(tok).lower() if c.isalnum())
+    if t in ("raindance", "rain", "primordialsea"):
+        return "rain"
+    if t in ("sunnyday", "sun", "desolateland", "harshsunlight"):
+        return "sun"
+    if t in ("sandstorm", "sand"):
+        return "sand"
+    if t in ("snow", "snowscape", "hail"):
+        return "snow"
+    return None
+
+
+def _terrain_key(tok) -> Optional[str]:
+    """Normalise any terrain token ('electric'/'ELECTRIC_TERRAIN'/'electricterrain') to a key."""
+    if not tok:
+        return None
+    t = "".join(c for c in str(tok).lower() if c.isalnum())
+    for k in ("electric", "grassy", "misty", "psychic"):
+        if k in t:
+            return k
+    return None
+
+
+def move_redundant_condition(move_id: Optional[str], side_active, weather, terrain) -> float:
+    """1.0 if casting ``move_id`` would re-set a non-stackable condition ALREADY active on the relevant
+    side, else 0.0. ``side_active`` = the casting mon's OWN-side active SIDE_COND names (canonical, e.g.
+    {'LIGHT_SCREEN','TAILWIND'}); ``weather``/``terrain`` = the current global field tokens. A pure
+    feature — the policy still decides (no action is blocked)."""
+    if not move_id:
+        return 0.0
+    side_active = side_active or frozenset()      # defensive: tolerate a None / empty container
+    name = _REDUNDANT_OWN_SIDE_MOVE.get(move_id)
+    if name is not None:
+        return 1.0 if name in side_active else 0.0
+    wk = _REDUNDANT_WEATHER_MOVE.get(move_id)
+    if wk is not None:
+        return 1.0 if wk == _weather_key(weather) else 0.0
+    tk = _REDUNDANT_TERRAIN_MOVE.get(move_id)
+    if tk is not None:
+        return 1.0 if tk == _terrain_key(terrain) else 0.0
+    return 0.0

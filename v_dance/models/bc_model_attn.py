@@ -11,7 +11,7 @@ pretrain + a successor self-play run; see the to-do list).
 WHY this exists
 ---------------
 ``BCPolicy`` consumes the frozen STATE_DIM vector as one unstructured blob: a
-512-wide Linear sees all 4913 numbers at once, so the mon in bench-slot 3 and the
+512-wide Linear sees all STATE_DIM numbers at once, so the mon in bench-slot 3 and the
 mon in bench-slot 4 are processed by ENTIRELY SEPARATE weights, and any notion of
 "these twelve things are all Pokémon, compare them" must be re-learned from
 scratch for every slot.  The CS230 paper (Tse, 2022) and our own 15b TP redesign
@@ -19,9 +19,9 @@ both point at the same structural prior: process each Pokémon with a SHARED
 per-mon encoder, then let the mons INTERACT.
 
 The frozen layout makes this a MODEL-ONLY change — no encoder change, no data
-re-export (numbers below = current v17; the model auto-sizes from get_state_dim()):
+re-export (numbers below = current v18; the model auto-sizes from get_state_dim()):
 
-    STATE_DIM = 12 mon-slots x POKEMON_FEATURES (401) + GLOBAL_FEATURES (101) = 4913
+    STATE_DIM = 12 mon-slots x POKEMON_FEATURES (405) + GLOBAL_FEATURES (101) = 4961
 
     slot 0  own active a   (our_a)        slots 4-7   own bench
     slot 1  own active b   (our_b)        slots 8-11  opp bench
@@ -95,7 +95,7 @@ class AttnBCPolicy(nn.Module):
     action + gimmick heads + a pooled value head.
 
     Args:
-        state_dim:    input width (frozen STATE_DIM == 4913).
+        state_dim:    input width (frozen STATE_DIM == 4961 at layout v18).
         action_dim:   move/switch logits per head (frozen ACTION_DIM == 16).
         gimmick_dim:  gimmick logits per head (GIMMICK_DIM == 3, {none, mega, tera}; v11 Phase D).
         d_model:      per-mon token width (default 128).

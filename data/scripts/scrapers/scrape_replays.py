@@ -455,6 +455,7 @@ def _format_choices() -> dict:
             tok = reg_token(f)                       # e.g. 'regma'
             if tok and tok.startswith("reg") and len(tok) > 3:
                 out[tok[3:]] = f                     # 'ma' -> 'gen9championsvgc2026regma'
+                out[tok[3:] + "bo3"] = f + "bo3"     # \'mabo3\' -> the reg\'s Best-of-3 competitive feed
         if out:
             return out
     except Exception:
@@ -462,6 +463,8 @@ def _format_choices() -> dict:
     return {
         "ma": "gen9championsvgc2026regma",
         "mb": "gen9championsvgc2026regmb",
+        "mabo3": "gen9championsvgc2026regmabo3",
+        "mbbo3": "gen9championsvgc2026regmbbo3",
     }
 
 

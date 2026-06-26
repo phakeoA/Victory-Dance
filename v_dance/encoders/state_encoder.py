@@ -73,7 +73,7 @@ TENSOR LAYOUT  (total STATE_DIM floats)
                                reflect/light_screen/aurora_veil (age>base ⇒ Light-Clay/Terrain-Extender 8-turn)
         team counts (4)      ← own/opp living-bench, own/opp fainted (each /4) — MUST stay last
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-POKEMON_FEATURES per slot (= 401; the *_FEATURES constants in encoder_layout.py are canonical, but this
+POKEMON_FEATURES per slot (= 405; the *_FEATURES constants in encoder_layout.py are canonical, but this
 list is the authoritative per-field breakdown in WRITE order — keep it in sync on a layout bump):
     hp_frac          (1)
     type1 one-hot    (20)
@@ -86,7 +86,7 @@ list is the authoritative per-field breakdown in WRITE order — keep it in sync
     status one-hot   (7)    ← BRN FNT FRZ PAR PSN SLP TOX
     boosts           (7)    ← atk def spa spd spe acc eva / 6
     weight           (1)    ← v9: normalized species weight (Heavy Slam / Low Kick / Heavy-Light Metal)
-    4 × MOVE_FEATURES (224) ← 4 × 56 (per-move breakdown below)
+    4 × MOVE_FEATURES (228) ← 4 × 57 (per-move breakdown below)
     item block       (25)   ← v9: 23 item-mechanic tags (multi-hot) + identity index (1) + item_known (1);
                               tags are MECHANICS (not identity) so the layout is format-scalable
     ability block    (45)   ← v9: 43 ability-mechanic tags (multi-hot) + identity index (1) + ability_known (1)
@@ -100,7 +100,7 @@ list is the authoritative per-field breakdown in WRITE order — keep it in sync
     is_fainted       (1)    ← layout-v2; KO flag (opp bench / counting)
     is_transformed   (1)    ← layout-v2; Ditto copied a forme (types/stats above are the COPY's)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-MOVE_FEATURES per move (= 56 = 25 core + 29 move-tags + identity + is_known; in WRITE order):
+MOVE_FEATURES per move (= 57 = 25 core + 1 redundant-condition + 29 move-tags + identity + is_known; in WRITE order):
     base_power / 150     (1)   ← v11 N1 Champions BP override, capped 250
     type_idx / 19        (1)   ← ordinal, not one-hot; v9 -ate / N1 Champions type
     category             (1)   ← 0=phys 0.5=spec 1=status
@@ -116,6 +116,7 @@ MOVE_FEATURES per move (= 56 = 25 core + 29 move-tags + identity + is_known; in 
     who-moves-first 0/1  (2)   ← B1.4b: priority-aware signed speed margin of THIS move vs each enemy
     intrinsics           (4)   ← B1.3: contact · recoil · drain · multihit-count/5 (per-move, public)
     hit-chance vs enemy0/1(2)  ← B2b: realized hit chance vs each enemy (evasion / Sand Veil / No Guard / …)
+    redundant-condition  (1)   ← v18 Option 1: this move re-sets a screen/weather/terrain already active on the caster's side
     move tags            (29)  ← v9: mechanic-tag multi-hot prior
     identity index       (1)   ← v9: move embedding index (feeds nn.Embedding, NOT the flat dim)
     is_known             (1)   ← 1.0 revealed/exact · p(usage) belief-padded · 0 empty slot
@@ -205,8 +206,8 @@ from v_dance.encoders.battle_mechanics import (  # noqa: F401
     _moves_data, _moves_first, _per_enemy_hit_chance, _side_screens, _situational_damage_mult,
     _type_chart, _type_eff_signed_immune, _type_mult, ability_effect_indices, champ_acc_raw,
     champ_bp, champ_type, dex_unique_ability, field_duration_scalars, is_spread_target,
-    item_effect_indices, pp_max, resolve_ability_json, resolve_active_ability_json,
-    resolve_item_json,
+    item_effect_indices, move_redundant_condition, pp_max,
+    resolve_ability_json, resolve_active_ability_json, resolve_item_json,
 )
 from v_dance.encoders.action_codec import (  # noqa: F401
     ABILITY_ID_REL, ABILITY_KNOWN_REL, ITEM_ID_REL, MOVE_ID_RELS, OPP_HEADS,
@@ -220,6 +221,26 @@ from v_dance.encoders.action_codec import (  # noqa: F401
     permute_action_index, permute_action_mask_row, permute_move_slots,
 )
 
+
+def _active_side_conditions_offline(side: dict | None) -> frozenset:
+    """v18 (Option 1): canonical SIDE_COND names ACTIVE on a side, from the offline snapshot's side dict —
+    MIRRORS the global SC block exactly (tailwind + screens + safeguard/mist/lucky_chant), so the per-move
+    redundant-condition bit is parity-clean with the live path's analogue."""
+    s = side or {}
+    out = set()
+    if (s.get("tailwind_turns_remaining") or 0) > 0:
+        out.add("TAILWIND")
+    for _scr in (s.get("screens") or {}):
+        _nm = _SCREEN_TO_SC.get(_scr)
+        if _nm:
+            out.add(_nm)
+    if s.get("safeguard"):
+        out.add("SAFEGUARD")
+    if s.get("mist"):
+        out.add("MIST")
+    if s.get("lucky_chant"):
+        out.add("LUCKY_CHANT")
+    return frozenset(out)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -269,6 +290,9 @@ class VodStateEncoder:
         _sc = snap.get("side_conditions") or {}
         _our_scr = _side_screens(_sc.get("our_side"))
         _opp_scr = _side_screens(_sc.get("opp_side"))
+        # v18 (Option 1): canonical active SIDE_COND names per side → the per-move redundant-condition bit.
+        _our_side_active = _active_side_conditions_offline(_sc.get("our_side"))
+        _opp_side_active = _active_side_conditions_offline(_sc.get("opp_side"))
         # v11 B.1b: per-side tailwind + Trick Room resolved ONCE for the move-block who-moves-first
         # channel — the defender eff_speed and the attacker att_ctx.eff_speed each need the mon's OWN
         # side tailwind (and the global weather/TR).
@@ -291,6 +315,7 @@ class VodStateEncoder:
             enemy = own_enemy if prefix == "our" else opp_enemy
             _tw = _our_tw if prefix == "our" else _opp_tw
             _fnt = _own_fnt if prefix == "our" else _opp_fnt
+            _side_act = _our_side_active if prefix == "our" else _opp_side_active
             for slot in ("a", "b"):
                 mon = key_map.get(f"{prefix}_{slot}")
                 # v11 Victory Star: the ACTIVE ally's ability (other slot) — boosts this mon's accuracy.
@@ -300,7 +325,7 @@ class VodStateEncoder:
                                          field_mods=field_mods, side_tailwind=_tw, trick_room=_trick_room,
                                          gravity=_gravity, fainted_allies=_fnt,
                                          magic_room=_magic_room, wonder_room=_wonder_room,
-                                         ally_ability=_ally_ab)
+                                         ally_ability=_ally_ab, side_active=_side_act)
                 cursor += POKEMON_FEATURES
 
         # ── [B] Own bench (fainted excluded — matches the live path; the
@@ -313,7 +338,8 @@ class VodStateEncoder:
             self._write_pokemon_json(vec, cursor, mon, is_active=False, enemy_defenders=own_enemy,
                                      field_mods=field_mods, side_tailwind=_our_tw, trick_room=_trick_room,
                                      gravity=_gravity, fainted_allies=_own_fnt,
-                                     magic_room=_magic_room, wonder_room=_wonder_room)
+                                     magic_room=_magic_room, wonder_room=_wonder_room,
+                                     side_active=_our_side_active)
             cursor += POKEMON_FEATURES
 
         # ── [B2] Opponent bench (layout-v2): opp non-active roster mons.
@@ -329,7 +355,8 @@ class VodStateEncoder:
             self._write_pokemon_json(vec, cursor, mon, is_active=False, enemy_defenders=opp_enemy,
                                      field_mods=field_mods, side_tailwind=_opp_tw, trick_room=_trick_room,
                                      gravity=_gravity, fainted_allies=_opp_fnt,
-                                     magic_room=_magic_room, wonder_room=_wonder_room)
+                                     magic_room=_magic_room, wonder_room=_wonder_room,
+                                     side_active=_opp_side_active)
             cursor += POKEMON_FEATURES
 
         # ── [C] Global features ──────────────────────────────────────────────
@@ -479,6 +506,7 @@ class VodStateEncoder:
         magic_room: bool = False,
         wonder_room: bool = False,
         ally_ability: Optional[str] = None,
+        side_active: frozenset = frozenset(),
     ) -> None:
         """JSON twin of _write_pokemon — same POKEMON_FEATURES layout. ``enemy_defenders`` = the 2 enemy
         actives' defender profiles; ``field_mods`` = (weather, terrain) for the B1.2b damage modifiers;
@@ -602,7 +630,8 @@ class VodStateEncoder:
                    "type_boost": _TYPE_BOOST_TYPE.get(_att_item),  # v11 B3: ×1.2 matching-type move (P5: gated)
                    "scope_lens": _att_item in ("scopelens", "razorclaw"),  # v11 N4: +1 crit stage (P5: gated)
                    # v11: Victory Star ×1.1 accuracy — the holder OR its active ally has the ability.
-                   "victory_star": abil_id == "victorystar" or ally_ability == "victorystar"}
+                   "victory_star": abil_id == "victorystar" or ally_ability == "victorystar",
+                   "side_active": side_active}      # v18 (Option 1): this mon's own-side active conditions
         slots = move_slots_for_mon(mon)
         for m_idx in range(NUM_MOVES):
             if m_idx < len(slots):
@@ -898,6 +927,14 @@ class VodStateEncoder:
                     defender=d, move_id=_mid, weather=_weather,
                     victory_star=_ac.get("victory_star", False))   # v11 Victory Star
             i += 1
+
+        # v18 (Option 1): REDUNDANT-CONDITION bit — 1.0 if this move re-sets a screen/weather/terrain
+        # already active on the caster's side (Light Screen under Light Screen, Rain Dance under rain, …).
+        # A pure feature: no action is masked, so a deliberate re-cast stays learnable. ``side_active`` is
+        # the mon's own-side conditions (att_ctx); _weather/_terrain are the global field (field_mods).
+        vec[i] = move_redundant_condition(_mid, (att_ctx or {}).get("side_active") or frozenset(),
+                                          _weather, _terrain)
+        i += 1
 
         # v9: move effect-tags (multi-hot priors) + identity index, BEFORE the trailing is_known
         for idx in move_tag_indices(move_name):

@@ -50,6 +50,10 @@ from v_dance.encoders.state_encoder import (
     move_tag_indices, ability_tag_indices, item_tag_indices, ABILITY_SUPPRESSED_IDX,
     ability_index, move_index, item_index,
 )
+# v18 (Option 1): redundant-condition helper (shared, parity) + the canonical SC names it keys on.
+from v_dance.encoders.battle_mechanics import (
+    move_redundant_condition, _REDUNDANT_OWN_SIDE_NAMES,
+)
 from v_dance.encoders import damage_mechanics as _DMG
 from v_dance.parser.vod_parser.battle_models import volatile_flags
 
@@ -367,6 +371,11 @@ class LiveStateEncoder:
         _gravity = any(getattr(f, "name", "") == "GRAVITY" for f in battle.fields)   # v11 C.2e
         _magic_room = any(getattr(f, "name", "") == "MAGIC_ROOM" for f in battle.fields)     # v11 P5
         _wonder_room = any(getattr(f, "name", "") == "WONDER_ROOM" for f in battle.fields)   # v11 P5
+        # v18 (Option 1): per-side ACTIVE SIDE_COND names → the per-move redundant-condition bit. Uses the
+        # testable static twin of the offline _active_side_conditions_offline (extraction parity is locked by
+        # tests/test_redundant_condition_v18.py; the underlying presence bits are already global-SC parity-proven).
+        _our_side_active = self._active_side_conditions_live(battle.side_conditions)
+        _opp_side_active = self._active_side_conditions_live(battle.opponent_side_conditions)
 
         def _prof(mon, is_own):
             if mon is None:
@@ -462,7 +471,8 @@ class LiveStateEncoder:
                                 move_override=mv, enemy_defenders=own_enemy, field_mods=field_mods,
                                 side_tailwind=_own_tw, trick_room=_tr, gravity=_gravity,
                                 fainted_allies=_own_fnt, times_attacked=_own_ta.get(slot, 0),
-                                magic_room=_magic_room, wonder_room=_wonder_room, ally_ability=_ally_ab)
+                                magic_room=_magic_room, wonder_room=_wonder_room, ally_ability=_ally_ab,
+                                side_active=_our_side_active)
             cursor += POKEMON_FEATURES
         _opp_list = list(opp_active)
         for slot, mon in enumerate(_opp_list):
@@ -471,7 +481,8 @@ class LiveStateEncoder:
             self._write_pokemon(vec, cursor, mon, is_active=True, is_own=False, enemy_defenders=opp_enemy,
                                 field_mods=field_mods, side_tailwind=_opp_tw, trick_room=_tr, gravity=_gravity,
                                 fainted_allies=_opp_fnt,
-                                magic_room=_magic_room, wonder_room=_wonder_room, ally_ability=_ally_ab)
+                                magic_room=_magic_room, wonder_room=_wonder_room, ally_ability=_ally_ab,
+                                side_active=_opp_side_active)
             cursor += POKEMON_FEATURES
 
         # ── [B] Bench slots ──────────────────────────────────────────────────
@@ -489,7 +500,8 @@ class LiveStateEncoder:
             self._write_pokemon(vec, cursor, mon, is_active=False, is_own=True, enemy_defenders=own_enemy,
                                 field_mods=field_mods, side_tailwind=_own_tw, trick_room=_tr, gravity=_gravity,
                                 fainted_allies=_own_fnt,
-                                magic_room=_magic_room, wonder_room=_wonder_room)
+                                magic_room=_magic_room, wonder_room=_wonder_room,
+                                side_active=_our_side_active)
             cursor += POKEMON_FEATURES
 
         # ── [B2] Opponent bench (layout-v2): the opponent's FULL teampreview
@@ -507,7 +519,8 @@ class LiveStateEncoder:
             self._write_pokemon(vec, cursor, mon, is_active=False, is_own=False, enemy_defenders=opp_enemy,
                                 field_mods=field_mods, side_tailwind=_opp_tw, trick_room=_tr, gravity=_gravity,
                                 fainted_allies=_opp_fnt,
-                                magic_room=_magic_room, wonder_room=_wonder_room)
+                                magic_room=_magic_room, wonder_room=_wonder_room,
+                                side_active=_opp_side_active)
             cursor += POKEMON_FEATURES
 
         # ── [C] Global features ──────────────────────────────────────────────
@@ -834,6 +847,15 @@ class LiveStateEncoder:
             return min(val, 2) / 2.0
         return 1.0
 
+    @staticmethod
+    def _active_side_conditions_live(side_conditions) -> frozenset:
+        """v18 (Option 1): canonical SIDE_COND names ACTIVE on a side, from a poke-env
+        ``Dict[SideCondition, int]`` — the LIVE twin of state_encoder._active_side_conditions_offline.
+        Filtered to ``_REDUNDANT_OWN_SIDE_NAMES`` so the frozenset matches the offline path for the same
+        battle (extraction parity is locked by tests/test_redundant_condition_v18.py)."""
+        return frozenset(getattr(k, "name", "") for k, v in side_conditions.items()
+                         if v and getattr(k, "name", "") in _REDUNDANT_OWN_SIDE_NAMES)
+
     # ── Pokémon encoder (live) ────────────────────────────────────────────────
     def _live_effective_speed(self, mon, is_own, side_tailwind, weather=None, magic_room=False):
         """(speed, known) — mirror of the offline _effective_speed: est speed folding the spe boost
@@ -891,6 +913,7 @@ class LiveStateEncoder:
         magic_room: bool = False,
         wonder_room: bool = False,
         ally_ability: Optional[str] = None,
+        side_active: frozenset = frozenset(),
     ) -> None:
         """Write POKEMON_FEATURES floats into vec starting at `start`.
 
@@ -1016,7 +1039,8 @@ class LiveStateEncoder:
                    "type_boost": _TYPE_BOOST_TYPE.get(_it),  # v11 B3: ×1.2 matching-type move
                    "scope_lens": _it in ("scopelens", "razorclaw"),  # v11 N4: +1 crit stage (P5: gated via _it)
                    # v11: Victory Star ×1.1 accuracy — the holder OR its active ally has the ability.
-                   "victory_star": abil_id == "victorystar" or ally_ability == "victorystar"}
+                   "victory_star": abil_id == "victorystar" or ally_ability == "victorystar",
+                   "side_active": side_active}      # v18 (Option 1): this mon's own-side active conditions
         for m_idx in range(NUM_MOVES):
             if m_idx < len(move_list):
                 self._write_move(vec, i, move_list[m_idx], mon, enemy_defenders, att_ctx,
@@ -1383,8 +1407,14 @@ class LiveStateEncoder:
                     victory_star=_ac.get("victory_star", False))   # v11 Victory Star
             i += 1
 
+        # v18 (Option 1): REDUNDANT-CONDITION bit (parity twin of the offline _write_move_json) — 1.0 if
+        # this move re-sets a screen/weather/terrain already active on the caster's side. Pure feature.
+        vec[i] = move_redundant_condition(_mid, (att_ctx or {}).get("side_active") or frozenset(),
+                                          field_mods[0] if field_mods else None,
+                                          field_mods[1] if field_mods else None)
+        i += 1
+
         # v9: move effect-tags + identity index, BEFORE the trailing is_known
-        _mid = getattr(move, "id", None)
         for idx in move_tag_indices(_mid):
             vec[i + idx] = 1.0
         i += NUM_MOVE_TAGS

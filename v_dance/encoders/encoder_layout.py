@@ -130,11 +130,13 @@ NUM_FIELDS     = len(FIELD_NAMES)       # 15
 NUM_SIDE_CONDS = len(SIDE_COND_NAMES)   # 24
 NUM_BOOSTS     = 7                      # atk def spa spd spe acc eva
 NUM_MOVES      = 4
-MOVE_FEATURES  = 25 + NUM_MOVE_TAGS + 1 + 1   # v9/v11: 25 core feats (base_power/type/category/priority/
+MOVE_FEATURES  = 26 + NUM_MOVE_TAGS + 1 + 1   # v9/v11: 25 core feats (base_power/type/category/priority/
                       # accuracy/pp/protect/stab/spread + type-eff×2 + damage-band×2 + MOVES-FIRST×2 [v11 B.1b
                       # priority-aware who-moves-first vs each enemy] + intrinsics×4 + HIT-CHANCE×2 [v11 B2b
-                      # per-enemy realized accuracy: defender evasion stage/Sand-Veil/No-Guard/acc−eva boost]) +
-                      # 29 effect-tags + 1 identity index + is_known(last) = 25+29+1+1 = 56
+                      # per-enemy realized accuracy: defender evasion stage/Sand-Veil/No-Guard/acc−eva boost])
+                      # + 1 REDUNDANT-CONDITION bit (v18: this move re-sets an already-active screen/weather/
+                      # terrain on the relevant side) + 29 effect-tags + 1 identity index + is_known(last)
+                      # = 26+29+1+1 = 57
 
 POKEMON_FEATURES = (
     1               # hp_frac
@@ -148,7 +150,7 @@ POKEMON_FEATURES = (
     + NUM_STATUS    # status one-hot  (7)
     + NUM_BOOSTS    # stat boosts     (7)
     + WEIGHT_FEATURES            # v9: normalized species weight (1)
-    + NUM_MOVES * MOVE_FEATURES  # v9: 4 × MOVE_FEATURES (v11/v17 = 56)
+    + NUM_MOVES * MOVE_FEATURES  # v9: 4 × MOVE_FEATURES (v18 = 57)
     + ITEM_BLOCK_V9              # v9: item tags + identity index + known
     + ABILITY_BLOCK_V9          # v9: ability tags + identity index + known
     + VOLATILE_FEATURES         # v9: per-mon volatile block (6)
@@ -158,7 +160,7 @@ POKEMON_FEATURES = (
     + 1             # is_fainted      (layout-v2: see/count KO'd mons)
     + 1             # is_transformed  (layout-v2: Ditto copies a forme; reverts)
 )
-# POKEMON_FEATURES sums the blocks above (v17 = 401; full dim history in the
+# POKEMON_FEATURES sums the blocks above (v18 = 405; full dim history in the
 #   STATE_LAYOUT_VERSION block below).
 #   item block = ITEM_FEATURES 17 (16 effects + known); ability block =
 #   ABILITY_FEATURES 18 (17 effects + known) after the Defiant/Competitive split.
@@ -184,7 +186,7 @@ GLOBAL_FEATURES = (
 )  # = 101
 
 STATE_DIM = (ACTIVE_SLOTS + BENCH_SLOTS + OPP_BENCH_SLOTS) * POKEMON_FEATURES + GLOBAL_FEATURES
-# Current STATE_DIM = 4913 @ layout v17 (= 12 × POKEMON_FEATURES + GLOBAL_FEATURES);
+# Current STATE_DIM = 4961 @ layout v18 (= 12 × POKEMON_FEATURES + GLOBAL_FEATURES);
 # see the STATE_LAYOUT_VERSION history below for every prior layout.
 
 # Monotonic layout version: bump whenever the tensor LAYOUT changes (a new
@@ -217,9 +219,16 @@ STATE_DIM = (ACTIVE_SLOTS + BENCH_SLOTS + OPP_BENCH_SLOTS) * POKEMON_FEATURES + 
 #       381→401, +20×12 slots = +240. REVEALED tera type only (parity-clean) → PERMANENTLY ZERO while the
 #       Champions mod hard-disables tera (canTerastallize→null); forward-compat. Gimmick codec also 2→3 here
 #       but GIMMICK_DIM is an action-head width, NOT part of STATE_DIM.)
+#  18 → STATE_DIM 4961 (Option 1, support-move discipline: +1 per-move REDUNDANT-CONDITION bit — 1.0 if
+#       this move re-sets an already-active screen/weather/terrain on the relevant side → MOVE_FEATURES
+#       56→57, POKEMON_FEATURES 401→405, +1×4 moves×12 slots = +48. A PURE feature (no action masked) so a
+#       deliberate re-cast vs a predicted Brick Break / before expiry stays learnable. ⚠ Inert until a
+#       RETRAIN: a v17 checkpoint (gen141) is REJECTED at load against v18. (Option 1b — an explicit
+#       opp-has-screen-breaker GLOBAL — was DEFERRED: it is opp-derived but not in the gap-#6 splice, and
+#       the opp's breaker move is already encoded on the opp mon's move block.))
 # train_bc stamps this into the checkpoint config; model_io.load_bc_policy asserts
 # it (and the dim) match the running code.
-STATE_LAYOUT_VERSION = 17
+STATE_LAYOUT_VERSION = 18
 
 # ── Action space ───────────────────────────────────────────────────────────────
 ACTIONS_PER_SLOT = 16    # 12 move-target + 4 switch
