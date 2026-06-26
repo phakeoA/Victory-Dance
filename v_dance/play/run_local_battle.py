@@ -162,7 +162,10 @@ def start_showdown_on(port: int = SHOWDOWN_PORT) -> subprocess.Popen | None:
             sys.exit(1)
         time.sleep(0.5)
 
-    proc.terminate()
+    # tree-kill, not a bare terminate: ``node pokemon-showdown start`` forks a child server that a plain
+    # proc.terminate() would ORPHAN on Windows (same reason stop_showdown uses _terminate_tree). On a
+    # partial-start timeout the port-holding child may already exist, so reap the whole tree.
+    stop_showdown(proc)
     log.error("Showdown server did not open port %d within %ds.", port, SHOWDOWN_READY_TIMEOUT)
     sys.exit(1)
 
