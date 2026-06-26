@@ -48,6 +48,9 @@ class PPOConfig:
     value_coef: float = 0.5        # value-loss weight
     entropy_coef: float = 0.01     # entropy bonus weight
     kl_coef: float = 0.0           # KL-to-BC penalty weight (0 = log-only; Phase 1 sets >0)
+    gimmick_kl_weight: float = 1.0 # per-head KL scale for the MEGA (gimmick) head ONLY (1.0 = same anchor
+                                   # as the move policy). <1.0 loosens the mega anchor so RL can un-learn
+                                   # the BC "always mega turn 1" data-bias (see policy_eval._joint_kl).
     value_loss_mode: str = "bce"   # "bce" (Phase 1, win-prob) | "huber" (Phase 3, shaped return)
     huber_delta: float = 1.0
     standardize_adv: bool = True   # per-minibatch advantage standardisation (sec 3)
@@ -173,7 +176,8 @@ def ppo_loss_from_batch(
     pull the stored old logprob/value, and assemble the PPO loss. ``advantages`` and
     ``returns`` come from ``gae.compute_batch_gae`` (numpy, value_pm space — pass them
     UN-standardised; standardisation happens here per-minibatch)."""
-    ev = policy_eval.ppo_forward(ac, list(transitions), cfg.tau, device, ref_policy=ref_policy)
+    ev = policy_eval.ppo_forward(ac, list(transitions), cfg.tau, device, ref_policy=ref_policy,
+                                 gimmick_kl_weight=cfg.gimmick_kl_weight)
     old_logprob = _col(transitions, "logprob", device)
     old_value_pm = _col(transitions, "value", device)
     adv = torch.as_tensor(np.asarray(advantages, np.float32), device=device)

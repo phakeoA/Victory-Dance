@@ -132,7 +132,7 @@ class PPOTrainer:
     def _kl_from_bc(self, txns) -> float:
         with torch.no_grad():
             ev = policy_eval.ppo_forward(self.ac, txns, self.cfg.tau, self.device,
-                                         ref_policy=self.ref)
+                                         ref_policy=self.ref, gimmick_kl_weight=self.cfg.gimmick_kl_weight)
         return float(ev.kl_to_ref.mean())
 
     # ── critic-only warm-up (actor frozen) ────────────────────────────────────

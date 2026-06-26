@@ -205,8 +205,8 @@ from v_dance.encoders.battle_mechanics import (  # noqa: F401
     _move_ignores_all_immunity, _move_ignores_evasion, _move_immune, _move_is_ohko,
     _moves_data, _moves_first, _per_enemy_hit_chance, _side_screens, _situational_damage_mult,
     _type_chart, _type_eff_signed_immune, _type_mult, ability_effect_indices, champ_acc_raw,
-    champ_bp, champ_type, dex_unique_ability, field_duration_scalars, is_spread_target,
-    item_effect_indices, move_redundant_condition, pp_max,
+    champ_bp, champ_type, dex_unique_ability, field_dependent_move_type, field_duration_scalars, is_spread_target,
+    item_effect_indices, move_redundant_condition, move_redundant_status, pp_max,
     resolve_ability_json, resolve_active_ability_json, resolve_item_json,
 )
 from v_dance.encoders.action_codec import (  # noqa: F401
@@ -745,6 +745,9 @@ class VodStateEncoder:
         i += 1
 
         mtype = _canon(champ_type(_mid, data.get("type")))              # v11 N1: Champions type (snaptrap Grass→Steel)
+        mtype = _canon(field_dependent_move_type(_mid, mtype,           # v19b: Weather Ball / Terrain Pulse follow
+                       field_mods[0] if field_mods else None,          #        the weather / terrain (else base type)
+                       field_mods[1] if field_mods else None))
         mtype = _DMG.effective_move_type(move_name, mtype, ability_id)   # v9: Normalize/Pixilate/-ate/Liquid Voice
         if mtype in _TYPE_IDX:
             vec[i] = _TYPE_IDX[mtype] / (NUM_TYPES - 1)
@@ -935,6 +938,14 @@ class VodStateEncoder:
         vec[i] = move_redundant_condition(_mid, (att_ctx or {}).get("side_active") or frozenset(),
                                           _weather, _terrain)
         i += 1
+
+        # v19 (Option 1c): per-ENEMY REDUNDANT-STATUS bits (2). 1.0 if this PURE status move is WASTED on
+        # enemy_defenders[e] (target already carries a major status, or is type/ability immune). Reuses the
+        # SAME enemy iteration as the type-eff / hit-chance channels; damaging moves & empty slots → 0.0.
+        for e in range(2):
+            d = enemy_defenders[e] if (enemy_defenders and e < len(enemy_defenders)) else None
+            vec[i] = move_redundant_status(_mid, d)
+            i += 1
 
         # v9: move effect-tags (multi-hot priors) + identity index, BEFORE the trailing is_known
         for idx in move_tag_indices(move_name):

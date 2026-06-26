@@ -167,15 +167,21 @@ def _joint_logprob_entropy(action_logits, gimmick_logits, slot_batches, tau):
     return total_lp, total_ent
 
 
-def _joint_kl(new_a, new_g, ref_a, ref_g, slot_batches, tau):
-    """Sum the per-head forward KL(ref||new) over the slots that decided."""
+def _joint_kl(new_a, new_g, ref_a, ref_g, slot_batches, tau, gimmick_kl_weight: float = 1.0):
+    """Sum the per-head forward KL(ref||new) over the slots that decided. ``gimmick_kl_weight`` scales the
+    GIMMICK (mega) head's KL contribution ONLY (default 1.0 = byte-identical to the old joint KL). Set it
+    < 1.0 to anchor the mega head to BC more LOOSELY than the move policy, so RL can un-learn the BC
+    "always mega turn 1" data-bias while the move policy stays anchored. The heads are independent, so this
+    is a clean per-head knob; it down-weights the mega head in BOTH the KL penalty AND the target_kl_bc
+    drift-halt (so a mega-head drift won't trip the early stop — exactly what we want)."""
     B = slot_batches[0].acts.shape[0]
     total = torch.zeros(B, device=slot_batches[0].acts.device)
     z = torch.zeros(B, device=total.device)
     for sb in slot_batches:
         total = total + torch.where(sb.valid, masked_kl(ref_a[sb.head], new_a[sb.head], sb.amask, tau), z)
         if sb.gimmick:
-            total = total + torch.where(sb.has_g, masked_kl(ref_g[sb.head], new_g[sb.head], sb.gmask, tau), z)
+            g_kl = gimmick_kl_weight * masked_kl(ref_g[sb.head], new_g[sb.head], sb.gmask, tau)
+            total = total + torch.where(sb.has_g, g_kl, z)
     return total
 
 
@@ -219,7 +225,7 @@ class PPOEval:
 
 def ppo_forward(
     ac, transitions: List[Transition], tau: float = 1.0, device: str = "cpu",
-    ref_policy=None,
+    ref_policy=None, gimmick_kl_weight: float = 1.0,
 ) -> PPOEval:
     """One actor-critic forward (+ one frozen-reference forward if given) → the
     PPOEval bundle. Returned ``kl_to_ref`` is the exact per-step forward KL(BC||new)
@@ -239,7 +245,7 @@ def ppo_forward(
     kl = None
     if ref_policy is not None:
         ref_a, ref_g, _ = ref_policy(states)        # frozen BC reference logits
-        kl = _joint_kl(action_logits, gimmick_logits, ref_a, ref_g, sb, tau)
+        kl = _joint_kl(action_logits, gimmick_logits, ref_a, ref_g, sb, tau, gimmick_kl_weight)
     return PPOEval(lp, ent, value_pm, kl)
 
 

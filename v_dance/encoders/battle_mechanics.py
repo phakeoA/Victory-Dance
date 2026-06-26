@@ -412,6 +412,7 @@ def _defender_profile(mon: Optional[dict], side_screens: tuple = (False, False),
                else mon.get("species"))
     return {"types": types, "def": est.get("def"), "spd": est.get("spd"), "hp": est.get("hp"),
             "hp_frac": hp_frac, "grounded": grounded, "ability": _active_ab,
+            "status": mon.get("status"),    # v19 Option 1c: token ('brn'/…); helper lowercases (live = enum.name)
             "screen_phys": side_screens[0], "screen_spec": side_screens[1],
             "eff_speed": _effective_speed(mon, side_tailwind, weather, magic_room)[0],   # v11 B.1b / P5
             # v11 B.2: target Atk (Foul Play), raw weight (Low Kick / Heavy Slam), positive-boost sum
@@ -1318,6 +1319,28 @@ def _terrain_key(tok) -> Optional[str]:
     return None
 
 
+# v19b: FIELD-DEPENDENT move type. Weather Ball's type follows the WEATHER (rain→Water, sun→Fire, snow→Ice,
+# sand→Rock, none→Normal); Terrain Pulse's follows the TERRAIN (electric→Electric, grassy→Grass, psychic→
+# Psychic, misty→Fairy, none→Normal). Without this both read as base Normal → the type-eff / damage-band
+# channels mis-rate them (e.g. a rain-boosted Water Weather Ball reads neutral instead of super-effective).
+# ⚠ Terrain Pulse is GROUNDED-only in the sim; we approximate "always grounded" (airborne Terrain-Pulse
+# users are vanishingly rare in the meta) — BOTH encoders make the SAME approximation → parity-clean. Techno
+# Blast (Drive-ITEM dependent, rare Genesect) is intentionally NOT handled here. Value-only (no new slot).
+_WEATHER_BALL_TYPE = {"rain": "Water", "sun": "Fire", "snow": "Ice", "sand": "Rock"}
+_TERRAIN_PULSE_TYPE = {"electric": "Electric", "grassy": "Grass", "psychic": "Psychic", "misty": "Fairy"}
+
+
+def field_dependent_move_type(move_id: Optional[str], base_type, weather, terrain):
+    """Effective type of a FIELD-dependent move (Weather Ball / Terrain Pulse) under the current
+    weather/terrain; ``base_type`` for every other move (and for these two when no field is up). SHARED by
+    the offline + live writers (same _weather_key/_terrain_key normalisation) → parity by construction."""
+    if move_id == "weatherball":
+        return _WEATHER_BALL_TYPE.get(_weather_key(weather), base_type)
+    if move_id == "terrainpulse":
+        return _TERRAIN_PULSE_TYPE.get(_terrain_key(terrain), base_type)
+    return base_type
+
+
 def move_redundant_condition(move_id: Optional[str], side_active, weather, terrain) -> float:
     """1.0 if casting ``move_id`` would re-set a non-stackable condition ALREADY active on the relevant
     side, else 0.0. ``side_active`` = the casting mon's OWN-side active SIDE_COND names (canonical, e.g.
@@ -1336,3 +1359,76 @@ def move_redundant_condition(move_id: Optional[str], side_active, weather, terra
     if tk is not None:
         return 1.0 if tk == _terrain_key(terrain) else 0.0
     return 0.0
+
+
+# ── v19 (Option 1c): per-TARGET status-move redundancy ─────────────────────────────────────────────────
+# A PURE status move (category 'Status' whose whole point is to inflict a major status — Will-O-Wisp,
+# Thunder Wave, Toxic, Spore, Glare, Sleep Powder, …) is WASTED on a target that already carries a major
+# status (a mon holds only ONE) or is IMMUNE to that status by typing / ability. DAMAGING moves that carry
+# a status only as a SECONDARY (Zap Cannon, Scald, Nuzzle, Discharge, Sludge Bomb) are category Physical/
+# Special → they are NEVER flagged: the damage justifies them regardless of the target's status. A PURE
+# feature (no action is masked) so statusing a predicted switch-in stays fully learnable.
+_MAJOR_STATUS = frozenset({"brn", "par", "psn", "tox", "slp", "frz"})
+# Defender TYPE → the applied status it is immune to (deterministic from typing; Corrosion edge-case skipped).
+_STATUS_TYPE_IMMUNE = {
+    "brn": frozenset({"FIRE"}),
+    "psn": frozenset({"POISON", "STEEL"}),
+    "tox": frozenset({"POISON", "STEEL"}),
+    "frz": frozenset({"ICE"}),
+    # 'par' is handled specially (Electric immune to ALL paralysis gen6+; Ground immune to the Thunder-Wave MOVE).
+}
+# Abilities granting BLANKET status immunity (any major status).
+_STATUS_ABILITY_IMMUNE_ALL = frozenset({"comatose", "purifyingsalt"})
+# Ability → the single status it blocks.
+_STATUS_ABILITY_IMMUNE = {
+    "limber": "par", "insomnia": "slp", "vitalspirit": "slp", "sweetveil": "slp",
+    "immunity": "psn", "pastelveil": "psn", "waterveil": "brn", "waterbubble": "brn",
+    "thermalexchange": "brn", "magmaarmor": "frz",
+}
+
+
+def _pure_status_move(move_id: Optional[str]):
+    """(status_token, is_powder) for a PURE status move, else (None, False).
+
+    Data-driven: category == 'Status' AND a TOP-LEVEL ``status`` field. Zap Cannon/Scald carry their status
+    only in ``secondary`` (category Physical/Special) → excluded by construction (no hand list to rot)."""
+    data = _gen9_moves().get(move_id or "")
+    if not data or (data.get("category") or "").lower() != "status":
+        return None, False
+    st = (data.get("status") or "").lower()
+    if st not in _MAJOR_STATUS:
+        return None, False
+    return st, bool((data.get("flags") or {}).get("powder"))
+
+
+def _status_immune(status: str, powder: bool, move_type: Optional[str], defender: Optional[dict]) -> bool:
+    """True if ``defender`` cannot receive ``status`` from this move — already statused, type immunity,
+    powder vs Grass/Overcoat, or a status-immunity ability."""
+    if defender is None:
+        return False
+    if (defender.get("status") or "").lower() in _MAJOR_STATUS:   # holds a major status already → a new one fails
+        return True
+    types = {str(t).upper() for t in (defender.get("types") or [])}
+    ab = (defender.get("ability") or "")
+    if ab in _STATUS_ABILITY_IMMUNE_ALL or _STATUS_ABILITY_IMMUNE.get(ab) == status:
+        return True
+    if powder and ("GRASS" in types or ab == "overcoat"):        # Spore/Sleep Powder/Stun Spore do nothing
+        return True
+    if status == "par":
+        if "ELECTRIC" in types:                                  # gen6+: Electric-types can't be paralysed
+            return True
+        if (move_type or "").upper() == "ELECTRIC" and "GROUND" in types:   # Thunder Wave (Electric) vs Ground
+            return True
+        return False
+    return status in _STATUS_TYPE_IMMUNE and bool(types & _STATUS_TYPE_IMMUNE[status])
+
+
+def move_redundant_status(move_id: Optional[str], defender: Optional[dict]) -> float:
+    """1.0 if casting PURE status move ``move_id`` at ``defender`` is wasted (target already statused or
+    immune to that status), else 0.0. ``defender`` is a per-move enemy DEFENDER profile (must carry
+    ``types``/``status``/``ability``). Damaging moves and empty slots → 0.0. A pure feature — never masks."""
+    st, powder = _pure_status_move(move_id)
+    if st is None or defender is None:
+        return 0.0
+    move_type = (_gen9_moves().get(move_id, {}).get("type") or "")
+    return 1.0 if _status_immune(st, powder, move_type, defender) else 0.0

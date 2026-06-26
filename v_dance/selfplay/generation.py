@@ -505,6 +505,7 @@ def _default_run_config(ap) -> dict:
 
 def build_train_configs(*, kl_coef: float = 0.5, target_kl_bc: Optional[float] = 0.15,
                         tau: float = 1.0, min_ev: Optional[float] = None,
+                        gimmick_kl_weight: float = 1.0,
                         target_kl_relax_per_gen: float = 0.0,
                         target_kl_max: Optional[float] = None,
                         ppo_overrides: Optional[dict] = None,
@@ -529,7 +530,7 @@ def build_train_configs(*, kl_coef: float = 0.5, target_kl_bc: Optional[float] =
     # --config overrides apply FIRST; the explicit (CLI-derived) values below WIN, so an
     # explicit --kl-coef / --tau / --target-kl-bc still beats the file.
     ppo_kw = dict(ppo_overrides or {})
-    ppo_kw.update(kl_coef=float(kl_coef), tau=float(tau))
+    ppo_kw.update(kl_coef=float(kl_coef), tau=float(tau), gimmick_kl_weight=float(gimmick_kl_weight))
     train_kw = dict(train_overrides or {})
     train_kw.update(target_kl_from_bc=tkl, min_explained_variance=min_ev,
                     target_kl_relax_per_gen=float(target_kl_relax_per_gen),

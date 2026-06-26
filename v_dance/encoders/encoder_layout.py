@@ -130,13 +130,14 @@ NUM_FIELDS     = len(FIELD_NAMES)       # 15
 NUM_SIDE_CONDS = len(SIDE_COND_NAMES)   # 24
 NUM_BOOSTS     = 7                      # atk def spa spd spe acc eva
 NUM_MOVES      = 4
-MOVE_FEATURES  = 26 + NUM_MOVE_TAGS + 1 + 1   # v9/v11: 25 core feats (base_power/type/category/priority/
+MOVE_FEATURES  = 28 + NUM_MOVE_TAGS + 1 + 1   # v9/v11: 25 core feats (base_power/type/category/priority/
                       # accuracy/pp/protect/stab/spread + type-eff×2 + damage-band×2 + MOVES-FIRST×2 [v11 B.1b
                       # priority-aware who-moves-first vs each enemy] + intrinsics×4 + HIT-CHANCE×2 [v11 B2b
                       # per-enemy realized accuracy: defender evasion stage/Sand-Veil/No-Guard/acc−eva boost])
                       # + 1 REDUNDANT-CONDITION bit (v18: this move re-sets an already-active screen/weather/
-                      # terrain on the relevant side) + 29 effect-tags + 1 identity index + is_known(last)
-                      # = 26+29+1+1 = 57
+                      # terrain on the relevant side) + 2 REDUNDANT-STATUS bits (v19/Option 1c: per-enemy —
+                      # this PURE status move is wasted on enemy[e] (already-statused / type-or-ability immune))
+                      # + 29 effect-tags + 1 identity index + is_known(last) = 28+29+1+1 = 59
 
 POKEMON_FEATURES = (
     1               # hp_frac
@@ -226,9 +227,21 @@ STATE_DIM = (ACTIVE_SLOTS + BENCH_SLOTS + OPP_BENCH_SLOTS) * POKEMON_FEATURES + 
 #       RETRAIN: a v17 checkpoint (gen141) is REJECTED at load against v18. (Option 1b — an explicit
 #       opp-has-screen-breaker GLOBAL — was DEFERRED: it is opp-derived but not in the gap-#6 splice, and
 #       the opp's breaker move is already encoded on the opp mon's move block.))
+#  19 → STATE_DIM 5057 (Option 1c, status-move discipline: +2 per-move REDUNDANT-STATUS bits — per enemy
+#       active e, 1.0 if this PURE status move (Will-O-Wisp / Thunder Wave / Toxic / Spore / Glare …, i.e.
+#       category 'Status' with a top-level major-status field) is WASTED on enemy[e] — it already carries a
+#       major status (a mon holds only ONE) or is type/ability immune (Fire↔brn, Poison/Steel↔psn/tox,
+#       Grass↔powder, Electric↔par, Ground↔Thunder-Wave, Comatose/Purifying-Salt/Limber/… ). DAMAGING moves
+#       with a status RIDER (Zap Cannon, Scald, Nuzzle, Discharge) are category dmg → NEVER flagged. A PURE
+#       feature (no action masked) so statusing a predicted switch-in / setup stays learnable. MOVE_FEATURES
+#       57→59, POKEMON_FEATURES 405→413, +2×4 moves×12 slots = +96. ⚠ Inert until a RETRAIN: a v18 checkpoint
+#       is REJECTED at load against v19. ALSO bundled in v19 (VALUE-only, no slot change): FIELD-DEPENDENT
+#       move type — Weather Ball follows the weather (rain→Water/sun→Fire/snow→Ice/sand→Rock) and Terrain
+#       Pulse the terrain, so the type-eff / damage-band channels rate them correctly (a rain Weather Ball
+#       now reads Water/super-effective, not neutral Normal). See battle_mechanics.field_dependent_move_type.
 # train_bc stamps this into the checkpoint config; model_io.load_bc_policy asserts
 # it (and the dim) match the running code.
-STATE_LAYOUT_VERSION = 18
+STATE_LAYOUT_VERSION = 19
 
 # ── Action space ───────────────────────────────────────────────────────────────
 ACTIONS_PER_SLOT = 16    # 12 move-target + 4 switch

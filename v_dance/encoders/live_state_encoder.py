@@ -39,7 +39,7 @@ from v_dance.encoders.state_encoder import (
     _item_active,                                   # v11 P5: Magic Room item-suppression gate (shared)
     _expected_crit_mult,                            # v11 N4: expected-crit band multiplier (shared)
     _immunity_neg_ctx, _move_hit_range,
-    champ_bp, champ_type, champ_acc_raw, _canon,   # v11 N1: Champions move overrides (shared, parity)
+    champ_bp, champ_type, champ_acc_raw, field_dependent_move_type, _canon,   # v11 N1 + v19b field-dep type (shared)
     _disguise_intact,                              # v11 B1: Mimikyu Disguise intact-block (shared, parity)
     _accuracy_modifiers, _move_always_hit, _move_is_ohko, _per_enemy_hit_chance,  # v11 B2/B2b (shared, parity)
     _TYPE_BOOST_TYPE, _RESIST_BERRY_TYPE, _BAND_ITEM_MULT,   # v11 B3: item band mults (shared, parity)
@@ -52,7 +52,7 @@ from v_dance.encoders.state_encoder import (
 )
 # v18 (Option 1): redundant-condition helper (shared, parity) + the canonical SC names it keys on.
 from v_dance.encoders.battle_mechanics import (
-    move_redundant_condition, _REDUNDANT_OWN_SIDE_NAMES,
+    move_redundant_condition, move_redundant_status, _REDUNDANT_OWN_SIDE_NAMES,
 )
 from v_dance.encoders import damage_mechanics as _DMG
 from v_dance.parser.vod_parser.battle_models import volatile_flags
@@ -403,6 +403,9 @@ class LiveStateEncoder:
                     # v11 A.1: the ACTIVE ability (belief-aware) for damage-band immunity — parity twin
                     # of the offline _defender_profile's resolve_active_ability_json.
                     "ability": _ab,
+                    # v19 Option 1c: poke-env Status enum → its .name ('BRN'/…); the shared helper
+                    # lowercases it (offline stores the 'brn' token) → parity by construction.
+                    "status": getattr(getattr(mon, "status", None), "name", None),
                     "grounded": grounded, "screen_phys": phys_scr, "screen_spec": spec_scr,
                     # v11 C.2c: Ground-move immunity (Air Balloon / Magnet Rise / Telekinesis) + Tar Shot.
                     "ground_immune": _ground_immune(_it, _levit, _fg_g), "tar_shot": _pvf["tar_shot"],
@@ -1223,6 +1226,9 @@ class LiveStateEncoder:
         # Move type as ordinal index — v9 EFFECTIVE type (Normalize/Pixilate/-ate/Liquid Voice).
         _mt = move.type.name if getattr(move, "type", None) is not None else ""
         _mt = _canon(champ_type(_mid, _mt))        # v11 N1: Champions type override (snaptrap Grass→Steel)
+        _mt = _canon(field_dependent_move_type(_mid, _mt,          # v19b: Weather Ball / Terrain Pulse follow the
+                     field_mods[0] if field_mods else None,        #        weather / terrain (parity twin of offline)
+                     field_mods[1] if field_mods else None))
         _mt = _DMG.effective_move_type(_mid, _mt, ability_id)
         _user_types = {t.name for t in user.types if t}
         if _mt in _TYPE_IDX:
@@ -1413,6 +1419,12 @@ class LiveStateEncoder:
                                           field_mods[0] if field_mods else None,
                                           field_mods[1] if field_mods else None)
         i += 1
+
+        # v19 (Option 1c): per-ENEMY REDUNDANT-STATUS bits (2) — parity twin of the offline _write_move_json.
+        for e in range(2):
+            d = enemy_defenders[e] if (enemy_defenders and e < len(enemy_defenders)) else None
+            vec[i] = move_redundant_status(_mid, d)
+            i += 1
 
         # v9: move effect-tags + identity index, BEFORE the trailing is_known
         for idx in move_tag_indices(_mid):
