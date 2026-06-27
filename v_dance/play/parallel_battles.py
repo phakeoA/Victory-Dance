@@ -108,6 +108,38 @@ async def abandon_server_state(model_player, opponent) -> int:
     already dead (the stall WAS a dropped connection), the sends fail harmlessly and teardown
     proceeds. Duck-typed (``battles`` / ``ps_client.send_message`` / ``username``) so the module
     stays import-light and the cleanup unit-tests offline against fake players."""
+    # #02-fix: the worker runs this on its asyncio.run() loop, but each player's websocket is bound to
+    # ps_client.loop (poke-env's POKE_LOOP) and send_message does NOT bridge loops — a direct cross-loop
+    # await would raise and SILENTLY no-op the whole cleanup. Bridge every send through the player's own
+    # loop, exactly as poke-env's public API does. Lazy + guarded so the offline fakes (no real loop /
+    # no poke-env) fall back to a direct await.
+    try:
+        from poke_env.concurrency import handle_threaded_coroutines as _bridge
+    except Exception:
+        _bridge = None
+
+    async def _send(player, *msg):
+        loop = getattr(getattr(player, "ps_client", None), "loop", None)
+        coro = player.ps_client.send_message(*msg)
+        if _bridge is not None and loop is not None:
+            await _bridge(coro, loop)
+        else:
+            await coro
+
+    def _tag_forfeited(player, tag):
+        # #05-fix: record the abandoned battle on the player's _forfeited_tags (the T3.1 key). If the
+        # server ACKs the /forfeit before teardown and fires _battle_finished_callback, the existing
+        # FALLBACK path then DISCARDS the (engineering-abandoned) outcome instead of training/scoring it
+        # as a real win/loss. Inline-normalize the tag (matches _norm_tag) without importing poke-env.
+        ff = getattr(player, "_forfeited_tags", None)
+        if ff is None:
+            ff = set()
+            try:
+                player._forfeited_tags = ff
+            except Exception:
+                return
+        ff.add((str(tag) or "").strip().lstrip(">").strip())
+
     # 1) forfeit each unfinished battle in its room (the server ends the room → reclaims it).
     abandoned = 0   # distinct unfinished battles we abandon-by-forfeit (counted from OUR view only)
     for p in (model_player, opponent):
@@ -122,7 +154,8 @@ async def abandon_server_state(model_player, opponent) -> int:
                 if battle is not None and not getattr(battle, "finished", True):
                     if p is model_player:
                         abandoned += 1          # count once per battle (model's view), not per side
-                    await p.ps_client.send_message("/forfeit", tag)
+                    _tag_forfeited(p, tag)      # both players (T3.1 / mp_eval read each side's set)
+                    await _send(p, "/forfeit", tag)
             except Exception:
                 log.debug("forfeit of %s failed (non-fatal)", tag, exc_info=True)
     # fs-monitor: record the watchdog/abandon forfeits on the model player's source_counts so they
@@ -138,11 +171,30 @@ async def abandon_server_state(model_player, opponent) -> int:
     # 2) cancel the model's outgoing challenge to the opponent (sent but never accepted).
     if model_player is not None and opponent is not None:
         try:
-            await model_player.ps_client.send_message(
-                f"/cancelchallenge {_to_id(getattr(opponent, 'username', ''))}")
+            await _send(model_player,
+                        f"/cancelchallenge {_to_id(getattr(opponent, 'username', ''))}")
         except Exception:
             log.debug("cancelchallenge failed (non-fatal)", exc_info=True)
     return abandoned
+
+
+def discount_forfeits(w: int, f: int, model_player, opponent) -> Tuple[int, int]:
+    """Discount BACKSTOP-FORFEIT battles from a ``(wins, finished)`` delta. A forced-switch
+    loop-guard ``ForfeitBattleOrder`` (and a watchdog-abandon, #05) is an ENGINEERING escape that
+    poke-env scores as a real finished WIN for the other side — counting it biases a win-rate. So
+    subtract the OPPONENT's forfeits from BOTH wins and finished (their forfeit = our spurious win)
+    and OUR forfeits from finished only; clamp ≥ 0. This is the shared definition used by BOTH the
+    single-process gauntlet and ``mp_eval`` so the two paths can't drift (mp_eval previously inlined
+    it; the gauntlet had no discount at all → a one-directional promote bias).
+
+    SET-BASED (#0 fix): a WATCHDOG-ABANDONED battle (abandon_server_state) is tagged on BOTH players'
+    ``_forfeited_tags``, so a plain ``len(opp)+len(own)`` would subtract that single battle TWICE from
+    finished and once from wins. Set algebra counts a both-sides tag ONCE: drop the UNION from finished,
+    and only the opp-EXCLUSIVE tags (our spurious wins) from wins. Identical to the old counts for the
+    normal disjoint single-side forfeit (intersection empty)."""
+    own = set(getattr(model_player, "_forfeited_tags", None) or ())
+    opp = set(getattr(opponent, "_forfeited_tags", None) or ())
+    return max(0, w - len(opp - own)), max(0, f - len(own | opp))
 
 
 async def play_pairing(model_player, opponent, n: int, *,
@@ -171,13 +223,26 @@ async def play_pairing(model_player, opponent, n: int, *,
         step = min(float(poll_interval), float(battle_timeout)) or float(battle_timeout)
         last_fin = fin_before
         last_progress = loop.time()
+        last_sig = None
         while True:
             done, _ = await asyncio.wait({task}, timeout=step)
             if done:                                        # battle_against returned or raised
                 break
             fin_now = model_player.n_finished_battles
-            if fin_now > last_fin:                          # a battle FINISHED -> reset stall clock
+            # #17: reset the stall clock on ANY observed progress — a finish OR the in-flight battle
+            # picture advancing (a new room appears, or turns tick) — not just on a finish. Otherwise a
+            # healthy-but-slow battle with no PRIOR finish (a chunk's FIRST/only game, e.g. a timer-on VGC
+            # doubles match) is falsely abandoned at battle_timeout. A true hang (no new room, no turn
+            # advance) leaves the signature stable, so the watchdog still fires.
+            try:
+                _bats = getattr(model_player, "battles", {}) or {}
+                sig = (fin_now, len(_bats),
+                       sum(int(getattr(b, "turn", 0) or 0) for b in _bats.values()))
+            except Exception:
+                sig = (fin_now, 0, 0)
+            if fin_now > last_fin or sig != last_sig:       # progress -> reset stall clock
                 last_fin = fin_now
+                last_sig = sig
                 last_progress = loop.time()
             elif (loop.time() - last_progress) >= battle_timeout:   # no progress for too long = hang
                 task.cancel()

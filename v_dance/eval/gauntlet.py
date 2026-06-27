@@ -231,14 +231,27 @@ def team_matchups(team_pool: Sequence[str], n_battles: int,
     if len(pool) == 1:
         return [(pool[0], pool[0], n_battles)]
     pairs = [(a, b) for a in pool for b in pool if a != b]
-    random.Random(seed).shuffle(pairs)
-    chunks: List[Tuple[str, str, int]] = []
     base, rem = divmod(n_battles, len(pairs))
-    for k, (a, b) in enumerate(pairs):
-        n = base + (1 if k < rem else 0)
-        if n > 0:
-            chunks.append((a, b, n))
-    return chunks
+    counts = {p: base for p in pairs}
+    # #10: distribute the remainder in MIRROR-PAIR UNITS so (a,b) and (b,a) always get the SAME count —
+    # else a shuffled prefix of ORDERED pairs could bonus (a,b) but not (b,a), leaving the team played
+    # by the model more often than against (a residual side imbalance the docstring promises cancels).
+    # Build the unordered pairs, shuffle reproducibly, +1 to BOTH halves of the first rem//2; an odd
+    # leftover goes to one ordered pair (an unavoidable single-game imbalance) so the sum stays == n_battles.
+    unordered, seen = [], set()
+    for a in pool:
+        for b in pool:
+            if a != b and (a, b) not in seen and (b, a) not in seen:
+                seen.add((a, b))
+                unordered.append((a, b))
+    random.Random(seed).shuffle(unordered)
+    for (a, b) in unordered[: rem // 2]:
+        counts[(a, b)] += 1
+        counts[(b, a)] += 1
+    if rem % 2:
+        a, b = unordered[rem // 2]
+        counts[(a, b)] += 1
+    return [(a, b, n) for (a, b), n in counts.items() if n > 0]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -403,6 +416,10 @@ async def run_gauntlet(
         try:
             w, f = await PB.play_pairing(model_player, opp, n,
                                          battle_timeout=battle_timeout, label=f"vs {kind}")
+            # #01: discount backstop-forfeits exactly like mp_eval (shared helper) — the gauntlet had
+            # NO discount, so an opp (champion) loop-guard/abandon forfeit counted as a spurious
+            # candidate WIN -> a one-directional PROMOTE bias in the default (collect_procs<=1) gate.
+            w, f = PB.discount_forfeits(w, f, model_player, opp)
             acc[kind][0] += w
             acc[kind][1] += f
         finally:

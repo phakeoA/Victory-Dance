@@ -501,6 +501,11 @@ def _flip_perspective(snap: dict) -> dict:
         "opp_active": _relabel_slots(snap.get("our_active"), "our_", "opp_"),
         "our_bench": snap.get("opp_bench") or [],
         "opp_bench": snap.get("our_bench") or [],
+        # #07: carry the global FIELD through the flip. build_action_mask's exact-legality drops keyed
+        # on field (Gravity-grounded moves, Magic-Room) read snap["field"]; omitting it left the opp_a/
+        # opp_b aux-head mask a looser superset on Gravity/Magic-Room turns. Field is side-symmetric
+        # (global), so it carries verbatim — no relabel.
+        "field": snap.get("field"),
     }
 
 

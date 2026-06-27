@@ -199,6 +199,18 @@ def transition_to_example(
                 stats["usable_gimmick_examples"] += 1
                 if gi == 1:
                     stats["gimmick_positives"] += 1
+        elif stats is not None and grow:
+            # #27: SURFACE a stale-export gap. gimmick_mask is BAKED into the JSONL at parse time, so a
+            # file exported before GIMMICK_DIM grew (the v11 2->3 tera bump) stores len-2 rows -> the
+            # strict-equality guard silently drops EVERY gimmick label (incl. the 'none' negatives) for
+            # that file. A loud counter beats silent supervision loss (dont-defer-gaps).
+            if len(grow) != GIMMICK_DIM:
+                stats["skipped_gimmick_dim_mismatch"] += 1
+            elif gi is not None:
+                # #4: correct dim but the chosen gimmick is mask-illegal (the gimmick analogue of
+                # skipped_illegal_target). Dropping the label is correct; count it so it isn't silent.
+                # (gi is None = a legitimate no-gimmick decision — NOT a skip, so it's not counted.)
+                stats["skipped_gimmick_illegal"] += 1
 
     if not targets:
         return None
@@ -591,6 +603,7 @@ def print_stats(stats: Counter) -> None:
     order = [
         "files", "transitions", "replays", "slot_decisions", "usable_examples",
         "skipped_null_index", "skipped_no_mask", "skipped_illegal_target",
+        "skipped_gimmick_dim_mismatch", "skipped_gimmick_illegal",
         "dropped_forced_replacement", "bad_files",
     ]
     print("── BC dataset stats ─────────────────────────")

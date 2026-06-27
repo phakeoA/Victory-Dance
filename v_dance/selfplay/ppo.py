@@ -51,6 +51,10 @@ class PPOConfig:
     gimmick_kl_weight: float = 1.0 # per-head KL scale for the MEGA (gimmick) head ONLY (1.0 = same anchor
                                    # as the move policy). <1.0 loosens the mega anchor so RL can un-learn
                                    # the BC "always mega turn 1" data-bias (see policy_eval._joint_kl).
+    opp_aux_coef: float = 0.0      # Level-A aux opponent-prediction CE weight (0 = OFF). When >0 AND the
+                                   # model carries opp_a/opp_b heads (Piece-1 anchor), adds a supervised CE
+                                   # of those heads vs the recorded opp action (Piece 3) to the loss, so the
+                                   # shared trunk becomes opponent-predictive. Phase-1 sets ~0.3.
     value_loss_mode: str = "bce"   # "bce" (Phase 1, win-prob) | "huber" (Phase 3, shaped return)
     huber_delta: float = 1.0
     standardize_adv: bool = True   # per-minibatch advantage standardisation (sec 3)
@@ -120,6 +124,7 @@ def ppo_losses(
     *, new_logprob: torch.Tensor, old_logprob: torch.Tensor, advantages: torch.Tensor,
     value_pm: torch.Tensor, old_value_pm: torch.Tensor, returns: torch.Tensor,
     entropy: torch.Tensor, kl_to_ref: Optional[torch.Tensor] = None,
+    opp_ce: Optional[torch.Tensor] = None,
     cfg: PPOConfig = PPOConfig(),
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """The pure PPO loss. All tensors are (B,). ``new_logprob``/``entropy``/``kl`` carry
@@ -145,6 +150,12 @@ def ppo_losses(
         if cfg.kl_coef > 0.0:
             loss = loss + cfg.kl_coef * kl_mean
 
+    # Level-A aux opponent-prediction CE (already a 0-dim mean over valid opp head-slots).
+    # Carries gradient to the opp heads + shared trunk; penalised only when opp_aux_coef > 0
+    # AND the model has opp heads (opp_ce None otherwise). Logged always.
+    if opp_ce is not None and cfg.opp_aux_coef > 0.0:
+        loss = loss + cfg.opp_aux_coef * opp_ce
+
     with torch.no_grad():
         clip_frac = ((ratio - 1.0).abs() > cfg.clip_eps).float().mean()
         approx_kl_old_new = (old_logprob - new_logprob).mean()   # ~KL(old||new)
@@ -154,6 +165,7 @@ def ppo_losses(
             "value_loss": float(value_loss),
             "entropy": float(entropy_mean),
             "kl_to_bc": float(kl_mean) if kl_mean is not None else float("nan"),
+            "opp_ce": float(opp_ce) if opp_ce is not None else float("nan"),
             "approx_kl_old_new": float(approx_kl_old_new),
             "clip_fraction": float(clip_frac),
             "ratio_mean": float(ratio.mean()),
@@ -185,5 +197,5 @@ def ppo_loss_from_batch(
     return ppo_losses(
         new_logprob=ev.logprob, old_logprob=old_logprob, advantages=adv,
         value_pm=ev.value_pm, old_value_pm=old_value_pm, returns=ret,
-        entropy=ev.entropy, kl_to_ref=ev.kl_to_ref, cfg=cfg,
+        entropy=ev.entropy, kl_to_ref=ev.kl_to_ref, opp_ce=ev.opp_ce, cfg=cfg,
     )

@@ -398,7 +398,12 @@ class LiveStateEncoder:
             grounded = _is_grounded(types, _ab, _it, _levit, _fg_g)
             return {"types": types,
                     "def": est.get("def"), "spd": est.get("spd"),
-                    "hp": est.get("hp") or getattr(mon, "max_hp", None),
+                    # #08 parity: NO max_hp fallback — the offline _defender_profile uses est.get("hp")
+                    # with no fallback (battle_mechanics.py), so hp=None -> damage band (0,0). For an
+                    # OPPONENT defender, mon.max_hp is the percent-scale denominator (~100), not a real
+                    # HP stat, so the old fallback both broke train/serve parity AND fed a wrong number
+                    # into the L50 damage formula. (Own-side defenders get a real est["hp"] upstream.)
+                    "hp": est.get("hp"),
                     "hp_frac": (mon.current_hp_fraction if mon.revealed else 1.0),
                     # v11 A.1: the ACTIVE ability (belief-aware) for damage-band immunity — parity twin
                     # of the offline _defender_profile's resolve_active_ability_json.

@@ -35,7 +35,9 @@ _REPO_ROOT = _HERE.parents[1]
 import torch
 
 from v_dance.selfplay import policy_eval
-from v_dance.selfplay.collector import TrajectoryCollector, assert_zero_sum
+from v_dance.selfplay.collector import (
+    TrajectoryCollector, align_opponent_actions, assert_zero_sum,
+)
 from v_dance.selfplay.reward import place_terminal_reward
 from v_dance.selfplay.schema import PASS_ACTION, Transition, Trajectory
 from v_dance.selfplay.store import assert_terminal_rewards_clean, write_trajectories
@@ -93,7 +95,13 @@ def record_decision(collector: TrajectoryCollector, actor_critic, *, state,
 def terminal_type_for(won: Optional[bool], lost: Optional[bool]) -> str:
     """Map a finished battle's win/lost flags to a TerminalType value. Neither set =>
     a true draw/tie (reward 0, no bootstrap). (A FALLBACK forfeit is detected by the
-    runner from the source counts, 3c.1b — not here.)"""
+    runner from the source counts, 3c.1b — not here.)
+
+    ⚠ #22 (KNOWN GAP): this never returns HORIZON_CUT or ADJUDICATED — the live collector has no
+    training step-cap, so a long game runs to a real ±1 terminal (correct today, nothing mislabeled).
+    The HORIZON_CUT scaffolding (schema/gae bootstrap/reward) is therefore DEAD until a truncation cap is
+    added; if one is, the producer must also record V(s_cut) and thread bootstrap_value through
+    compute_batch_gae (it currently hard-drops it). Deferred to the RL launch."""
     if won:
         return "win"
     if lost:
@@ -424,6 +432,12 @@ async def run_self_play_games(
     finally:
         if server is not None:
             R.stop_showdown(server)
+
+    # Piece 3 (Level-A opp-prediction): fill each perspective's opp_a/opp_b_action from
+    # its paired opposite perspective (seat-symmetric codec -> direct copy). In-place, so
+    # both the returned `pairs` and the store written below carry the targets.
+    for a, b in pairs:
+        align_opponent_actions(a, b)
 
     if store_path is not None:
         flat = [t for pair in pairs for t in pair]

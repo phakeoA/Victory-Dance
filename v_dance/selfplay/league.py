@@ -177,7 +177,15 @@ class OpponentLeague:
             s.wins_vs_latest = s.games_vs_latest = 0
 
     def record_result(self, snapshot_id: str, latest_won: bool) -> None:
-        """Record one latest-vs-snapshot outcome for PFSP weighting."""
+        """Record one latest-vs-snapshot outcome for PFSP weighting.
+
+        ⚠ #24 (KNOWN GAP, fix at RL launch): the in-memory 'latest' is PPO-updated EVERY generation —
+        including HOLD gens, where ``reset_pfsp`` is NOT called — so over a long frozen-champion hold these
+        tallies blend outcomes from a SEQUENCE of progressively-different policies, and ``pfsp_weights()``
+        then targets an ANCESTOR mixture's hard counters, not the current latest (a diluted/lagged signal).
+        The fix is an EMA decay here (``games = decay*games + 1``; ``wins = decay*wins + won``, decay≈0.95)
+        applied ALSO in the MP fold (mp_collect's PFSP merge). Deferred — it's a measured RL-tuning change
+        that needs the league tests updated and is dormant until self-play runs."""
         for s in self.snapshots:
             if s.snapshot_id == snapshot_id:
                 s.games_vs_latest += 1

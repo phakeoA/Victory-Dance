@@ -31,6 +31,7 @@ from typing import Callable, List, Optional, Tuple
 
 from v_dance.play.parallel_battles import (close_players, collect_account_names, gen_salt,
                                            play_pairing, run_jobs)
+from v_dance.selfplay.collector import align_paired_trajectories   # pure (poke-env-free)
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 log = logging.getLogger(__name__)
@@ -177,10 +178,17 @@ async def _collect_specs(ac, specs: List[ChunkSpec], *, tau: float, seed: int,
             games["n"] += len(our_trajs)
             if spec.kind == "latest":
                 source_counts.update(getattr(opp, "_source_counts", {}) or {})
-                trajectories.extend(opp.finished_trajectories().values())
+                opp_trajs = opp.finished_trajectories()
+                # Piece 3 (Level-A): align opp-action targets across both mirror perspectives
+                # (shared battle_tag). In-place -> the our_trajs already extended above update too.
+                align_paired_trajectories(our_trajs, opp_trajs)
+                trajectories.extend(opp_trajs.values())
             elif spec.kind == "snapshot":
                 for t in our_trajs.values():
-                    if t.meta.won is not None:
+                    # #1: skip a FALLBACK (opp backstop-forfeit) game — dropped from PPO, so it must
+                    # not bias PFSP either. Gate on is_trainable (same as the PPO buffer). getattr keeps
+                    # minimal offline fakes (no is_trainable) treated as trainable = the old behavior.
+                    if t.meta.won is not None and getattr(t.meta, "is_trainable", True):
                         pfsp.append((spec.snapshot_id, bool(t.meta.won)))
             await close_players(our, opp)
 

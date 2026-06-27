@@ -36,6 +36,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 import torch
 import torch.nn.functional as F
 
+from v_dance.encoders.action_codec import OPP_HEADS
 from v_dance.selfplay.schema import PASS_ACTION, Transition
 
 
@@ -185,6 +186,40 @@ def _joint_kl(new_a, new_g, ref_a, ref_g, slot_batches, tau, gimmick_kl_weight: 
     return total
 
 
+# ── Level-A auxiliary opponent-action prediction (Piece 2) ────────────────────
+def opp_aux_ce(action_logits, transitions, head_names, device: str = "cpu"):
+    """UNMASKED cross-entropy of the auxiliary opponent-action heads (``opp_a``/``opp_b``)
+    vs the recorded opp-action targets (Piece 3 ``opp_a_action`` / ``opp_b_action``).
+
+    Only heads PRESENT in the model (i.e. after the Piece-1 anchor retrain with
+    ``--aux-opp-head``) and slots with a VALID (non-PASS) target contribute. The recorded
+    opp action always EXECUTED, so it is always legal → no legal mask is needed, and the
+    aux heads are representation-only (never used to pick actions). Returns
+    ``(opp_ce, n_valid)``: ``opp_ce`` is a 0-dim mean CE over the valid head-slot terms
+    (carries gradient to the opp heads AND the shared trunk — the Level-A goal), or
+    ``None`` when no opp head is present / the batch has no valid opp target."""
+    present = [h for h in OPP_HEADS if h in action_logits and h in head_names]
+    if not present:
+        return None, 0
+    total_ce, total_valid = None, 0
+    for h in present:
+        logits = action_logits[h]                                       # (B,A) with grad
+        tgt = torch.as_tensor(
+            np.array([getattr(t, h + "_action") for t in transitions], np.int64),
+            device=device)
+        valid = tgt != PASS_ACTION
+        nv = int(valid.sum().item())
+        if nv == 0:
+            continue
+        ce = F.cross_entropy(logits, tgt.clamp_min(0), reduction="none")  # (B,)
+        s = torch.where(valid, ce, torch.zeros_like(ce)).sum()
+        total_ce = s if total_ce is None else total_ce + s
+        total_valid += nv
+    if total_valid == 0:
+        return None, 0
+    return total_ce / total_valid, total_valid
+
+
 def _states_tensor(transitions, device):
     return torch.as_tensor(np.stack([np.asarray(t.state, np.float32) for t in transitions]),
                            device=device)
@@ -221,6 +256,7 @@ class PPOEval:
     entropy: torch.Tensor      # (B,) summed per-head entropy
     value_pm: torch.Tensor     # (B,) critic value in [-1,1]
     kl_to_ref: Optional[torch.Tensor]  # (B,) KL(BC||new), or None if no reference given
+    opp_ce: Optional[torch.Tensor] = None  # 0-dim aux opp-prediction CE, or None (no opp head / no target)
 
 
 def ppo_forward(
@@ -246,7 +282,8 @@ def ppo_forward(
     if ref_policy is not None:
         ref_a, ref_g, _ = ref_policy(states)        # frozen BC reference logits
         kl = _joint_kl(action_logits, gimmick_logits, ref_a, ref_g, sb, tau, gimmick_kl_weight)
-    return PPOEval(lp, ent, value_pm, kl)
+    opp_ce, _ = opp_aux_ce(action_logits, transitions, ac.head_names, device)
+    return PPOEval(lp, ent, value_pm, kl, opp_ce=opp_ce)
 
 
 # ── data-integrity guard (mirrors corpus_qa's "illegal under mask") ───────────

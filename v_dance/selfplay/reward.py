@@ -14,6 +14,15 @@ from v_dance.selfplay.schema import Trajectory
 
 # Sources that count as MODEL-DRIVEN (mirror gauntlet.py's report: model + replacement).
 _MODEL_DRIVEN_SOURCES = ("model", "forced_switch_model")
+# BOOKKEEPING-only counters excluded from the MODEL-DRIVEN denominator (#21). `rejected_resample` is
+# incremented ALONGSIDE `model` when a Showdown-rejected MODEL order is re-sampled to a fresh legal
+# MODEL action (the executed pick is still model-driven), so leaving it in the "all non-tp" denominator
+# wrongly deflated MODEL-DRIVEN% toward the 0.95 warn / 0.75 abort on a legitimate Choice-lock/Encore/
+# Taunt resample burst. `abandon_forfeit` is a watchdog count, not a per-turn decision. Everything else
+# non-tp (model, forced_switch_model, retry_default, forced_default, forfeit, forced_switch_escape,
+# forced_switch, …) IS a real executed decision and stays in the denominator — a blocklist keeps the
+# guard's coverage intact (a whitelist would silently drop any executed source it forgot to list).
+_NON_DECISION_COUNTERS = ("rejected_resample", "abandon_forfeit")
 
 
 def place_terminal_reward(traj: Trajectory) -> Trajectory:
@@ -34,10 +43,13 @@ def place_terminal_reward(traj: Trajectory) -> Trajectory:
 
 
 def model_driven_fraction(source_counts: Dict[str, int]) -> float:
-    """Fraction of per-turn decisions driven by the model (model + forced_switch_model),
-    excluding the per-battle team-preview tp_* counts. 1.0 when there are no decisions.
-    Mirrors gauntlet.py's MODEL-DRIVEN computation."""
-    turn = {k: v for k, v in source_counts.items() if not k.startswith("tp_")}
+    """Fraction of EXECUTED per-turn decisions driven by the model (model + forced_switch_model)
+    vs executed non-model escapes (retry / default / forced-switch escape). Bookkeeping-only
+    counters (rejected_resample, tp_*, abandon_forfeit, …) are excluded from the denominator, so a
+    legitimate resample burst can't trip the guard. 1.0 when there are no decisions. Matches
+    game_runner.phase0_report's de-duped MODEL-DRIVEN measure."""
+    turn = {k: v for k, v in source_counts.items()
+            if not k.startswith("tp_") and k not in _NON_DECISION_COUNTERS}
     total = sum(turn.values())
     if total <= 0:
         return 1.0

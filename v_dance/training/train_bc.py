@@ -439,6 +439,7 @@ def train(args: argparse.Namespace) -> dict:
         d_model=args.d_model,
         n_heads=args.n_heads,
         n_layers=args.n_layers,
+        ff_mult=args.ff_mult,
         dropout=args.dropout,
         heads=train_heads,
         gimmick_heads=list(HEADS),
@@ -488,6 +489,10 @@ def train(args: argparse.Namespace) -> dict:
         "action_dim": model.action_dim,
         "gimmick_dim": model.gimmick_dim,
         "value_loss_weight": args.value_loss_weight,
+        # #28: stamp the remaining loss-shaping knobs for provenance/reproducibility (every other
+        # weighting knob is recorded; these two were missing). No loader reads them back.
+        "gimmick_loss_weight": args.gimmick_loss_weight,
+        "class_weight_cap": args.class_weight_cap,
         "value_trained": bool(value_trained),
         # True only when the train data actually carried gimmick labels — a
         # gimmick head trained on pre-gimmick JSONL is at init and must NOT drive

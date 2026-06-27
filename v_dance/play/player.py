@@ -253,6 +253,12 @@ class VGCPlayer(VGCPlayerBase):
                     out.append(GIMMICK_NONE)        # switch / no action never megas
                     continue
                 gmask = build_gimmick_legal_mask(battle, slot)
+                # #18: an empty/fainted (action-less) slot is passed in as a fabricated move 0 by
+                # _select_actions (None->0); force GIMMICK_NONE explicitly when it has no legal gimmick so
+                # it can never read the head or participate in (and steal) the cross-slot dedup below.
+                if not any(gmask):
+                    out.append(GIMMICK_NONE)
+                    continue
                 # #9: self-play samples at tau (matches the recorded behaviour log-prob + explores mega);
                 # eval/serve uses deterministic argmax. masked_sample(temperature<=0) == masked_argmax.
                 g = (_M.masked_sample(glog[slot], gmask, temperature=self._temperature, rng=self._rng)

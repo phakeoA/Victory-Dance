@@ -375,6 +375,18 @@ class ShowdownReplayParser:
             cured = parts[3] if len(parts) > 3 else None
             if slot_key in self.active_slots:
                 self.active_slots[slot_key].status = None
+            else:
+                # #12: a team-cure (Heal Bell / Aromatherapy) or switch-out cure (Natural Cure) emits a
+                # BARE 'pN: Nickname' ident (no a/b) for a BENCHED member; _slot_key_from_ident then falls
+                # back to 'pN' (not in active_slots) and the bench mon kept its stale status forever.
+                # Resolve by nickname (poke-env keys its team dict by 'pN: Nickname'), matching the live
+                # encoder so offline parse == live serve.
+                player = slot_key[:2]
+                nick = parts[2].split(": ", 1)[1] if ": " in parts[2] else None
+                if nick:
+                    for m in self.seen_mons.values():
+                        if m.player == player and m.nickname == nick and not m.is_fainted:
+                            m.status = None
             # Bug 3 fix: record the event so status changes between
             # state_before and state_after are explained in the action log.
             self._current_turn_actions.append({
@@ -383,6 +395,17 @@ class ShowdownReplayParser:
                 "species": self._species_from_ident(parts[2]),
                 "status": cured,
             })
+
+        elif cmd == "-cureteam":
+            # #12: legacy whole-party cure (older Heal Bell form). Clear status on every NON-fainted
+            # member of that side (bench seen_mons + active), mirroring poke-env's team.values() cure loop.
+            player = self._slot_key_from_ident(parts[2])[:2]
+            for m in self.seen_mons.values():
+                if m.player == player and not m.is_fainted:
+                    m.status = None
+            for k, m in self.active_slots.items():
+                if k.startswith(player) and not getattr(m, "is_fainted", False):
+                    m.status = None
 
         elif cmd == "-start":
             self._handle_volatile(parts, start=True)
@@ -502,7 +525,17 @@ class ShowdownReplayParser:
         (e.g. an unbroken disguise the log never resolves)."""
         mon = self.active_slots.get(slot_key)
         want = norm_species(fainted_species) if fainted_species else None
-        if want and (mon is None
+        # #13: when the slot's occupant is the ACTIVE disguise the |faint| line names (a Species-Clause-
+        # relabeled Zoroark whose base_species is now 'Zoroark' but which faints still showing the
+        # teammate's disguise name), TRUST the slot pointer — else the named-species search below would
+        # faint the genuine teammate of that species and leave the dead Zoroark alive.
+        slot_is_named_disguise = (
+            mon is not None
+            and getattr(mon, "illusion_active", False)
+            and want is not None
+            and norm_species(getattr(mon, "disguise_species", None)) == want
+        )
+        if want and not slot_is_named_disguise and (mon is None
                      or norm_species(mon.base_species or mon.species) != want):
             player = slot_key[:2]
             match = next(
@@ -596,8 +629,10 @@ class ShowdownReplayParser:
         # switch mutates anything, so the in-battle policy can learn the
         # "who to send in after a faint" choice.  ``species`` is already the
         # true (de-disguised) identity at this point.
-        if (slot_key in self.active_slots
-                and self.active_slots[slot_key].is_fainted):
+        # #00: capture this BEFORE line ~660 reassigns active_slots[slot_key] to the incoming mon.
+        is_forced_replacement = (slot_key in self.active_slots
+                                 and self.active_slots[slot_key].is_fainted)
+        if is_forced_replacement:
             self._current_turn_replacements.append({
                 "player": player,
                 "slot": slot_key,
@@ -699,6 +734,11 @@ class ShowdownReplayParser:
             "slot": slot_key,
             "species": species,
             "player": player,
+            # #00: a post-faint forced refill is NOT a turn-start decision (the genuine "who to send in"
+            # choice is the separate decision_type="replacement" transition). Flag it so _extract_actions
+            # drops it from our_actions / opp_actions_actual — else it becomes a FALSE turn-start switch
+            # label (especially when the KO'd mon never acted, so it's the slot's ONLY entry).
+            "forced_replacement": is_forced_replacement,
         })
 
     def _prescan_illusions(self) -> dict[int, str]:
@@ -1732,6 +1772,11 @@ class ShowdownReplayParser:
             out = []
             for ev in self._current_turn_actions:
                 if ev.get("event") not in ("move", "switch"):
+                    continue
+                # #00: skip a forced post-faint replacement — it is recorded separately as a
+                # decision_type="replacement" transition; emitting it here as a turn-start switch teaches
+                # a FALSE label (the real turn-start command was a move that never executed, or nothing).
+                if ev["event"] == "switch" and ev.get("forced_replacement"):
                     continue
                 slot = ev.get("user_slot") or ev.get("slot") or ""
                 if not slot.startswith(player):

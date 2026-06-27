@@ -22,6 +22,12 @@ from v_dance.encoders.mechanic_vocab import _DEX, _norm
 # the damage_boost tag). Data set is cross-checked against mechanic_tags._DATA_MOVE_TYPECHANGE.
 _ATE_TYPE = {"pixilate": "FAIRY", "refrigerate": "ICE", "aerilate": "FLYING",
              "galvanize": "ELECTRIC", "dragonize": "DRAGON"}
+# #09: moves an -ate ability must NOT retype (abilities.ts noModifyType). Defined LOCALLY — NOT imported
+# from battle_mechanics, which imports THIS module (_DMG) → that would be circular. Keep in sync with
+# battle_mechanics._ATE_NOMODIFY. Normalize's exclusion set is broader (also spares Hidden Power/Struggle).
+_ATE_NOMODIFY = frozenset({"judgment", "multiattack", "naturalgift", "revelationdance",
+                           "technoblast", "terrainpulse", "weatherball"})
+_NORMALIZE_NOMODIFY = _ATE_NOMODIFY | {"hiddenpower", "struggle"}
 
 
 def _sound_moves() -> Set[str]:
@@ -46,11 +52,17 @@ def effective_move_type(move_id: Optional[str], base_type: Optional[str], abilit
     """The move's EFFECTIVE type after a type-changing ability (UPPERCASE). Falls back to base_type."""
     bt = (base_type or "").upper()
     aid = _norm(ability_id)
+    mid = _norm(move_id)
+    # #09: an -ate ability / Normalize must NOT retype the noModifyType moves (Weather Ball, Terrain Pulse,
+    # Judgment, Techno Blast, …). Without this, a no-weather Weather Ball (base type NORMAL) was wrongly
+    # re-typed FAIRY by Pixilate etc., while the matching damage boost was already correctly suppressed
+    # (battle_mechanics:1081) — an internal inconsistency. mid is normalized so offline ("Weather Ball")
+    # and live ("weatherball") agree.
     if aid == "normalize":
-        return "NORMAL"
-    if aid in _ATE_TYPE and bt == "NORMAL":
+        return "NORMAL" if mid not in _NORMALIZE_NOMODIFY else bt
+    if aid in _ATE_TYPE and bt == "NORMAL" and mid not in _ATE_NOMODIFY:
         return _ATE_TYPE[aid]
-    if aid == "liquidvoice" and _norm(move_id) in _SOUND_MOVES:
+    if aid == "liquidvoice" and mid in _SOUND_MOVES:
         return "WATER"
     return bt
 

@@ -21,7 +21,9 @@ from typing import List, Optional, Sequence
 
 import numpy as np
 
-from v_dance.selfplay.schema import Transition, EpisodeMeta, Trajectory, TerminalType
+from v_dance.selfplay.schema import (
+    PASS_ACTION, Transition, EpisodeMeta, Trajectory, TerminalType,
+)
 
 
 class TrajectoryCollector:
@@ -110,3 +112,58 @@ def assert_zero_sum(us: Trajectory, opp: Trajectory, tol: float = 1e-6) -> None:
         return
     assert abs(ru + ro) <= tol, \
         f"not zero-sum: r_us={ru} r_opp={ro} (sum {ru + ro}, tol {tol})"
+
+
+# ── Level-A opponent-action alignment (Piece 3) ───────────────────────────────
+def _steps_by_key(traj: Trajectory) -> dict:
+    """Index a trajectory's steps by ``(turn, decision_type)``. After the 3c.1c de-dup
+    there is exactly one step per key; if a stray duplicate survives, the LAST (the
+    executed pick) wins — matching the de-dup's keep-the-executed semantics."""
+    idx: dict = {}
+    for t in traj.transitions:
+        idx[(t.turn, t.decision_type)] = t
+    return idx
+
+
+def align_opponent_actions(traj_a: Trajectory, traj_b: Trajectory) -> int:
+    """Fill each perspective's ``opp_a_action`` / ``opp_b_action`` from the OTHER
+    perspective's same-``(turn, decision_type)`` ``action_s0`` / ``action_s1`` — the
+    Level-A opponent-prediction target (Piece 3).
+
+    The action codec is SEAT-SYMMETRIC (each player encodes from its own seat, and the
+    BC aux target ``opp_action_to_index`` just re-encodes the foe from that same seat),
+    so the opponent player's OWN ``action_s0`` / ``action_s1`` ARE the ``opp_a`` / ``opp_b``
+    target space directly — a copy, no re-flip. A slot the opponent PASSED
+    (``PASS_ACTION``) or a ``(turn, decision_type)`` with no matching opposite-perspective
+    step leaves the ``PASS_ACTION`` sentinel, so the Piece-2 aux loss masks it
+    (``opp_valid = 0``).
+
+    Mutates both trajectories in place. Returns the number of slot-targets filled."""
+    a_idx = _steps_by_key(traj_a)
+    b_idx = _steps_by_key(traj_b)
+    filled = 0
+    for src, dst_idx in ((traj_a, b_idx), (traj_b, a_idx)):
+        for t in src.transitions:
+            opp = dst_idx.get((t.turn, t.decision_type))
+            if opp is None:
+                continue
+            if opp.action_s0 != PASS_ACTION:
+                t.opp_a_action = int(opp.action_s0)
+                filled += 1
+            if opp.action_s1 != PASS_ACTION:
+                t.opp_b_action = int(opp.action_s1)
+                filled += 1
+    return filled
+
+
+def align_paired_trajectories(our_trajs: dict, opp_trajs: dict) -> int:
+    """Align opp-action targets for every ``battle_tag`` present in BOTH perspective
+    dicts. Only ``latest`` mirror chunks carry both perspectives — ``snapshot`` /
+    ``scripted`` opponents are NON-recording, so those transitions keep the sentinel and
+    Piece 2 masks them. Mutates in place; returns total slot-targets filled."""
+    total = 0
+    for tag, a in our_trajs.items():
+        b = opp_trajs.get(tag)
+        if b is not None:
+            total += align_opponent_actions(a, b)
+    return total

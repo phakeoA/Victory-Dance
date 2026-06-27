@@ -586,7 +586,7 @@ async def run(
         await player2.ps_client.stop_listening()
         player1.close()
         player2.close()
-        # stop_showdown(server_proc)
+        stop_showdown(server_proc)   # no-op when we didn't start one (server_proc is None)
 
     total   = player1.n_finished_battles
     p1_wins = player1.n_won_battles

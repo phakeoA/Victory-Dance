@@ -261,8 +261,9 @@ class HoFConfig:
     z: float = 1.96                  # veto significance band (P2.1: halves per-snapshot false-reject)
     min_pool: int = 2                # need >= this many PAST-CHAMPION suspects to render a veto, else SKIP
                                      # (fail-open — early in a run there are too few promotions to cycle)
-    force_limit: int = 4             # consecutive hof-rejects of a plateau_reanchor -> freeze + operator alert
-                                     # (P2.1: the auto-advance 'marginal' window is empty at n=60 -> alert only)
+    # NOTE: the HoF-standoff FORCE-VALVE was calibrated to alert-only (the auto-advance 'marginal'
+    # window is empty at n=60, gate_sim.force_valve_rate), so there is no force_limit config field —
+    # operator_alert fires at its own hof_standoff_limit (default 2). Don't re-add a dead knob here.
     override: bool = False           # operator escape (--hof-override): let HoF-rejected promotes through
                                      # (still EVALUATED + logged loudly) to release a frozen catastrophic standoff
 

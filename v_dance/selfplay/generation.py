@@ -148,6 +148,12 @@ def run_generation(
         status.phase("updating", generation=gen)
     if gen == 0 and cfg.warmup_updates > 0 and trajectories:
         trainer.warmup_critic(trajectories, cfg.warmup_updates)
+        # ⚠ #23 (KNOWN GAP, fix at RL launch): the gen-0 ppo_update below runs value-loss with clip=True,
+        # but old_value_pm is each step's COLLECTION-time value = the PRE-warmup BC critic value. So the
+        # value-clip trust region is anchored one critic-migration behind and can suppress the critic's
+        # gradient on states whose true discounted return is far from the BC estimate, partly fighting the
+        # warm-up. Fix = recompute V(s) post-warmup and overwrite Transition.value before ppo_update (or
+        # run the FIRST post-warmup update with clip=False). gen-0-only; deferred (RL self-play not running).
     update_stats = trainer.ppo_update(trajectories) if trajectories else {"halted": False}
     if status is not None:
         status.set_update(update_stats)
@@ -308,6 +314,7 @@ async def collect_with_league(actor_critic, league: OpponentLeague, n_games: int
     from v_dance.play.live_vgc_base import _norm_tag   # #4: match the opponent's forfeit-tag key
     from v_dance.eval.gauntlet import _make_opponent
     from v_dance.selfplay.game_runner import SelfPlayVGCPlayer
+    from v_dance.selfplay.collector import align_paired_trajectories
 
     chunks = build_collection_chunks(league, team_pool, n_games, chunk_size=chunk_size,
                                      matchup_seed=matchup_seed, seed=seed)
@@ -377,10 +384,20 @@ async def collect_with_league(actor_critic, league: OpponentLeague, n_games: int
                 status.games(prog["games"], (prog["won"] / prog["decided"]) if prog["decided"] else None)
             if kind == "latest":
                 source_counts.update(getattr(opp, "_source_counts", {}) or {})
-                trajectories.extend(opp.finished_trajectories().values())
+                opp_trajs = opp.finished_trajectories()
+                # Piece 3 (Level-A): align opp-action targets across the two perspectives of
+                # each mirror game (shared battle_tag). In-place -> the our_trajs objects already
+                # extended into `trajectories` above are updated too.
+                align_paired_trajectories(our_trajs, opp_trajs)
+                trajectories.extend(opp_trajs.values())
             elif kind == "snapshot":
                 for traj in our_trajs.values():
-                    if traj.meta.won is not None:
+                    # #1: a FALLBACK (opponent backstop-forfeit) game was already win=True but tagged
+                    # fallback above so PPO drops it — it must NOT count as a real 'latest beat this
+                    # snapshot' PFSP outcome either (it would bias pfsp_weights toward a phantom-beaten
+                    # snapshot). Gate on is_trainable, same as the PPO buffer (getattr: offline fakes
+                    # without the property stay trainable = old behavior).
+                    if traj.meta.won is not None and getattr(traj.meta, "is_trainable", True):
                         league.record_result(spec[1].snapshot_id, bool(traj.meta.won))
             await PB.close_players(our, opp)
 
@@ -503,10 +520,11 @@ def _default_run_config(ap) -> dict:
             "train": _fields(TrainConfig), "gate": _fields(GateConfigV2)}
 
 
-def build_train_configs(*, kl_coef: float = 0.5, target_kl_bc: Optional[float] = 0.15,
+def build_train_configs(*, kl_coef: Optional[float] = None, target_kl_bc: Optional[float] = None,
                         tau: float = 1.0, min_ev: Optional[float] = None,
-                        gimmick_kl_weight: float = 1.0,
-                        target_kl_relax_per_gen: float = 0.0,
+                        gimmick_kl_weight: Optional[float] = None,
+                        opp_aux_coef: Optional[float] = None,
+                        target_kl_relax_per_gen: Optional[float] = None,
                         target_kl_max: Optional[float] = None,
                         ppo_overrides: Optional[dict] = None,
                         train_overrides: Optional[dict] = None):
@@ -526,15 +544,34 @@ def build_train_configs(*, kl_coef: float = 0.5, target_kl_bc: Optional[float] =
     Imported lazily so this module stays importable (``--dry-run``) without torch."""
     from v_dance.selfplay.ppo import PPOConfig
     from v_dance.selfplay.trainer import TrainConfig
-    tkl = target_kl_bc if (target_kl_bc is not None and target_kl_bc > 0) else None
-    # --config overrides apply FIRST; the explicit (CLI-derived) values below WIN, so an
-    # explicit --kl-coef / --tau / --target-kl-bc still beats the file.
+    # #3 precedence for EVERY overlapping knob: an explicit CLI value (non-None here) WINS; else a
+    # --config file value (in *_overrides) is KEPT; else the LAUNCHER default. The launcher default
+    # differs from the dataclass default for kl_coef (0.5 vs 0.0) and target_kl_from_bc (0.15 vs None) —
+    # both keep the BC-prior guards ON for a bare run — so those two are applied explicitly. Previously
+    # the non-None CLI defaults UNCONDITIONALLY clobbered the file, silently no-opping a --config value.
+    # (tau is always applied: it is the gen-0 collection temp, re-annealed per generation.)
     ppo_kw = dict(ppo_overrides or {})
-    ppo_kw.update(kl_coef=float(kl_coef), tau=float(tau), gimmick_kl_weight=float(gimmick_kl_weight))
+    ppo_kw["tau"] = float(tau)
+    if kl_coef is not None:
+        ppo_kw["kl_coef"] = float(kl_coef)
+    elif "kl_coef" not in ppo_kw:
+        ppo_kw["kl_coef"] = 0.5
+    if gimmick_kl_weight is not None:
+        ppo_kw["gimmick_kl_weight"] = float(gimmick_kl_weight)
+    if opp_aux_coef is not None:
+        ppo_kw["opp_aux_coef"] = float(opp_aux_coef)
+
     train_kw = dict(train_overrides or {})
-    train_kw.update(target_kl_from_bc=tkl, min_explained_variance=min_ev,
-                    target_kl_relax_per_gen=float(target_kl_relax_per_gen),
-                    target_kl_max=target_kl_max)
+    if target_kl_bc is not None:
+        train_kw["target_kl_from_bc"] = target_kl_bc if target_kl_bc > 0 else None
+    elif "target_kl_from_bc" not in train_kw:
+        train_kw["target_kl_from_bc"] = 0.15
+    if min_ev is not None:
+        train_kw["min_explained_variance"] = min_ev
+    if target_kl_relax_per_gen is not None:
+        train_kw["target_kl_relax_per_gen"] = float(target_kl_relax_per_gen)
+    if target_kl_max is not None:
+        train_kw["target_kl_max"] = target_kl_max
     return PPOConfig(**ppo_kw), TrainConfig(**train_kw)
 
 
@@ -1098,6 +1135,7 @@ def _launch_live(args):
     ppo_cfg, train_cfg = build_train_configs(
         kl_coef=args.kl_coef, target_kl_bc=args.target_kl_bc,
         tau=args.tau_start, min_ev=args.min_ev,
+        gimmick_kl_weight=args.gimmick_kl_weight, opp_aux_coef=args.opp_aux_coef,
         target_kl_relax_per_gen=args.target_kl_relax,
         target_kl_max=args.target_kl_max,
         ppo_overrides=getattr(args, "run_cfg_ppo", None),
@@ -1117,10 +1155,27 @@ def _launch_live(args):
     _tau_desc = (f"tau {args.tau_start}->{args.tau} over {args.tau_anneal_gens} gens"
                  if args.tau_anneal_gens > 0 and args.tau_start != args.tau
                  else f"tau={args.tau} (flat)")
-    print(f"   exploration (sec 12): KL-to-BC coef={args.kl_coef} "
-          f"target_kl_bc={'off' if args.target_kl_bc <= 0 else args.target_kl_bc} "
-          f"min_ev={'off' if args.min_ev is None else args.min_ev} {_tau_desc}")
-    _gc = GateConfigV2()
+    # #3: print the EFFECTIVE resolved config (CLI > --config > launcher default), not the raw args
+    # (which are now None when unset and would crash on `<= 0`).
+    print(f"   exploration (sec 12): KL-to-BC coef={ppo_cfg.kl_coef} "
+          f"target_kl_bc={'off' if not train_cfg.target_kl_from_bc else train_cfg.target_kl_from_bc} "
+          f"min_ev={'off' if train_cfg.min_explained_variance is None else train_cfg.min_explained_variance} {_tau_desc}")
+    _gc = GateConfigV2(**(getattr(args, "run_cfg_gate", None) or {}))
+    # #06: a sub-floor --mirror-battles SILENTLY disables beat_champion AND mirror-collapse-revert (both
+    # require the games floor), leaving only the plateau-reanchor backstop active on a noisy small sample.
+    # Refuse a real run below the floor unless the operator explicitly opts in for a smoke.
+    _mirror_floor = max(_gc.min_h2h_games, _gc.mirror_collapse_min_games)
+    if args.mirror_battles < _mirror_floor:
+        _m = (f"--mirror-battles={args.mirror_battles} < gate floor (min_h2h_games={_gc.min_h2h_games}, "
+              f"mirror_collapse_min_games={_gc.mirror_collapse_min_games}): beat_champion AND "
+              f"mirror-collapse-revert are DISABLED — only plateau-reanchor + scripted-collapse remain.")
+        if args.allow_undersized_mirror or getattr(args, "dry_run", False):
+            print(f"[gen] WARNING: {_m}  (--allow-undersized-mirror/--dry-run set — SMOKE only.)",
+                  file=sys.stderr)
+        else:
+            print(f"[gen] FATAL: {_m}\n      Use --allow-undersized-mirror for a deliberate smoke, or raise "
+                  f"--mirror-battles to >= {_mirror_floor}.", file=sys.stderr)
+            sys.exit(2)
     print(f"   gate (sec 16): frozen-champion ladder — beat_champion >= {_gc.promote_threshold:.2f} over "
           f"{args.mirror_battles} mirror games; mirror-collapse revert < {0.5 - _gc.mirror_collapse_margin:.2f}; "
           f"prev_best mirror = {'ON' if args.prev_best else 'OFF (pure scripted ladder)'}")
@@ -1231,7 +1286,15 @@ def _wizard(ap):
     args.max_vram_gb = ask("Max VRAM GB for the GPU update", None,
                            "4 (of 8 GB); blank = uncapped", float)
     args.mirror_battles = ask("Mirror battles vs the champion (the 0.55 beat_champion bar)", 360,
-                              "360 = the calibrated floor (P2.1); 48 for a fast test", int)
+                              "360 = the calibrated floor (P2.1); 48 for a fast SMOKE", int)
+    # #2: a sub-floor mirror disables beat_champion + mirror-collapse-revert; _launch_live hard-stops
+    # unless --allow-undersized-mirror. Since the wizard offers a smoke value, auto-opt-in here so the
+    # interactive flow doesn't end in a FATAL exit (and echo the flag in the printed command below).
+    _floor = max(GateConfigV2().min_h2h_games, GateConfigV2().mirror_collapse_min_games)
+    if args.mirror_battles < _floor:
+        args.allow_undersized_mirror = True
+        print(f"  (note: mirror_battles {args.mirror_battles} < gate floor {_floor} -> SMOKE mode: "
+              f"beat_champion + mirror-collapse-revert OFF; adding --allow-undersized-mirror.)")
     args.prev_best = ask_yn("Use the prev_best head-to-head promotion bar? "
                             "(promotes past a scripted plateau; N = pure scripted ladder)", True)
     args.hof = ask_yn("Run the Hall-of-Fame breadth check on a promote? (also require beating "
@@ -1268,6 +1331,8 @@ def _wizard(ap):
         parts.append(f"--n-eval-teams {args.n_eval_teams}")
     if args.mirror_battles != 360:
         parts.append(f"--mirror-battles {args.mirror_battles}")
+    if getattr(args, "allow_undersized_mirror", False):
+        parts.append("--allow-undersized-mirror")
     if args.collect_workers:
         parts.append(f"--collect-workers {args.collect_workers}")
     if args.collect_procs and args.collect_procs > 1:
@@ -1360,6 +1425,11 @@ if __name__ == "__main__":
                          "Default 360 (>= the gate's min_h2h_games=360 floor; P2.1 gate_sim: the 0.55 "
                          "bar needs ~360 to hold false-promote ~3%% AND the mirror-collapse revert "
                          "needs it). The scripted ladder stays at --eval-battles; only the mirror is bumped.")
+    ap.add_argument("--allow-undersized-mirror", action="store_true",
+                    help="permit --mirror-battles BELOW the gate floor (min_h2h_games / "
+                         "mirror_collapse_min_games). Below it, beat_champion AND mirror-collapse-revert "
+                         "are DISABLED (only plateau-reanchor + scripted-collapse remain) — for a fast "
+                         "SMOKE only (#06). Without this flag a sub-floor mirror is a hard error.")
     ap.add_argument("--warmup", type=int, default=5, help="critic-only warm-up updates (gen 0)")
     ap.add_argument("--ckpt", default=str(DEFAULT_BC_CHECKPOINT))
     ap.add_argument("--train-teams", nargs="+", default=["all"],
@@ -1388,16 +1458,26 @@ if __name__ == "__main__":
                          "linearly to --tau over --tau-anneal-gens. Set == --tau to disable.")
     ap.add_argument("--tau-anneal-gens", type=int, default=12,
                     help="generations to anneal tau from --tau-start down to --tau (0 = no anneal)")
-    ap.add_argument("--kl-coef", type=float, default=0.5,
+    ap.add_argument("--kl-coef", type=float, default=None,
                     help="KL-to-BC penalty weight (sec 12: >0 preserves the BC prior so PPO "
-                         "can't crush rare tactics; 0 = off)")
-    ap.add_argument("--target-kl-bc", type=float, default=0.15,
+                         "can't crush rare tactics; 0 = off). Default unset -> use the --config ppo "
+                         "value, else the launcher default 0.5 (#3: unset no longer clobbers --config).")
+    ap.add_argument("--gimmick-kl-weight", type=float, default=None,
+                    help="per-head KL scale for the MEGA (gimmick) head ONLY (<1.0 loosens the "
+                         "BC anchor so RL can un-learn the 'always mega turn 1' bias). Default "
+                         "None = use the --config value, else PPOConfig's 1.0.")
+    ap.add_argument("--opp-aux-coef", type=float, default=None,
+                    help="Level-A aux opponent-prediction CE weight (>0 shapes the trunk to be "
+                         "opponent-predictive; needs an --aux-opp-head anchor). Default None = "
+                         "use the --config value, else PPOConfig's 0.0 (off).")
+    ap.add_argument("--target-kl-bc", type=float, default=None,
                     help="early-halt a generation if mean KL(BC||new) exceeds this "
-                         "(warm-start-collapse guard); <=0 disables")
-    ap.add_argument("--target-kl-relax", type=float, default=0.0,
+                         "(warm-start-collapse guard); <=0 disables. Default unset -> --config train "
+                         "value, else the launcher default 0.15 (#3: unset no longer clobbers --config).")
+    ap.add_argument("--target-kl-relax", type=float, default=None,
                     help="relax --target-kl-bc by this much PER GENERATION (sec 12: the static "
                          "BC anchor's KL grows as a stronger champion drifts, so a fixed bar "
-                         "would eventually halt good gens; 0 = fixed, the default)")
+                         "would eventually halt good gens; unset/0 = fixed). Default unset -> --config value, else 0.")
     ap.add_argument("--target-kl-max", type=float, default=None,
                     help="cap for the relaxed --target-kl-bc threshold (default uncapped)")
     ap.add_argument("--min-ev", type=float, default=None,

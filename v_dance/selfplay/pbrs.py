@@ -1,5 +1,16 @@
 """Gated potential-based reward shaping (PBRS) — task 3b.7. DEFAULT OFF.
 
+⚠ NOT-YET-WIRED (#19): ``maybe_shape_batch`` / ``PotentialShaper`` are NOT called by the live loop
+(``generation.run_live_generations`` / ``run_generation`` / ``trainer``). Flipping ``PBRSConfig.enabled``
+True alone does NOTHING — there is no live call site. Wiring it (a Phase-3 step, do at the gated-PBRS-enable
+point) requires: (1) build ``PotentialShaper.from_critic(ac.critic)`` ONCE at gen 0 (frozen Φ) and thread it
++ a ``PBRSConfig`` into ``run_generation``; (2) call ``maybe_shape_batch`` AFTER ``drop_fallback_pairs`` and
+BEFORE the gen-0 critic warm-up AND ``ppo_update`` (all must see the same shaped rewards); (3) relax the
+value-space guard (``trainer._flatten`` → ``assert_transitions_value_space``) for shaped rewards that exceed
+±1; (4) anneal ``lam`` → 0 over the final ~30-40% of gens. Until then this module is unit-tested in isolation
+only.
+
+
 Phase-3-only, added ONLY on a measured stall (docs/ppo_reward_design.md sec 4/8). When
 on, shaping is PBRS exclusively: ``F_t = gamma*Phi(s_{t+1}) - Phi(s_t)`` with Phi a
 function of STATE ONLY. By Ng/Harada/Russell (1999) Thm 1 the discounted shaping return
@@ -110,6 +121,13 @@ def _potential_and_F(traj, shaper: PotentialShaper, gamma: float) -> Tuple[np.nd
     if n == 0:
         e = np.zeros(0, np.float32)
         return e, e.copy()
+    # #20: on a HORIZON_CUT TRUNCATION the last step's phi_next must be Phi(s_cut) (mirroring GAE's
+    # bootstrap_value), NOT Phi(terminal)=0 — using 0 injects a spurious -Phi(s_last) and breaks the
+    # Ng/Harada/Russell telescoping on truncated episodes. HORIZON_CUT is not produced today (and PBRS is
+    # OFF), so fail LOUD rather than silently bias: thread a bootstrap_potential through here before
+    # enabling either truncation or PBRS.
+    assert not getattr(traj.meta, "bootstraps", False), (
+        "PBRS shaping on a HORIZON_CUT trajectory is unsupported (needs a Phi(s_cut) bootstrap, #20)")
     phi = shaper.phi_values(np.stack([np.asarray(t.state, np.float32) for t in ts]))
     F = np.zeros(n, np.float32)
     for t in range(n):

@@ -22,8 +22,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List, Optional
 
-from v_dance.play.parallel_battles import (close_players, eval_account_names, gen_salt,
-                                           play_pairing, run_jobs)
+from v_dance.play.parallel_battles import (close_players, discount_forfeits, eval_account_names,
+                                           gen_salt, play_pairing, run_jobs)
 from v_dance.selfplay.mp_collect import partition_specs   # round-robin split (generic over any list)
 
 log = logging.getLogger(__name__)
@@ -110,12 +110,11 @@ async def _eval_specs(candidate, prev_best, team_chooser, specs: List[EvalSpec],
             # is tagged at DECISION time (when ForfeitBattleOrder is returned), while `w` only counts a
             # SERVER-ACKED win, so in the rare stall-abandon window (an opp forfeit issued but wedged, then
             # folded into the FINISHED delta as a non-win by the watchdog) opp_ff can exceed the reflected
-            # wins. Clamp non-negative so one such chunk can never push a negative tally into the gate
-            # (the f-side already nets to real_finished >= 0; the clamp there is belt-and-suspenders).
-            opp_ff = len(getattr(opp, "_forfeited_tags", None) or ())
-            own_ff = len(getattr(model_player, "_forfeited_tags", None) or ())
-            acc[spec.kind][0] += max(0, w - opp_ff)
-            acc[spec.kind][1] += max(0, f - opp_ff - own_ff)
+            # wins. discount_forfeits clamps non-negative. SHARED with the single-process gauntlet so the
+            # two eval paths can't drift (#01).
+            w, f = discount_forfeits(w, f, model_player, opp)
+            acc[spec.kind][0] += w
+            acc[spec.kind][1] += f
         finally:
             source.update(getattr(model_player, "_source_counts", {}) or {})
             for k, v in (getattr(model_player, "_tp_source", {}) or {}).items():

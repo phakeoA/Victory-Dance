@@ -32,6 +32,9 @@ from v_dance.play.run_local_battle import (
 
 _AI_NAME = "VictoryDanceAI"
 URL = f"http://{SHOWDOWN_HOST}:{SHOWDOWN_PORT}"
+# Per-battle inactivity watchdog (the consumer frees the AI if one battle runs absurdly long / the tab
+# went silent). Module-level so the self-test budget can be sized ABOVE it (#16) from a single source.
+_MAX_BATTLE_S = 600.0
 
 # The local client redirects to https://localhost.psim.us then opens insecure ws://localhost:8000;
 # fresh Chromium blocks that (mixed-content / private-network). These flags allow it (LOCAL dev only).
@@ -61,8 +64,11 @@ def _toid(s: str) -> str:
 
 
 def _load_pool() -> list[tuple[str, str]]:
-    """Every champion team for the active format, as (name, paste)."""
-    return [(Path(p).name, load_team(resolve_team_path(Path(p).name)))
+    """Every champion team for the active format, as (name, paste). #14: resolve the FULL reg-scoped
+    repo-relative path from discover_teams (resolve_team_path returns it verbatim when it exists),
+    NOT just Path(p).name — a bare name goes through resolve_team_path's cross-reg rglob and would
+    return the alphabetically-first match if a filename ever existed in two regulations (wrong-reg team)."""
+    return [(Path(p).name, load_team(resolve_team_path(p)))
             for p in discover_teams(reg=BATTLE_FORMAT)]
 
 
@@ -235,7 +241,7 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
     pending = None               # a challenger (our format) seen while busy — accepted once free
     seen_wrong_fmt: set = set()  # (challenger, fmt) pairs already warned about (dedup the repeated frames)
     errors = 0                   # consecutive frame-handling errors → stop if the tab is dead
-    _MAX_BATTLE_S = 600.0        # never refuse challenges forever because one battle silently never ended
+    # _MAX_BATTLE_S is module-level (#16) so run()'s self-test budget can be sized above it.
     while not stop.is_set():
         # watchdog: free up if a battle ran absurdly long / went silent (tab closed, desync)
         if busy and (loop.time() - busy_since) > _MAX_BATTLE_S:
@@ -351,8 +357,10 @@ async def run(headed: bool, human_name: str, self_test: bool, ai_team_pin: str |
                 ch = asyncio.run_coroutine_threadsafe(
                     opp.send_challenges(_AI_NAME, self_test_battles), POKE_LOOP)
                 try:
+                    # #16: budget must exceed the per-battle watchdog so the consumer's watchdog fires +
+                    # logs FIRST (450*N alone is < 600 for the default N=1). Single-sourced off _MAX_BATTLE_S.
                     await asyncio.wait_for(_wait_total(tally, self_test_battles),
-                                           timeout=450 * self_test_battles)  # > 600s watchdog → a hang is caught+logged
+                                           timeout=max(_MAX_BATTLE_S + 100.0, 450.0 * self_test_battles))
                 except asyncio.TimeoutError:
                     print("[play] self-test TIMEOUT")
                     if ch.done() and ch.exception():               # the CHALLENGE failed, not the AI

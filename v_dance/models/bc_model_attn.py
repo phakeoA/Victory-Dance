@@ -19,16 +19,17 @@ both point at the same structural prior: process each Pokémon with a SHARED
 per-mon encoder, then let the mons INTERACT.
 
 The frozen layout makes this a MODEL-ONLY change — no encoder change, no data
-re-export (numbers below = current v18; the model auto-sizes from get_state_dim()):
+re-export (the model auto-sizes from get_state_dim() — see encoder_layout.py for the
+live constants; do NOT hardcode them here, they rot at every layout bump):
 
-    STATE_DIM = 12 mon-slots x POKEMON_FEATURES (405) + GLOBAL_FEATURES (101) = 4961
+    STATE_DIM = NUM_MON_SLOTS x POKEMON_FEATURES + GLOBAL_FEATURES  (5057 at layout v19)
 
     slot 0  own active a   (our_a)        slots 4-7   own bench
     slot 1  own active b   (our_b)        slots 8-11  opp bench
     slot 2  opp active a   (opp_a)
     slot 3  opp active b   (opp_b)
 
-So we reshape the existing flat vector to (B, 12, 149) IN-MODEL, run a shared
+So we reshape the existing flat vector to (B, NUM_MON_SLOTS, POKEMON_FEATURES) IN-MODEL, run a shared
 per-mon encoder + learned per-slot positional embedding + a self-attention block
 (the mons attend to one another), fuse with an encoded global block, and read the
 SAME heads off the relevant tokens.
@@ -49,8 +50,8 @@ DESIGN NOTES
 * PAD-SAFE: empty slots are all-zero in the encoding (no mon).  Absent mons are
   masked out of attention (``key_padding_mask``) and excluded from the value
   pool.  Own active slots CAN be empty too — in a forced-replacement / post-faint
-  state the encoder writes an all-zero own-active block (state_encoder.py:789-790
-  returns early on a None mon) — so that slot's per-slot head logits are then
+  state the offline encoder writes an all-zero own-active block (returns early on a
+  None mon) — so that slot's per-slot head logits are then
   meaningless but finite; downstream LEGALITY MASKING is the real authority.  A
   guard covers the degenerate fully-empty row so attention never sees an
   all-masked query.
@@ -95,7 +96,7 @@ class AttnBCPolicy(nn.Module):
     action + gimmick heads + a pooled value head.
 
     Args:
-        state_dim:    input width (frozen STATE_DIM == 4961 at layout v18).
+        state_dim:    input width (frozen STATE_DIM from get_state_dim(); 5057 at layout v19).
         action_dim:   move/switch logits per head (frozen ACTION_DIM == 16).
         gimmick_dim:  gimmick logits per head (GIMMICK_DIM == 3, {none, mega, tera}; v11 Phase D).
         d_model:      per-mon token width (default 128).
@@ -151,7 +152,7 @@ class AttnBCPolicy(nn.Module):
             raise ValueError(
                 f"AttnBCPolicy expects state_dim == {expected} "
                 f"({self.n_mon_slots}x{self.mon_features} + {self.global_features}), got {state_dim}. "
-                "This model reshapes the flat v4 layout in-place; a layout change needs this updated."
+                "This model reshapes the flat encoder layout in-place; a layout change needs this updated."
             )
 
         self.head_names: Tuple[str, ...] = tuple(heads)
@@ -352,13 +353,19 @@ def build_attn_model(
     d_model: int = 128,
     n_heads: int = 4,
     n_layers: int = 2,
+    ff_mult: int = 2,
     dropout: float = 0.1,
     heads: Sequence[str] = DEFAULT_HEADS,
     device: str = "cpu",
     gimmick_heads: Optional[Sequence[str]] = None,
     value_readout: str = "mean",
 ) -> AttnBCPolicy:
-    """Build an AttnBCPolicy on ``device`` and print a one-line summary."""
+    """Build an AttnBCPolicy on ``device`` and print a one-line summary.
+
+    ``ff_mult`` MUST be forwarded (not left at the AttnBCPolicy default): the trainer
+    stamps ``args.ff_mult`` into the checkpoint config and ``model_io`` rebuilds with it,
+    so dropping it here would build ``ff_mult=2`` while the config claims another value →
+    a silent reload SHAPE MISMATCH for any ``--ff-mult != 2``."""
     model = AttnBCPolicy(
         state_dim=get_state_dim(),
         action_dim=get_action_dim(),
@@ -366,6 +373,7 @@ def build_attn_model(
         d_model=d_model,
         n_heads=n_heads,
         n_layers=n_layers,
+        ff_mult=ff_mult,
         dropout=dropout,
         heads=heads,
         gimmick_heads=gimmick_heads,
@@ -375,7 +383,7 @@ def build_attn_model(
         f"[AttnBCPolicy] {model.count_parameters():,} params | "
         f"state_dim={model.state_dim} action_dim={model.action_dim} "
         f"gimmick_dim={model.gimmick_dim} d_model={d_model} n_layers={n_layers} "
-        f"value_readout={value_readout} heads={model.head_names} "
+        f"ff_mult={ff_mult} value_readout={value_readout} heads={model.head_names} "
         f"gimmick_heads={model.gimmick_head_names} device={device}"
     )
     return model

@@ -48,6 +48,13 @@ class Transition:
     action_s1: int                   # slot-1 action; PASS_ACTION(-1) = pass/no-decode
     gimmick_s0: int = 0              # GIMMICK_NONE(0) / GIMMICK_MEGA(1)
     gimmick_s1: int = 0
+    # Level-A opp-prediction targets (Piece 3): the OPPONENT's same-turn action per slot,
+    # in the opponent's own-perspective 0..ACTION_DIM-1 codec. The action codec is
+    # seat-symmetric, so the opponent player's OWN action_s0/action_s1 ARE the opp_a/opp_b
+    # aux-head target space directly (no re-flip). PASS_ACTION(-1) = unknown (opp passed, or
+    # no matching opposite-perspective step) -> the Piece-2 aux loss masks it (opp_valid=0).
+    opp_a_action: int = PASS_ACTION
+    opp_b_action: int = PASS_ACTION
     logprob: float = 0.0             # joint log-prob of (a0,g0,a1,g1) under the BEHAVIOUR policy
     value: float = 0.0               # critic V(s) at collection time (value_pm space, [-1,1])
     reward: float = 0.0              # per-step reward (0 except terminal; + PBRS F_t if enabled)
@@ -68,6 +75,7 @@ class Transition:
             "state": np.asarray(self.state, dtype=np.float32).tolist(),
             "action_s0": int(self.action_s0), "action_s1": int(self.action_s1),
             "gimmick_s0": int(self.gimmick_s0), "gimmick_s1": int(self.gimmick_s1),
+            "opp_a_action": int(self.opp_a_action), "opp_b_action": int(self.opp_b_action),
             "logprob": float(self.logprob), "value": float(self.value),
             "reward": float(self.reward), "done": bool(self.done),
             "decision_type": self.decision_type, "turn": int(self.turn),
@@ -81,6 +89,8 @@ class Transition:
             state=np.asarray(d["state"], dtype=np.float32),
             action_s0=int(d["action_s0"]), action_s1=int(d["action_s1"]),
             gimmick_s0=int(d.get("gimmick_s0", 0)), gimmick_s1=int(d.get("gimmick_s1", 0)),
+            opp_a_action=int(d.get("opp_a_action", PASS_ACTION)),
+            opp_b_action=int(d.get("opp_b_action", PASS_ACTION)),
             logprob=float(d.get("logprob", 0.0)), value=float(d.get("value", 0.0)),
             reward=float(d.get("reward", 0.0)), done=bool(d.get("done", False)),
             decision_type=d.get("decision_type", "turn"), turn=int(d.get("turn", 0)),
