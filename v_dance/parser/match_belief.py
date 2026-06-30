@@ -145,6 +145,13 @@ def identity_reliable(mon: Optional[dict]) -> bool:
     return True
 
 
+def _spread_key(spread: dict):
+    """Stable identity for an EV spread (nature + actual EVs) — used to align externally-computed
+    per-spread damage log-likelihoods (the A2 v2 live poke-env path) with the belief block's spreads
+    across re-sorts."""
+    return (spread.get("nature"), tuple(spread.get("evs_actual") or ()))
+
+
 def damage_main_term(base_power, attacker_stat, defender_stat) -> float:
     """The +2-free, multiplier-free, roll-free MAIN damage term (HP points) of the L50 Gen-9 formula:
     ``22·bp·A/(D·50)`` (the part of ``_damage_band``'s ``base`` BEFORE the additive ``+2``). Pass its value at
@@ -375,6 +382,16 @@ class MatchBelief:
             "sigma": float(sigma_log),
         })
 
+    def observe_damage_loglik(self, species: Optional[str], loglik_by_key: Optional[dict]) -> None:
+        """Record a PRECOMPUTED per-spread LOG-likelihood (A2 v2): an external calculator (the live
+        poke-env path, which marginalises over item hypotheses) computed ``ln L(spread)`` for each
+        candidate spread of an observed damage event, keyed by :func:`_spread_key`. MatchBelief just
+        multiplies these into the spread distribution at ``block_for`` time — staying calculator-agnostic
+        (it never imports poke-env). No-op for an empty map."""
+        if not loglik_by_key:
+            return
+        self._obs(species).damage_constraints.append({"mode": "loglik", "loglik": dict(loglik_by_key)})
+
     def observe_speed_bound(
         self,
         species: Optional[str],
@@ -570,6 +587,17 @@ class MatchBelief:
         log_w = [0.0] * len(spreads)        # accumulate log-likelihood (numerically stable over many events)
         fired = False
         for c in mb.damage_constraints:
+            if c["mode"] == "loglik":       # A2 v2: a precomputed per-spread log-likelihood (poke-env path)
+                ll = c["loglik"]
+                # A MISSING spread key → the NEUTRAL value (log_floor), NOT 0.0: every real loglik the
+                # producer stores is ≤ 0 (a mixture of exp(-½z²)≤1, floored at _LL_FLOOR == log_floor), so
+                # defaulting to 0.0 would rank an un-evaluated spread as the MOST likely and invert the
+                # narrowing (reachable when producer/consumer spread keys diverge). Floor → clean no-op for
+                # the unmatched spreads instead. (audit 2026-06-30)
+                for i, s in enumerate(spreads):
+                    log_w[i] += max(ll.get(_spread_key(s), log_floor), log_floor)
+                fired = True
+                continue
             stat, sigma, mode = c["stat"], c["sigma"], c["mode"]
             ref_main, ref_stat, mu_ref = c["ref_main"], c["ref_stat"], c["mu_ref"]
             denom = ref_main + 2.0

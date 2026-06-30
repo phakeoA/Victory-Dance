@@ -278,6 +278,45 @@ def value_trained(model) -> bool:
     return bool(getattr(model, "_value_trained", False))
 
 
+def _masked_softmax(logits, mask) -> np.ndarray:
+    """Softmax of ``logits`` over the LEGAL actions (``mask`` truthy), zero elsewhere; an all-zero
+    vector when no action is legal. Output length = ``len(logits)``."""
+    z = np.asarray(logits, dtype=np.float64).ravel()
+    n = z.shape[0]
+    out = np.zeros(n, dtype=np.float64)
+    m = np.asarray(list(mask), dtype=bool)
+    if m.shape[0] < n:
+        m = np.concatenate([m, np.zeros(n - m.shape[0], dtype=bool)])
+    idx = np.nonzero(m[:n])[0]
+    if idx.size == 0:
+        return out
+    zz = z[idx] - z[idx].max()
+    p = np.exp(zz)
+    out[idx] = p / p.sum()
+    return out
+
+
+def opp_action_prior(model, state_vec: np.ndarray, snap: dict, *, device: str = "cpu",
+                     opp_heads=("opp_a", "opp_b")):
+    """The net's predicted OPPONENT action distribution: ``{"opp_a": [A], "opp_b": [A]}`` =
+    softmax(opp-head logits) masked by ``build_opp_action_mask(snap)`` (decision-time opp legality from
+    the flipped snapshot).  This is the opponent model the Level-C search plans against (belief-weighted
+    expectimax) — NOT used by A3 itself.  Returns ``None`` for a model with no opponent heads (a plain
+    our-only BC net).  Runs the policy ONCE; each value is an ``np.ndarray`` summing to 1 over the legal
+    opp actions (all-zero when the opp slot has no legal action)."""
+    with torch.no_grad():
+        t = torch.as_tensor(np.asarray(state_vec, dtype=np.float32), device=device)
+        out = model(t)
+    actions = out[0] if isinstance(out, tuple) else out
+    if not isinstance(actions, dict) or any(h not in actions for h in opp_heads):
+        return None
+    l0, l1 = _head_logits(actions, opp_heads)
+    from v_dance.encoders.action_codec import build_opp_action_mask
+    masks = build_opp_action_mask(snap or {})
+    return {"opp_a": _masked_softmax(l0, masks.get("opp_a") or []),
+            "opp_b": _masked_softmax(l1, masks.get("opp_b") or [])}
+
+
 # ── Team-preview scorer ───────────────────────────────────────────────────────
 def load_team_chooser(path, device: str = "cpu"):
     """Rebuild the TeamPreviewModel from a dict checkpoint and load its weights.

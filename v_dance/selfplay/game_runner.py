@@ -310,7 +310,11 @@ def phase0_report(pairs: List[tuple], source_counts: dict, *, min_games: int = 2
             p1_games += 1
             p1_wins += 1 if p1t.meta.won else 0
 
-    sc = {k: v for k, v in source_counts.items() if not str(k).startswith("tp_")}
+    # A3: pull the belief-feed diagnostics OUT before the non-model math (else belief_* counts would be
+    # mis-counted as non-model executions and deflate MODEL-DRIVEN%). Surfaced separately in rep["belief"].
+    belief = {k[len("belief_"):]: v for k, v in source_counts.items() if str(k).startswith("belief_")}
+    sc = {k: v for k, v in source_counts.items()
+          if not str(k).startswith("tp_") and not str(k).startswith("belief_")}
     resamples = sc.get("rejected_resample", 0)
     # audit: count EVERY executed NON-model source (forced_default / forced_partial / forced_switch /
     # forfeit / retry / retry_default / forced_switch_escape …) — a BLOCKLIST, not a 3-key whitelist that
@@ -352,6 +356,7 @@ def phase0_report(pairs: List[tuple], source_counts: dict, *, min_games: int = 2
         "p1_win_rate": p1_wr, "p1_games": p1_games, "balance_ok": bal_ok,
         "terminal_clean": clean, "terminal_error": clean_err,
         "looks_like_winprob": winprob_suspect, "value_space_ok": value_space_ok,
+        "belief": belief,
     }
     rep["PASS"] = bool(enough and md_ok and sym_ok and bal_ok and clean and data_clean and value_space_ok)
     return rep
@@ -381,6 +386,11 @@ def print_phase0_report(rep: dict) -> None:
           f"[{mark(rep['terminal_clean'])}]")
     print(f"  value space       : {'value_pm OK' if rep.get('value_space_ok', True) else 'looks like WIN-PROB [0,1] — value_pm mismatch!'}  "
           f"[{mark(rep.get('value_space_ok', True))}]")
+    bel = rep.get("belief") or {}
+    if bel:
+        fired = sum(int(v or 0) for k, v in bel.items() if "used" in k)
+        print(f"  belief feed       : {fired} constraints FIRED  "
+              f"({', '.join(f'{k}={v}' for k, v in sorted(bel.items()))})  [info]")
     print("  ----------------------------------------------------------")
     print(f"  PHASE 0           : {'PASS - plumbing clean, ready for Phase 1' if rep['PASS'] else 'FAIL - investigate above'}")
     print("============================================================")
@@ -391,11 +401,20 @@ async def run_self_play_games(
     actor_critic, team_pool: Sequence[str], n_games: int, *,
     store_path=None, tau: float = 1.0, seed: int = 0, manage_server: bool = True,
     battle_timeout: Optional[float] = 90.0, matchup_seed: int = 0, n_workers: int = 1,
+    match_belief: str = "off", live_dir=None, save_replays: bool = False,
 ):
     """Play ``n_games`` self-play battles (the shared policy on BOTH sides) over a
     side-balanced team rotation, collect both perspectives of each game, and write the
     Type-C store. Returns ``(pairs, source_counts)``. ``n_workers`` (task #13) runs that
-    many pairings concurrently via the shared runner (default 1 = sequential, as before)."""
+    many pairings concurrently via the shared runner (default 1 = sequential, as before).
+
+    ``match_belief`` (A3 within-game belief A/B): ``"off"`` (default — neither side),
+    ``"both"`` (the live-wiring Phase-0 smoke — belief ON on both seats), or ``"ab"`` (the
+    strength A/B — belief ON on p1/SP1 only, OFF on p2/SP2, so p1's win-rate isolates the
+    belief's effect; run with a SINGLE team for a clean MIRROR). The per-seat belief-feed
+    counts are aggregated into ``source_counts`` under ``belief_*`` keys."""
+    p1_belief = match_belief in ("both", "ab")        # SP1 = belief-on side of the A/B
+    p2_belief = match_belief == "both"
     import logging as _logging
     from collections import Counter
 
@@ -423,13 +442,15 @@ async def run_self_play_games(
             replay_path=_REPO_ROOT / "artifacts" / "replay_buffer" / f"SP1_{uid}.jsonl",
             account_configuration=AccountConfiguration(f"SP1x{uid}", None),
             battle_format=R.BATTLE_FORMAT, team=ta, max_concurrent_battles=1,
-            log_level=_logging.WARNING)
+            log_level=_logging.WARNING, use_match_belief=p1_belief,
+            live_dir=live_dir, save_replays=save_replays)
         p2 = SelfPlayVGCPlayer(
             actor_critic, tau=tau, sample_seed=seed + 100000 + uid,
             replay_path=_REPO_ROOT / "artifacts" / "replay_buffer" / f"SP2_{uid}.jsonl",
             account_configuration=AccountConfiguration(f"SP2x{uid}", None),
             battle_format=R.BATTLE_FORMAT, team=tb, max_concurrent_battles=1,
-            log_level=_logging.WARNING)
+            log_level=_logging.WARNING, use_match_belief=p2_belief,
+            live_dir=live_dir, save_replays=save_replays)
         try:
             await PB.play_pairing(p1, p2, n, battle_timeout=battle_timeout, label="self-play")
         except Exception:
@@ -437,6 +458,9 @@ async def run_self_play_games(
         finally:
             source_counts.update(getattr(p1, "_source_counts", {}) or {})
             source_counts.update(getattr(p2, "_source_counts", {}) or {})
+            for _p in (p1, p2):                          # A3 belief-feed diagnostics → belief_* keys
+                for _k, _v in (getattr(_p, "_belief_stats", None) or {}).items():
+                    source_counts["belief_" + _k] += int(_v or 0)
             pairs.extend(pair_trajectories(p1.finished_trajectories(),
                                            p2.finished_trajectories()))
             await PB.close_players(p1, p2)
@@ -461,12 +485,34 @@ async def run_self_play_games(
     return pairs, dict(source_counts)
 
 
+def _wilson_ci(wins: int, n: int, z: float = 1.96):
+    """(lo, hi) 95% Wilson score interval for a win-rate, or (None, None) for n==0."""
+    if not n:
+        return None, None
+    import math as _m
+    p = wins / n
+    denom = 1.0 + z * z / n
+    centre = (p + z * z / (2 * n)) / denom
+    half = z * _m.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom
+    return centre - half, centre + half
+
+
 def main(argv=None) -> int:
     import argparse
     import asyncio
+    import json
 
-    ap = argparse.ArgumentParser(description="Self-play Phase-0 plumbing smoke (3c.1b / 3a.6)")
+    ap = argparse.ArgumentParser(description="Self-play Phase-0 plumbing smoke + A3 belief A/B (3c.1b / 3a.6)")
     ap.add_argument("--games", "-n", type=int, default=200, help="self-play games to collect")
+    ap.add_argument("--match-belief", choices=["off", "both", "ab"], default="off",
+                    help="A3 within-game belief: off | both (Phase-0 live-wiring smoke, belief on both "
+                         "seats) | ab (strength A/B — belief ON on p1 only; run with ONE team for a clean "
+                         "MIRROR so p1's win-rate isolates the belief effect)")
+    ap.add_argument("--report-json", default=None, metavar="PATH",
+                    help="also write the full report dict (incl. the A/B verdict + belief diagnostics) "
+                         "as JSON to PATH, so a run is self-describing without scraping the terminal")
+    ap.add_argument("--live-dir", default=None,
+                    help="write per-battle spectate/replay files here (enables save_replays)")
     ap.add_argument("--teams", nargs="+",
                     default=["team1", "WolfeGlick", "Kronomono1", "Kronomono3"])
     ap.add_argument("--ckpt", default=str(_REPO_ROOT / "ai_train_scripts" / "BC_model"
@@ -506,10 +552,49 @@ def main(argv=None) -> int:
         ac, team_pool=args.teams, n_games=args.games, store_path=store_path,
         tau=args.tau, seed=args.seed, manage_server=not args.no_server,
         battle_timeout=args.battle_timeout, matchup_seed=args.matchup_seed,
-        n_workers=args.workers))
+        n_workers=args.workers, match_belief=args.match_belief,
+        live_dir=args.live_dir, save_replays=bool(args.live_dir)))
 
     rep = phase0_report(pairs, sources, min_games=args.min_games)
+    rep["match_belief"] = args.match_belief
+    rep["ckpt"] = str(ckpt)
+    rep["teams"] = list(args.teams)
+    rep["tau"] = args.tau
+
+    # ── A3 belief A/B verdict ────────────────────────────────────────────────
+    # In 'ab' mode p1 = belief-ON, p2 = belief-OFF (same net), so p1's win-rate IS the belief effect.
+    # (The standard phase-0 'balance_ok ~50%' check is EXPECTED to read FAIL here — that divergence is
+    # the signal, not a problem.) Report it with a 95% Wilson CI so significance is unambiguous.
+    if args.match_belief == "ab":
+        wr, ng = rep.get("p1_win_rate"), int(rep.get("p1_games") or 0)
+        wins = int(round((wr or 0.0) * ng))
+        lo, hi = _wilson_ci(wins, ng)
+        verdict = ("INCONCLUSIVE (CI spans 50%)" if lo is None or (lo <= 0.5 <= hi)
+                   else "belief HELPS (CI > 50%)" if lo > 0.5 else "belief HURTS (CI < 50%)")
+        bel = rep.get("belief") or {}
+        fired = sum(int(v or 0) for k, v in bel.items() if "used" in k)
+        rep["ab"] = {"belief_on_win_rate": wr, "wins": wins, "games": ng,
+                     "ci95_low": lo, "ci95_high": hi, "verdict": verdict,
+                     "belief_constraints_fired": fired}
+        print("== A3 belief A/B (belief-ON p1 vs belief-OFF p2, same net) ==")
+        print(f"  belief-ON win-rate : {wr*100:.1f}%  ({wins}/{ng})" if wr is not None
+              else "  belief-ON win-rate : n/a (no decisive games)")
+        if lo is not None:
+            print(f"  95% Wilson CI      : [{lo*100:.1f}%, {hi*100:.1f}%]")
+        print(f"  belief fired       : {fired} constraints "
+              f"({'OK — A/B is meaningful' if fired else 'ZERO — belief never fired, A/B is NULL; check wiring'})")
+        print(f"  VERDICT            : {verdict}")
+        print("============================================================")
+
     print_phase0_report(rep)
+
+    if args.report_json:
+        try:
+            Path(args.report_json).write_text(json.dumps(rep, indent=2, default=str), encoding="utf-8")
+            print(f"[phase0] wrote report JSON -> {args.report_json}")
+        except Exception as exc:
+            print(f"[phase0] could not write report JSON: {exc}", file=sys.stderr)
+
     return 0 if rep["PASS"] else 1
 
 

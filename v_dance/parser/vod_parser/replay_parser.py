@@ -132,6 +132,11 @@ class ShowdownReplayParser:
         # Tracks the most recent move action so damage events can be attributed
         self._last_move_action: Optional[dict] = None
 
+        # Slot with a pending critical hit: Showdown emits |-crit|MON immediately before the |-damage|
+        # for that hit, so the NEXT direct damage on this slot is a crit. Consumed in _handle_damage so
+        # the within-game belief's live damage feed can use the SHARP (crit-known) σ + a ×1.5 reference.
+        self._pending_crit_slot: Optional[str] = None
+
         # Monotone counter for action execution order within a turn
         self._execution_index: int = 0
 
@@ -249,6 +254,7 @@ class ShowdownReplayParser:
             self._current_turn_replacements = []
             self._last_move_action = None
             self._execution_index = 0
+            self._pending_crit_slot = None
             # Field-duration: advance turns-ACTIVE at the START of each turn, anchored on the SET turn,
             # so a pre-|turn|1 lead weather/terrain (Drought / Electric Surge on switch-in) reads
             # age = current_turn − set_turn, matching poke-env's ``turn − start-turn`` on the live path.
@@ -316,6 +322,8 @@ class ShowdownReplayParser:
         elif cmd == "move":
             self._handle_move(parts)
 
+        elif cmd == "-crit":
+            self._handle_crit(parts)
         elif cmd == "-damage" or cmd == "-heal":
             self._handle_damage(parts, cmd)
 
@@ -1043,6 +1051,11 @@ class ShowdownReplayParser:
 
     def _handle_move(self, parts: list[str]) -> None:
         # |move|p1b: Sneasler|Fake Out|p2a: Sneasler
+        # A pending |-crit| applies ONLY to its own hit's damage. A NEW move means the prior hit fully
+        # resolved — including a crit ABSORBED by a Substitute, which emits |-crit| then |-end|/-activate
+        # with NO |-damage| line. Clear it here so the crit can't leak onto a later direct hit on that
+        # slot (e.g. a doubles ally's move). (audit 2026-06-30)
+        self._pending_crit_slot = None
         user_ident = parts[2] if len(parts) > 2 else ""
         move_name = parts[3] if len(parts) > 3 else ""
         target_ident = parts[4] if len(parts) > 4 else None
@@ -1124,6 +1137,15 @@ class ShowdownReplayParser:
         self._last_move_action = action
         self._current_turn_actions.append(action)
 
+    def _handle_crit(self, parts: list[str]) -> None:
+        """|-crit|MON — a critical hit landed on MON. Showdown emits this immediately before the
+        |-damage| line for that hit (any |-supereffective|/|-resisted| lines fall between but don't
+        clear it), so we stamp the slot as pending and the NEXT direct |-damage| on it is a crit. This
+        is additive metadata for the live A3 damage feed (sharp crit-known σ + ×1.5 reference); it does
+        NOT affect the encoded state, so no re-export is needed."""
+        if len(parts) > 2:
+            self._pending_crit_slot = self._slot_key_from_ident(parts[2])
+
     def _handle_damage(self, parts: list[str], cmd: str) -> None:
         # |-damage|p2a: Sneasler|74/100
         ident = parts[2]
@@ -1175,6 +1197,13 @@ class ShowdownReplayParser:
                          and self._last_move_action.get("user_slot") == slot_key)):
             self.active_slots[slot_key].times_attacked += 1
 
+        # Consume a pending |-crit| (set just before this line) for a DIRECT damaging hit on this slot —
+        # additive metadata for the live A3 damage feed; absence of a crit is itself information (the
+        # feed always knows whether it was a crit → sharp σ). Cleared whether or not it matched so it
+        # can't leak to a later unrelated damage.
+        crit = bool(cmd == "-damage" and not has_from_tag and self._pending_crit_slot == slot_key)
+        self._pending_crit_slot = None
+
         event = {
             "event": cmd.lstrip("-"),   # "damage" or "heal"
             "slot": slot_key,
@@ -1184,6 +1213,7 @@ class ShowdownReplayParser:
             "source_slot": source_slot,
             "source_species": source_species,
             "source_move": source_move,
+            "crit": crit,
         }
         self._current_turn_damage_events.append(event)
         self._current_turn_actions.append(event)
@@ -1321,6 +1351,9 @@ class ShowdownReplayParser:
         """|-start| / |-end| volatile tracking (v9 B1-mechanics): Substitute, Ingrain, Taunt/Encore/
         Disable/Torment, the partial-trap moves, Mean Look/Block, Gastro Acid, recharge/locked states.
         Feeds the per-mon volatile block; cleared on switch-in."""
+        # A crit absorbed by a Substitute emits |-crit| then |-end|/|-start| with no |-damage| — clear any
+        # pending crit so it can't leak onto a later direct hit on this slot (A3 crit-feed). (audit 2026-06-30)
+        self._pending_crit_slot = None
         if len(parts) < 4:
             return
         mon = self.active_slots.get(self._slot_key_from_ident(parts[2]))

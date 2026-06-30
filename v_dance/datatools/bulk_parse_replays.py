@@ -453,16 +453,19 @@ def main() -> int:
             print(f"[{idx}/{len(replays)}] ERROR        {html.name} — {exc}")
             continue
 
+        # Under --overwrite, drop a stale stem-named twin FIRST — BEFORE the empty-parse early-continue —
+        # so a replay that now parses to 0 transitions still drops its outdated legacy export instead of
+        # stranding it (with old, now-wrong content) in the corpus. (audit 2026-06-30)
+        _twin = _legacy_twin_to_clean(out_path, legacy_path, args.overwrite)
+        if _twin is not None:
+            _twin.unlink()
+            print(f"[{idx}/{len(replays)}] cleaned legacy twin  {_twin.name}")
+
         if not transitions:
             n_empty += 1
             print(f"[{idx}/{len(replays)}] empty (0 turns) {html.name}")
             continue
 
-        # Under --overwrite, drop a stale stem-named twin so we don't strand a duplicate replay_id.
-        _twin = _legacy_twin_to_clean(out_path, legacy_path, args.overwrite)
-        if _twin is not None:
-            _twin.unlink()
-            print(f"[{idx}/{len(replays)}] cleaned legacy twin  {_twin.name}")
         # Same serialization as server.py /export: one JSON object per line.
         out_path.write_text(
             "\n".join(json.dumps(t, ensure_ascii=False) for t in transitions),

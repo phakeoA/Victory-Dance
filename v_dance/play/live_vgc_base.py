@@ -74,8 +74,10 @@ import random as _random  # noqa: E402  (retry-exploration on rejected choices)
 
 from v_dance.encoders.live_state_encoder import (  # noqa: E402
     opp_snapshot_from_log_prefix, opp_snapshot_current, own_bench_mons,
+    reconstruct_for_decision,
 )
-from v_dance.encoders.state_encoder import SWITCH_OFFSET, GIMMICK_NONE  # noqa: E402
+from v_dance.encoders.state_encoder import SWITCH_OFFSET, GIMMICK_NONE, _WEATHER_SPEED_ABILITY  # noqa: E402
+from v_dance.parser.vod_parser.pokedex import norm_species  # noqa: E402  (A3 belief-feed species keys)
 
 log = logging.getLogger(__name__)
 
@@ -131,9 +133,28 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
         # eval gauntlet can file replays into eval/<kind>/ and eval/league/ named gen<N>_vs_<...>.
         replay_dir = kwargs.pop("replay_dir", None)
         replay_label = kwargs.pop("replay_label", None)
+        # Level C / A3 (live wiring): within-game opponent belief (MatchBelief) PRE-ENRICHMENT of the
+        # gap-#6 opponent snapshot. OFF by default → prod serving stays byte-identical (the un-spliced
+        # static-belief path); the A/B harness / overnight self-play flips it on. See _apply_match_belief.
+        use_match_belief = kwargs.pop("use_match_belief", False)
         super().__init__(*args, **kwargs)
         # raw protocol lines accumulated per battle tag (real-time)
         self._proto_log: Dict[str, List[str]] = {}
+        # Level C / A3: per-battle within-game opponent belief, keyed by battle tag like _proto_log (the
+        # LiveStateEncoder is a per-PLAYER singleton — its BeliefState is GLOBAL across battles — so the
+        # within-game belief CANNOT live on it). Created lazily per tag in _match_belief_for, reset in
+        # _battle_finished_callback. Empty + unused unless use_match_belief is on.
+        self._use_match_belief = bool(use_match_belief)
+        self._match_belief: Dict[str, "MatchBelief"] = {}
+        # A3 idempotency: the last turn whose prev-turn events were fed into each battle's MatchBelief.
+        # poke-env re-invokes choose_move for the SAME turn on a rejected/re-requested order, so without
+        # this guard the same damage/speed events would be appended (and the Bayesian product double-
+        # counted) on every retry. Reset in _battle_finished_callback. (audit 2026-06-30)
+        self._belief_fed_turn: Dict[str, int] = {}
+        # A3 diagnostics: cumulative belief-feed counts (dmg_used_def / dmg_used_off / spd_used / skips…)
+        # over this player's lifetime — surfaced by the self-play runner so a run can CONFIRM the belief
+        # actually fired (an empty count means belief-ON == belief-OFF and the A/B is null).
+        self._belief_stats: "Counter[str]" = Counter()
         # ⚠ MUST NOT be named ``_save_replays`` — poke-env's ``Player`` uses that exact attribute as
         # its OWN native-replay flag, which ``_create_battle`` reads to stamp every battle and
         # ``AbstractBattle._finish_battle`` then uses to dump an UNCATEGORIZED ``./replays/<user> -
@@ -203,7 +224,11 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
         if any(battle.force_switch):
             return self._handle_force_switch(battle)
 
-        opp_snapshot = self._build_opp_snapshot(battle)
+        # ONE parse of the public-log prefix → the gap-#6 opponent snapshot AND the just-resolved
+        # previous turn (the A3 belief feed), so a normal turn parses the prefix once.
+        opp_snapshot, prev_turn = self._reconstruct_decision(battle)
+        self._feed_match_belief(battle, prev_turn)                      # A3: feed prev-turn damage+speed (no-op unless on)
+        opp_snapshot = self._apply_match_belief(opp_snapshot, battle)   # A3: within-game belief (no-op unless on)
         state_vec = self._encoder.encode(battle, opp_snapshot=opp_snapshot)
         # gap-#6 reconstructed opponent slot occupancy → lets the codec target
         # opp_a vs opp_b DELIBERATELY when a same-species illusion makes poke-env
@@ -398,6 +423,19 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
             log.debug("opp_snapshot build failed (degrading to poke-env)", exc_info=True)
             return None
 
+    def _reconstruct_decision(self, battle: DoubleBattle):
+        """``(opp_snapshot start-of-turn, prev_turn T-1)`` from a SINGLE parse of the public log, for a
+        normal-turn decision — shared by the gap-#6 splice and the A3 belief feed. ``(None, None)`` on
+        any failure (degrade to poke-env's opponent view, no feed)."""
+        try:
+            log_str, own_role = self._assemble_log(battle)
+            if not log_str:
+                return None, None
+            return reconstruct_for_decision(log_str, own_role, battle.turn)
+        except Exception:
+            log.debug("decision reconstruct failed (degrading to poke-env)", exc_info=True)
+            return None, None
+
     def _build_opp_snapshot_current(self, battle: DoubleBattle) -> Optional[dict]:
         """Opponent side as of the CURRENT (mid-turn / post-faint) board, for a
         forced-replacement decision — the start-of-turn snapshot is stale once a
@@ -410,6 +448,268 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
         except Exception:
             log.debug("current opp_snapshot build failed (degrading to poke-env)", exc_info=True)
             return None
+
+    # ── Level C / A3: within-game opponent belief (MatchBelief) pre-enrichment ──
+    def _match_belief_for(self, battle: DoubleBattle) -> Optional["MatchBelief"]:
+        """The per-battle ``MatchBelief`` for this battle tag (lazily created on first
+        use), or ``None`` when MatchBelief is off or the encoder carries no
+        ``BeliefState``.
+
+        The ``LiveStateEncoder`` is a per-PLAYER singleton (its ``belief`` is shared
+        across battles), so the within-game opponent belief lives HERE — keyed by
+        battle tag like ``_proto_log`` — and is reset in ``_battle_finished_callback``.
+        """
+        if not getattr(self, "_use_match_belief", False):
+            return None
+        belief = getattr(getattr(self, "_encoder", None), "belief", None)
+        if belief is None:
+            return None
+        tag = _norm_tag(getattr(battle, "battle_tag", None))
+        if not tag:
+            return None
+        store = self._match_belief
+        mb = store.get(tag)
+        if mb is None:
+            from v_dance.parser.match_belief import MatchBelief
+            mb = store[tag] = MatchBelief(belief, level=getattr(self._encoder, "level", 50))
+        return mb
+
+    def _apply_match_belief(
+        self, opp_snapshot: Optional[dict], battle: DoubleBattle
+    ) -> Optional[dict]:
+        """PRE-ENRICH the reconstructed opponent snapshot with this battle's
+        ``MatchBelief`` so the gap-#6 splice carries the WITHIN-GAME-narrowed opponent
+        stats/spreads (accumulated reveals + A2 damage + A3 speed) instead of the
+        static Pikalytics prior.  Returns the snapshot UNCHANGED — a true no-op — when
+        MatchBelief is off or no snapshot was reconstructed (degrade to static belief).
+
+        Each opponent mon is enriched via ``MatchBelief.enrich_mon``, which also
+        ACCUMULATES that mon's reveals (moves/item/ability) across turns; the
+        encoder's static ``_enrich_opp_snapshot`` then NO-OPs on these mons (they
+        already carry a ``stats_estimate``) and splices the sharpened bytes — so the
+        encoder itself is UNCHANGED.  A mon with no Pikalytics data keeps no estimate
+        and still falls through to the encoder's static path, exactly as today.
+
+        Guarded so a belief hiccup can never break a live turn (→ static belief).
+        Identity (Zoroark/Ditto) is gated inside ``enrich_mon``/``ingest_mon`` via
+        ``identity_reliable`` — a disguised/transformed mon's reveals are skipped.
+        """
+        if opp_snapshot is None:
+            return opp_snapshot
+        mb = self._match_belief_for(battle)
+        if mb is None:
+            return opp_snapshot
+        try:
+            opp_active = opp_snapshot.get("opp_active") or {}
+            mons = [opp_active.get("opp_a"), opp_active.get("opp_b")]
+            mons += list(opp_snapshot.get("opp_bench") or [])
+            for m in mons:
+                if not m:
+                    continue
+                try:
+                    mb.enrich_mon(m)
+                except Exception:
+                    log.debug("MatchBelief enrich_mon failed (non-fatal)", exc_info=True)
+        except Exception:
+            log.debug("MatchBelief pre-enrich failed (degrading to static belief)", exc_info=True)
+        return opp_snapshot
+
+    def _feed_match_belief(self, battle: DoubleBattle, prev_turn: Optional[dict] = None) -> None:
+        """Feed the JUST-RESOLVED previous turn's events (``prev_turn``, from the shared single parse in
+        ``_reconstruct_decision``) into this battle's ``MatchBelief`` so the within-game opponent belief
+        sharpens before this turn is encoded — DAMAGE (A2) via ``feed_damage_constraints`` and SPEED
+        (A3) via ``feed_speed_constraints``.  A no-op when MatchBelief is off or there is no prior turn.
+        Fully guarded — a feed hiccup must never break a live turn (the belief just stays one behind)."""
+        if not getattr(self, "_use_match_belief", False) or not prev_turn:
+            return
+        mb = self._match_belief_for(battle)
+        if mb is None:
+            return
+        try:
+            own_role = getattr(battle, "player_role", None)
+            if not own_role:
+                return
+            # Idempotency: feed each (battle, turn) ONCE — a rejected-order re-entry re-invokes
+            # choose_move for the same turn with the same prev_turn, which would otherwise double-count
+            # this turn's evidence into the (append-only) constraint product. (audit 2026-06-30)
+            tag = _norm_tag(getattr(battle, "battle_tag", None))
+            turn = getattr(battle, "turn", 0) or 0
+            if not tag or self._belief_fed_turn.get(tag) == turn:
+                return
+            self._belief_fed_turn[tag] = turn
+            from v_dance.play.live_belief_feed import (
+                feed_damage_constraints, feed_speed_constraints,
+            )
+            belief = getattr(self._encoder, "belief", None)
+            level = getattr(self._encoder, "level", 50)
+            ds = feed_damage_constraints(
+                mb, belief, prev_turn, own_role, self._our_stats_by_species(battle), level=level,
+                damage_loglik_fn=lambda **kw: self._damage_loglik(battle, **kw))
+            ss = feed_speed_constraints(
+                mb, prev_turn, own_role, self._speed_ctx(battle, prev_turn))
+            bs = getattr(self, "_belief_stats", None)
+            if bs is not None:
+                for _k, _v in (ds or {}).items():
+                    bs["dmg_" + _k] += int(_v or 0)
+                for _k, _v in (ss or {}).items():
+                    bs["spd_" + _k] += int(_v or 0)
+        except Exception:
+            log.debug("MatchBelief per-turn feed failed (non-fatal)", exc_info=True)
+
+    @staticmethod
+    def _our_stats_by_species(battle: DoubleBattle) -> Dict[str, dict]:
+        """``{norm_species: {hp,atk,def,spa,spd,spe}}`` for OUR team from the live poke-env battle —
+        our exact stats (known from ``|request|``), the known side of every damage constraint.  Keyed by
+        both the current species and the base species (so a mega forme resolves).  Skips any mon whose
+        stats are not fully numeric."""
+        out: Dict[str, dict] = {}
+        for m in (getattr(battle, "team", None) or {}).values():
+            st = getattr(m, "stats", None) or {}
+            if not st or any(not isinstance(st.get(k), (int, float))
+                             for k in ("hp", "atk", "def", "spa", "spd", "spe")):
+                continue
+            d = {k: st.get(k) for k in ("hp", "atk", "def", "spa", "spd", "spe")}
+            for key in (getattr(m, "species", None), getattr(m, "base_species", None)):
+                if key:
+                    out.setdefault(norm_species(key), d)
+        return out
+
+    def _damage_loglik(self, battle: DoubleBattle, *, direction, opp_key, our_key, opp_species,
+                       opp_snapshot_mon, move, crit, obs_frac):
+        """A2 v2: resolve the live poke-env mons for a damage event and compute the per-spread poke-env
+        log-likelihood (item + ability marginalised). ``direction='off'`` (opp attacker → narrow the
+        opp's offence) / ``'def'`` (opp defender → narrow the opp's bulk). ``opp_key`` is the OPP's
+        active slot, ``our_key`` ours. Returns ``{spread_key: loglik}`` or ``None`` (→ the feeder's
+        analytic fallback). The opp mon is species-matched to the event (its slot may have changed since
+        the hit) and restored inside the calc helper. Guarded — a calc hiccup must never break a turn."""
+        try:
+            opp_active = list(getattr(battle, "opponent_active_pokemon", None) or [])
+            our_active = list(getattr(battle, "active_pokemon", None) or [])
+            oi = 0 if str(opp_key).endswith("a") else 1
+            ui = 0 if str(our_key).endswith("a") else 1
+            opp_mon = opp_active[oi] if oi < len(opp_active) else None
+            our_mon = our_active[ui] if ui < len(our_active) else None
+            if opp_mon is None or our_mon is None:
+                return None
+            live_sp = getattr(opp_mon, "base_species", None) or getattr(opp_mon, "species", "") or ""
+            if norm_species(live_sp) != norm_species(opp_species or ""):
+                return None                  # the slot's live mon isn't the one in the event (a switch since)
+            from v_dance.play.pokeenv_damage import damage_loglik
+            return damage_loglik(
+                battle, opp_mon=opp_mon, our_mon=our_mon, direction=direction, move_name=move,
+                is_critical=crit, obs_frac=obs_frac, belief=getattr(self._encoder, "belief", None),
+                opp_snapshot_mon=opp_snapshot_mon, level=getattr(self._encoder, "level", 50))
+        except Exception:
+            log.debug("poke-env damage loglik failed (→ analytic)", exc_info=True)
+            return None
+
+    def _speed_ctx(self, battle: DoubleBattle, prev_turn: dict) -> dict:
+        """Assemble the live SPEED context for ``feed_speed_constraints`` from the poke-env battle:
+        our active mons' EXACT effective speed (the threshold, via the encoder's ``_live_effective_speed``),
+        the opp active mons' KNOWN speed multipliers (boost/Tailwind/paralysis/revealed-Scarf/weather-
+        ability — divided out so the bound is in opp BASE-Spe units) + whether the opp's item+ability are
+        revealed (σ width), Trick Room, and a forced-order hint (Quash/After-You/Quick-Claw/Instruct)."""
+        enc = self._encoder
+        try:
+            weather = next((w.name for w in battle.weather), None)
+        except Exception:
+            weather = None
+        fields = getattr(battle, "fields", {}) or {}
+        trick_room = any(getattr(f, "name", "") == "TRICK_ROOM" for f in fields)
+        magic_room = any(getattr(f, "name", "") == "MAGIC_ROOM" for f in fields)
+        our_tw = any(getattr(k, "name", "") == "TAILWIND" and v
+                     for k, v in (getattr(battle, "side_conditions", {}) or {}).items())
+        opp_tw = any(getattr(k, "name", "") == "TAILWIND" and v
+                     for k, v in (getattr(battle, "opponent_side_conditions", {}) or {}).items())
+        try:
+            our_active = list(battle.active_pokemon)
+        except Exception:
+            our_active = [None, None]
+        try:
+            opp_active = list(battle.opponent_active_pokemon)
+        except Exception:
+            opp_active = [None, None]
+
+        our: Dict[str, dict] = {}
+        for i, key in ((0, "our_a"), (1, "our_b")):
+            m = our_active[i] if i < len(our_active) else None
+            if m is None:
+                continue
+            try:
+                eff = enc._live_effective_speed(m, True, our_tw, weather, magic_room)[0]
+            except Exception:
+                eff = 0.0
+            our[key] = {"eff_speed": eff,
+                        "ability": norm_species(getattr(m, "ability", None) or "") or None,
+                        "hp_frac": (m.current_hp_fraction if getattr(m, "revealed", False) else 1.0)}
+        opp: Dict[str, dict] = {}
+        for i, key in ((0, "opp_a"), (1, "opp_b")):
+            m = opp_active[i] if i < len(opp_active) else None
+            if m is not None:
+                opp[key] = self._opp_speed_mult_known(m, opp_tw, weather)
+        return {"trick_room": trick_room,
+                "order_forced": self._order_forced_hint(battle, prev_turn),
+                "our": our, "opp": opp}
+
+    @staticmethod
+    def _opp_speed_mult_known(m, opp_tw: bool, weather) -> dict:
+        """``{speed_mult_known, context_known, ability, hp_frac}`` for an opp active mon — the product of
+        its KNOWN speed multipliers (boost stage · Tailwind · paralysis · a REVEALED Choice Scarf ·
+        weather-speed ability) and whether its item+ability are both revealed (else a possible hidden
+        Scarf → wider σ). Only revealed context is applied, so the bound never over-claims."""
+        mult = 1.0
+        stage = (getattr(m, "boosts", None) or {}).get("spe", 0) or 0
+        mult *= ((2 + stage) / 2.0) if stage >= 0 else (2.0 / (2 - stage))
+        if opp_tw:
+            mult *= 2.0
+        if getattr(getattr(m, "status", None), "name", None) == "PAR":
+            mult *= 0.5                       # ignore opp Quick Feet (unrevealed) → conservative
+        item = norm_species(getattr(m, "item", None) or "")
+        ability = norm_species(getattr(m, "ability", None) or "")
+        item_known = bool(item) and item != "unknownitem"
+        if item_known and item == "choicescarf":
+            mult *= 1.5
+        if weather and ability and weather in _WEATHER_SPEED_ABILITY.get(ability, ()):
+            mult *= 2.0
+        return {"speed_mult_known": mult,
+                "context_known": item_known and bool(ability),
+                "ability": ability or None,
+                # the CURRENT-board species at this slot, so the speed feeder can skip a read whose
+                # prev-turn mover != the current occupant (a switch/faint+replacement). (audit 2026-06-30)
+                "species": norm_species(getattr(m, "base_species", None)
+                                        or getattr(m, "species", "") or "") or None,
+                "hp_frac": (m.current_hp_fraction if getattr(m, "revealed", False) else 1.0)}
+
+    def _order_forced_hint(self, battle: DoubleBattle, prev_turn: dict) -> bool:
+        """True when the previous turn's order was (or may have been) decided by something OTHER than
+        speed — a forced/extra move out of speed order: Quash / After You / Quick Claw / Instruct /
+        Dancer. Detected from the raw proto segment of that turn (a repeated move is also caught in
+        ``feed_speed_constraints``). Conservative — a hit just SKIPS the speed read, never corrupts."""
+        try:
+            seg = self._prev_turn_proto_segment(battle).lower()
+        except Exception:
+            return False
+        return any(tok in seg for tok in
+                   ("after you", "afteryou", "quash", "quick claw", "quickclaw", "instruct", "dancer"))
+
+    def _prev_turn_proto_segment(self, battle: DoubleBattle) -> str:
+        """The raw protocol lines of the PREVIOUS turn (between ``|turn|T-1`` and ``|turn|T``) from the
+        per-battle capture buffer, joined — for the forced-order scan. Empty string if unavailable."""
+        lines = self._proto_log.get(_norm_tag(getattr(battle, "battle_tag", None))) or []
+        turn = getattr(battle, "turn", 0) or 0
+        start, end = f"|turn|{turn - 1}", f"|turn|{turn}"
+        seg: List[str] = []
+        collecting = False
+        for ln in lines:
+            s = ln.strip()
+            if s == start:
+                collecting = True
+                continue
+            if s == end:
+                break
+            if collecting:
+                seg.append(ln)
+        return "\n".join(seg)
 
     # ── Forced replacement (post-faint) — encode + let the POLICY choose ────────
     def _handle_force_switch(self, battle: DoubleBattle):
@@ -449,6 +749,7 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
         opp_snapshot = None
         try:
             opp_snapshot = self._build_opp_snapshot_current(battle)
+            opp_snapshot = self._apply_match_belief(opp_snapshot, battle)   # A3: within-game belief (no-op unless on)
             state_vec = self._encoder.encode(battle, opp_snapshot=opp_snapshot)
         except Exception:
             log.debug("forceSwitch encode failed (non-fatal)", exc_info=True)
@@ -543,6 +844,10 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
                 self._proto_log.pop(_t, None)
             if isinstance(getattr(self, "_last_error", None), dict):
                 self._last_error.pop(_t, None)
+            if isinstance(getattr(self, "_match_belief", None), dict):   # A3: drop this battle's within-game belief
+                self._match_belief.pop(_t, None)
+            if isinstance(getattr(self, "_belief_fed_turn", None), dict):
+                self._belief_fed_turn.pop(_t, None)
         except Exception:
             log.debug("proto-log prune on finish failed (non-fatal)", exc_info=True)
         return super()._battle_finished_callback(battle)

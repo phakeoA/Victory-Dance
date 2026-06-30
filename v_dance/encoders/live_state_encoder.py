@@ -1737,22 +1737,15 @@ def own_role_from_log(
 # ══════════════════════════════════════════════════════════════════════════════
 # Gap #6: real-time opponent reconstruction for the live splice
 # ══════════════════════════════════════════════════════════════════════════════
-def opp_snapshot_from_log_prefix(
-    log: str, own_role: str, turn: int
-) -> Optional[dict]:
-    """Reconstruct the OPPONENT side as of the START of ``turn`` from the public
-    protocol log, using the SAME ``vod_parser`` the training data uses.
+def _parse_log_prefix(log: str, own_role: str, turn: int):
+    """Parse the public protocol PREFIX up to and including ``|turn|{turn}`` with the SAME
+    ``vod_parser`` the training data uses, and return the parsed ``ShowdownReplayParser`` (or ``None``
+    when the prefix has no such ``|turn|`` marker yet).
 
-    REAL-TIME / production-honest: the log is truncated to the prefix up to and
-    including ``|turn|{turn}`` BEFORE parsing, so the illusion resolver only sees
-    information a live bot would have at that moment (no future |replace| can
-    leak backwards into the snapshot).  Returns the perspective snapshot for
-    ``own_role`` (whose ``opp_active`` / ``opp_bench`` describe the opponent), or
-    None if the prefix has no such turn yet.
-
-    Pass the result to ``LiveStateEncoder.encode(battle, opp_snapshot=...)`` to
-    make the live opponent view immune to poke-env's duplicate-species illusion
-    merge (gap #6 sub-cause 2).
+    REAL-TIME / production-honest: truncating to the prefix BEFORE parsing means the illusion resolver
+    only sees information a live bot would have at that moment (no future ``|replace|`` leaks back).
+    Shared by ``opp_snapshot_from_log_prefix`` / ``prev_turn_from_log_prefix`` /
+    ``reconstruct_for_decision`` so a single live decision can parse the prefix ONCE.
     """
     from v_dance.parser.vod_parser.replay_parser import ShowdownReplayParser
 
@@ -1766,15 +1759,57 @@ def opp_snapshot_from_log_prefix(
             break
     if not seen:
         return None
-
     parser = ShowdownReplayParser("\n".join(prefix), our_player=own_role)
     parser.parse()
-    # _state_before is the start-of-current-turn snapshot captured when the
-    # |turn| line was handled; the prefix ends exactly there.
-    state_before = getattr(parser, "_state_before", None)
-    if not state_before:
-        return None
-    return state_before.get(own_role)
+    return parser
+
+
+def _opp_snapshot_of(parser, own_role: str) -> Optional[dict]:
+    # _state_before is the start-of-current-turn snapshot captured when the |turn| line was handled;
+    # the prefix ends exactly there.
+    state_before = getattr(parser, "_state_before", None) if parser is not None else None
+    return state_before.get(own_role) if state_before else None
+
+
+def opp_snapshot_from_log_prefix(
+    log: str, own_role: str, turn: int
+) -> Optional[dict]:
+    """Reconstruct the OPPONENT side as of the START of ``turn`` from the public
+    protocol log, using the SAME ``vod_parser`` the training data uses.
+
+    Returns the perspective snapshot for ``own_role`` (whose ``opp_active`` /
+    ``opp_bench`` describe the opponent), or None if the prefix has no such turn yet.
+
+    Pass the result to ``LiveStateEncoder.encode(battle, opp_snapshot=...)`` to
+    make the live opponent view immune to poke-env's duplicate-species illusion
+    merge (gap #6 sub-cause 2).
+    """
+    return _opp_snapshot_of(_parse_log_prefix(log, own_role, turn), own_role)
+
+
+def prev_turn_from_log_prefix(
+    log: str, own_role: str, turn: int
+) -> Optional[dict]:
+    """The PREVIOUS turn's RESOLVED events (turn ``turn-1``) from the public protocol prefix up to and
+    including ``|turn|{turn}``, for the per-turn within-game belief feed (A3): the LAST COMPLETED turn
+    dict (``parser.turns[-1]`` = turn ``turn-1``), carrying the raw ``damage_events`` (incl. ``crit``)
+    + the ``state_before_actions`` snapshots. ``None`` when there is no prior turn (``turn`` is 1)."""
+    parser = _parse_log_prefix(log, own_role, turn)
+    turns = getattr(parser, "turns", None) if parser is not None else None
+    return turns[-1] if turns else None
+
+
+def reconstruct_for_decision(
+    log: str, own_role: str, turn: int
+) -> tuple[Optional[dict], Optional[dict]]:
+    """``(opp_snapshot start-of-turn, prev_turn T-1)`` from a SINGLE parse of the public log prefix —
+    so a live decision shares one parse between the gap-#6 opponent splice and the A3 belief feed
+    (instead of parsing the prefix twice). ``(None, None)`` when the prefix lacks the ``|turn|`` marker."""
+    parser = _parse_log_prefix(log, own_role, turn)
+    if parser is None:
+        return None, None
+    turns = getattr(parser, "turns", None)
+    return _opp_snapshot_of(parser, own_role), (turns[-1] if turns else None)
 
 
 def opp_snapshot_current(log: str, own_role: str) -> Optional[dict]:
