@@ -1021,7 +1021,7 @@ class LiveStateEncoder:
         # below was False, dropping the believed Life Orb / Choice / Expert Belt / type-boost / Loaded Dice /
         # Wide Lens / Scope Lens bands that TRAINING applied. (No-op for own mons + opp-spliced mons; corrects
         # the rare degraded-splice opponent path.)
-        _it = _item_active(self._live_item(mon, is_own)[0], magic_room,   # v11 P5: Magic Room
+        _it = _item_active(self._live_item(mon, is_own)[0], magic_room and is_active,   # v11 P5: Magic Room (active-only; audit 2026-06-30)
                            klutz=abil_id == "klutz",                 # v11 Klutz: suppress held item
                            embargo="embargo" in _eff_ids)            # v11 Embargo volatile
         att_ctx = {"atk": _est.get("atk"), "spa": _est.get("spa"),
@@ -1358,7 +1358,9 @@ class LiveStateEncoder:
                 _rb = d.get("resist_berry")
                 if _rb == _mt and (_mt == "NORMAL" or _tmult > 1.0):
                     _sit *= 0.5
-                _sit *= _crit                                   # v11 N4: expected-crit EV (band crit-blind otherwise)
+                # v11 N4: expected-crit EV (band crit-blind otherwise). Battle/Shell Armor null ALL crits →
+                # expected mult 1.0 (parity twin of offline; Mold Breaker bypass not modelled). audit 2026-06-30.
+                _sit *= 1.0 if d.get("ability") in ("battlearmor", "shellarmor") else _crit
                 _bp = _DMG.variable_base_power(                     # v11 B.2 variable base power
                     _mid, _raw_bp,
                     attacker_weight=_ac.get("weight"), target_weight=d.get("weight"),
@@ -1428,7 +1430,7 @@ class LiveStateEncoder:
         # v19 (Option 1c): per-ENEMY REDUNDANT-STATUS bits (2) — parity twin of the offline _write_move_json.
         for e in range(2):
             d = enemy_defenders[e] if (enemy_defenders and e < len(enemy_defenders)) else None
-            vec[i] = move_redundant_status(_mid, d)
+            vec[i] = move_redundant_status(_mid, d, field_mods[1] if field_mods else None)
             i += 1
 
         # v9: move effect-tags + identity index, BEFORE the trailing is_known

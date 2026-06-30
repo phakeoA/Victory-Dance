@@ -244,10 +244,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     _prep = Path("data") / "vods" / "Prepared_training_data" / "Regulation_MA"
     default_data = [str(_prep / f"Jsonl_Type{t}") for t in ("A", "B", "C", "D")]
     ap.add_argument("--data", nargs="+", default=default_data)
-    # T4.1: default to the PRODUCTION battle-net checkpoint (was _HERE/"checkpoints"/"bc_best.pt" =
-    # v_dance/training/checkpoints, which does not exist). Matches model_io.DEFAULT_BC_CHECKPOINT.
-    ap.add_argument("--ckpt", default=str(
-        _HERE.parents[1] / "ai_train_scripts" / "BC_model" / "checkpoints_attn" / "battle_selfplay_gen141.pt"))
+    # T4.1: default to the PRODUCTION battle-net checkpoint. audit: the previous default pointed at
+    # checkpoints_attn/battle_selfplay_gen141.pt — the intentionally STALE v17 self-play champion
+    # (state_dim 4913 / layout v17) which model_io REJECTS on the current v19 encoder (STATE_DIM 5057),
+    # so `python -m v_dance.training.eval_buckets` aborted with no args. Use the live v19 anchor directly
+    # (model_io.DEFAULT_BC_CHECKPOINT) so the two never drift again.
+    from v_dance.play.model_io import DEFAULT_BC_CHECKPOINT
+    ap.add_argument("--ckpt", default=str(DEFAULT_BC_CHECKPOINT))
     ap.add_argument("--val-frac", type=float, default=0.1,
                     help="MUST match the training run to reproduce its val split")
     ap.add_argument("--seed", type=int, default=0)

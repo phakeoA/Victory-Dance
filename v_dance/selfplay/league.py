@@ -33,8 +33,10 @@ class LeagueSnapshot:
     path: str
     generation: int
     elo: float = 1000.0
-    wins_vs_latest: int = 0     # the LATEST policy's wins against this snapshot (PFSP signal)
-    games_vs_latest: int = 0
+    # PFSP tallies are EMA-decayed floats (#24): record_result ages old outcomes so the win-rate
+    # tracks the CURRENT in-memory latest across a long champion HOLD (see record_result / LeagueConfig.pfsp_decay).
+    wins_vs_latest: float = 0.0   # the LATEST policy's (EMA) wins against this snapshot (PFSP signal)
+    games_vs_latest: float = 0.0
     is_champion: bool = False   # was this gen an accepted CHAMPION? (never evicted — anti-cycle memory)
 
     def latest_winrate(self) -> float:
@@ -44,16 +46,16 @@ class LeagueSnapshot:
     def to_obj(self) -> dict:
         return {"snapshot_id": self.snapshot_id, "path": self.path,
                 "generation": int(self.generation), "elo": float(self.elo),
-                "wins_vs_latest": int(self.wins_vs_latest),
-                "games_vs_latest": int(self.games_vs_latest),
+                "wins_vs_latest": float(self.wins_vs_latest),     # #24: EMA float, not int
+                "games_vs_latest": float(self.games_vs_latest),
                 "is_champion": bool(self.is_champion)}
 
     @classmethod
     def from_obj(cls, d: dict) -> "LeagueSnapshot":
         return cls(snapshot_id=d["snapshot_id"], path=d["path"],
                    generation=int(d.get("generation", 0)), elo=float(d.get("elo", 1000.0)),
-                   wins_vs_latest=int(d.get("wins_vs_latest", 0)),
-                   games_vs_latest=int(d.get("games_vs_latest", 0)),
+                   wins_vs_latest=float(d.get("wins_vs_latest", 0.0)),   # #24: tolerate old int snapshots
+                   games_vs_latest=float(d.get("games_vs_latest", 0.0)),
                    is_champion=bool(d.get("is_champion", False)))
 
 
@@ -66,6 +68,11 @@ class LeagueConfig:
     scripted_decay_per_snapshot: float = 0.02
     pfsp_power: float = 2.0            # (1 - latest_winrate)^power: favour hard counters
     pfsp_floor: float = 0.05          # min weight so even an always-beaten snapshot recurs
+    pfsp_decay: float = 0.95          # #24: EMA decay for record_result (≈20-game memory). The
+                                      # in-memory latest is PPO-updated EVERY gen (incl. HOLD gens
+                                      # where reset_pfsp is NOT called), so a plain running tally
+                                      # would lag a SEQUENCE of policies; the decay ages old outcomes
+                                      # so latest_winrate tracks the CURRENT latest. 1.0 = no decay.
 
 
 @dataclass
@@ -163,7 +170,7 @@ class OpponentLeague:
             self.admit(demote_old_as, self.latest_path, generation, elo)
         self.latest_path = new_path
         for s in self.snapshots:           # new latest hasn't faced the pool yet
-            s.wins_vs_latest = s.games_vs_latest = 0
+            s.wins_vs_latest = s.games_vs_latest = 0.0
 
     def reset_pfsp(self) -> None:
         """Zero every snapshot's latest-vs-snapshot tally.  MUST be called whenever the
@@ -174,22 +181,27 @@ class OpponentLeague:
         to' guarantee.  (promote_latest already resets; this is for the live loop, which
         sets latest_path directly.)"""
         for s in self.snapshots:
-            s.wins_vs_latest = s.games_vs_latest = 0
+            s.wins_vs_latest = s.games_vs_latest = 0.0
 
     def record_result(self, snapshot_id: str, latest_won: bool) -> None:
-        """Record one latest-vs-snapshot outcome for PFSP weighting.
+        """Record one latest-vs-snapshot outcome for PFSP weighting, with EMA DECAY (#24).
 
-        ⚠ #24 (KNOWN GAP, fix at RL launch): the in-memory 'latest' is PPO-updated EVERY generation —
-        including HOLD gens, where ``reset_pfsp`` is NOT called — so over a long frozen-champion hold these
-        tallies blend outcomes from a SEQUENCE of progressively-different policies, and ``pfsp_weights()``
-        then targets an ANCESTOR mixture's hard counters, not the current latest (a diluted/lagged signal).
-        The fix is an EMA decay here (``games = decay*games + 1``; ``wins = decay*wins + won``, decay≈0.95)
-        applied ALSO in the MP fold (mp_collect's PFSP merge). Deferred — it's a measured RL-tuning change
-        that needs the league tests updated and is dormant until self-play runs."""
+        The in-memory 'latest' is PPO-updated EVERY generation — including HOLD gens, where
+        ``reset_pfsp`` is NOT called — so over a long frozen-champion hold a plain running tally would
+        blend outcomes from a SEQUENCE of progressively-different policies, and ``pfsp_weights()`` would
+        then target an ANCESTOR mixture's hard counters, not the current latest (a diluted/lagged signal).
+        The EMA (``cfg.pfsp_decay``, ≈0.95 → ~20-game memory) AGES OUT old outcomes so the win-rate tracks
+        the CURRENT in-memory policy: ``games = decay*games + 1``, ``wins = decay*wins + won``. With
+        ``pfsp_decay = 1.0`` this recovers the exact old running-count behaviour.
+
+        BOTH collection paths fold through here — the asyncio ``collect_with_league`` and the
+        multiprocess ``mp_collect.collect_with_pool`` (whose PFSP merge calls this) — so the decay
+        applies to both with no separate code in the MP fold."""
+        decay = self.cfg.pfsp_decay
         for s in self.snapshots:
             if s.snapshot_id == snapshot_id:
-                s.games_vs_latest += 1
-                s.wins_vs_latest += 1 if latest_won else 0
+                s.games_vs_latest = decay * s.games_vs_latest + 1.0
+                s.wins_vs_latest = decay * s.wins_vs_latest + (1.0 if latest_won else 0.0)
                 return
 
     # ── persistence (3c.4 resume snapshot) ────────────────────────────────────
@@ -201,7 +213,8 @@ class OpponentLeague:
                         "scripted_frac_max": c.scripted_frac_max,
                         "scripted_frac_min": c.scripted_frac_min,
                         "scripted_decay_per_snapshot": c.scripted_decay_per_snapshot,
-                        "pfsp_power": c.pfsp_power, "pfsp_floor": c.pfsp_floor}}
+                        "pfsp_power": c.pfsp_power, "pfsp_floor": c.pfsp_floor,
+                        "pfsp_decay": c.pfsp_decay}}
 
     @classmethod
     def from_obj(cls, d: dict) -> "OpponentLeague":

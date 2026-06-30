@@ -161,7 +161,8 @@ def compute_gimmick_class_weights(examples, gimmick_dim: int, cap: float = 10.0)
     return w, counts
 
 
-def compute_class_weights(examples, action_dim: int, cap: float = 10.0):
+def compute_class_weights(examples, action_dim: int, cap: float = 10.0,
+                          augment_move_order: bool = False):
     """Balanced (sklearn-style) action weights over the train targets (both
     heads): ``w_c = total / (n_present_classes * count_c)``.  This keeps the
     frequency-weighted average weight ≈ 1 (so the overall loss scale is sane —
@@ -169,17 +170,35 @@ def compute_class_weights(examples, action_dim: int, cap: float = 10.0):
     and clamped to ``cap`` so a handful of samples can't dominate the gradient.
     Absent classes get a neutral weight of 1.
 
+    ``augment_move_order`` (audit fix): when the train loader permutes move-ORDER
+    each fetch (``BCDataset(augment_move_order=True)``, the default), it remaps the
+    4 MOVE SLOTS to a random permutation while the per-slot BUCKET (index % 3) is
+    invariant. So within each bucket the 4 move classes {b, 3+b, 6+b, 9+b} attain
+    EQUAL frequency in the data the model actually sees. Counting on the RAW
+    (un-permuted) targets would then MIS-calibrate the inverse-frequency weights for
+    all 12 move classes. So when augmentation is on we POOL each bucket's 4 move-slot
+    counts to their mean before balancing (switch classes ≥12 are permutation-invariant
+    → left untouched). The RETURNED counts are the raw counts (for the majority-action
+    readout).
+
     Returns (weights np.float32 [action_dim], counts np.float64 [action_dim])."""
     counts = np.zeros(action_dim, dtype=np.float64)
     for ex in examples:
         for ai in ex["targets"].values():
             counts[ai] += 1
+    counts_for_weight = counts
+    if augment_move_order:                      # pool the 4 move slots within each of the 3 buckets
+        counts_for_weight = counts.copy()
+        for b in range(3):
+            idx = [b, 3 + b, 6 + b, 9 + b]
+            if max(idx) < action_dim:
+                counts_for_weight[idx] = counts_for_weight[idx].mean()
     w = np.ones(action_dim, dtype=np.float32)
-    present = counts > 0
+    present = counts_for_weight > 0
     if present.any():
-        total = counts[present].sum()
+        total = counts_for_weight[present].sum()
         n_present = int(present.sum())
-        bal = total / (n_present * counts[present])
+        bal = total / (n_present * counts_for_weight[present])
         w[present] = np.clip(bal, 0.0, cap).astype(np.float32)
     return w, counts
 
@@ -435,6 +454,11 @@ def train(args: argparse.Namespace) -> dict:
               f"weight {args.aux_opp_weight})")
 
     # ── Model / optimizer (#27 attn-only: the per-mon set-attention AttnBCPolicy) ──
+    if args.opp_cond and not args.aux_opp_head:
+        sys.exit("[train_bc] --opp-cond (Level B) requires --aux-opp-head (the opp_a/opp_b heads it "
+                 "conditions on). Re-run with both, or drop --opp-cond.")
+    if args.opp_cond:
+        print("[train_bc] Level-B opp-conditioning: ON (the OUR heads read the detached predicted opp action)")
     model = build_attn_model(
         d_model=args.d_model,
         n_heads=args.n_heads,
@@ -444,6 +468,7 @@ def train(args: argparse.Namespace) -> dict:
         heads=train_heads,
         gimmick_heads=list(HEADS),
         value_readout=args.value_readout,
+        opp_cond=args.opp_cond,
         device=device,
     )
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -452,7 +477,8 @@ def train(args: argparse.Namespace) -> dict:
     class_weight = None
     if args.class_weight == "balanced":
         w_np, counts = compute_class_weights(train_ex, ACTIONS_PER_SLOT,
-                                             cap=args.class_weight_cap)
+                                             cap=args.class_weight_cap,
+                                             augment_move_order=args.augment_move_order)
         class_weight = torch.tensor(w_np, device=device)
         print(f"[train_bc] class weights (balanced, cap {args.class_weight_cap}): "
               f"min {w_np.min():.2f} max {w_np.max():.2f} "
@@ -466,12 +492,15 @@ def train(args: argparse.Namespace) -> dict:
     gimmick_class_weight = torch.tensor(gw_np, device=device)
     print(f"[train_bc] gimmick class weights (balanced, cap {args.class_weight_cap}): "
           f"{[round(float(v), 2) for v in gw_np]} "
-          f"(counts none={int(gcounts[0])} mega={int(gcounts[1])})")
+          f"(counts none={int(gcounts[0])} mega={int(gcounts[1])} tera={int(gcounts[2])})")
 
     # Value head trains only when the data carries game-outcome labels (`won`);
     # the serve player must not trust an untrained value head (the flag gates it).
     n_value = sum(1 for e in train_ex if e.get("won") is not None)
-    value_trained = n_value > 0
+    # audit: gate the stamped flag on the LOSS WEIGHT too — a 0 weight means the head got zero gradient
+    # and stays at xavier init, yet the data may still carry labels. Marking it value_trained=True would
+    # let ActorCritic.from_bc_checkpoint's require_value_trained guard warm-start the RL critic from noise.
+    value_trained = (n_value > 0) and (args.value_loss_weight > 0)
     print(f"[train_bc] value head: {n_value}/{len(train_ex)} train examples have an "
           f"outcome label (value_trained={value_trained}, weight {args.value_loss_weight})")
 
@@ -494,15 +523,16 @@ def train(args: argparse.Namespace) -> dict:
         "gimmick_loss_weight": args.gimmick_loss_weight,
         "class_weight_cap": args.class_weight_cap,
         "value_trained": bool(value_trained),
-        # True only when the train data actually carried gimmick labels — a
-        # gimmick head trained on pre-gimmick JSONL is at init and must NOT drive
+        # True only when the train data actually carried gimmick labels AND the head was actually
+        # trained (weight > 0) — a gimmick head at init (no labels OR zero loss weight) must NOT drive
         # live mega decisions (the serve player honours this flag).
-        "gimmick_trained": bool(gcounts.sum() > 0),
+        "gimmick_trained": bool(gcounts.sum() > 0) and (args.gimmick_loss_weight > 0),
         "dropout": args.dropout,
         "heads": list(model.head_names),               # our (+ opp aux when on)
         "gimmick_heads": list(model.gimmick_head_names),
         "aux_opp_head": bool(args.aux_opp_head),
         "aux_opp_weight": args.aux_opp_weight,
+        "opp_cond": bool(args.opp_cond),               # Level B: our heads read the predicted opp action
         "augment_move_order": bool(args.augment_move_order),
         "lr": args.lr,
         "weight_decay": args.weight_decay,
@@ -622,6 +652,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                          "aux signal (task #9). Default OFF (the A/B baseline).")
     ap.add_argument("--aux-opp-weight", type=float, default=0.3,
                     help="weight on the auxiliary opponent CE term (default 0.3).")
+    ap.add_argument("--opp-cond", action=argparse.BooleanOptionalAction, default=False,
+                    help="Level B: feed the DETACHED predicted opp-action distribution into the OUR "
+                         "action heads (best-response to anticipated opp). Requires --aux-opp-head. "
+                         "Default OFF (the Level-A baseline).")
     # ── Demonstrator skill filtering / weighting (TIER-1 #1) ──────────────────
     ap.add_argument("--rating-min", type=float, default=None,
                     help="drop TRAIN examples whose our-side ladder rating_before "

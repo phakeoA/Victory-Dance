@@ -24,12 +24,13 @@ def _numeric_stats(d: dict) -> dict:
     """Keep only the plottable scalars from a PPO ``update_stats`` dict (loss,
     kl_to_bc, clip_fraction, explained_variance, entropy, value, policy, …);
     booleans like ``halted`` collapse to 0.0/1.0 so the dashboard can chart them."""
+    import math
     out = {}
     for k, v in (d or {}).items():
         if isinstance(v, bool):
             out[k] = 1.0 if v else 0.0
-        elif isinstance(v, (int, float)):
-            out[k] = float(v)
+        elif isinstance(v, (int, float)) and math.isfinite(v):   # audit: drop NaN/inf — bare `NaN` in
+            out[k] = float(v)                                    # manifest.json breaks the browser JSON.parse
     return out
 
 

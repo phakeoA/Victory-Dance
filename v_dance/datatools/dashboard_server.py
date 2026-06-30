@@ -130,10 +130,16 @@ def _spawn_run(cfg_path: Path, log_path: Path):
     # PYTHONUNBUFFERED: stdout to a FILE is block-buffered by default, so a run's output would only
     # reach the log in ~4-8 KB chunks and the Console tab would lag far behind. Force unbuffered so the
     # live tail streams promptly, "like a terminal". (Overhead is negligible — the loop prints rarely.)
-    return subprocess.Popen(
-        [sys.executable, "-m", _GEN_MODULE, "--config", str(cfg_path)],
-        cwd=str(_REPO), stdout=logf, stderr=subprocess.STDOUT,
-        env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}, **kwargs)
+    try:
+        return subprocess.Popen(
+            [sys.executable, "-m", _GEN_MODULE, "--config", str(cfg_path)],
+            cwd=str(_REPO), stdout=logf, stderr=subprocess.STDOUT,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}, **kwargs)
+    finally:
+        # audit (leak): the child has its own dup'd handle now — the PARENT (dashboard) must release its
+        # copy, else every launch/stop cycle leaks a write handle to launch_*.log (and on a Popen failure
+        # the handle would leak with no run started). finally covers both the success and the raise path.
+        logf.close()
 
 
 def _pid_alive(pid) -> bool:
@@ -163,7 +169,10 @@ def _kill_pid_tree(pid) -> None:
         subprocess.run(["taskkill", "/F", "/T", "/PID", str(int(pid))], capture_output=True)
     else:
         import signal
-        os.kill(int(pid), signal.SIGTERM)
+        try:                                          # the run is a process-GROUP leader (start_new_session=
+            os.killpg(os.getpgid(int(pid)), signal.SIGTERM)   # True), so kill the GROUP (its mp workers +
+        except (ProcessLookupError, PermissionError, OSError):  # Node server) — matches the Windows /T tree-kill
+            os.kill(int(pid), signal.SIGTERM)         # fallback: at least the parent
 
 
 # A run that crashed / was killed leaves status.json ``live:true`` forever, which would deadlock
@@ -323,45 +332,54 @@ def create_app(dash_dir=_DASH_DIR, archive_dir=_ARCHIVE_DIR) -> Flask:
         resp.headers["Cache-Control"] = "no-store, max-age=0"
         return resp
 
+    # audit (TOCTOU): threaded Flask (app.run(threaded=True)) serves /launch concurrently, and the handler
+    # does an unsynchronized check-then-spawn (status.json live flag isn't written until seconds into the
+    # child's startup). Serialize the whole check→spawn→set (and /stop) so two near-simultaneous /launch
+    # requests can't both pass the guards and start two runs writing into the same archive.
+    import threading as _threading
+    _launch_lock = _threading.Lock()
+
     @app.route("/launch", methods=["POST"])
     def launch():
         cfg = request.get_json(silent=True)
         if not isinstance(cfg, dict):
             return jsonify({"ok": False, "error": "body must be a JSON object (the run config)"}), 400
-        if _run_is_live(archive_dir):
-            return jsonify({"ok": False,
-                            "error": "a run is already in progress (status.json live)"}), 409
-        prev = app.config.get("_LAUNCHED")
-        if prev is not None and prev.poll() is None:
-            return jsonify({"ok": False,
-                            "error": "a launched run is still active — stop it first"}), 409
-        import json as _json
-        import time as _time
-        stamp = _time.strftime("%Y%m%d_%H%M%S")
-        cfg_dir = archive_dir / "launch_configs"
-        cfg_dir.mkdir(parents=True, exist_ok=True)
-        cfg_path = cfg_dir / f"config_{stamp}.json"
-        cfg_path.write_text(_json.dumps(cfg, indent=2), encoding="utf-8")
-        log_dir = archive_dir / "logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_path = log_dir / f"launch_{stamp}.log"
-        try:
-            proc = _spawn_run(cfg_path, log_path)
-        except Exception as exc:
-            return jsonify({"ok": False, "error": f"spawn failed: {exc}"}), 500
-        app.config["_LAUNCHED"] = proc
-        app.config["_LAUNCH_LOG"] = str(log_path)
-        # Persist the PID so a RESTARTED dashboard (its own terminal closed) can still stop the
-        # detached run + read its state — the run outlives the launcher now.
-        try:
-            (archive_dir / "launched.pid").write_text(str(proc.pid), encoding="utf-8")
-        except Exception:
-            pass
-        return jsonify({"ok": True, "pid": proc.pid,
-                        "config": str(cfg_path), "log": str(log_path)})
+        with _launch_lock:
+            if _run_is_live(archive_dir):
+                return jsonify({"ok": False,
+                                "error": "a run is already in progress (status.json live)"}), 409
+            prev = app.config.get("_LAUNCHED")
+            if prev is not None and prev.poll() is None:
+                return jsonify({"ok": False,
+                                "error": "a launched run is still active — stop it first"}), 409
+            import json as _json
+            import time as _time
+            stamp = _time.strftime("%Y%m%d_%H%M%S")
+            cfg_dir = archive_dir / "launch_configs"
+            cfg_dir.mkdir(parents=True, exist_ok=True)
+            cfg_path = cfg_dir / f"config_{stamp}.json"
+            cfg_path.write_text(_json.dumps(cfg, indent=2), encoding="utf-8")
+            log_dir = archive_dir / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_path = log_dir / f"launch_{stamp}.log"
+            try:
+                proc = _spawn_run(cfg_path, log_path)
+            except Exception as exc:
+                return jsonify({"ok": False, "error": f"spawn failed: {exc}"}), 500
+            app.config["_LAUNCHED"] = proc
+            app.config["_LAUNCH_LOG"] = str(log_path)
+            # Persist the PID so a RESTARTED dashboard (its own terminal closed) can still stop the
+            # detached run + read its state — the run outlives the launcher now.
+            try:
+                (archive_dir / "launched.pid").write_text(str(proc.pid), encoding="utf-8")
+            except Exception:
+                pass
+            return jsonify({"ok": True, "pid": proc.pid,
+                            "config": str(cfg_path), "log": str(log_path)})
 
     @app.route("/stop", methods=["POST"])
     def stop():
+      with _launch_lock:
         proc = app.config.get("_LAUNCHED")
         if proc is not None and proc.poll() is None:
             try:

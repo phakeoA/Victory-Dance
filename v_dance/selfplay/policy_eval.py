@@ -241,11 +241,15 @@ def evaluate_actions(
     if not transitions:
         z = torch.zeros(0, device=device)
         return z, z, z
-    action_logits, gimmick_logits, value_logit = ac(_states_tensor(transitions, device))
+    states = _states_tensor(transitions, device)
+    action_logits, gimmick_logits, value_logit = ac(states)
     A = next(iter(action_logits.values())).shape[-1]
     G = next(iter(gimmick_logits.values())).shape[-1] if gimmick_logits else 0
     sb = _slot_batches(transitions, ac.head_names, ac.gimmick_head_names, A, G, device)
     lp, ent = _joint_logprob_entropy(action_logits, gimmick_logits, sb, tau)
+    # C51: collection records the distribution MEAN as value_pm (still in [-1,1]); scalar keeps win-prob.
+    if getattr(ac, "critic", None) is not None and ac.critic.is_c51:
+        return lp, ent, ac.critic.value_pm(states)
     return lp, ent, 2.0 * torch.sigmoid(value_logit) - 1.0
 
 
@@ -257,6 +261,7 @@ class PPOEval:
     value_pm: torch.Tensor     # (B,) critic value in [-1,1]
     kl_to_ref: Optional[torch.Tensor]  # (B,) KL(BC||new), or None if no reference given
     opp_ce: Optional[torch.Tensor] = None  # 0-dim aux opp-prediction CE, or None (no opp head / no target)
+    atoms_logits: Optional[torch.Tensor] = None  # (B, n_atoms) C51 per-atom value logits, or None (scalar critic)
 
 
 def ppo_forward(
@@ -276,14 +281,21 @@ def ppo_forward(
     G = next(iter(gimmick_logits.values())).shape[-1] if gimmick_logits else 0
     sb = _slot_batches(transitions, ac.head_names, ac.gimmick_head_names, A, G, device)
     lp, ent = _joint_logprob_entropy(action_logits, gimmick_logits, sb, tau)
-    value_pm = 2.0 * torch.sigmoid(value_logit) - 1.0
+    # C51: the value baseline is the distribution MEAN and the loss needs the raw per-atom logits;
+    # the scalar critic keeps the win-prob path. value_pm stays in [-1,1] either way.
+    atoms_logits = None
+    if getattr(ac, "critic", None) is not None and ac.critic.is_c51:
+        atoms_logits = ac.critic.value_atoms_logits(states)
+        value_pm = (atoms_logits.softmax(dim=-1) * ac.critic.support).sum(dim=-1)
+    else:
+        value_pm = 2.0 * torch.sigmoid(value_logit) - 1.0
 
     kl = None
     if ref_policy is not None:
         ref_a, ref_g, _ = ref_policy(states)        # frozen BC reference logits
         kl = _joint_kl(action_logits, gimmick_logits, ref_a, ref_g, sb, tau, gimmick_kl_weight)
     opp_ce, _ = opp_aux_ce(action_logits, transitions, ac.head_names, device)
-    return PPOEval(lp, ent, value_pm, kl, opp_ce=opp_ce)
+    return PPOEval(lp, ent, value_pm, kl, opp_ce=opp_ce, atoms_logits=atoms_logits)
 
 
 # ── data-integrity guard (mirrors corpus_qa's "illegal under mask") ───────────

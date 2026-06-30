@@ -312,9 +312,13 @@ def phase0_report(pairs: List[tuple], source_counts: dict, *, min_games: int = 2
 
     sc = {k: v for k, v in source_counts.items() if not str(k).startswith("tp_")}
     resamples = sc.get("rejected_resample", 0)
-    # turns where a NON-model order executed (default / forced-switch escape / a random
-    # retry perturbation). model-driven = executed model steps / (those + non-model).
-    non_model = sc.get("retry_default", 0) + sc.get("forced_switch_escape", 0) + sc.get("retry", 0)
+    # audit: count EVERY executed NON-model source (forced_default / forced_partial / forced_switch /
+    # forfeit / retry / retry_default / forced_switch_escape …) — a BLOCKLIST, not a 3-key whitelist that
+    # silently drops a forced source it forgot to list (which biased MODEL-DRIVEN% HIGH and could green-
+    # light a desync-corrupted run). Reuse reward.py's canonical sets so the two measures can't drift.
+    from v_dance.selfplay.reward import _MODEL_DRIVEN_SOURCES, _NON_DECISION_COUNTERS
+    _excluded = set(_MODEL_DRIVEN_SOURCES) | set(_NON_DECISION_COUNTERS)   # model + bookkeeping (tp_* already stripped)
+    non_model = sum(int(v or 0) for k, v in sc.items() if k not in _excluded)
     md = (n_steps / (n_steps + non_model)) if (n_steps + non_model) else 0.0
     resample_rate = (resamples / (n_steps + resamples)) if (n_steps + resamples) else 0.0
 
@@ -324,6 +328,14 @@ def phase0_report(pairs: List[tuple], source_counts: dict, *, min_games: int = 2
         clean, clean_err = True, None
     except AssertionError as e:
         clean, clean_err = False, str(e)
+
+    # audit: the documented #1 silent PPO bug is win-prob [0,1] stored as value_pm [-1,1] — a range assert
+    # cannot catch it (a [0,1] batch is a subset of [-1,1]). looks_like_winprob over the POOLED both-
+    # perspective values (which MUST contain negative/losing states) is the real catch; wire it into the gate.
+    from v_dance.selfplay.value_space import looks_like_winprob
+    all_vals = [t.value for pair in pairs for traj in pair for t in traj.transitions]
+    winprob_suspect = looks_like_winprob(all_vals)
+    value_space_ok = not winprob_suspect
 
     p1_wr = (p1_wins / p1_games) if p1_games else None
     enough = n >= min_games
@@ -339,8 +351,9 @@ def phase0_report(pairs: List[tuple], source_counts: dict, *, min_games: int = 2
         "symmetry_failures": sym_fail, "symmetry_ok": sym_ok,
         "p1_win_rate": p1_wr, "p1_games": p1_games, "balance_ok": bal_ok,
         "terminal_clean": clean, "terminal_error": clean_err,
+        "looks_like_winprob": winprob_suspect, "value_space_ok": value_space_ok,
     }
-    rep["PASS"] = bool(enough and md_ok and sym_ok and bal_ok and clean and data_clean)
+    rep["PASS"] = bool(enough and md_ok and sym_ok and bal_ok and clean and data_clean and value_space_ok)
     return rep
 
 
@@ -366,6 +379,8 @@ def print_phase0_report(rep: dict) -> None:
           f"(want ~50%)  [{mark(rep['balance_ok'])}]")
     print(f"  terminal space    : {'clean' if rep['terminal_clean'] else rep['terminal_error']}  "
           f"[{mark(rep['terminal_clean'])}]")
+    print(f"  value space       : {'value_pm OK' if rep.get('value_space_ok', True) else 'looks like WIN-PROB [0,1] — value_pm mismatch!'}  "
+          f"[{mark(rep.get('value_space_ok', True))}]")
     print("  ----------------------------------------------------------")
     print(f"  PHASE 0           : {'PASS - plumbing clean, ready for Phase 1' if rep['PASS'] else 'FAIL - investigate above'}")
     print("============================================================")

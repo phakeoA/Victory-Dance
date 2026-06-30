@@ -179,6 +179,23 @@ def _parse_challenge(payload: str):
     return None
 
 
+def _current_challengers(payload: str):
+    """The set of user-ids currently challenging us, per the latest ``updatechallenges`` frame in
+    ``payload`` (the AUTHORITATIVE list), or ``None`` if this payload carries no such frame. A
+    challenger absent from this set has CANCELLED/withdrawn — the consumer uses it to clear a stale
+    ``pending`` so the AI never tries to /accept a challenge that no longer exists."""
+    found = None
+    for line in payload.split("\n"):
+        parts = line.split("|")
+        if len(parts) >= 3 and parts[1] == "updatechallenges":
+            try:
+                cf = (json.loads(parts[2]) or {}).get("challengesFrom") or {}
+            except Exception:
+                cf = {}
+            found = {_toid(u) for u in cf.keys()}
+    return found
+
+
 def _result_line(payload: str):
     """The terminal ``|win|<name>`` / ``|tie|`` line of a battle frame, or None. PREFIX-matched per line
     (not a substring scan of the whole frame) so battle-chat text like ``|win|`` can't false-trigger."""
@@ -257,7 +274,13 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
                 busy, busy_since, active_tag = True, loop.time(), None
                 hb_next = busy_since + 15.0                           # first heartbeat 15s after accept
                 ai_name, src = await _pick_ai_team(page, ai_pool, ai_team_pin)
-                ai_team = load_team(resolve_team_path(ai_name))
+                # audit: resolve the AI team WITHIN the active reg. A bare name through resolve_team_path
+                # cross-reg rglobs and returns the alphabetically-first match (M-A sorts before M-B), so a
+                # same-named paste in two reg folders would load the wrong-reg (possibly illegal) team. Map
+                # the name back to its BATTLE_FORMAT-scoped path first; fall back to the bare name.
+                _scoped = next((p for p in discover_teams(reg=BATTLE_FORMAT)
+                                if Path(p).name == ai_name), ai_name)
+                ai_team = load_team(resolve_team_path(_scoped))
                 host.player.update_team(ai_team)                     # decision core uses this team
                 packed = host.player._team.yield_team()
                 await page.evaluate("(t) => app.socket.send('|/utm ' + t)", packed)
@@ -288,6 +311,14 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
                     seen_wrong_fmt.add(ch)                            # wrong-format challenge — it's why a
                     print(f"[ai] ignoring challenge from {ch[0]} in format {ch[1]!r} — "
                           f"challenge in {BATTLE_FORMAT} (the challenge box should default to it).")
+                # audit: clear a stale `pending` if its challenger has CANCELLED. A cancellation sends an
+                # authoritative updatechallenges frame with the challenger gone; without this, a busy AI
+                # would later /accept a withdrawn challenge and then sit latched-busy until the ~600s
+                # watchdog, skipping genuinely-new challenges in the meantime.
+                cur = _current_challengers(payload)
+                if cur is not None and pending is not None and _toid(pending) not in cur:
+                    print(f"[ai] challenge from {pending} was cancelled — clearing pending.")
+                    pending = None
             # 2) battle frame → host decides → ship its commands back into the tab
             elif payload.startswith(">battle"):
                 active_tag = payload.split("\n", 1)[0].lstrip(">")
@@ -305,7 +336,11 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
                             print(f"[ai] (battle command not shipped: {msg[:30]})")
                 finally:
                     # Battle ended → tally + free up + reclaim state, EVEN IF the feed/ship raised.
-                    if result is not None:
+                    # Guard on host._ended: Showdown re-sends a room's full log (incl. |win|) on
+                    # reconnect/rejoin, so a RE-DELIVERED terminal frame for an already-credited room must
+                    # NOT double-count the tally or fall back to the collision-prone win-name (feed_async
+                    # already drops the stray frame; mirror that here).
+                    if result is not None and active_tag and active_tag not in host._ended:
                         _credit(host, active_tag, result, tally)
                         host.end_battle(active_tag)
                         busy, active_tag = False, None

@@ -146,13 +146,21 @@ class PPOTrainer:
         for _ in range(n_updates):
             for mb in self._minibatches(len(txns)):
                 mb_txns = [txns[i] for i in mb]
-                value_pm = self.ac.value_pm(self._states(mb_txns))     # critic only
+                states = self._states(mb_txns)
                 old_v = torch.as_tensor(np.array([txns[i].value for i in mb], np.float32),
                                         device=self.device)
                 tgt = torch.as_tensor(ret[mb].astype(np.float32), device=self.device)
+                # C51: regress the distributional CE on the per-atom head; else the scalar value loss.
+                atoms_logits = None
+                if self.cfg.value_loss_mode == "c51":
+                    atoms_logits = self.ac.critic.value_atoms_logits(states)
+                    value_pm = (atoms_logits.softmax(dim=-1) * self.ac.critic.support).sum(dim=-1)
+                else:
+                    value_pm = self.ac.value_pm(states)                # critic only
                 # clip=False: the warm-up regresses on a FIXED cold-start anchor, so the
                 # value-clip would freeze V within ±value_clip of the BC value (3b.4 bug fix).
-                vloss = P.value_loss(value_pm, old_v, tgt, self.cfg, clip=False)
+                vloss = P.value_loss(value_pm, old_v, tgt, self.cfg, clip=False, atoms_logits=atoms_logits,
+                                     support=(self.ac.critic.support if atoms_logits is not None else None))
                 self.critic_opt.zero_grad()
                 vloss.backward()
                 clip_grad_norm_(self.ac.critic_parameters(), self.tcfg.max_grad_norm)
@@ -160,6 +168,29 @@ class PPOTrainer:
                 last_vloss = float(vloss.detach())
             self.warmups += 1
         return {"value_loss": last_vloss, "explained_variance": self._critic_ev(txns, ret)}
+
+    # ── #23: rebase collection-time values onto the post-warm-up critic ────────
+    def rebase_values(self, trajectories) -> int:
+        """Overwrite each transition's collection-time ``value`` with the critic's CURRENT V(s)
+        (``value_pm`` space). Call at gen 0 AFTER ``warmup_critic`` and BEFORE ``ppo_update``.
+
+        The warm-up migrates the critic OFF the BC value scale, so each step's stored
+        collection-time value (the pre-warm-up BC estimate) is one critic-migration STALE — and
+        that value is reused below as BOTH the value-clip trust-region anchor (``old_value_pm`` in
+        ``_value_loss``) AND the GAE baseline (``compute_batch_gae`` reads ``t.value``). A stale
+        clip anchor pins V within ±``value_clip`` of the dead BC estimate (throttling the very
+        gradient the warm-up exists to enable), and a stale baseline biases the gen-0 advantages.
+        Rebasing makes gen-0 behave like gen-N, where ``old_value`` IS the critic at the start of
+        the update (no intervening shift). Mutates the transitions in place (gen-0 trajectories are
+        discarded after the update). Returns the count rebased."""
+        txns = [t for tr in trajectories for t in tr.transitions]
+        if not txns:
+            return 0
+        with torch.no_grad():
+            v = self.ac.value_pm(self._states(txns)).cpu().numpy()
+        for t, vi in zip(txns, v):
+            t.value = float(vi)
+        return len(txns)
 
     # ── full PPO update ───────────────────────────────────────────────────────
     def ppo_update(self, trajectories) -> Dict[str, float]:
@@ -225,8 +256,15 @@ class PPOTrainer:
 
 
 def _mean_stats(stats_list: List[Dict[str, float]]) -> Dict[str, float]:
-    """Average each numeric stat across the minibatch steps."""
+    """Average each numeric stat across the minibatch steps. audit: drop NON-FINITE entries per key before
+    averaging (seed NaN only if EVERY entry was NaN) — e.g. `opp_ce` is NaN on a minibatch with zero valid
+    opp-action targets (all-PASS), and a single NaN would otherwise poison the whole generation's reported
+    metric. Training is unaffected (the loss term is excluded for those minibatches); this keeps the telemetry
+    a true mean over the minibatches that actually contributed."""
     if not stats_list:
         return {}
-    keys = stats_list[0].keys()
-    return {k: float(np.mean([s[k] for s in stats_list])) for k in keys}
+    out: Dict[str, float] = {}
+    for k in stats_list[0].keys():
+        finite = [s[k] for s in stats_list if isinstance(s.get(k), (int, float)) and np.isfinite(s[k])]
+        out[k] = float(np.mean(finite)) if finite else float("nan")
+    return out

@@ -89,6 +89,7 @@ def run_epoch(model, loader, device, optimizer=None) -> Dict[str, float]:
             bring = batch["bring"].to(device)
             lead = batch["lead"].to(device)
             valid = batch["valid_bring"].to(device)
+            valid_lead = batch["valid_lead"].to(device)
             # 15b-train.1: the teammate-bias prior (None unless the SBDA dataset precomputed it).
             our_aff = batch.get("our_affinity")
             if our_aff is not None:
@@ -96,8 +97,11 @@ def run_epoch(model, loader, device, optimizer=None) -> Dict[str, float]:
 
             bring_logits, lead_logits = model(our_idx, opp_idx, our_feat, opp_feat, our_aff)
 
-            # lead head: every example. bring head: only valid_bring rows.
-            lead_loss = F.binary_cross_entropy_with_logits(lead_logits, lead)
+            # lead head: only valid_lead rows (audit: a species-match-shifted lead is masked out, same as
+            # valid_bring masks the bring head). On a clean corpus (all valid) this == the old plain mean.
+            lead_bce = F.binary_cross_entropy_with_logits(
+                lead_logits, lead, reduction="none").mean(dim=1)     # (B,)
+            lead_loss = (lead_bce * valid_lead).sum() / valid_lead.sum().clamp_min(1.0)
             bring_bce = F.binary_cross_entropy_with_logits(
                 bring_logits, bring, reduction="none").mean(dim=1)   # (B,)
             denom = valid.sum().clamp_min(1.0)
@@ -113,7 +117,9 @@ def run_epoch(model, loader, device, optimizer=None) -> Dict[str, float]:
             n_batches += 1
 
             be, bo, bn = _topk_set_metrics(bring_logits, bring, BRING_K, valid > 0.5)
-            le, lo, ln = _topk_set_metrics(lead_logits, lead, LEAD_K)
+            # audit: mirror the loss's valid_lead mask in the METRIC too — else an invalid (species-shifted)
+            # lead row is a guaranteed exact-miss that dilutes lead_exact + the checkpoint-selection score.
+            le, lo, ln = _topk_set_metrics(lead_logits, lead, LEAD_K, valid_lead > 0.5)
             bring_exact += be; bring_overlap += bo; bring_n += bn
             lead_exact += le; lead_overlap += lo; lead_n += ln
 

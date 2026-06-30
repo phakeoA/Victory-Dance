@@ -29,6 +29,7 @@ sync ``feed`` from inside POKE_LOOP itself (it would deadlock) — use ``feed_as
 from __future__ import annotations
 
 import logging
+from collections import deque
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -84,6 +85,7 @@ class BattleHost:
         # sends any non-init battle message through _get_battle(), which BLOCKS FOREVER on a tag no longer
         # in _battles → the single-threaded feed (and the whole consumer loop) wedges. Skip such frames.
         self._ended: set = set()
+        self._ended_order: "deque[str]" = deque()      # eviction order so _ended stays bounded (audit leak)
         # Serialize feed_async on the player's loop so the per-frame ``_outgoing[before:]`` accounting is
         # sound even if a caller ever overlaps frames (the shipped consumer feeds one-at-a-time, but the
         # online roadmap may drain in parallel). Lazily created on the player's loop (see _get_lock).
@@ -156,7 +158,14 @@ class BattleHost:
         """Reclaim a finished battle's state so a long session doesn't accumulate every battle's protocol
         log + captured commands. The transport calls this when it sees the battle's ``|win|``/``|tie|``."""
         tag = (tag or "").lstrip(">")
-        self._ended.add(tag)                           # gate late stray frames for this tag (see feed_async)
+        # gate late stray frames for this tag (see feed_async), BOUNDED to the most-recent tags — only a
+        # freshly-ended battle can emit a late frame, so retaining every tag forever was an unbounded leak
+        # in this explicitly long-lived (human-vs-AI / online) host.
+        if tag not in self._ended:
+            self._ended.add(tag)
+            self._ended_order.append(tag)
+            while len(self._ended_order) > 512:
+                self._ended.discard(self._ended_order.popleft())
         self.player._battles.pop(tag, None)
         proto = getattr(self.player, "_proto_log", None)
         if isinstance(proto, dict):

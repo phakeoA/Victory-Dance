@@ -187,6 +187,8 @@ class VGCPlayer(VGCPlayerBase):
                 if wp is not None:
                     self._last_value = wp
                     self._value_trace.append((battle.turn, round(wp, 3)))
+                    if len(self._value_trace) > 1000:   # audit (leak): bound this write-only serve trace
+                        del self._value_trace[:-1000]   # (play_vs_human_browser runs one player indefinitely)
                     log.info("Turn %d [%s] value head win-prob: %.3f  (%s)",
                              battle.turn, battle.battle_tag, wp,
                              "winning" if wp >= 0.55 else "losing" if wp <= 0.45 else "even")

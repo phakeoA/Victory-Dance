@@ -31,8 +31,8 @@ _RESIDUAL_VOL = frozenset({"leechseed", "saltcure", "curse", "nightmare"})
 def volatile_flags(vol_ids) -> dict:
     """Map a set of normalised volatile ids -> the encoder's per-mon volatile booleans/scalars. SHARED by
     the offline (PokemonSlot.to_dict) and live (live_state_encoder) paths so the volatile block is byte-
-    parity by construction. ``ability_suppressed`` is handled by the caller (Gastro Acid / Neutralizing
-    Gas). ``perish_norm`` is a FLOAT in [0,1] (not a bool)."""
+    parity by construction. ``ability_suppressed`` is handled by the caller (Gastro Acid only; Neutralizing
+    Gas not yet tracked). ``perish_norm`` is a FLOAT in [0,1] (not a bool)."""
     ids = set(vol_ids)
     _perish = [n for n in (3, 2, 1, 0) if f"perish{n}" in ids]   # the countdown ACCUMULATES; lowest = now
     return {
@@ -173,6 +173,9 @@ class PokemonSlot:
     taunt: bool = False                    # |-start|MON|move: Taunt  (blocks status moves)
     disabled_move: Optional[str] = None    # the move named by |-start|MON|Disable|<Move>
     encore_move: Optional[str] = None      # move Encore locks into (derived from the last self-selected move)
+    # audit: the ACTUAL last self-selected move this stint (NOT de-duped, unlike stint_moves) — Encore locks
+    # into the move used ON the Encore turn, which differs from stint_moves[-1] when that move was a repeat.
+    last_self_move: Optional[str] = None
 
     def key(self) -> str:
         return f"{self.player}{self.slot}"

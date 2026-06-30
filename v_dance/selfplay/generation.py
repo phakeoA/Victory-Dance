@@ -80,7 +80,11 @@ _FS_MONITOR_KEYS = ("forced_default", "retry", "retry_default", "forced_switch_e
 # --dry-run; the set is stable — the complement is what makes the monitor robust to new edge labels).
 _MODEL_DRIVEN_SOURCES = ("model", "forced_switch_model")
 # Non-edge source keys excluded from the complement: model-driven decisions + bookkeeping counters.
-_NON_EDGE_SOURCE_KEYS = frozenset(_MODEL_DRIVEN_SOURCES) | {"games"}
+# audit: `rejected_resample` is BOOKKEEPING (incremented alongside a re-sampled MODEL pick whose executed
+# action is still model-driven, per reward._NON_DECISION_COUNTERS) — it is NOT an edge event, so a benign
+# Choice-lock/Encore resample burst must not inflate the fs-monitor 'edge event' tally. (abandon_forfeit IS
+# a real edge event with its own _FS_MONITOR_KEYS slot, so it is deliberately NOT excluded here.)
+_NON_EDGE_SOURCE_KEYS = frozenset(_MODEL_DRIVEN_SOURCES) | {"rejected_resample", "games"}
 
 
 def fs_monitor_counts(sources: dict) -> dict:
@@ -148,12 +152,12 @@ def run_generation(
         status.phase("updating", generation=gen)
     if gen == 0 and cfg.warmup_updates > 0 and trajectories:
         trainer.warmup_critic(trajectories, cfg.warmup_updates)
-        # ⚠ #23 (KNOWN GAP, fix at RL launch): the gen-0 ppo_update below runs value-loss with clip=True,
-        # but old_value_pm is each step's COLLECTION-time value = the PRE-warmup BC critic value. So the
-        # value-clip trust region is anchored one critic-migration behind and can suppress the critic's
-        # gradient on states whose true discounted return is far from the BC estimate, partly fighting the
-        # warm-up. Fix = recompute V(s) post-warmup and overwrite Transition.value before ppo_update (or
-        # run the FIRST post-warmup update with clip=False). gen-0-only; deferred (RL self-play not running).
+        # #23 FIX: the warm-up just migrated the critic OFF the BC value scale, so each step's
+        # COLLECTION-time value (the pre-warmup BC estimate) is now stale as BOTH the value-clip
+        # trust-region anchor (old_value_pm in ppo._value_loss) AND the GAE baseline for the
+        # ppo_update below. Rebase the stored values onto the post-warmup critic so gen-0 behaves
+        # like gen-N (old_value == the critic at the start of the update). gen-0-only.
+        trainer.rebase_values(trajectories)
     update_stats = trainer.ppo_update(trajectories) if trajectories else {"halted": False}
     if status is not None:
         status.set_update(update_stats)
@@ -572,7 +576,10 @@ def build_train_configs(*, kl_coef: Optional[float] = None, target_kl_bc: Option
         train_kw["target_kl_relax_per_gen"] = float(target_kl_relax_per_gen)
     if target_kl_max is not None:
         train_kw["target_kl_max"] = target_kl_max
-    return PPOConfig(**ppo_kw), TrainConfig(**train_kw)
+    ppo_cfg = PPOConfig(**ppo_kw)
+    if ppo_cfg.value_loss_mode == "c51" and int(ppo_cfg.n_atoms) < 2:   # C51 sanity (wired end-to-end in B2/B3)
+        raise SystemExit(f"value_loss_mode='c51' needs n_atoms >= 2 (got {ppo_cfg.n_atoms}).")
+    return ppo_cfg, TrainConfig(**train_kw)
 
 
 def resolve_train_pool(spec, reg=None):
@@ -761,24 +768,43 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
     # resume snapshot's trained state if present (sec 17 — ref/arch re-derived, not stored).
     # 3c.8b: the actor-critic + optimisers live on `device` (cuda => GPU PPO update); collection
     # uses a CPU inference-copy (see collect_fn). Resume maps the snapshot onto `device` too.
-    ac = ActorCritic.from_bc_checkpoint(ckpt, device=device)
+    # Resolve the resume snapshot FIRST so a C51 run's value config can be ALIGNED to the snapshot
+    # BEFORE the actor-critic + optimisers are built (the c51 critic head + the critic_opt param groups
+    # must match the snapshot, or load_into's strict load fails — resume rebuilds arch from the SCALAR
+    # base anchor, so a c51 resume must not depend on the operator re-passing --value-loss-mode).
+    try:
+        _resume_path = RS.resolve_resume(archive, resume_gen=resume_gen, explicit_path=resume_from)
+    except (ValueError, TypeError):
+        print(f"[resume] invalid --resume-gen {resume_gen!r} (use an int or 'latest')", file=sys.stderr)
+        sys.exit(2)
+    if _resume_path is not None and not Path(_resume_path).exists():
+        avail = [g for g, _ in RS.list_snapshots(archive)]
+        print(f"[resume] snapshot not found: {_resume_path}  (available generations: "
+              f"{avail if avail else 'none'})", file=sys.stderr)
+        sys.exit(2)
+    if _resume_path is not None:                            # align the value-head config to the snapshot
+        _vc = RS.peek_value_config(_resume_path)
+        if _vc and _vc["value_loss_mode"] == "c51" and ppo_cfg.value_loss_mode != "c51":
+            print(f"[resume] snapshot is C51 (n_atoms={_vc['n_atoms']}) — aligning value config "
+                  f"(was {ppo_cfg.value_loss_mode!r}).")
+            ppo_cfg.value_loss_mode = "c51"
+            ppo_cfg.n_atoms, ppo_cfg.v_min, ppo_cfg.v_max = _vc["n_atoms"], _vc["v_min"], _vc["v_max"]
+        elif _vc and _vc["value_loss_mode"] != "c51" and ppo_cfg.value_loss_mode == "c51":
+            print("[resume] snapshot is a SCALAR critic — aligning value config to 'bce'.", file=sys.stderr)
+            ppo_cfg.value_loss_mode = "bce"
+
+    # C51: build a DISTRIBUTIONAL critic from the (scalar) BC anchor when value_loss_mode='c51' (now
+    # aligned to the snapshot above on resume); else the scalar critic. mp / collapse-revert cold loads
+    # auto-detect a saved c51 critic via from_bc_checkpoint.
+    _c51_atoms = ppo_cfg.n_atoms if ppo_cfg.value_loss_mode == "c51" else 0
+    ac = ActorCritic.from_bc_checkpoint(ckpt, device=device, n_value_atoms=_c51_atoms,
+                                        v_min=ppo_cfg.v_min, v_max=ppo_cfg.v_max)
     trainer = PPOTrainer(ac, ppo_cfg, train_cfg, seed=seed, device=device)
     # Base KL-to-BC early-halt threshold (the relax schedule rises from this each gen; sec 12).
     _base_target_kl = trainer.tcfg.target_kl_from_bc
     league = OpponentLeague(latest_path=str(ckpt))
     history = GenerationHistory()
-    try:
-        _resume_path = RS.resolve_resume(archive, resume_gen=resume_gen, explicit_path=resume_from)
-    except (ValueError, TypeError):
-        print(f"[resume] invalid --resume-gen {resume_gen!r} (use an int or 'latest')",
-              file=sys.stderr)
-        sys.exit(2)
     if _resume_path is not None:
-        if not Path(_resume_path).exists():
-            avail = [g for g, _ in RS.list_snapshots(archive)]
-            print(f"[resume] snapshot not found: {_resume_path}  (available generations: "
-                  f"{avail if avail else 'none'})", file=sys.stderr)
-            sys.exit(2)
         league, history, _snap = RS.load_into(_resume_path, actor_critic=ac, trainer=trainer,
                                               device=device)
         print(f"[resume] loaded {Path(_resume_path).name} — continuing at generation "
@@ -958,6 +984,13 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
     # long run (#22c) — each sees ~1/K the battles. K=1 (default) is the single shared server,
     # byte-identical to before. An externally-managed server (manage_server=False) is always single.
     _n_servers = max(1, int(n_servers)) if manage_server else 1
+    # audit: only the MULTIPROCESS collect/eval paths spread players across the pool ports; the asyncio
+    # (collect_procs<=1) path binds every player to the default localhost:8000. So a >1 pool there would
+    # launch + recycle extra Node servers that never carry a battle (wasted RAM/CPU). Clamp to 1 + warn.
+    if _n_servers > 1 and not _mp:
+        print(f"   [server] --servers {_n_servers} has NO effect with --collect-procs<=1 (the asyncio "
+              f"collect/eval paths only use localhost:8000) — using 1 server.")
+        _n_servers = 1
     server_pool = R.ServerPool(_n_servers, manage=manage_server).start_all()
     _pool_ports = server_pool.ports if _n_servers > 1 else None   # None => poke-env's 8000 default
     reports = []
@@ -1002,6 +1035,14 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
             _alert = operator_alert(history)        # unattended-run watchdog (sec 16)
             if _alert:
                 print(f"        ⚠ {_alert}")
+            # audit: prune() never evicts champion snapshots (anti-cycle memory), so their ~21MB per-gen
+            # checkpoints accumulate on disk unbounded over a long run with no operator-visible warning.
+            # Surface a throttled heads-up so a disk-bound operator can act (no auto-eviction — champions
+            # are the rollback/HoF targets).
+            _n_champ = sum(1 for s in league.snapshots if s.is_champion)
+            if _n_champ and _n_champ % 25 == 0:
+                print(f"        ⚠ disk: {_n_champ} champion checkpoints retained (~{_n_champ * 21}MB; never "
+                      f"auto-evicted) — prune old archive/checkpoints/genN.pt manually if low on disk.")
             us = rep.get("update_stats", {}) or {}
             print(f"        update: loss={us.get('loss', float('nan')):+.4f} "
                   f"kl_to_bc={us.get('kl_to_bc', float('nan')):.3e} "
@@ -1046,6 +1087,7 @@ def _dry_run(n_generations: int = 6, seed: int = 0) -> None:
 
     class _Trainer:
         def warmup_critic(self, trajs, n): return {"value_loss": 0.2}
+        def rebase_values(self, trajs): return 0          # #23: gen-0 value rebase (no-op in dry run)
         def ppo_update(self, trajs): return {"loss": 0.1, "halted": False, "kl_to_bc": 0.01}
     trainer = _Trainer()
 
@@ -1132,13 +1174,18 @@ def _launch_live(args):
     except ValueError as e:
         print(f"[gen] resource budget error: {e}", file=sys.stderr)
         sys.exit(2)
+    _ppo_ov = dict(getattr(args, "run_cfg_ppo", None) or {})    # CLI > --config ppo section
+    if args.value_loss_mode is not None:
+        _ppo_ov["value_loss_mode"] = args.value_loss_mode
+    if args.value_atoms is not None:
+        _ppo_ov["n_atoms"] = int(args.value_atoms)
     ppo_cfg, train_cfg = build_train_configs(
         kl_coef=args.kl_coef, target_kl_bc=args.target_kl_bc,
         tau=args.tau_start, min_ev=args.min_ev,
         gimmick_kl_weight=args.gimmick_kl_weight, opp_aux_coef=args.opp_aux_coef,
         target_kl_relax_per_gen=args.target_kl_relax,
         target_kl_max=args.target_kl_max,
-        ppo_overrides=getattr(args, "run_cfg_ppo", None),
+        ppo_overrides=_ppo_ov or None,
         train_overrides=getattr(args, "run_cfg_train", None))   # gen-0 tau; collect_fn re-sets per gen
     # train = full archetype-rich pool; eval = controlled set (sec 15). --teams (deprecated)
     # overrides BOTH with an explicit list.
@@ -1470,6 +1517,12 @@ if __name__ == "__main__":
                     help="Level-A aux opponent-prediction CE weight (>0 shapes the trunk to be "
                          "opponent-predictive; needs an --aux-opp-head anchor). Default None = "
                          "use the --config value, else PPOConfig's 0.0 (off).")
+    ap.add_argument("--value-loss-mode", default=None, choices=["bce", "huber", "c51"],
+                    help="critic value loss: 'bce' (win-prob, default) | 'huber' | 'c51' (distributional "
+                         "value head, the Phase-2 A/B). Default None = use the --config ppo value, else 'bce'.")
+    ap.add_argument("--value-atoms", type=int, default=None,
+                    help="C51 number of value atoms over [-1,1] (value-loss-mode=c51). Default None = "
+                         "use the --config value, else PPOConfig's 51.")
     ap.add_argument("--target-kl-bc", type=float, default=None,
                     help="early-halt a generation if mean KL(BC||new) exceeds this "
                          "(warm-start-collapse guard); <=0 disables. Default unset -> --config train "

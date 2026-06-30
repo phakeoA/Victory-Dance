@@ -104,15 +104,16 @@ def masked_sample(
 
 
 # ── Battle policy (two-head BC) ───────────────────────────────────────────────
-def load_bc_policy(path, device: str = "cpu"):
+def load_bc_policy(path, device: str = "cpu", _ckpt=None):
     """Rebuild the AttnBCPolicy from a dict checkpoint and load its weights.
 
     Returns ``(model, head_names)``.  Back-compat: if ``path`` is a pickled
-    nn.Module it is returned as-is with head_names=None.
-    """
+    nn.Module it is returned as-is with head_names=None. ``_ckpt`` (internal): an
+    already-loaded checkpoint dict to reuse instead of re-reading ``path`` from disk
+    (avoids a double torch.load when the caller has the dict, e.g. C51 auto-detect)."""
     if not _TORCH:
         raise RuntimeError("PyTorch unavailable")
-    ckpt = torch.load(path, map_location=device, weights_only=False)
+    ckpt = _ckpt if _ckpt is not None else torch.load(path, map_location=device, weights_only=False)
     if not (isinstance(ckpt, dict) and "model_state" in ckpt):
         # legacy: a directly-pickled module
         if callable(ckpt):
@@ -167,6 +168,7 @@ def load_bc_policy(path, device: str = "cpu"):
         # the own slots — pass the saved set so the strict load matches.
         gimmick_heads=cfg.get("gimmick_heads"),
         value_readout=cfg.get("value_readout", "mean"),
+        opp_cond=cfg.get("opp_cond", False),    # Level B: rebuild the opp-conditioned our heads if stamped
     )
     # A PRE-gimmick checkpoint has no ``gimmick_heads.*`` weights.  The model now
     # always carries gimmick heads, so load non-strictly for those old checkpoints

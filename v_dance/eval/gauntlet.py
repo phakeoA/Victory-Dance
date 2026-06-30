@@ -403,17 +403,20 @@ async def run_gauntlet(
             kind, cand_gen, opp_ref=(prev_best_ckpt if kind == "prev_best" else None))
         _rdir = str(Path(live_dir) / _subdir) if (live_dir and save_replays) else None
         model_name, opp_name = PB.eval_account_names(kind, uid, salt=name_salt)  # 22d
-        model_player = R.make_player(
-            model_name, model_team, model_path=ckpt, team_chooser_path=team_chooser,
-            live_dir=live_dir, save_replays=save_replays,   # #18b: eval match spectate
-            replay_dir=_rdir, replay_label=_label)
-        opp = _make_opponent(
-            kind, opp_name, opp_team,
-            model_path=prev_best_ckpt, team_chooser_path=team_chooser)
-        if spect["open"]:                 # atomic check+clear (no await between)
-            spect["open"] = False
-            asyncio.ensure_future(_open_spectator(model_player))
+        # #audit 2026-06-30: create players INSIDE the try so a raise from _make_opponent (unknown kind /
+        # bad prev_best checkpoint) after make_player() succeeds still tears down model_player's socket.
+        model_player = opp = None
         try:
+            model_player = R.make_player(
+                model_name, model_team, model_path=ckpt, team_chooser_path=team_chooser,
+                live_dir=live_dir, save_replays=save_replays,   # #18b: eval match spectate
+                replay_dir=_rdir, replay_label=_label)
+            opp = _make_opponent(
+                kind, opp_name, opp_team,
+                model_path=prev_best_ckpt, team_chooser_path=team_chooser)
+            if spect["open"]:                 # atomic check+clear (no await between)
+                spect["open"] = False
+                asyncio.ensure_future(_open_spectator(model_player))
             w, f = await PB.play_pairing(model_player, opp, n,
                                          battle_timeout=battle_timeout, label=f"vs {kind}")
             # #01: discount backstop-forfeits exactly like mp_eval (shared helper) — the gauntlet had
@@ -584,6 +587,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         extra={"sources": dict(sources)})
     history = load_history(args.history)            # BEFORE appending current
     gate = regression_gate(history, row)
+    # audit: a NO-RESULT eval (model_elo None = every scripted anchor had 0 finished battles — total server
+    # stall / mask flood / all chunks abandoned) must NOT exit 0. regression_gate folds None into
+    # regressed=False, so without this an automated promotion/CI harness reads a catastrophically-broken eval
+    # as a clean non-regressing pass. Distinct non-zero code (3) so it's not confused with a real regression (1).
+    # audit: also do NOT persist the None-elo row — a poison baseline would make the NEXT good run's
+    # regression_gate see history[-1].model_elo==None and skip its comparison ("no baseline").
+    if row.get("model_elo") is None:
+        print_report(row, gate)
+        print_sources(sources)
+        if any(o in ANCHORS for o in (args.opponents or [])):   # anchors WERE requested but all stalled
+            print("[gauntlet] FATAL: no measurable scripted result (model_elo is None — every requested "
+                  "anchor had 0 finished battles). Not a clean pass; NOT recorded to history.", file=sys.stderr)
+            return 3
+        # no scripted anchors requested (e.g. --opponents prev_best): a VALID anchor-free run. model_elo
+        # is undefined by design — show the mirror results but do NOT append a None-elo poison baseline.
+        print("[gauntlet] anchor-free run (no scripted anchors requested): model_elo not measured; "
+              "mirror results above, history NOT updated.", file=sys.stderr)
+        return 0
     append_run(args.history, row)
     print_report(row, gate)
     print_sources(sources)

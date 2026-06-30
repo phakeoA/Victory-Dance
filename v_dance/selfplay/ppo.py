@@ -55,8 +55,11 @@ class PPOConfig:
                                    # model carries opp_a/opp_b heads (Piece-1 anchor), adds a supervised CE
                                    # of those heads vs the recorded opp action (Piece 3) to the loss, so the
                                    # shared trunk becomes opponent-predictive. Phase-1 sets ~0.3.
-    value_loss_mode: str = "bce"   # "bce" (Phase 1, win-prob) | "huber" (Phase 3, shaped return)
+    value_loss_mode: str = "bce"   # "bce" (Phase 1, win-prob) | "huber" (Phase 3) | "c51" (distributional)
     huber_delta: float = 1.0
+    n_atoms: int = 51              # C51: # value-distribution atoms (used when value_loss_mode="c51")
+    v_min: float = -1.0            # C51 support lower bound (value_pm space [-1,1])
+    v_max: float = 1.0             # C51 support upper bound
     standardize_adv: bool = True   # per-minibatch advantage standardisation (sec 3)
     adv_eps: float = 1e-8
     tau: float = 1.0               # policy temperature (MUST match collection)
@@ -83,8 +86,49 @@ def _standardize_adv(adv: torch.Tensor, eps: float) -> torch.Tensor:
     return (adv - adv.mean()) / (adv.std(unbiased=False) + eps)
 
 
+def c51_support(cfg: PPOConfig, device="cpu") -> torch.Tensor:
+    """The C51 atom locations z_0..z_{N-1} (uniform) in value_pm space [v_min, v_max]."""
+    return torch.linspace(cfg.v_min, cfg.v_max, cfg.n_atoms, device=device)
+
+
+def project_returns_to_support(returns: torch.Tensor, support: torch.Tensor) -> torch.Tensor:
+    """Standard C51 categorical projection of a SCALAR target (a Dirac at each return, clamped
+    to [v_min, v_max]) onto the fixed atom support -> a two-hot target distribution (B, n_atoms).
+    Each row sums to 1 and has mean == clamped(return) (exact for the two-hot). This is the
+    PPO-compatible form: we project the GAE return, not a bootstrapped Bellman next-state dist."""
+    returns = returns.detach()
+    vmin, vmax = float(support[0]), float(support[-1])
+    n = support.numel()
+    dz = (vmax - vmin) / (n - 1)
+    Tz = returns.clamp(vmin, vmax)
+    b = (Tz - vmin) / dz                                   # (B,) in [0, n-1]
+    lower = b.floor().clamp(0, n - 1)
+    upper = b.ceil().clamp(0, n - 1)
+    lo, up = lower.long(), upper.long()
+    m = torch.zeros(returns.shape[0], n, device=returns.device, dtype=returns.dtype)
+    m.scatter_add_(1, lo.unsqueeze(1), (upper - b).unsqueeze(1))    # mass to the lower atom
+    m.scatter_add_(1, up.unsqueeze(1), (b - lower).unsqueeze(1))    # mass to the upper atom
+    eq = lo == up                                          # integer b: both weights 0 -> assign full mass
+    if bool(eq.any()):
+        m[eq] = 0.0
+        m[eq, lo[eq]] = 1.0
+    return m
+
+
+def c51_value_loss(atoms_logits: torch.Tensor, returns: torch.Tensor,
+                   support: torch.Tensor) -> torch.Tensor:
+    """Cross-entropy between the predicted categorical value distribution (softmax of
+    ``atoms_logits``, B x n_atoms) and the projected scalar-return target. The distributional
+    analog of the scalar value regression; ``value_pm = sum(p_i z_i)`` remains the GAE baseline."""
+    target = project_returns_to_support(returns, support)          # (B, n)
+    logp = torch.log_softmax(atoms_logits, dim=-1)
+    return -(target * logp).sum(dim=-1).mean()
+
+
 def _value_loss(value_pm: torch.Tensor, old_value_pm: torch.Tensor,
-                returns: torch.Tensor, cfg: PPOConfig, clip: bool = True) -> torch.Tensor:
+                returns: torch.Tensor, cfg: PPOConfig, clip: bool = True,
+                atoms_logits: Optional[torch.Tensor] = None,
+                support: Optional[torch.Tensor] = None) -> torch.Tensor:
     """Critic loss in the single ``value_pm`` space; pointwise loss is BCE (win-prob,
     Phase 1) or Huber (shaped return, Phase 3).
 
@@ -96,6 +140,16 @@ def _value_loss(value_pm: torch.Tensor, old_value_pm: torch.Tensor,
     a FIXED cold-start anchor (the immutable collection-time value), so clipping there
     would freeze V within ±value_clip of the BC value and DEFEAT the migration to the
     gamma-discounted ±1 return scale the warm-up exists to perform (sec 2)."""
+    if cfg.value_loss_mode == "c51":
+        if atoms_logits is None:
+            raise ValueError("value_loss_mode='c51' requires atoms_logits (the critic's per-atom "
+                             "value logits) — wired through ppo_forward.")
+        # Use the CRITIC's own support (single source of truth) so the CE target projects onto the SAME
+        # atoms the value mean reads from (no silent loss-vs-mean support divergence); fall back to the
+        # cfg support if not threaded. Value-clip is a NO-OP for C51 (clipping a distribution is
+        # ill-defined); the trust region is the KL-to-BC anchor + critic warm-up + critic_lr.
+        _sup = support if support is not None else c51_support(cfg, returns.device)
+        return c51_value_loss(atoms_logits, returns.detach(), _sup)
     target = returns.detach()
     old = old_value_pm.detach()
 
@@ -125,6 +179,8 @@ def ppo_losses(
     value_pm: torch.Tensor, old_value_pm: torch.Tensor, returns: torch.Tensor,
     entropy: torch.Tensor, kl_to_ref: Optional[torch.Tensor] = None,
     opp_ce: Optional[torch.Tensor] = None,
+    atoms_logits: Optional[torch.Tensor] = None,
+    support: Optional[torch.Tensor] = None,
     cfg: PPOConfig = PPOConfig(),
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """The pure PPO loss. All tensors are (B,). ``new_logprob``/``entropy``/``kl`` carry
@@ -139,7 +195,7 @@ def ppo_losses(
     surr2 = ratio.clamp(1.0 - cfg.clip_eps, 1.0 + cfg.clip_eps) * adv
     policy_loss = -torch.min(surr1, surr2).mean()
 
-    value_loss = _value_loss(value_pm, old_value_pm, returns, cfg)
+    value_loss = _value_loss(value_pm, old_value_pm, returns, cfg, atoms_logits=atoms_logits, support=support)
     entropy_mean = entropy.mean()
     entropy_loss = -entropy_mean
 
@@ -197,5 +253,6 @@ def ppo_loss_from_batch(
     return ppo_losses(
         new_logprob=ev.logprob, old_logprob=old_logprob, advantages=adv,
         value_pm=ev.value_pm, old_value_pm=old_value_pm, returns=ret,
-        entropy=ev.entropy, kl_to_ref=ev.kl_to_ref, opp_ce=ev.opp_ce, cfg=cfg,
+        entropy=ev.entropy, kl_to_ref=ev.kl_to_ref, opp_ce=ev.opp_ce,
+        atoms_logits=ev.atoms_logits, support=getattr(ac.critic, "support", None), cfg=cfg,
     )

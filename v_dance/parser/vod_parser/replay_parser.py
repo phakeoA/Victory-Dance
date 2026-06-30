@@ -231,9 +231,13 @@ class ShowdownReplayParser:
             raw_text = parts[2] if len(parts) > 2 else ""
             m = re.search(r"(\d+)\s*(?:&rarr;|→)\s*<strong>(\d+)<", raw_text)
             if m:
+                rt = raw_text.lower()
                 for pid, uname in self.players.items():
-                    if uname and uname.lower() in raw_text.lower():
+                    # match "<name>'s rating" precisely, not a bare substring — one username can be a
+                    # substring of the other (e.g. 'ash' in 'ashketchum'); one |raw| line = one player.
+                    if uname and f"{uname.lower()}'s rating" in rt:
                         self.rating_deltas[pid] = int(m.group(2)) - int(m.group(1))
+                        break
 
         # ---- start of new turn ----
         elif cmd == "turn":
@@ -274,7 +278,7 @@ class ShowdownReplayParser:
 
         # ---- field events ----
         elif cmd == "switch" or cmd == "drag":
-            self._handle_switch(parts)
+            self._handle_switch(parts, is_drag=(cmd == "drag"))
 
         elif cmd == "replace":
             # |replace|p2a: Zoroark|Zoroark-Hisui, L50, M
@@ -597,8 +601,11 @@ class ShowdownReplayParser:
             "to_slot": dst_slot,
         })
 
-    def _handle_switch(self, parts: list[str]) -> None:
+    def _handle_switch(self, parts: list[str], is_drag: bool = False) -> None:
         # |switch|p1b: Incineroar|Incineroar, L50, F|100/100
+        # ``is_drag`` = this came from a |drag| line: an INVOLUNTARY phaze (Roar / Whirlwind /
+        # Dragon Tail / Circle Throw / Red Card) — the player did NOT choose it, so it must not
+        # become a turn-start switch label (see the action append + _extract_actions below).
         ident = parts[2]
         details = parts[3]
         hp_str = parts[4] if len(parts) > 4 else "100/100"
@@ -710,6 +717,7 @@ class ShowdownReplayParser:
         # A switch-in starts a fresh stay on the field — a Choice lock from a
         # previous stint no longer applies, so the working move set restarts.
         mon.stint_moves = []
+        mon.last_self_move = None        # audit: the Encore lock-target source resets with the stint
         # Transform reverts on switch-out: a mon coming back in is its real
         # self again.  (An Imposter Ditto re-fires |-transform| immediately, so
         # this is correctly re-set right after; a Transform-move user that left
@@ -739,6 +747,11 @@ class ShowdownReplayParser:
             # drops it from our_actions / opp_actions_actual — else it becomes a FALSE turn-start switch
             # label (especially when the KO'd mon never acted, so it's the slot's ONLY entry).
             "forced_replacement": is_forced_replacement,
+            # audit: a |drag| is an INVOLUNTARY phaze (Roar/Whirlwind/Dragon Tail/Circle Throw/Red Card).
+            # The player did NOT choose it, so it likewise must NOT become a turn-start switch label — esp.
+            # the faster-phaze case where our mon is dragged BEFORE it moves, making the drag the slot's ONLY
+            # entry and a FALSE "we chose to switch to the randomly-phazed-in mon" label for BC + opp-aux.
+            "forced_switch": is_drag,
         })
 
     def _prescan_illusions(self) -> dict[int, str]:
@@ -781,6 +794,11 @@ class ShowdownReplayParser:
         truth: dict[int, str] = {}
         last_switch: dict[str, int] = {}
         active_base: dict[str, str] = {}   # slot -> base species currently SHOWN
+        # audit (#9): when the Species-Clause rule GUESSES the incumbent is the disguise, remember which
+        # incumbent switch it relabeled, keyed by the NEW-ARRIVAL (trigger) slot — so if that new arrival is
+        # later REVEALED as the disguise (|replace|), we can UNDO the wrong incumbent guess (Scenario B: the
+        # genuine same-species mon was fielded FIRST and the disguise entered second).
+        clause_relabel: dict[str, int] = {}
         rosters: dict[str, list[str]] = {}
         for idx, line in enumerate(self.lines):
             if not line.startswith("|"):
@@ -810,6 +828,7 @@ class ShowdownReplayParser:
                             o_switch = last_switch[oslot]
                             if illu and o_switch not in truth:
                                 truth[o_switch] = f"{illu}, L50"
+                                clause_relabel[slot] = o_switch   # remember the GUESS; a reveal can undo it
                             break
                     active_base[slot] = base
                 last_switch[slot] = idx
@@ -820,6 +839,22 @@ class ShowdownReplayParser:
                 if origin is not None and details:
                     truth[origin] = details          # a reveal is ground truth
                     active_base[slot] = norm_species(details.split(",")[0].strip())
+                    # audit (#9): if THIS slot was a Species-Clause TRIGGER (its arrival wrongly relabeled the
+                    # INCUMBENT as the Illusion), the reveal proves the NEW arrival (this slot) is the disguise
+                    # → the incumbent was the GENUINE same-species mon. Undo the wrong incumbent guess so it
+                    # keeps its own identity (only one Illusion mon exists, so the popped guess was synthetic).
+                    _inc = clause_relabel.pop(slot, None)
+                    if _inc is not None:
+                        truth.pop(_inc, None)
+            elif cmd == "faint":
+                # A fainted slot is no longer ACTIVE — clear its shown species so a stale entry can't trip
+                # the duplicate-active Species-Clause check above before the slot's own replacement switch-in
+                # arrives. Without this, a Zoroark disguised as a just-fainted mon's species entering the
+                # OTHER slot is wrongly flagged as the duplicate and the dead REAL mon's switch gets relabeled
+                # as the Illusion (swapping their cards for the rest of the replay). audit 2026-06-30.
+                _fslot = self._slot_key_from_ident(parts[2] if len(parts) > 2 else "")
+                if _fslot:
+                    active_base.pop(_fslot, None)
         return truth
 
     def _handle_replace(self, parts: list[str]) -> None:
@@ -1057,6 +1092,9 @@ class ShowdownReplayParser:
                 if move_name and not called and move_name.lower() != "struggle":
                     if move_name not in mon.stint_moves:
                         mon.stint_moves.append(move_name)
+                    # audit: track the ACTUAL last self-selected move (not de-duped) for the Encore lock —
+                    # stint_moves[-1] is wrong when the encored move repeats an earlier move in the stint.
+                    mon.last_self_move = move_name
                     if len(mon.stint_moves) >= 2:
                         mon.can_have_choice_item = False
                     # PP tracking (gap #7): count this self-selected use.  The
@@ -1161,10 +1199,32 @@ class ShowdownReplayParser:
             return
         slot_key = self._slot_key_from_ident(parts[2])
         hp_current, hp_max = self._parse_hp(parts[3])
+        prev_hp = None
         if slot_key in self.active_slots and hp_current is not None:
+            prev_hp = self.active_slots[slot_key].hp_current
             self.active_slots[slot_key].hp_current = hp_current
             if hp_max:
                 self.active_slots[slot_key].hp_max = hp_max
+        # audit: Pain Split (and any -sethp) is a real HP swing emitted with NO |-damage|/|-heal| line, so
+        # record it as a damage_event (source_move=None → inert for the belief back-calc, but counted by the
+        # per-turn hp_delta/tempo dense-reward metadata in transitions.py, which sums damage_events). Mirrors
+        # _handle_damage's percentage math. NOT counted toward times_attacked (it is not a direct hit).
+        denom = hp_max or 100.0
+        hp_pct_after = None if hp_current is None else round(hp_current / denom * 100.0, 2)
+        delta_pct = None
+        if prev_hp is not None and hp_current is not None:
+            delta_pct = round((hp_current - prev_hp) / denom * 100.0, 2)
+        if delta_pct is not None:
+            ev = {
+                "event": "sethp",
+                "slot": slot_key,
+                "species": self._species_from_ident(parts[2]),
+                "hp_pct_after": hp_pct_after,
+                "hp_pct_delta": delta_pct,
+                "source_slot": None, "source_species": None, "source_move": None,
+            }
+            self._current_turn_damage_events.append(ev)
+            self._current_turn_actions.append(ev)
 
     def _handle_boost(self, parts: list[str], cmd: str) -> None:
         # |-boost|p1a: Floette|spa|1
@@ -1282,11 +1342,13 @@ class ShowdownReplayParser:
             mon.volatiles.add(vid)
             # v11 exact-mask: capture the SPECIFIC restricted move so the offline action mask can drop
             # the exact illegal slot. Disable names the move in parts[4]; Encore names none → it locks to
-            # the LAST self-selected move (stint_moves[-1], appended in _handle_move BEFORE this -start).
+            # the move used ON the Encore turn = the LAST self-selected move. audit: use last_self_move (the
+            # actually-taken move, NOT de-duped) — stint_moves[-1] is wrong when that move repeated an earlier
+            # one this stint (e.g. EQ, Protect, EQ → stint_moves[-1]=Protect but Encore locks EQ).
             if vid == "disable":
                 mon.disabled_move = parts[4] if len(parts) > 4 else None
             elif vid == "encore":
-                mon.encore_move = mon.stint_moves[-1] if mon.stint_moves else None
+                mon.encore_move = mon.last_self_move or (mon.stint_moves[-1] if mon.stint_moves else None)
             elif vid == "taunt":
                 mon.taunt = True
         else:
@@ -1776,7 +1838,8 @@ class ShowdownReplayParser:
                 # #00: skip a forced post-faint replacement — it is recorded separately as a
                 # decision_type="replacement" transition; emitting it here as a turn-start switch teaches
                 # a FALSE label (the real turn-start command was a move that never executed, or nothing).
-                if ev["event"] == "switch" and ev.get("forced_replacement"):
+                # audit: also skip an involuntary |drag| (forced_switch) phaze — the player did not choose it.
+                if ev["event"] == "switch" and (ev.get("forced_replacement") or ev.get("forced_switch")):
                     continue
                 slot = ev.get("user_slot") or ev.get("slot") or ""
                 if not slot.startswith(player):

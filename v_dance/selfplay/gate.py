@@ -290,7 +290,9 @@ def cluster_hof_suspects(snapshots, *, n: int = 5, current_champion_path=None):
         champs = [s for s in champs if s.path != current_champion_path]
     else:
         champs = champs[:-1]                       # drop the latest-gen champion = the current one
-    return list(reversed(champs[-max(0, int(n)):]))   # the most-recent n past champions, newest first
+    # audit: guard the n==0 case — `champs[-0:]` is `champs[0:]` (the WHOLE list), the opposite of "zero".
+    k = max(0, int(n))
+    return list(reversed(champs[-k:])) if k > 0 else []   # the most-recent n past champions, newest first
 
 
 def hall_of_fame_gate(snap_results, *, cfg: HoFConfig = HoFConfig()) -> Tuple[str, dict]:

@@ -197,16 +197,23 @@ def _example_for_side(t: dict, side: str, opp: str,
         stats["unmatched_picks"] += unmatched
 
     bring = np.zeros(TEAM_SIZE, dtype=np.float32)
-    lead = np.zeros(TEAM_SIZE, dtype=np.float32)
     for i in brought_idx:
         bring[i] = 1.0
-    for i in brought_idx[:LEAD_K]:   # first two brought == the leads
+    # audit: derive the lead from the FIRST LEAD_K brought picks matched INDEPENDENTLY — NOT brought_idx[:K],
+    # which is the COMPACTED full-pick list (unmatched picks dropped). If brought[0] fails species matching,
+    # brought_idx[:K] would point at picks #2/#3 → the lead head learns the WRONG pair. Mark the lead VALID
+    # only when the first LEAD_K picks all matched in order; train_teampreview masks an invalid lead loss.
+    lead_idx, lead_unmatched = _label_indices(roster_norm, list(brought)[:LEAD_K])
+    lead = np.zeros(TEAM_SIZE, dtype=np.float32)
+    for i in lead_idx:
         lead[i] = 1.0
+    valid_lead = 1.0 if (lead_unmatched == 0 and len(lead_idx) == LEAD_K) else 0.0
 
     valid_bring = 1.0 if (len(brought) == BRING_K and int(bring.sum()) == BRING_K) else 0.0
     if stats is not None:
         stats["examples"] += 1
         stats["valid_bring"] += int(valid_bring)
+        stats["valid_lead"] += int(valid_lead)
 
     return {
         "our_species": roster_norm,
@@ -216,6 +223,7 @@ def _example_for_side(t: dict, side: str, opp: str,
         "bring": bring,
         "lead": lead,
         "valid_bring": valid_bring,
+        "valid_lead": valid_lead,
         "replay_id": t.get("replay_id"),
         "side": side,
     }
@@ -331,6 +339,7 @@ class TeamPreviewDataset(Dataset):
         self.bring = np.zeros((n, TEAM_SIZE), dtype=np.float32)
         self.lead = np.zeros((n, TEAM_SIZE), dtype=np.float32)
         self.valid_bring = np.zeros((n,), dtype=np.float32)
+        self.valid_lead = np.zeros((n,), dtype=np.float32)     # audit: mask a species-match-shifted lead
         self.replay_ids: List[str] = []
 
         for i, ex in enumerate(examples):
@@ -341,6 +350,7 @@ class TeamPreviewDataset(Dataset):
             self.bring[i] = ex["bring"]
             self.lead[i] = ex["lead"]
             self.valid_bring[i] = ex["valid_bring"]
+            self.valid_lead[i] = ex.get("valid_lead", 1.0)     # tolerate older example dicts
             self.replay_ids.append(ex["replay_id"])
             if self.use_affinity:
                 self.our_affinity[i] = affinity_fn(ex["our_species"])
@@ -352,6 +362,7 @@ class TeamPreviewDataset(Dataset):
         self.t_bring = torch.from_numpy(self.bring)
         self.t_lead = torch.from_numpy(self.lead)
         self.t_valid = torch.from_numpy(self.valid_bring)
+        self.t_valid_lead = torch.from_numpy(self.valid_lead)
         if self.use_affinity:
             self.t_our_affinity = torch.from_numpy(self.our_affinity)
 
@@ -367,6 +378,7 @@ class TeamPreviewDataset(Dataset):
             "bring": self.t_bring[idx],
             "lead": self.t_lead[idx],
             "valid_bring": self.t_valid[idx],
+            "valid_lead": self.t_valid_lead[idx],
         }
         if self.use_affinity:
             item["our_affinity"] = self.t_our_affinity[idx]
@@ -374,7 +386,7 @@ class TeamPreviewDataset(Dataset):
 
 
 def print_stats(stats: Counter) -> None:
-    order = ["files", "replays", "examples", "valid_bring",
+    order = ["files", "replays", "examples", "valid_bring", "valid_lead",
              "skipped_incomplete", "unmatched_picks", "bad_files"]
     print("── Team-preview dataset stats ───────────────")
     for k in order:

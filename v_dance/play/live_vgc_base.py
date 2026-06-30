@@ -533,6 +533,18 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
                     live.remove(tag)
             except Exception:
                 log.debug("live-battle replay save failed (non-fatal)", exc_info=True)
+        # audit (leak): reclaim this battle's per-tag splice buffers on finish — the whole reconstructed
+        # protocol log + last Showdown error were never pruned (unlike the root base's _tp_decision pop),
+        # so a finished battle's hundreds of log lines stayed resident for the player's lifetime. Mirror the
+        # _tp_decision discipline; guarded so teardown never raises. (The browser host also pops _proto_log.)
+        try:
+            _t = _norm_tag(getattr(battle, "battle_tag", None))
+            if isinstance(getattr(self, "_proto_log", None), dict):
+                self._proto_log.pop(_t, None)
+            if isinstance(getattr(self, "_last_error", None), dict):
+                self._last_error.pop(_t, None)
+        except Exception:
+            log.debug("proto-log prune on finish failed (non-fatal)", exc_info=True)
         return super()._battle_finished_callback(battle)
 
     def _record_rl_decision(self, battle, state_vec, action_s0, action_s1,

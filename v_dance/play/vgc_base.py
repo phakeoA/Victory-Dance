@@ -874,6 +874,30 @@ class VGCPlayerBase(Player):
 
         state_vec = self._encoder.encode(battle)
         action_s0, action_s1, source = self._select_actions(battle, state_vec)
+
+        # audit (#10 + round-4 regression fix): break a REJECTION LOOP. A deterministic root-base player (the
+        # scripted gauntlet/collection opponents) rebuilds the SAME order when Showdown rejects it as an
+        # unavailable choice (a rare mask desync), and poke-env re-calls choose_move with the unchanged battle
+        # — with no escape the battle wedged until the chunk-stall watchdog abandoned the WHOLE chunk. After
+        # repeated rebuilds for the same (battle,turn), escape to /choose default (always accepted). This runs
+        # UNCONDITIONALLY (covers BOTH the normal-turn AND the empty-mask/forced-move partial-order paths — the
+        # empty-mask _forced_aware_double_order is just as deterministic and could loop the same way). No-op on
+        # a normal turn (called once → counter stays 1). The SplicingVGCPlayerBase fully overrides choose_move
+        # with its own retry guard, so this is root-only.
+        _rb = getattr(self, "_turn_rebuilds", None)
+        if _rb is None:
+            _rb = {}
+            self._turn_rebuilds = _rb
+        _k = (battle.battle_tag, battle.turn)
+        if _k not in _rb:
+            _rb.clear()                       # new turn → forget old keys (bounds the dict)
+        _rb[_k] = _rb.get(_k, 0) + 1
+        if _rb[_k] > 10:                      # mirrors live_vgc_base._MAX_TURN_RETRIES
+            log.warning("Turn %d [%s] order rebuilt %d× without finishing — '/choose default' "
+                        "(deterministic opponent mask desync; breaking the rejection loop).",
+                        battle.turn, battle.battle_tag, _rb[_k])
+            return DefaultBattleOrder()
+
         g0, g1 = self._select_gimmicks(battle, state_vec, action_s0, action_s1)
 
         log.debug(

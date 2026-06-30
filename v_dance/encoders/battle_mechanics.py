@@ -449,7 +449,8 @@ def _defender_profile(mon: Optional[dict], side_screens: tuple = (False, False),
 # _canon(parser_token), live Weather.name), NOT the encoder's canonical one-hot token. For gen-9 SNOW that
 # raw token is "SNOWSCAPE" (poke-env Weather.SNOWSCAPE; Showdown emits |-weather|Snowscape) — the old
 # "SNOW" was the canonical-one-hot alias target and never matched here, so Slush Rush never boosted.
-_WEATHER_SPEED_ABILITY = {"swiftswim": ("RAINDANCE",), "chlorophyll": ("SUNNYDAY",),
+_WEATHER_SPEED_ABILITY = {"swiftswim": ("RAINDANCE", "PRIMORDIALSEA"),       # also extreme rain (audit 2026-06-30)
+                          "chlorophyll": ("SUNNYDAY", "DESOLATELAND"),       # also extreme sun
                           "sandrush": ("SANDSTORM",), "slushrush": ("SNOWSCAPE", "HAIL")}
 
 # v11 B.2: SPECIAL moves that hit the target's physical DEF instead of SpD (overrideDefensiveStat:'def').
@@ -474,10 +475,15 @@ def _situational_damage_mult(move_type, is_physical, weather, terrain, defender,
     defender (the semi-invulnerable exemption is a rare two-turn state the band does not model)."""
     mult = 1.0
     mt = (move_type or "").upper()
-    if weather == "SUNNYDAY":
-        mult *= 1.5 if mt == "FIRE" else (0.5 if mt == "WATER" else 1.0)
-    elif weather == "RAINDANCE":
-        mult *= 1.5 if mt == "WATER" else (0.5 if mt == "FIRE" else 1.0)
+    # audit: extreme weather (Desolate Land harsh sun / Primordial Sea heavy rain) acts like Sun/Rain for
+    # the Fire/Water modifiers AND NULLS the opposite type (Water=0 under harsh sun, Fire=0 under heavy rain).
+    # Both encoders share this helper (parity-clean). (Dormant in Reg-M — restricted-legend setters only.)
+    if weather in ("SUNNYDAY", "DESOLATELAND"):
+        _opp = 0.0 if weather == "DESOLATELAND" else 0.5
+        mult *= 1.5 if mt == "FIRE" else (_opp if mt == "WATER" else 1.0)
+    elif weather in ("RAINDANCE", "PRIMORDIALSEA"):
+        _opp = 0.0 if weather == "PRIMORDIALSEA" else 0.5
+        mult *= 1.5 if mt == "WATER" else (_opp if mt == "FIRE" else 1.0)
     if defender and defender.get("grounded"):
         if (terrain == "ELECTRIC_TERRAIN" and mt == "ELECTRIC") \
                 or (terrain == "GRASSY_TERRAIN" and mt == "GRASS") \
@@ -1094,7 +1100,7 @@ def _ability_damage_mult(move_id: Optional[str], attacker_ability: Optional[str]
             if weather == "SANDSTORM" and mt in ("ROCK", "GROUND", "STEEL"):
                 mult *= _M_1_3
         elif a == "solarpower":                      # v11 gap-scan G6: ×1.5 SPECIAL damage in Sun
-            if weather == "SUNNYDAY" and not is_physical:
+            if weather in ("SUNNYDAY", "DESOLATELAND") and not is_physical:   # audit: harsh sun counts as Sun
                 mult *= 1.5
     elif a == "waterbubble":                         # v11 A.1b: Water Bubble offensive Water ×2
         if mt == "WATER":
@@ -1401,13 +1407,20 @@ def _pure_status_move(move_id: Optional[str]):
     return st, bool((data.get("flags") or {}).get("powder"))
 
 
-def _status_immune(status: str, powder: bool, move_type: Optional[str], defender: Optional[dict]) -> bool:
+def _status_immune(status: str, powder: bool, move_type: Optional[str], defender: Optional[dict],
+                   terrain: Optional[str] = None) -> bool:
     """True if ``defender`` cannot receive ``status`` from this move — already statused, type immunity,
-    powder vs Grass/Overcoat, or a status-immunity ability."""
+    powder vs Grass/Overcoat, a status-immunity ability, or TERRAIN immunity (Misty blocks all major
+    status, Electric blocks sleep — both only on a GROUNDED target)."""
     if defender is None:
         return False
     if (defender.get("status") or "").lower() in _MAJOR_STATUS:   # holds a major status already → a new one fails
         return True
+    if defender.get("grounded") and terrain:                     # terrain status immunity (grounded targets only)
+        if terrain == "MISTY_TERRAIN":                           # Misty Terrain: blocks ALL major status
+            return True
+        if terrain == "ELECTRIC_TERRAIN" and status == "slp":    # Electric Terrain: blocks sleep
+            return True
     types = {str(t).upper() for t in (defender.get("types") or [])}
     ab = (defender.get("ability") or "")
     if ab in _STATUS_ABILITY_IMMUNE_ALL or _STATUS_ABILITY_IMMUNE.get(ab) == status:
@@ -1423,12 +1436,14 @@ def _status_immune(status: str, powder: bool, move_type: Optional[str], defender
     return status in _STATUS_TYPE_IMMUNE and bool(types & _STATUS_TYPE_IMMUNE[status])
 
 
-def move_redundant_status(move_id: Optional[str], defender: Optional[dict]) -> float:
+def move_redundant_status(move_id: Optional[str], defender: Optional[dict],
+                          terrain: Optional[str] = None) -> float:
     """1.0 if casting PURE status move ``move_id`` at ``defender`` is wasted (target already statused or
-    immune to that status), else 0.0. ``defender`` is a per-move enemy DEFENDER profile (must carry
-    ``types``/``status``/``ability``). Damaging moves and empty slots → 0.0. A pure feature — never masks."""
+    immune to that status — incl. Misty/Electric Terrain on a grounded target), else 0.0. ``defender`` is a
+    per-move enemy DEFENDER profile (must carry ``types``/``status``/``ability``/``grounded``). ``terrain``
+    is the global field token (e.g. ``MISTY_TERRAIN``). Damaging moves and empty slots → 0.0. Pure feature."""
     st, powder = _pure_status_move(move_id)
     if st is None or defender is None:
         return 0.0
     move_type = (_gen9_moves().get(move_id, {}).get("type") or "")
-    return 1.0 if _status_immune(st, powder, move_type, defender) else 0.0
+    return 1.0 if _status_immune(st, powder, move_type, defender, terrain) else 0.0

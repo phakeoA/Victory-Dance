@@ -92,6 +92,7 @@ def audit_folders(folders: Sequence[str]) -> dict:
         "slot_decisions": 0,
         "null_index": 0,
         "illegal_under_mask": 0,
+        "no_mask_skips": 0,                 # audit: all-zero/empty-mask slots the BC loader drops as no_mask
         "duplicate_replay_ids": [],
         "bad_lines": 0,
         "examples": {"files_scanned": []},
@@ -120,7 +121,11 @@ def audit_folders(folders: Sequence[str]) -> dict:
                     except json.JSONDecodeError:
                         report["bad_lines"] += 1
                         continue
-                    _audit_transition(t, report, os.path.basename(fp), replay_to_files)
+                    # audit: key the dup-detector on the ABSPATH, not the basename — bulk_parse names every
+                    # output {replay_id}.jsonl, so the same replay in two folders has the SAME basename and a
+                    # basename key would collapse them to one (size 1) and miss the cross-folder duplicate the
+                    # BC loader (abspath-deduped) would then DOUBLE-WEIGHT.
+                    _audit_transition(t, report, os.path.abspath(fp), replay_to_files)
         except OSError:
             report["bad_lines"] += 1
 
@@ -174,9 +179,16 @@ def _audit_transition(t: dict, report: dict, fname: str, replay_to_files) -> Non
             bucket["null_index"] += 1
         else:
             row = mask_all.get(head)
-            if row and 0 <= ai < len(row) and row[ai] == 1:
+            if not row or sum(row) == 0:
+                # audit: an all-zero / empty mask is treated by the BC loader (bc_dataset.transition_to_example)
+                # as a SKIPPED no_mask slot, NOT illegal — mirror it so the audit's illegal count equals what
+                # train_bc actually drops (the docstring's stated parity contract). The genuine codec invariant
+                # (an illegal target under a NON-empty legal mask) is still hard-failed below.
+                report["no_mask_skips"] += 1
+                bucket["no_mask_skips"] += 1
+            elif 0 <= ai < len(row) and row[ai] == 1:
                 pass  # legal
-            elif row is not None:
+            else:
                 report["illegal_under_mask"] += 1
                 bucket["illegal_under_mask"] += 1
         if act.get("gimmick_index") == 1:
@@ -189,6 +201,7 @@ def print_report(report: dict) -> None:
     print(f"  transitions          : {report['transitions']}")
     print(f"  slot decisions       : {report['slot_decisions']}")
     print(f"  null action_index    : {report['null_index']}")
+    print(f"  no-mask skips (dropd) : {report['no_mask_skips']}  (slot decisions the BC loader drops)")
     print(f"  illegal-under-mask   : {report['illegal_under_mask']}  "
           f"{'OK' if report['illegal_under_mask'] == 0 else '<<< FAIL'}")
     print(f"  bad/unparseable lines: {report['bad_lines']}")
@@ -208,8 +221,11 @@ def print_report(report: dict) -> None:
 
 
 def _default_folders() -> List[str]:
-    here = os.path.dirname(os.path.abspath(__file__))
-    prep = os.path.join(here, "..", "vods", "Prepared_training_data", "Regulation_MA")
+    # audit: this module moved from data/scripts/ to v_dance/datatools/, so "../vods" now resolves to
+    # the non-existent <repo>/v_dance/vods — a no-argument run then scanned 0 files and exited 0 (a silent
+    # FALSE-CLEAN audit). The corpus actually lives at <repo>/data/vods. Walk up TWO levels to the repo root.
+    here = os.path.dirname(os.path.abspath(__file__))                     # v_dance/datatools
+    prep = os.path.join(here, "..", "..", "data", "vods", "Prepared_training_data", "Regulation_MA")
     return [os.path.normpath(os.path.join(prep, f"Jsonl_Type{t}")) for t in ("A", "B", "C", "D")]
 
 
@@ -229,7 +245,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     else:
         print_report(report)
 
-    # Hard invariants that must hold for a clean export.
+    # Hard invariants that must hold for a clean export. audit: an EMPTY scan (0 files — a mis-pointed
+    # default or an empty corpus) must NOT read as clean/exit 0; it gives false confidence the gate looked.
+    if report.get("files", 0) == 0:
+        print("<<< FAIL: corpus_qa scanned 0 files — check the folder path(s); an empty scan is NOT clean.",
+              file=sys.stderr)
+        return 1
     hard_fail = report["illegal_under_mask"] > 0 or bool(report["duplicate_replay_ids"])
     soft_fail = report["bad_lines"] > 0
     if hard_fail or (args.strict and soft_fail):

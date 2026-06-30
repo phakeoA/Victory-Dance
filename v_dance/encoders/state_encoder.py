@@ -599,7 +599,7 @@ class VodStateEncoder:
         pp_used_map = mon.get("move_pp_used") or {}
         # B1.2/B1.2b attacker context: A stat + burn + Life-Orb/Choice item (fold into the damage band).
         _est = (mon.get("stats_estimate") or {}).get("stats") or {}
-        _att_item = _item_active(resolve_item_json(mon)[0], magic_room,   # v11 P5: Magic Room
+        _att_item = _item_active(resolve_item_json(mon)[0], magic_room and is_active,   # v11 P5: Magic Room (active-only; audit 2026-06-30)
                                  klutz=abil_id == "klutz",                # v11 Klutz: suppress held item
                                  embargo=bool(vol.get("embargo")))        # v11 Embargo volatile
         _aidx = item_effect_indices(_att_item)
@@ -655,8 +655,9 @@ class VodStateEncoder:
         vec[i] = item_known
         i += 1
 
-        # ── v9 ABILITY block: identity index + effect-tag multi-hot + known. Gastro Acid / Neutralizing
-        # Gas suppress the FUNCTIONAL tags but keep the identity (+ set the ability_suppressed tag). ──
+        # ── v9 ABILITY block: identity index + effect-tag multi-hot + known. Gastro Acid suppresses the
+        # FUNCTIONAL tags but keeps the identity (+ sets the ability_suppressed tag). audit: Neutralizing
+        # Gas is NOT yet tracked (0/corpus prevalence); only ability_suppressed (Gastro Acid) flips here. ──
         vec[i] = float(ability_index(abil_id))
         i += 1
         if vol.get("ability_suppressed"):
@@ -858,7 +859,9 @@ class VodStateEncoder:
                 _rb = d.get("resist_berry")
                 if _rb == mtype and (mtype == "NORMAL" or _tmult > 1.0):
                     _sit *= 0.5
-                _sit *= _crit                                   # v11 N4: expected-crit EV (band crit-blind otherwise)
+                # v11 N4: expected-crit EV (band crit-blind otherwise). Battle/Shell Armor null ALL crits →
+                # expected mult 1.0 (Mold Breaker bypass is rare^2 and not modelled). audit 2026-06-30.
+                _sit *= 1.0 if d.get("ability") in ("battlearmor", "shellarmor") else _crit
                 # v11 B.2: variable base power (Low Kick/Heavy Slam/Gyro Ball/Eruption/Stored Power/…) —
                 # a no-op (returns _raw_bp) for the ~99% of moves with a fixed BP. Per-enemy context (d).
                 _bp = _DMG.variable_base_power(
@@ -903,7 +906,9 @@ class VodStateEncoder:
         # math the value head reasons over; multihit re-procs Life-Orb/Tough-Claws + ignores Sash.
         flags = data.get("flags") or {}
         vec[i] = 1.0 if flags.get("contact") else 0.0
-        vec[i + 1] = 1.0 if data.get("recoil") else 0.0
+        # audit (parity): poke-env's live Move.recoil returns 0.25 for a `struggleRecoil` move (Struggle),
+        # so honour struggleRecoil here too — else offline encodes 0 while live encodes 1 for the Struggle slot.
+        vec[i + 1] = 1.0 if (data.get("recoil") or data.get("struggleRecoil")) else 0.0
         vec[i + 2] = 1.0 if data.get("drain") else 0.0
         _mh = data.get("multihit")
         _mh_max = (_mh[-1] if isinstance(_mh, (list, tuple)) and _mh
@@ -944,7 +949,7 @@ class VodStateEncoder:
         # SAME enemy iteration as the type-eff / hit-chance channels; damaging moves & empty slots → 0.0.
         for e in range(2):
             d = enemy_defenders[e] if (enemy_defenders and e < len(enemy_defenders)) else None
-            vec[i] = move_redundant_status(_mid, d)
+            vec[i] = move_redundant_status(_mid, d, _terrain)
             i += 1
 
         # v9: move effect-tags (multi-hot priors) + identity index, BEFORE the trailing is_known

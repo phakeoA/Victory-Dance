@@ -7,10 +7,14 @@ perspective's decision steps during play (the player calls ``add_step`` each tur
 recording the BEHAVIOUR-policy logprob + collection-time value), and ``finish``
 finalises it into a ``Trajectory``.
 
-``assert_zero_sum`` is the sec 6 invariant the trainer runs on every pair: the two
-perspectives must be the same game, share the turn clock (so gamma^T cancels), and
-carry NEGATED outcome rewards (r_us == -r_opp; both 0 on a draw). It is THE guard
-against a discount-asymmetry / perspective-flip self-collusion bug.
+``assert_zero_sum`` is the sec 6 invariant: the two perspectives must be the same game,
+share the turn clock (so gamma^T cancels), and carry NEGATED outcome rewards (r_us ==
+-r_opp; both 0 on a draw). It is THE guard against a discount-asymmetry / perspective-flip
+self-collusion bug. NOTE (audit): it is enforced by the **Phase-0 plumbing smoke**
+(``game_runner.phase0_report``, run before a self-play launch), NOT per-pair inside the
+live ``PPOTrainer`` — the live trainer flattens both perspectives and trains on the pool
+without re-asserting zero-sum each update. So run the Phase-0 smoke after any change to the
+recording/finalisation path to re-validate this invariant.
 
 This module places NO per-step reward (that is task 3a.3); ``finish`` only marks the
 last step ``done`` and attaches the episode metadata.

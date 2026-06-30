@@ -285,7 +285,7 @@ for _tag, _ids in _ABILITY_TAG_SETS.items():
 
 def ability_tags(raw: Optional[str]) -> List[str]:
     """Sorted STATIC effect-tag names for an ability id/name ([] for empty/unknown). ``ability_suppressed``
-    is NOT included here — the encoder sets it at runtime (Gastro Acid / Neutralizing Gas)."""
+    is NOT included here — the encoder sets it at runtime (Gastro Acid; Neutralizing Gas not yet tracked)."""
     return sorted(_ABILITY_TAGS.get(_norm(raw), set())) if raw else []
 
 

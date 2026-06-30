@@ -165,20 +165,17 @@ def _legacy_twin_to_clean(out_path: Path, legacy_path: Path, overwrite: bool) ->
 
 
 def _players_for(source_type: str, override: str | None) -> list[str]:
-    """Perspectives to export.  Type B → both ranked players; else just p1.
+    """Perspectives to export when no ``--players`` override and no team-mode side detection applies.
 
-    Mirrors server.py /export: a Type B replay is two ranked players, so each
-    side's decisions are a valid BC target and the replay yields both halves.
+    audit (parity): mirror server.py /export's NO-yourSide-annotation fallback, which exports BOTH
+    ['p1','p2'] for every type — not just Type B. The previous hardcoded ['p1'] for non-B types silently
+    dropped the equally-valid p2 half of Type C/D (self-play) bulk runs without --team, halving the corpus
+    and biasing it toward p1-seat decisions. Type A still routes through the team_mode detect_our_side
+    path (players=[side]); only the non-team C/D case reaches here, and both its sides are valid targets.
     """
     if override:
         return [p.strip() for p in override.split(",") if p.strip()]
-    is_b = True
-    if VodType is not None:
-        try:
-            is_b = VodType.coerce(source_type or "B") is VodType.B
-        except Exception:
-            is_b = (source_type or "B").upper() in ("B", "RANKED_PLAYER_VOD")
-    return ["p1", "p2"] if is_b else ["p1"]
+    return ["p1", "p2"]
 
 
 def _discover(input_dir: Path, recursive: bool) -> list[Path]:

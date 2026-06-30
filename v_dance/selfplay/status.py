@@ -43,12 +43,15 @@ PHASES = ("starting", "collecting", "updating", "evaluating", "idle", "done")
 
 
 def _numeric(d: dict) -> dict:
-    """Keep only chartable scalars (bool -> 0/1) from a PPO update_stats dict."""
+    """Keep only chartable scalars (bool -> 0/1) from a PPO update_stats dict. audit: DROP non-finite floats
+    (NaN/inf) — e.g. opp_ce is NaN for a generation whose minibatches carried no aligned opp-action targets,
+    and a bare `NaN` token in status.json is INVALID JSON that crashes the browser dashboard's JSON.parse."""
+    import math
     out = {}
     for k, v in (d or {}).items():
         if isinstance(v, bool):
             out[k] = 1.0 if v else 0.0
-        elif isinstance(v, (int, float)):
+        elif isinstance(v, (int, float)) and math.isfinite(v):
             out[k] = float(v)
     return out
 

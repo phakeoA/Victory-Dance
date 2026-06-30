@@ -541,8 +541,11 @@ def replay_to_transitions(
             # Win/loss signal on the final turn only
             win_signal = None
             if is_final_turn and battle.get("winner"):
-                our_username = battle["players"][perspective]["username"]
-                win_signal   = 1 if battle["winner"] == our_username else -1
+                our_username = (battle["players"].get(perspective) or {}).get("username")
+                # only credit when our side is identifiable by name; a missing/blank username must stay
+                # UNKNOWN (None), not silently flip the actual winner to a loss (corpus_qa guards identically).
+                if our_username:
+                    win_signal = 1 if battle["winner"] == our_username else -1
 
             # ── Perspective-aware action lists ────────────────────────────
             # our_actions / opp_actions_actual were extracted relative to the

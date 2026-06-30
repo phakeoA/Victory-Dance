@@ -91,10 +91,10 @@ def _to_id(name) -> str:
         return "".join(ch for ch in str(name).lower() if ch.isalnum())
 
 
-async def abandon_server_state(model_player, opponent) -> int:
-    """Best-effort cleanup of SERVER-side state for an ABANDONED chunk (22e). Returns the number of
-    unfinished battles we abandon-by-forfeit (from the model's view) so the caller can fold them into
-    its finished tally (T4.4).
+async def abandon_server_state(model_player, opponent) -> set:
+    """Best-effort cleanup of SERVER-side state for an ABANDONED chunk (22e). Returns the SET of
+    normalized battle tags we abandon-by-forfeit (from the model's view) so the caller can fold them
+    into its finished tally (T4.4) AND re-check which are still un-finished at read time (audit race fix).
 
     When ``play_pairing``'s stall watchdog gives up on a chunk, the battles still in flight and
     any challenge that was sent-but-never-accepted are left HUNG on the shared Showdown server.
@@ -141,7 +141,7 @@ async def abandon_server_state(model_player, opponent) -> int:
         ff.add((str(tag) or "").strip().lstrip(">").strip())
 
     # 1) forfeit each unfinished battle in its room (the server ends the room → reclaims it).
-    abandoned = 0   # distinct unfinished battles we abandon-by-forfeit (counted from OUR view only)
+    abandoned_tags: set = set()   # normalized tags of the unfinished battles we abandon (model's view)
     for p in (model_player, opponent):
         if p is None:
             continue
@@ -152,8 +152,8 @@ async def abandon_server_state(model_player, opponent) -> int:
         for tag, battle in battles.items():
             try:
                 if battle is not None and not getattr(battle, "finished", True):
-                    if p is model_player:
-                        abandoned += 1          # count once per battle (model's view), not per side
+                    if p is model_player:       # count once per battle (model's view), not per side
+                        abandoned_tags.add((str(tag) or "").strip().lstrip(">").strip())
                     _tag_forfeited(p, tag)      # both players (T3.1 / mp_eval read each side's set)
                     await _send(p, "/forfeit", tag)
             except Exception:
@@ -161,11 +161,11 @@ async def abandon_server_state(model_player, opponent) -> int:
     # fs-monitor: record the watchdog/abandon forfeits on the model player's source_counts so they
     # flow through the existing per-gen aggregation (a runner-issued /forfeit never touches the
     # player's choose_move, so without this the stalled-chunk forfeits would be invisible).
-    if abandoned:
+    if abandoned_tags:
         sc = getattr(model_player, "_source_counts", None)
         if sc is not None:
             try:
-                sc["abandon_forfeit"] += abandoned
+                sc["abandon_forfeit"] += len(abandoned_tags)
             except Exception:
                 log.debug("abandon_forfeit tally failed (non-fatal)", exc_info=True)
     # 2) cancel the model's outgoing challenge to the opponent (sent but never accepted).
@@ -175,7 +175,7 @@ async def abandon_server_state(model_player, opponent) -> int:
                         f"/cancelchallenge {_to_id(getattr(opponent, 'username', ''))}")
         except Exception:
             log.debug("cancelchallenge failed (non-fatal)", exc_info=True)
-    return abandoned
+    return abandoned_tags
 
 
 def discount_forfeits(w: int, f: int, model_player, opponent) -> Tuple[int, int]:
@@ -215,7 +215,7 @@ async def play_pairing(model_player, opponent, n: int, *,
     ``battle_timeout`` <= 0 / ``None`` disables the watchdog (await to completion)."""
     won_before = model_player.n_won_battles
     fin_before = model_player.n_finished_battles
-    abandoned_n = 0          # T4.4: stall-abandoned (forfeited) battles, folded into the finished tally
+    abandoned_tags: set = set()   # T4.4: stall-abandoned (forfeited) battle tags, folded into the finished tally
     task = asyncio.ensure_future(model_player.battle_against(opponent, n_battles=n))
 
     if battle_timeout and battle_timeout > 0:
@@ -260,7 +260,7 @@ async def play_pairing(model_player, opponent, n: int, *,
                 # 22e: reclaim the hung battle rooms + stale challenge SERVER-side before the
                 # caller tears the sockets down — otherwise they linger and bloat the shared
                 # server (and, pre-22d, collided with the next gen's reused names).
-                abandoned_n = await abandon_server_state(model_player, opponent)
+                abandoned_tags = await abandon_server_state(model_player, opponent)
                 break
         # RETRIEVE a completed task's exception so it isn't logged as "Task exception was never
         # retrieved" (the scary-looking but harmless dropped-connection traceback in the log).
@@ -273,11 +273,22 @@ async def play_pairing(model_player, opponent, n: int, *,
         await task
 
     # T4.4: the stall watchdog FORFEITS the in-flight battles (a forfeit IS a loss), but those
-    # /forfeit messages are not server-acked before we tear the socket down, so n_finished_battles
+    # /forfeit messages are usually not server-acked before we tear the socket down, so n_finished_battles
     # misses them. Fold the abandoned count into the finished delta (as non-wins) so a stalled chunk
     # doesn't silently shrink the eval denominator / bias the per-opponent rate + Elo.
+    # audit (race): EXCLUDE any abandoned battle the server already acked + marked finished before this read —
+    # it is already in (n_finished_battles - fin_before), so adding it again would double-count (+1) and that
+    # over-count survives discount_forfeits. Count only abandons still un-finished here. ⚠ RESIDUAL (LOW): the
+    # `not finished` read here and the n_finished_battles read below are two separate reads of state the
+    # POKE_LOOP thread mutates, so a single tag whose /forfeit acks in that sub-microsecond window can still be
+    # counted once in each → at most +1 to one stalled chunk's eval denominator. A lock would be overkill for
+    # the already-rare abandon path; left as the closed-common-case fix. (n_finished_battles stays the
+    # authoritative finished count — poke-env's property OR a test fake's counter.)
+    _bats = getattr(model_player, "battles", {}) or {}
+    effective_abandoned = sum(1 for t in abandoned_tags
+                              if not getattr(_bats.get(t), "finished", False))
     return (model_player.n_won_battles - won_before,
-            model_player.n_finished_battles - fin_before + abandoned_n)
+            model_player.n_finished_battles - fin_before + effective_abandoned)
 
 
 async def close_players(*players) -> None:

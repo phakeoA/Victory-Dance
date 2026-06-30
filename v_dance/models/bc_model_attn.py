@@ -127,6 +127,8 @@ class AttnBCPolicy(nn.Module):
         heads: Sequence[str] = DEFAULT_HEADS,
         gimmick_heads: Optional[Sequence[str]] = None,
         value_readout: str = "mean",
+        n_value_atoms: int = 0,
+        opp_cond: bool = False,
     ):
         super().__init__()
         self.state_dim = state_dim
@@ -209,8 +211,18 @@ class AttnBCPolicy(nn.Module):
 
         # Heads read [mon token (d) || global context (d)] = 2*d_model.
         head_in = 2 * d_model
+        # Level B (opp-conditioning): the OUR action heads (DEFAULT_HEADS) ALSO read the DETACHED predicted
+        # opp-action distribution [softmax(opp_a) || softmax(opp_b)] (one softmax per aux opp head, each
+        # action_dim wide) so the policy best-responds to its own opp prediction. Requires the aux opp heads
+        # to be present. opp_cond=False (default) -> the our heads keep head_in (byte-identical arch).
+        self.opp_cond = bool(opp_cond)
+        self._opp_head_names = tuple(h for h in self.head_names if h not in DEFAULT_HEADS)
+        if self.opp_cond and not self._opp_head_names:
+            raise ValueError("opp_cond=True requires aux opp heads (e.g. opp_a/opp_b) in `heads`; none present")
+        opp_feat_dim = len(self._opp_head_names) * action_dim if self.opp_cond else 0
         self.heads = nn.ModuleDict(
-            {name: nn.Linear(head_in, action_dim) for name in self.head_names}
+            {name: nn.Linear(head_in + (opp_feat_dim if name in DEFAULT_HEADS else 0), action_dim)
+             for name in self.head_names}
         )
         self.gimmick_heads = nn.ModuleDict(
             {name: nn.Linear(head_in, gimmick_dim) for name in self.gimmick_head_names}
@@ -229,18 +241,20 @@ class AttnBCPolicy(nn.Module):
             self.value_attn = nn.MultiheadAttention(
                 d_model, n_heads, dropout=dropout, batch_first=True)
         self.value_head = nn.Linear(val_in, 1)
+        # C51 distributional value head (opt-in): a per-atom head over the value support,
+        # reading the SAME readout vector as the scalar value_head. n_value_atoms=0 (default)
+        # builds NO extra module -> existing checkpoints / the scalar critic stay byte-identical.
+        self.n_value_atoms = int(n_value_atoms)
+        self.value_atoms_head = (nn.Linear(val_in, self.n_value_atoms)
+                                 if self.n_value_atoms else None)
 
         self._init_weights()
 
-    def forward(
-        self, x: torch.Tensor
-    ) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor], torch.Tensor]:
-        """x: (B, state_dim) -> (actions, gimmicks, value).
+    def _encode(self, x: torch.Tensor):
+        """Shared encoder body: (B, state_dim) | (state_dim,) -> (enc, present, g, single).
 
-        Accepts an unbatched (state_dim,) input too — the serve helpers
-        (model_io.value_logit / head_logits / bc_action_indices) pass one state
-        vector — matching BCPolicy's nn.Linear broadcasting (1-D in -> unbatched out)
-        so AttnBCPolicy is a true drop-in."""
+        Factored out of ``forward`` so the C51 value-atoms head reuses the IDENTICAL mon-encoder
+        + self-attention + global stack without duplicating it (forward behaviour is unchanged)."""
         single = x.dim() == 1
         if single:
             x = x.unsqueeze(0)
@@ -292,11 +306,37 @@ class AttnBCPolicy(nn.Module):
         enc = self.attn(tok, src_key_padding_mask=key_padding_mask)  # (B, slots, d)
 
         g = self.glob_enc(glob)                                     # (B, d)
+        return enc, present, g, single
+
+    def forward(
+        self, x: torch.Tensor
+    ) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor], torch.Tensor]:
+        """x: (B, state_dim) -> (actions, gimmicks, value).
+
+        Accepts an unbatched (state_dim,) input too — the serve helpers
+        (model_io.value_logit / head_logits / bc_action_indices) pass one state
+        vector — matching BCPolicy's nn.Linear broadcasting (1-D in -> unbatched out)
+        so AttnBCPolicy is a true drop-in."""
+        enc, present, g, single = self._encode(x)
 
         actions: Dict[str, torch.Tensor] = {}
-        for name, head in self.heads.items():
+        # Opp-PREDICTION heads first, so the OUR heads can (Level B) condition on the predicted opp action.
+        for name in self._opp_head_names:
             ctx = torch.cat([enc[:, HEAD_SLOT[name], :], g], dim=-1)
-            actions[name] = head(ctx)
+            actions[name] = self.heads[name](ctx)
+        # Level B: the DETACHED predicted opp-action distribution(s) fed into the OUR heads. Detached so the
+        # our-policy gradient never corrupts the predictor (the opp heads learn only from the aux CE).
+        opp_feat = None
+        if self.opp_cond and self._opp_head_names:
+            opp_feat = torch.cat([torch.softmax(actions[n], dim=-1)
+                                  for n in self._opp_head_names], dim=-1).detach()
+        for name in self.head_names:
+            if name in self._opp_head_names:
+                continue                                    # opp heads already computed above
+            parts = [enc[:, HEAD_SLOT[name], :], g]
+            if opp_feat is not None and name in DEFAULT_HEADS:
+                parts.append(opp_feat)
+            actions[name] = self.heads[name](torch.cat(parts, dim=-1))
 
         gimmicks: Dict[str, torch.Tensor] = {}
         for name, head in self.gimmick_heads.items():
@@ -310,6 +350,24 @@ class AttnBCPolicy(nn.Module):
             gimmicks = {k: v.squeeze(0) for k, v in gimmicks.items()}
             value = value.squeeze(0)
         return actions, gimmicks, value
+
+    def value_atoms_logits(self, x: torch.Tensor) -> torch.Tensor:
+        """C51 per-atom value logits — (B, n_value_atoms) | (n_value_atoms,). Uses the SAME
+        readout vector as the scalar value head. Raises if no atoms head was built."""
+        if self.value_atoms_head is None:
+            raise RuntimeError(
+                "value_atoms_logits: no atoms head (construct with n_value_atoms>0)")
+        enc, present, g, single = self._encode(x)
+        logits = self.value_atoms_head(self._value_feature(enc, present, g))   # (B, n_atoms)
+        return logits.squeeze(0) if single else logits
+
+    def add_value_atoms_head(self, n_atoms: int) -> None:
+        """Attach a C51 per-atom value head AFTER construction (e.g. onto a deep-copy of a scalar BC
+        policy when building a distributional critic). Sized to the scalar value head's input so it
+        reads the SAME value readout. Cold-initialised — the caller warm-starts it
+        (init_value_atoms_from_scalar) and the critic warm-up sharpens it."""
+        self.n_value_atoms = int(n_atoms)
+        self.value_atoms_head = nn.Linear(self.value_head.in_features, int(n_atoms))
 
     def _value_feature(
         self, enc: torch.Tensor, present: torch.Tensor, g: torch.Tensor
@@ -359,6 +417,7 @@ def build_attn_model(
     device: str = "cpu",
     gimmick_heads: Optional[Sequence[str]] = None,
     value_readout: str = "mean",
+    opp_cond: bool = False,
 ) -> AttnBCPolicy:
     """Build an AttnBCPolicy on ``device`` and print a one-line summary.
 
@@ -378,6 +437,7 @@ def build_attn_model(
         heads=heads,
         gimmick_heads=gimmick_heads,
         value_readout=value_readout,
+        opp_cond=opp_cond,
     ).to(device)
     print(
         f"[AttnBCPolicy] {model.count_parameters():,} params | "
