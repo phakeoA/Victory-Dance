@@ -560,7 +560,7 @@ class VodStateEncoder:
         est = est_block.get("stats")
         known = {"exact": 1.0, "distribution": 0.5}.get(est_block.get("mode"), 0.0)
         for key in STAT_ORDER:
-            vec[i] = (est.get(key) or 0) / _EST_STAT_NORM if est else 0.0
+            vec[i] = min((est.get(key) or 0) / _EST_STAT_NORM, 1.0) if est else 0.0   # clamp: bulky HP (Blissey 362) overshot 1.0
             i += 1
         vec[i] = known if est else 0.0
         i += 1

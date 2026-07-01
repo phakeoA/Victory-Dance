@@ -38,15 +38,11 @@ from v_dance.selfplay import policy_eval
 from v_dance.selfplay.collector import (
     TrajectoryCollector, align_opponent_actions, assert_zero_sum,
 )
-from v_dance.selfplay.reward import place_terminal_reward
+from v_dance.selfplay.reward import _MODEL_DRIVEN_SOURCES, place_terminal_reward
 from v_dance.selfplay.schema import PASS_ACTION, Transition, Trajectory
 from v_dance.selfplay.store import assert_terminal_rewards_clean, write_trajectories
 
 log = logging.getLogger(__name__)
-
-# Sources that mean the MODEL drove the decision (everything else is a fallback /
-# mask-desync escape, counted but not model-driven). Mirrors gauntlet.print_sources.
-MODEL_DRIVEN_SOURCES = ("model", "forced_switch_model")
 
 
 # ── pure recording helpers (no poke-env) ──────────────────────────────────────
@@ -136,7 +132,11 @@ from v_dance.play.vgc_base import (  # noqa: E402
     build_legal_action_mask, build_replacement_mask, build_gimmick_legal_mask,
 )
 
-_MODEL_SOURCES = ("model", "forced_switch_model")
+# The step-RECORDING gate must mirror the MODEL-DRIVEN accounting set EXACTLY (else a model-driven
+# source — notably B1 'search' — is counted as model-driven in phase0/reward but its turns are never
+# recorded as Transitions, so n_steps→0 and MODEL-DRIVEN reads 0% on a legit search run, and the search
+# training corpus is empty). Derive it from the canonical reward set so the two can never drift (audit 2026-06-30).
+_MODEL_SOURCES = _MODEL_DRIVEN_SOURCES
 
 
 class SelfPlayVGCPlayer(VGCPlayer):
@@ -255,7 +255,16 @@ class SelfPlayVGCPlayer(VGCPlayer):
                     tp_bring=tp.get("bring"), tp_leads=tp.get("leads"),
                     opp_team=tp.get("opp_team") or ())
         except Exception:
-            log.debug("self-play finalize failed (non-fatal)", exc_info=True)
+            # A finalize failure silently drops this game from self._finished → it can't be paired →
+            # it vanishes from the A/B win-rate DENOMINATOR with no trace. Surface it (WARNING + a counted,
+            # NON-model bookkeeping source in _NON_DECISION_COUNTERS) so the run report shows the shrunken
+            # sample instead of hiding it (audit 2026-06-30).
+            try:
+                self._source_counts["finalize_failed"] += 1
+            except Exception:
+                pass
+            log.warning("self-play finalize FAILED for %s — game DROPPED from results (non-fatal)",
+                        getattr(battle, "battle_tag", "?"), exc_info=True)
         return super()._battle_finished_callback(battle)   # base (#18) saves/removes the spectate file
 
     def finished_trajectories(self) -> dict:
@@ -310,11 +319,16 @@ def phase0_report(pairs: List[tuple], source_counts: dict, *, min_games: int = 2
             p1_games += 1
             p1_wins += 1 if p1t.meta.won else 0
 
-    # A3: pull the belief-feed diagnostics OUT before the non-model math (else belief_* counts would be
-    # mis-counted as non-model executions and deflate MODEL-DRIVEN%). Surfaced separately in rep["belief"].
+    # A3/B1: pull the belief-feed AND search diagnostics OUT before the non-model math (else the
+    # belief_*/search_* counts would be mis-counted as non-model executions and deflate MODEL-DRIVEN%).
+    # Surfaced separately in rep["belief"] / rep["search_diag"]. The bare "search" DECISION source is
+    # NOT stripped here — it's a real model-grounded pick and is excluded as model-driven below
+    # (reward._MODEL_DRIVEN_SOURCES now lists it), exactly like "model".
     belief = {k[len("belief_"):]: v for k, v in source_counts.items() if str(k).startswith("belief_")}
+    search_diag = {k[len("search_"):]: v for k, v in source_counts.items() if str(k).startswith("search_")}
     sc = {k: v for k, v in source_counts.items()
-          if not str(k).startswith("tp_") and not str(k).startswith("belief_")}
+          if not str(k).startswith("tp_") and not str(k).startswith("belief_")
+          and not str(k).startswith("search_")}
     resamples = sc.get("rejected_resample", 0)
     # audit: count EVERY executed NON-model source (forced_default / forced_partial / forced_switch /
     # forfeit / retry / retry_default / forced_switch_escape …) — a BLOCKLIST, not a 3-key whitelist that
@@ -323,6 +337,7 @@ def phase0_report(pairs: List[tuple], source_counts: dict, *, min_games: int = 2
     from v_dance.selfplay.reward import _MODEL_DRIVEN_SOURCES, _NON_DECISION_COUNTERS
     _excluded = set(_MODEL_DRIVEN_SOURCES) | set(_NON_DECISION_COUNTERS)   # model + bookkeeping (tp_* already stripped)
     non_model = sum(int(v or 0) for k, v in sc.items() if k not in _excluded)
+    finalize_failed = int(sc.get("finalize_failed", 0) or 0)   # games that failed to finalize → dropped from the sample
     md = (n_steps / (n_steps + non_model)) if (n_steps + non_model) else 0.0
     resample_rate = (resamples / (n_steps + resamples)) if (n_steps + resamples) else 0.0
 
@@ -352,11 +367,12 @@ def phase0_report(pairs: List[tuple], source_counts: dict, *, min_games: int = 2
         "model_steps": n_steps, "duplicate_steps": dup_steps, "data_clean": data_clean,
         "model_driven": md, "model_driven_ok": md_ok, "non_model_executed": non_model,
         "resample_count": resamples, "resample_rate": resample_rate,
+        "finalize_failed": finalize_failed,
         "symmetry_failures": sym_fail, "symmetry_ok": sym_ok,
         "p1_win_rate": p1_wr, "p1_games": p1_games, "balance_ok": bal_ok,
         "terminal_clean": clean, "terminal_error": clean_err,
         "looks_like_winprob": winprob_suspect, "value_space_ok": value_space_ok,
-        "belief": belief,
+        "belief": belief, "search_diag": search_diag,
     }
     rep["PASS"] = bool(enough and md_ok and sym_ok and bal_ok and clean and data_clean and value_space_ok)
     return rep
@@ -376,6 +392,9 @@ def print_phase0_report(rep: dict) -> None:
     print(f"  silent resamples  : {rep['resample_count']}  "
           f"({rep['resample_rate']*100:.1f}% of model turns hit the approximate legal "
           f"mask + resampled)  [info]")
+    if rep.get("finalize_failed"):
+        print(f"  finalize failures : {rep['finalize_failed']} game(s) DROPPED from the sample "
+              f"(trajectory failed to finalize — see WARNING log)  [warn]")
     print(f"  zero-sum symmetry : {rep['symmetry_failures']} failures  "
           f"[{mark(rep['symmetry_ok'])}]")
     wr = rep["p1_win_rate"]
@@ -391,17 +410,66 @@ def print_phase0_report(rep: dict) -> None:
         fired = sum(int(v or 0) for k, v in bel.items() if "used" in k)
         print(f"  belief feed       : {fired} constraints FIRED  "
               f"({', '.join(f'{k}={v}' for k, v in sorted(bel.items()))})  [info]")
+    sd = rep.get("search_diag") or {}
+    if sd:
+        fired = int(sd.get("search", 0) or 0)
+        fell = int(sd.get("fallback", 0) or 0)
+        tot = fired + fell
+        rate = (fell / tot) if tot else 0.0
+        print(f"  search feed       : {fired} search decisions, {fell} fallbacks  "
+              f"({rate*100:.1f}% fallback{' — search NEVER fired, A/B is NULL' if not fired else ''})  [info]")
     print("  ----------------------------------------------------------")
     print(f"  PHASE 0           : {'PASS - plumbing clean, ready for Phase 1' if rep['PASS'] else 'FAIL - investigate above'}")
     print("============================================================")
 
 
 # ── live orchestration (reuses run_local_battle; exercised by the smoke) ──────
+def _subdivide_matchups(matchups, target_chunks):
+    """Split matchup chunks into ~``target_chunks`` total so a small team pool can still saturate the
+    worker pool (task #13). Each ``(team_a, team_b, n)`` may become several ``(team_a, team_b, n_sub)``
+    sub-chunks (``n_sub >= 1``, summing to ``n``); the extra splits go to the chunks with the most
+    games-per-sub-chunk (largest-load-first), so the resulting sub-chunks are as even as possible.
+
+    Motivating case: a SINGLE-team MIRROR A/B is ONE ``(team, team, n_games)`` chunk, which would pin the
+    whole run to a single sequential pairing regardless of ``--workers``. Splitting it into up-to-n_workers
+    sub-chunks — each later given a DISTINCT uid → distinct accounts + seeds — fills the worker slots with
+    INDEPENDENT seed-streams that still sum to ``n_games`` and aggregate into the IDENTICAL A/B verdict.
+
+    NO-OP when the pool already yields ``>= target_chunks`` pairings (multi-team / gauntlet) or when
+    ``target_chunks <= 1`` (the default sequential run). Total games are preserved exactly; the (team_a,
+    team_b) pair of every sub-chunk equals its parent, so per-matchup game totals are unchanged."""
+    chunks = [(a, b, n) for (a, b, n) in matchups if n > 0]
+    total = sum(n for _, _, n in chunks)
+    target = min(int(target_chunks), total)              # never more chunks than games
+    if target <= len(chunks):
+        return chunks
+    ks = [1] * len(chunks)                               # sub-chunk count per original chunk (>= 1)
+    ns = [n for _, _, n in chunks]
+    for _ in range(target - len(chunks)):               # hand out the extra splits one at a time
+        best, best_load = -1, -1.0
+        for i in range(len(chunks)):
+            if ks[i] >= ns[i]:                          # already 1 game / sub-chunk — can't split further
+                continue
+            load = ns[i] / ks[i]                        # games per current sub-chunk
+            if load > best_load:
+                best, best_load = i, load
+        if best < 0:
+            break                                        # nothing left that can be split
+        ks[best] += 1
+    out = []
+    for (a, b, n), k in zip(chunks, ks):
+        base, rem = divmod(n, k)                         # split n into k near-equal parts summing to n
+        for j in range(k):
+            out.append((a, b, base + (1 if j < rem else 0)))
+    return out
+
+
 async def run_self_play_games(
     actor_critic, team_pool: Sequence[str], n_games: int, *,
     store_path=None, tau: float = 1.0, seed: int = 0, manage_server: bool = True,
     battle_timeout: Optional[float] = 90.0, matchup_seed: int = 0, n_workers: int = 1,
-    match_belief: str = "off", live_dir=None, save_replays: bool = False,
+    match_belief: str = "off", search: str = "off", live_dir=None, save_replays: bool = False,
+    n_servers: int = 1,
 ):
     """Play ``n_games`` self-play battles (the shared policy on BOTH sides) over a
     side-balanced team rotation, collect both perspectives of each game, and write the
@@ -415,6 +483,8 @@ async def run_self_play_games(
     counts are aggregated into ``source_counts`` under ``belief_*`` keys."""
     p1_belief = match_belief in ("both", "ab")        # SP1 = belief-on side of the A/B
     p2_belief = match_belief == "both"
+    p1_search = search in ("both", "ab")              # B1 search A/B: SP1 = search-on side
+    p2_search = search == "both"
     import logging as _logging
     from collections import Counter
 
@@ -423,34 +493,51 @@ async def run_self_play_games(
     from v_dance.play import parallel_battles as PB
     from v_dance.eval.gauntlet import team_matchups
 
-    server = R.start_showdown() if manage_server else None
+    # #22f: shard workers across a POOL of K local Showdown servers (ports 8000..8000+K-1). ONE server's
+    # connection-accept STORMS at startup under high --workers (single-server ceiling ~40 workers = 80
+    # sockets; 200 workers = 400 sockets = a handshake-timeout flood), so K servers each take ~1/K the
+    # sockets and the safe worker ceiling scales ~K×. n_servers<=1 (or an externally-managed server,
+    # manage_server=False) reduces to the single localhost:8000 path, byte-identical to before.
+    _n_servers = max(1, int(n_servers)) if manage_server else 1
+    pool = R.ServerPool(_n_servers, manage=manage_server).start_all()
+    _multi_server = _n_servers > 1
     pairs: List[tuple] = []
     source_counts: Counter = Counter()
     # uid is assigned up front (sequentially, race-free) so concurrent pairings get
     # collision-free account names / replay paths.
     descriptors = []
     uid = 0
-    for team_a, team_b, n in team_matchups(team_pool, n_games, seed=matchup_seed):
+    # #13 scaling: a single-team MIRROR (and any pool with fewer pairings than workers) is subdivided into
+    # up-to-n_workers sub-chunks so --workers actually saturates. Each sub-chunk still gets its own uid → its
+    # own accounts/seeds, so a split is just an independent seed-stream — transparent to the aggregated A/B.
+    for team_a, team_b, n in _subdivide_matchups(
+            team_matchups(team_pool, n_games, seed=matchup_seed),
+            min(max(1, n_workers), n_games)):
         uid += 1
         descriptors.append((team_a, team_b, n, uid))
 
     async def _run_chunk(team_a, team_b, n, uid):
         ta = R.load_team(R.resolve_team_path(team_a))
         tb = R.load_team(R.resolve_team_path(team_b))
+        # #22f: bind BOTH seats of this pairing to the SAME pool server (round-robin by uid) — they battle
+        # each other, so they must share a server. Empty dict on the single-server path → poke-env's
+        # localhost:8000 default (byte-identical to before).
+        _srv = ({"server_configuration": R.localhost_server_config(pool.port_for_worker(uid))}
+                if _multi_server else {})
         p1 = SelfPlayVGCPlayer(
             actor_critic, tau=tau, sample_seed=seed + uid,
             replay_path=_REPO_ROOT / "artifacts" / "replay_buffer" / f"SP1_{uid}.jsonl",
             account_configuration=AccountConfiguration(f"SP1x{uid}", None),
             battle_format=R.BATTLE_FORMAT, team=ta, max_concurrent_battles=1,
-            log_level=_logging.WARNING, use_match_belief=p1_belief,
-            live_dir=live_dir, save_replays=save_replays)
+            log_level=_logging.WARNING, use_match_belief=p1_belief, use_search=p1_search,
+            live_dir=live_dir, save_replays=save_replays, **_srv)
         p2 = SelfPlayVGCPlayer(
             actor_critic, tau=tau, sample_seed=seed + 100000 + uid,
             replay_path=_REPO_ROOT / "artifacts" / "replay_buffer" / f"SP2_{uid}.jsonl",
             account_configuration=AccountConfiguration(f"SP2x{uid}", None),
             battle_format=R.BATTLE_FORMAT, team=tb, max_concurrent_battles=1,
-            log_level=_logging.WARNING, use_match_belief=p2_belief,
-            live_dir=live_dir, save_replays=save_replays)
+            log_level=_logging.WARNING, use_match_belief=p2_belief, use_search=p2_search,
+            live_dir=live_dir, save_replays=save_replays, **_srv)
         try:
             await PB.play_pairing(p1, p2, n, battle_timeout=battle_timeout, label="self-play")
         except Exception:
@@ -461,6 +548,9 @@ async def run_self_play_games(
             for _p in (p1, p2):                          # A3 belief-feed diagnostics → belief_* keys
                 for _k, _v in (getattr(_p, "_belief_stats", None) or {}).items():
                     source_counts["belief_" + _k] += int(_v or 0)
+            for _p in (p1, p2):                          # B1 search diagnostics → search_* keys
+                for _k, _v in (getattr(_p, "_search_counts", None) or {}).items():
+                    source_counts["search_" + _k] += int(_v or 0)
             pairs.extend(pair_trajectories(p1.finished_trajectories(),
                                            p2.finished_trajectories()))
             await PB.close_players(p1, p2)
@@ -469,8 +559,7 @@ async def run_self_play_games(
         await PB.run_jobs([lambda d=d: _run_chunk(*d) for d in descriptors],
                           workers=n_workers)
     finally:
-        if server is not None:
-            R.stop_showdown(server)
+        pool.stop_all()                                   # #22f: tree-kill every managed pool server
 
     # Piece 3 (Level-A opp-prediction): fill each perspective's opp_a/opp_b_action from
     # its paired opposite perspective (seat-symmetric codec -> direct copy). In-place, so
@@ -508,6 +597,10 @@ def main(argv=None) -> int:
                     help="A3 within-game belief: off | both (Phase-0 live-wiring smoke, belief on both "
                          "seats) | ab (strength A/B — belief ON on p1 only; run with ONE team for a clean "
                          "MIRROR so p1's win-rate isolates the belief effect)")
+    ap.add_argument("--search", choices=["off", "both", "ab"], default="off",
+                    help="B1 belief-weighted expectimax search: off | both (smoke — search on both seats) | "
+                         "ab (strength A/B — search ON on p1 only vs the policy-argmax net on p2; ONE team = "
+                         "clean MIRROR so p1's win-rate isolates the search effect)")
     ap.add_argument("--report-json", default=None, metavar="PATH",
                     help="also write the full report dict (incl. the A/B verdict + belief diagnostics) "
                          "as JSON to PATH, so a run is self-describing without scraping the terminal")
@@ -524,6 +617,10 @@ def main(argv=None) -> int:
     ap.add_argument("--battle-timeout", type=float, default=90.0)
     ap.add_argument("--workers", type=int, default=1,
                     help="run this many pairings concurrently (task #13; default 1 = sequential)")
+    ap.add_argument("--servers", type=int, default=1,
+                    help="#22f: shard workers across N local Showdown servers (ports 8000..8000+N-1) so a "
+                         "high --workers count doesn't storm one server's startup handshakes (single-server "
+                         "ceiling ~40 workers). Ignored with --no-server. Default 1 = single server.")
     ap.add_argument("--no-server", action="store_true")
     ap.add_argument("--min-games", type=int, default=200)
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -548,15 +645,26 @@ def main(argv=None) -> int:
     if store_path.exists():
         store_path.unlink()
 
-    pairs, sources = asyncio.run(run_self_play_games(
-        ac, team_pool=args.teams, n_games=args.games, store_path=store_path,
-        tau=args.tau, seed=args.seed, manage_server=not args.no_server,
-        battle_timeout=args.battle_timeout, matchup_seed=args.matchup_seed,
-        n_workers=args.workers, match_belief=args.match_belief,
-        live_dir=args.live_dir, save_replays=bool(args.live_dir)))
+    try:
+        pairs, sources = asyncio.run(run_self_play_games(
+            ac, team_pool=args.teams, n_games=args.games, store_path=store_path,
+            tau=args.tau, seed=args.seed, manage_server=not args.no_server,
+            battle_timeout=args.battle_timeout, matchup_seed=args.matchup_seed,
+            n_workers=args.workers, match_belief=args.match_belief, search=args.search,
+            n_servers=args.servers, live_dir=args.live_dir, save_replays=bool(args.live_dir)))
+    except KeyboardInterrupt:
+        # Ctrl-C now fires promptly (the parallel_battles heartbeat keeps the Windows select() loop awake);
+        # run_self_play_games' `finally` has already stopped the Showdown server during unwind. Exit cleanly
+        # with the conventional 130, no traceback (audit 2026-07-01 — Ctrl-C previously hung, forcing a
+        # terminal kill).
+        print("\n[game_runner] interrupted (Ctrl-C) — Showdown server stopped, partial run discarded.",
+              file=sys.stderr)
+        return 130
 
     rep = phase0_report(pairs, sources, min_games=args.min_games)
     rep["match_belief"] = args.match_belief
+    rep["search"] = args.search
+    rep["n_servers"] = args.servers
     rep["ckpt"] = str(ckpt)
     rep["teams"] = list(args.teams)
     rep["tau"] = args.tau
@@ -583,6 +691,30 @@ def main(argv=None) -> int:
             print(f"  95% Wilson CI      : [{lo*100:.1f}%, {hi*100:.1f}%]")
         print(f"  belief fired       : {fired} constraints "
               f"({'OK — A/B is meaningful' if fired else 'ZERO — belief never fired, A/B is NULL; check wiring'})")
+        print(f"  VERDICT            : {verdict}")
+        print("============================================================")
+
+    # ── B1 search A/B verdict ────────────────────────────────────────────────
+    # In 'ab' mode p1 = search-ON, p2 = policy-argmax (same net), so p1's win-rate IS the search effect.
+    if args.search == "ab":
+        wr, ng = rep.get("p1_win_rate"), int(rep.get("p1_games") or 0)
+        wins = int(round((wr or 0.0) * ng))
+        lo, hi = _wilson_ci(wins, ng)
+        verdict = ("INCONCLUSIVE (CI spans 50%)" if lo is None or (lo <= 0.5 <= hi)
+                   else "search HELPS (CI > 50%)" if lo > 0.5 else "search HURTS (CI < 50%)")
+        sd = rep.get("search_diag") or {}
+        fired = int(sd.get("search", 0) or 0)
+        fell = int(sd.get("fallback", 0) or 0)
+        rep["search_ab"] = {"search_on_win_rate": wr, "wins": wins, "games": ng,
+                            "ci95_low": lo, "ci95_high": hi, "verdict": verdict,
+                            "search_decisions": fired, "fallbacks": fell}
+        print("== B1 search A/B (search-ON p1 vs policy-argmax p2, same net) ==")
+        print(f"  search-ON win-rate : {wr*100:.1f}%  ({wins}/{ng})" if wr is not None
+              else "  search-ON win-rate : n/a (no decisive games)")
+        if lo is not None:
+            print(f"  95% Wilson CI      : [{lo*100:.1f}%, {hi*100:.1f}%]")
+        print(f"  search decisions   : {fired} (fallbacks {fell}) "
+              f"({'OK — search drove turns' if fired else 'ZERO — search never ran, A/B is NULL; check wiring'})")
         print(f"  VERDICT            : {verdict}")
         print("============================================================")
 

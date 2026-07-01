@@ -32,7 +32,7 @@ import math
 from typing import Optional
 
 from v_dance.parser.belief_state import dex_base_stats, calc_full_stats
-from v_dance.parser.match_belief import _spread_key
+from v_dance.parser.match_belief import _spread_key, _LIKELIHOOD_FLOOR
 from v_dance.parser.vod_parser.pokedex import norm_species
 
 try:  # poke-env optional (offline machines)
@@ -48,7 +48,10 @@ except Exception:  # pragma: no cover
 # KNOWN (the parser stamps |-crit|, folded as is_critical), poke-env handles mitigation, and the ITEM
 # uncertainty is carried by the mixture (not σ) — so this is sharp.
 _SIGMA = (0.05 ** 2 + 0.05 ** 2) ** 0.5            # ≈ 0.071
-_LL_FLOOR = math.log(1e-3)                          # per-event log-likelihood floor (never zero the truth)
+# per-event log-likelihood floor (never zero the truth). MUST equal the consumer's missing-key default in
+# match_belief._narrow_spreads_by_damage — derived from the SAME canonical _LIKELIHOOD_FLOOR so the producer
+# floor and consumer default can never drift (a drift would re-invert the narrowing; audit 2026-06-30).
+_LL_FLOOR = math.log(_LIKELIHOOD_FLOOR)
 _STATS = ("hp", "atk", "def", "spa", "spd", "spe")
 
 

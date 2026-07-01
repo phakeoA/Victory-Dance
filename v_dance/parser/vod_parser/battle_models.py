@@ -28,6 +28,18 @@ _LOCK_VOL = frozenset({"mustrecharge", "lockedmove", "bide", "uproar", "rollout"
 _RESIDUAL_VOL = frozenset({"leechseed", "saltcure", "curse", "nightmare"})
 
 
+def _paradox_boosted_stat(ids) -> Optional[str]:
+    """The stat suffix (atk/def/spa/spd/spe) of an ACTIVE Protosynthesis / Quark-Drive boost volatile
+    (``|-start|MON|protosynthesisatk`` / ``quarkdrivespa`` …), or ``None``. A paradox mon boosts its
+    HIGHEST stat, so this reveals which stat is highest — a strong EV-spread constraint the within-game
+    belief narrows on. (``paradox_speed`` above is the SPE-only bool the speed calc consumes; this is the
+    full stat, byte-parity offline/live since poke-env normalises the same ``protosynthesis<stat>`` ids.)"""
+    for st in ("atk", "def", "spa", "spd", "spe"):
+        if f"protosynthesis{st}" in ids or f"quarkdrive{st}" in ids:
+            return st
+    return None
+
+
 def volatile_flags(vol_ids) -> dict:
     """Map a set of normalised volatile ids -> the encoder's per-mon volatile booleans/scalars. SHARED by
     the offline (PokemonSlot.to_dict) and live (live_state_encoder) paths so the volatile block is byte-
@@ -45,6 +57,9 @@ def volatile_flags(vol_ids) -> dict:
         # in the volatile id (|-start|MON|protosynthesisspe). NOT a volatile-block channel; consumed only
         # by _effective_speed (×1.5). Byte-parity: poke-env Effect.PROTOSYNTHESISSPE normalises identically.
         "paradox_speed": bool(ids & {"protosynthesisspe", "quarkdrivespe"}),
+        # the FULL boosted stat (atk/def/spa/spd/spe or None) — reveals the paradox mon's HIGHEST stat to the
+        # within-game belief (NOT an encoder channel; the encoder reads only the named volatile flags above).
+        "paradox_boosted_stat": _paradox_boosted_stat(ids),
         # ── v11 C.2: dropped-volatile channels (pure id-set functions ⇒ offline/live byte-parity) ──
         "residual_damage": bool(ids & _RESIDUAL_VOL),    # Leech Seed / Salt Cure / Ghost-Curse / Nightmare
         "confused": "confusion" in ids,                  # 33% self-hit risk

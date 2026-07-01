@@ -180,9 +180,17 @@ def _best_nature_for_spread(evs_bucket: list[int], ranked_natures: list[dict]) -
     spa_ev = evs_bucket[3] if len(evs_bucket) > 3 else 0
     if atk_ev == spa_ev:
         return ranked_natures[0]["nature"]               # neutral/defensive → modal
-    forbidden = "atk" if atk_ev > spa_ev else "spa"      # don't lower the spread's offence stat
+    want = "atk" if atk_ev > spa_ev else "spa"           # the spread's offence stat
+    # PREFER the highest-pct nature that BOOSTS the offence stat (Modest for a SpA spread, Adamant for Atk) — an
+    # offence-invested spread almost always runs an offence-boosting nature. Only if none is in the distribution
+    # fall back to the highest-pct nature that at least does not LOWER it, then the modal (audit 2026-07-01: the
+    # old drop-only check tagged e.g. a special Torterra spread with Brave → SpA under-/Atk over-estimated).
+    # NB: this alters the BAKED stats_estimate, so it must ship WITH a corpus re-export (which it does).
     for n in ranked_natures:
-        if NATURE_BOOSTS.get(n["nature"], ("", ""))[1] != forbidden:
+        if NATURE_BOOSTS.get(n["nature"], ("", ""))[0] == want:
+            return n["nature"]
+    for n in ranked_natures:
+        if NATURE_BOOSTS.get(n["nature"], ("", ""))[1] != want:
             return n["nature"]
     return ranked_natures[0]["nature"]                   # fallback (no compatible nature)
 
@@ -1239,7 +1247,9 @@ def _enrich_mon_belief(
         lookup,
         top_k=top_k,
         revealed_moves=mon.get("revealed_moves") or [],
-        revealed_item=mon.get("known_item"),
+        # a CONSUMED item is no longer HELD → don't collapse the held-item belief to it (audit 2026-06-30);
+        # its identity stays on known_item for the encoder's consume-gated path, but belief reverts to the prior.
+        revealed_item=(mon.get("known_item") if not mon.get("item_consumed") else None),
         revealed_ability=mon.get("known_ability"),
         ability_species=ability_species,
         can_have_choice_item=mon.get("can_have_choice_item"),

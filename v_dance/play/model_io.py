@@ -271,6 +271,21 @@ def value_logit(model, state_vec: np.ndarray, device: str = "cpu") -> Optional[f
     return 1.0 / (1.0 + math.exp(-v))
 
 
+def value_logit_batch(model, state_vecs, device: str = "cpu"):
+    """Win-prob ∈ [0,1] for a BATCH of states — ONE model forward over an (N, STATE_DIM) stack (the Level-C
+    search's leaf evaluator; uses the GPU when ``device='cuda'``). Returns an np.ndarray (N,) or None for a
+    legacy (pre-value) model."""
+    arr = np.asarray(state_vecs, dtype=np.float32)
+    if arr.ndim == 1:
+        arr = arr[None, :]
+    with torch.no_grad():
+        out = model(torch.as_tensor(arr, device=device))
+    if not (isinstance(out, tuple) and len(out) >= 3):
+        return None
+    v = np.asarray(out[2].detach().cpu(), dtype=np.float64).ravel()
+    return 1.0 / (1.0 + np.exp(-v))
+
+
 def value_trained(model) -> bool:
     """Whether ``model`` was loaded from a checkpoint that actually trained the
     value head (load_bc_policy sets this); the serve player must not trust an

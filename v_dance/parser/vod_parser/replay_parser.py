@@ -1153,19 +1153,25 @@ class ShowdownReplayParser:
         slot_key = self._slot_key_from_ident(ident)
 
         hp_current, hp_max = self._parse_hp(hp_str)
+        # A KO / 0-HP line has NO explicit denominator (``|-damage|MON|0 fnt``); _parse_hp then defaults hp_max
+        # to 100. On a real-HP (X/Y, Y!=100) replay that stale 100 must NOT clobber the mon's stored real max
+        # NOR be used as the % denominator (else the KO's hp_pct_delta is scaled by real_max/100 ≈ 2x). Only an
+        # EXPLICIT X/Y token carries the real max (audit 2026-06-30).
+        has_denom = "/" in hp_str
         prev_hp = None
+        prev_max = self.active_slots[slot_key].hp_max if slot_key in self.active_slots else None
         if slot_key in self.active_slots:
             prev_hp = self.active_slots[slot_key].hp_current
             self.active_slots[slot_key].hp_current = hp_current
-            # Keep the denominator current so to_dict()'s hp_pct stays a true
-            # percentage even for real-HP (X/Y, Y!=100) replays (gap #5).
-            if hp_max:
+            # Keep the denominator current so to_dict()'s hp_pct stays a true percentage for real-HP (X/Y)
+            # replays (gap #5) — but only from an EXPLICIT denominator; a denominator-less "0 fnt" keeps the max.
+            if hp_max and has_denom:
                 self.active_slots[slot_key].hp_max = hp_max
 
-        # hp_pct_after / delta are reported as true 0-100 PERCENTAGES, normalising
-        # the raw numerator by the denominator so real-HP logs (e.g. 175/200) are
-        # not over-reported (gap #5).
-        denom = hp_max or 100.0
+        # hp_pct_after / delta are reported as true 0-100 PERCENTAGES, normalising the raw numerator by the
+        # denominator so real-HP logs (e.g. 175/200) are not over-reported (gap #5). Prefer the STORED real max
+        # for a denominator-less line so a KO's delta isn't computed over a bogus 100.
+        denom = (hp_max if has_denom else prev_max) or hp_max or 100.0
         hp_pct_after = None if hp_current is None else round(hp_current / denom * 100.0, 2)
         delta_pct = None
         if prev_hp is not None and hp_current is not None:

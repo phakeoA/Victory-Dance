@@ -122,6 +122,18 @@ def feed_damage_constraints(
     our_act = sb.get("our_active") or {}
     opp_act = sb.get("opp_active") or {}
 
+    # A spread move gets the 0.75x reduction ONLY when it actually struck 2+ targets; a spread move that hit a
+    # single mon (partner absent/fainted, or a mid-turn KO) dealt FULL damage. Count the DISTINCT damaged slots
+    # per (attacker, move) this turn so the reference damage isn't under-predicted → the log-normal likelihood
+    # doesn't skew the opp's stat toward higher offence to explain the "missing" 25% (audit 2026-06-30).
+    _hits: dict = {}
+    for ev in prev_turn.get("damage_events") or []:
+        if ev.get("event") == "damage" and ev.get("source_move") and ev.get("source_slot"):
+            _hits.setdefault((ev["source_slot"], norm_species(ev["source_move"])), set()).add(ev.get("slot"))
+
+    def _multi_target(ev) -> bool:
+        return len(_hits.get((ev.get("source_slot"), norm_species(ev.get("source_move") or "")), ())) >= 2
+
     for ev in prev_turn.get("damage_events") or []:
         if ev.get("event") != "damage" or not ev.get("source_move"):
             continue
@@ -149,14 +161,23 @@ def feed_damage_constraints(
                 stats["skipped_id"] += 1
                 continue
             sp = opp_mon.get("base_species") or opp_mon.get("species")
+            # reconcile the START-OF-TURN slot occupant (sp) with the mon that ACTUALLY took this hit
+            # (ev.species): a mid-turn switch / faint+replacement (Eject Button / Red Card / KO+replace)
+            # changes the slot occupant, so narrowing sp's belief from a different mon's damage would
+            # corrupt the wrong species. Mirrors the A3 speed guard. (audit 2026-06-30)
+            ev_def_sp = ev.get("species")
+            if ev_def_sp and sp and norm_species(sp) != norm_species(ev_def_sp):
+                stats["skipped_ctx"] += 1
+                continue
             # A2 v2: poke-env per-candidate calc (item + ability marginalised) when a live calc is wired,
             # else the analytic `_damage_band` path below. A None return falls through to analytic.
             if damage_loglik_fn is not None and sp:
                 ll = damage_loglik_fn(
                     direction="def", opp_key=dkey, our_key=skey, opp_species=sp,
+                    our_species=ev.get("source_species"),   # our mon is the ATTACKER here
                     opp_snapshot_mon=opp_mon, move=move, crit=bool(ev.get("crit")), obs_frac=obs)
                 if ll:
-                    mb.observe_damage_loglik(sp, ll)
+                    mb.observe_damage_loglik(sp, ll, direction="def")   # narrows opp Def/SpD/HP, not Atk/SpA
                     stats["used_def"] += 1
                     continue
             ctx = _move_damage_ctx(move, our_mon, opp_mon)
@@ -164,6 +185,7 @@ def feed_damage_constraints(
                 stats["skipped_move"] += 1
                 continue
             cat, _off, bp, _mt, tmult, is_spread, is_stab = ctx
+            is_spread = is_spread and _multi_target(ev)   # a spread move that hit ONE target dealt full damage
             a_key = norm_species(ev.get("source_species") or our_mon.get("species") or "")
             A = (our_stats.get(a_key) or {}).get(_off)
             mf = _modal_full(belief, sp, level)
@@ -177,9 +199,12 @@ def feed_damage_constraints(
             if bmax <= 0:
                 stats["skipped_ctx"] += 1
                 continue
-            # opp defender → mitigation known only once its item+ability are revealed (else σ keeps the
-            # resist-berry/Multiscale/screen term); crit is known either way → its σ term is dropped.
-            mitig_known = bool(opp_mon.get("known_item")) and bool(opp_mon.get("known_ability"))
+            # opp defender → mitigation known only once its STILL-HELD item + ability are revealed (else σ
+            # keeps the resist-berry/Multiscale/screen term); crit is known either way → its σ term is
+            # dropped. A CONSUMED item (berry eaten / Knocked Off / Sash popped) is no longer mitigating,
+            # so it must NOT count as known context — the currently-held item is unknown (audit 2026-06-30).
+            mitig_known = (bool(opp_mon.get("known_item")) and not opp_mon.get("item_consumed")
+                           and bool(opp_mon.get("known_ability")))
             mb.observe_damage_taken(
                 sp, mu_ref=(bmin + bmax) / 2.0, ref_main=damage_main_term(bp, A, mf[stat]),
                 ref_def_stat=mf[stat], ref_hp=mf["hp"], category=cat, obs_frac_of_max=obs,
@@ -195,14 +220,25 @@ def feed_damage_constraints(
                 stats["skipped_id"] += 1
                 continue
             sp = opp_mon.get("base_species") or opp_mon.get("species")
+            # opp is the ATTACKER here → reconcile the start-of-turn occupant against the event's SOURCE
+            # species (a mid-turn slot change since T-1 would otherwise narrow the wrong attacker's belief).
+            # Mirrors the A3 speed guard. (audit 2026-06-30)
+            ev_att_sp = ev.get("source_species")
+            if ev_att_sp and sp and norm_species(sp) != norm_species(ev_att_sp):
+                stats["skipped_ctx"] += 1
+                continue
             # A2 v2: poke-env per-candidate calc (item + ability marginalised) when a live calc is wired,
             # else the analytic `_damage_band` path below. A None return (poke-env couldn't run) falls through.
             if damage_loglik_fn is not None and sp:
                 ll = damage_loglik_fn(
                     direction="off", opp_key=skey, our_key=dkey, opp_species=sp, opp_snapshot_mon=opp_mon,
+                    our_species=ev.get("species"),          # our mon is the DEFENDER here
                     move=move, crit=bool(ev.get("crit")), obs_frac=obs)
                 if ll:
-                    mb.observe_damage_loglik(sp, ll)
+                    # tag the offensive stat this event pins (atk/spa for a standard move, None for a
+                    # stat-independent one) so the category/item nature guards defer only on the right stat.
+                    mb.observe_damage_loglik(sp, ll, direction="off",
+                                             stat=_offensive_stat_for_move(move))
                     stats["used_off"] += 1
                     continue
             ctx = _move_damage_ctx(move, opp_mon, our_mon)
@@ -210,6 +246,7 @@ def feed_damage_constraints(
                 stats["skipped_move"] += 1
                 continue
             cat, off_stat, bp, _mt, tmult, is_spread, is_stab = ctx
+            is_spread = is_spread and _multi_target(ev)   # a spread move that hit ONE target dealt full damage
             d_key = norm_species(ev.get("species") or our_mon.get("species") or "")
             ours = our_stats.get(d_key) or {}
             dstat = "def" if cat == "physical" else "spd"

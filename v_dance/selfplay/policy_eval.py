@@ -276,7 +276,16 @@ def ppo_forward(
         z = torch.zeros(0, device=device)
         return PPOEval(z, z, z, None if ref_policy is None else z)
     states = _states_tensor(transitions, device)
-    action_logits, gimmick_logits, value_logit = ac(states)
+    # C51: a full ac(states) runs the critic trunk to produce a SCALAR value_logit that the C51 branch
+    # below DISCARDS, then value_atoms_logits(states) runs that same trunk AGAIN — two critic passes for one
+    # value. Run the ACTOR alone for the policy heads (action_logits are IDENTICAL — ac.forward delegates
+    # them to self.policy) and the critic ONCE for the atoms. The scalar path keeps the single ac() call, so
+    # it is byte-identical (audit 2026-06-30 — perf, C51-only).
+    is_c51 = getattr(ac, "critic", None) is not None and ac.critic.is_c51
+    if is_c51:
+        action_logits, gimmick_logits, _ = ac.policy(states)   # actor only; the critic runs once below
+    else:
+        action_logits, gimmick_logits, value_logit = ac(states)
     A = next(iter(action_logits.values())).shape[-1]
     G = next(iter(gimmick_logits.values())).shape[-1] if gimmick_logits else 0
     sb = _slot_batches(transitions, ac.head_names, ac.gimmick_head_names, A, G, device)
@@ -284,7 +293,7 @@ def ppo_forward(
     # C51: the value baseline is the distribution MEAN and the loss needs the raw per-atom logits;
     # the scalar critic keeps the win-prob path. value_pm stays in [-1,1] either way.
     atoms_logits = None
-    if getattr(ac, "critic", None) is not None and ac.critic.is_c51:
+    if is_c51:
         atoms_logits = ac.critic.value_atoms_logits(states)
         value_pm = (atoms_logits.softmax(dim=-1) * ac.critic.support).sum(dim=-1)
     else:

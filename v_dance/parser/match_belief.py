@@ -60,6 +60,30 @@ from v_dance.parser.vod_parser.pokedex import norm_species
 # penalised equally the renormalised distribution is unchanged.
 _CATEGORY_PENALTY = 0.15
 
+# Revealed-item → spread COHERENCE prior (Level C, the 1 deferred B1-audit item; design
+# docs/levelC_item_spread_reconditioning_design.md).  Pikalytics exposes only the MARGINAL item & spread
+# (no joint P(spread|item)), so a usage-correlation heuristic would be speculative and could HURT.  Instead
+# we exploit a DETERMINISTIC fact that needs no joint data: a Choice item's ×1.5 boost makes a nature that
+# LOWERS that very stat competitively incoherent (you don't run a −Spe Choice Scarf, a −Atk Choice Band, or a
+# −SpA Choice Specs).  We down-weight ONLY those incoherent spreads — the safe INVERSE of guessing a
+# correlation up.  Renormalisation then lifts the survivors proportionally (no claim about which survivor is
+# likelier).  The penalty is slightly stronger than _CATEGORY_PENALTY: a held item is more direct evidence
+# than a single observed move.  Items that merely imply a DIRECTION (Assault Vest / Eviolite / Life Orb /
+# type-boost) contradict no nature → deliberately EXCLUDED (their damage effect is already in A2).
+_ITEM_NATURE_PENALTY = 0.12
+_ITEM_BOOST_STAT = {                        # norm_species(item) → the stat the item boosts (== the stat a
+    "choicescarf": "spe",                   # coherent spread must NOT lower
+    "choiceband": "atk",
+    "choicespecs": "spa",
+}
+
+# Paradox stat-reveal (Protosynthesis / Quark Drive, incl. Booster Energy): when the boost activates the
+# boosted stat IS the mon's HIGHEST non-HP stat (Atk>Def>SpA>SpD>Spe tiebreak per the mechanic). A candidate
+# spread whose argmax stat differs from the revealed one is (near-)impossible → strong down-weight. This is a
+# RANK reveal (which stat is highest), orthogonal to the magnitude signals (damage/speed). Floored, never zeroed.
+_BOOST_STAT_PENALTY = 0.10
+_STAT_TIEBREAK = ("atk", "def", "spa", "spd", "spe")   # the paradox highest-stat tiebreak order
+
 # A2 damage-roll narrowing (fully-fleshed): a per-spread Bayesian likelihood that the observed damage % came
 # from that spread, modelled LOG-NORMAL around the spread's PREDICTED mean damage. The log-space stdev σ encodes
 # the prediction uncertainty — and SHRINKS as the caller pins down context, so the SAME code narrows loosely
@@ -225,7 +249,8 @@ class _MonObservations:
     """Accumulated within-game reveals for ONE opponent mon line."""
 
     __slots__ = ("revealed_moves", "_revealed_norm", "known_item", "known_ability",
-                 "can_have_choice_item", "damage_constraints", "speed_constraints")
+                 "can_have_choice_item", "known_boosted_stat", "damage_constraints",
+                 "speed_constraints", "_seen_keys")
 
     def __init__(self) -> None:
         self.revealed_moves: list[str] = []   # display names, insertion order, dedup
@@ -233,8 +258,20 @@ class _MonObservations:
         self.known_item: Optional[str] = None
         self.known_ability: Optional[str] = None
         self.can_have_choice_item: Optional[bool] = None
+        self.known_boosted_stat: Optional[str] = None   # paradox highest-stat reveal (atk/def/spa/spd/spe)
         self.damage_constraints: list[dict] = []   # A2: defensive damage-roll constraints
         self.speed_constraints: list[dict] = []    # A3: speed-tier bounds (base-Spe threshold + direction)
+        self._seen_keys: set = set()               # internal idempotency: event keys already folded in
+
+    def fresh_event(self, key: Optional[str]) -> bool:
+        """True if ``key`` has NOT been folded in yet (and records it). None ⇒ always fresh (no dedup).
+        Defence-in-depth against a re-fed observation double-counting the Bayesian product (audit 2026-06-30)."""
+        if key is None:
+            return True
+        if key in self._seen_keys:
+            return False
+        self._seen_keys.add(key)
+        return True
 
     def add_move(self, move: Optional[str]) -> None:
         if not move:
@@ -304,6 +341,12 @@ class MatchBelief:
         if ability:
             self._obs(species).known_ability = ability
 
+    def observe_boosted_stat(self, species: Optional[str], stat: Optional[str]) -> None:
+        """Record a Protosynthesis / Quark-Drive boost reveal — the mon's HIGHEST non-HP stat. Monotone: the
+        spread doesn't change mid-game, so once seen it stays. No-op for a missing/invalid stat."""
+        if stat in _STAT_TIEBREAK:
+            self._obs(species).known_boosted_stat = stat
+
     def observe_choice_constraint(self, species: Optional[str],
                                   can_have_choice_item: Optional[bool]) -> None:
         """Replay-derived Choice constraint (False = used 2 moves in one stay →
@@ -325,6 +368,8 @@ class MatchBelief:
         category: Optional[str],
         obs_frac_of_max: Optional[float],
         sigma_log: float = _SIGMA_LOG_DEFAULT,
+        was_ko: bool = False,
+        event_key: Optional[str] = None,
     ) -> None:
         """DEFENSIVE constraint (A2): the opp mon (`species`) TOOK ``obs_frac_of_max`` (= |hp_pct_delta|/100
         of its MAX hp) from a ``category`` ('physical'|'special') move whose attacker is KNOWN (ours). The
@@ -337,9 +382,13 @@ class MatchBelief:
         if (category not in ("physical", "special") or not ref_def_stat or not ref_hp
                 or not mu_ref or mu_ref <= 0 or ref_main is None or ref_main < 0
                 or not obs_frac_of_max or obs_frac_of_max <= 0
-                or not sigma_log or sigma_log <= 0):
+                or not sigma_log or sigma_log <= 0
+                or was_ko):                       # a KO censors the damage (obs is only a lower bound) — drop it
             return
-        self._obs(species).damage_constraints.append({
+        obs = self._obs(species)
+        if not obs.fresh_event(event_key):        # idempotency: never fold the same event twice
+            return
+        obs.damage_constraints.append({
             "mode": "def",
             "stat": "def" if category == "physical" else "spd",
             "ref_stat": float(ref_def_stat),
@@ -360,6 +409,8 @@ class MatchBelief:
         category: Optional[str],
         obs_frac_of_max: Optional[float],
         sigma_log: float = _SIGMA_LOG_DEFAULT,
+        was_ko: bool = False,
+        event_key: Optional[str] = None,
     ) -> None:
         """OFFENSIVE constraint (A2 v2): the opp mon (`species`) DEALT ``obs_frac_of_max`` (of OUR mon's MAX
         hp) with a ``category`` move whose defender is KNOWN (ours). The CALLER predicts the MEAN damage
@@ -370,9 +421,13 @@ class MatchBelief:
         if (category not in ("physical", "special") or not ref_atk_stat
                 or not mu_ref or mu_ref <= 0 or ref_main is None or ref_main < 0
                 or not obs_frac_of_max or obs_frac_of_max <= 0
-                or not sigma_log or sigma_log <= 0):
+                or not sigma_log or sigma_log <= 0
+                or was_ko):                       # a KO censors OUR mon's damage taken (lower bound only) — drop
             return
-        self._obs(species).damage_constraints.append({
+        obs = self._obs(species)
+        if not obs.fresh_event(event_key):        # idempotency: never fold the same event twice
+            return
+        obs.damage_constraints.append({
             "mode": "off",
             "stat": "atk" if category == "physical" else "spa",
             "ref_stat": float(ref_atk_stat),
@@ -382,15 +437,23 @@ class MatchBelief:
             "sigma": float(sigma_log),
         })
 
-    def observe_damage_loglik(self, species: Optional[str], loglik_by_key: Optional[dict]) -> None:
+    def observe_damage_loglik(self, species: Optional[str], loglik_by_key: Optional[dict],
+                              *, direction: str = "off", stat: Optional[str] = None) -> None:
         """Record a PRECOMPUTED per-spread LOG-likelihood (A2 v2): an external calculator (the live
         poke-env path, which marginalises over item hypotheses) computed ``ln L(spread)`` for each
         candidate spread of an observed damage event, keyed by :func:`_spread_key`. MatchBelief just
         multiplies these into the spread distribution at ``block_for`` time — staying calculator-agnostic
-        (it never imports poke-env). No-op for an empty map."""
+        (it never imports poke-env). No-op for an empty map.
+
+        ``direction`` ('off' = opp DEALT it, narrows opp Atk/SpA; 'def' = opp TOOK it, narrows opp
+        Def/SpD/HP) and ``stat`` (the offensive stat 'atk'/'spa' an 'off' event pins; None for 'def' or a
+        stat-independent move) TAG what the loglik constrains. The move-category / item nature-coherence
+        guards defer ONLY to an OFFENSIVE loglik on the SAME stat: a DEFENSIVE loglik weights spreads by
+        Def/SpD/HP and says NOTHING about Atk/SpA, so it must not cancel that narrowing (audit 2026-06-30)."""
         if not loglik_by_key:
             return
-        self._obs(species).damage_constraints.append({"mode": "loglik", "loglik": dict(loglik_by_key)})
+        self._obs(species).damage_constraints.append(
+            {"mode": "loglik", "direction": direction, "stat": stat, "loglik": dict(loglik_by_key)})
 
     def observe_speed_bound(
         self,
@@ -399,6 +462,7 @@ class MatchBelief:
         threshold_base_spe: Optional[float],
         faster: bool,
         sigma_spe: Optional[float] = None,
+        event_key: Optional[str] = None,
     ) -> None:
         """Record a SPEED-TIER constraint (A3): the opp mon (`species`) moved FASTER (``faster=True``) or
         SLOWER (``faster=False``) than OUR mon in the SAME effective priority bracket. ``threshold_base_spe``
@@ -415,8 +479,14 @@ class MatchBelief:
         not call. MatchBelief then narrows spreads by a soft logistic on each candidate's Spe."""
         if not threshold_base_spe or threshold_base_spe <= 0:
             return
-        sig = sigma_spe if (sigma_spe and sigma_spe > 0) else max(2.0, _SPEED_SIGMA_REL * threshold_base_spe)
-        self._obs(species).speed_constraints.append({
+        # absolute floor of 2.0 base-Spe pts applies to a CALLER-supplied σ too (else slow mons get an
+        # over-sharp bound from an analyzer σ that rounds tiny) — audit 2026-06-30.
+        sig = (max(2.0, sigma_spe) if (sigma_spe and sigma_spe > 0)
+               else max(2.0, _SPEED_SIGMA_REL * threshold_base_spe))
+        obs = self._obs(species)
+        if not obs.fresh_event(event_key):        # idempotency: never fold the same order-event twice
+            return
+        obs.speed_constraints.append({
             "threshold": float(threshold_base_spe),
             "faster": bool(faster),
             "sigma": float(sig),
@@ -441,9 +511,13 @@ class MatchBelief:
             self.observe_move(species, mv)
         for mv in mon.get("known_moves") or []:   # exact/injected moves count as revealed
             self.observe_move(species, mv)
-        self.observe_item(species, mon.get("known_item"))
+        # a CONSUMED item is no longer HELD → don't collapse the held-item belief to it (audit 2026-06-30)
+        self.observe_item(species, mon.get("known_item") if not mon.get("item_consumed") else None)
         self.observe_ability(species, mon.get("known_ability"))
         self.observe_choice_constraint(species, mon.get("can_have_choice_item"))
+        # paradox highest-stat reveal (Protosynthesis/Quark Drive) — a transient volatile the accumulating
+        # belief keeps permanently once observed (the spread is fixed for the game).
+        self.observe_boosted_stat(species, (mon.get("volatiles") or {}).get("paradox_boosted_stat"))
 
     # ── belief block ─────────────────────────────────────────────────────────────
     def offensive_categories(self, species: Optional[str]) -> set[str]:
@@ -486,6 +560,8 @@ class MatchBelief:
         if block is None:
             return None
         self._narrow_spreads_by_category(block, species, stats_species or species)
+        self._narrow_spreads_by_item(block, species, stats_species or species)
+        self._narrow_spreads_by_boost_stat(block, species, stats_species or species)
         self._narrow_spreads_by_damage(block, species, stats_species or species)
         self._narrow_spreads_by_speed(block, species, stats_species or species)
         return block
@@ -542,6 +618,17 @@ class MatchBelief:
         else:
             return   # mixed / none / stat-independent only → no narrowing
 
+        # avoid double-counting correlated evidence: if OBSERVED DAMAGE already constrains this offensive stat
+        # (an 'off' analytic constraint on the same stat, or an OFFENSIVE loglik on the same stat), the damage
+        # likelihood already down-weights the stat-dropping natures — the move-category prior would re-apply it.
+        # A DEFENSIVE loglik (narrows Def/SpD/HP) is direction-blind to Atk/SpA and must NOT trigger this guard
+        # (audit 2026-06-30 — it was previously cancelling genuine offensive narrowing).
+        mb = self._mons.get(self._key(species))
+        if mb and any((c.get("mode") == "off" and c.get("stat") == drop)
+                      or (c.get("mode") == "loglik" and c.get("direction") == "off" and c.get("stat") == drop)
+                      for c in mb.damage_constraints):
+            return
+
         changed = False
         for s in spreads:
             if NATURE_BOOSTS.get(s.get("nature"), ("", ""))[1] == drop:
@@ -560,6 +647,97 @@ class MatchBelief:
         base = dex_base_stats(stats_species) or dex_base_stats(block.get("species_key"))
         if not base:
             return
+        acc = {st: 0.0 for st in STAT_ORDER}
+        for s in spreads:
+            stats = calc_full_stats(base, s["evs_actual"], s["nature"], level=self._level)
+            for st in STAT_ORDER:
+                acc[st] += s["p"] * stats[st]
+        block["expected_stats"] = {st: round(v, 1) for st, v in acc.items()}
+
+    def _narrow_spreads_by_item(self, block: dict, species: str,
+                                stats_species: Optional[str]) -> None:
+        """In-place: a revealed Choice Scarf/Band/Specs makes a spread whose nature LOWERS the item's
+        boosted stat competitively incoherent → down-weight it (never zeroed), renormalise, re-sort,
+        recompute ``expected_stats``.  A COHERENCE prior, not a P(spread|item) guess — it needs no joint
+        usage data (see ``_ITEM_BOOST_STAT``).  No-op unless the revealed item is in ``_ITEM_BOOST_STAT``
+        and the SAME stat is not already constrained by an observed move (category), damage (A2) or speed
+        (A3) event — so this only ever ADDS signal a physics/observation channel hasn't already covered
+        (mirrors the double-count guards in the other narrowers)."""
+        mb = self._mons.get(self._key(species))
+        if not mb or not mb.known_item:
+            return
+        boosted = _ITEM_BOOST_STAT.get(norm_species(mb.known_item))
+        if not boosted:
+            return    # item has no deterministic nature-coherence implication (AV/Eviolite/Life Orb/…)
+        spreads = block.get("spreads") or []
+        if len(spreads) < 2:
+            return
+        # double-count guards — defer to an already-fired channel on the SAME stat (audit-pattern parity):
+        if boosted in ("atk", "spa"):
+            if self.offensive_categories(species) == {boosted}:      # move-category prior ALREADY fired on this
+                return                                               # stat (it only fires on a SINGLE-category
+            #                                                          attacker; a MIXED {atk,spa} set bailed, so
+            #                                                          the item signal is still genuinely new)
+            if any((c.get("mode") == "off" and c.get("stat") == boosted)
+                   or (c.get("mode") == "loglik" and c.get("direction") == "off" and c.get("stat") == boosted)
+                   for c in mb.damage_constraints):                  # an OFFENSIVE damage event already
+                return                                               # constrained it (a DEFENSIVE loglik does NOT)
+        elif boosted == "spe" and mb.speed_constraints:              # A3 speed order already constrained Spe
+            return
+
+        changed = False
+        for s in spreads:
+            if NATURE_BOOSTS.get(s.get("nature"), ("", ""))[1] == boosted:
+                s["p"] = s["p"] * _ITEM_NATURE_PENALTY
+                changed = True
+        if not changed:
+            return   # no incoherent spread to penalise (single-role mon → near-no-op, by design)
+
+        total = sum(s["p"] for s in spreads) or 1.0
+        for s in spreads:
+            s["p"] = round(s["p"] / total, 4)
+        spreads.sort(key=lambda s: s["p"], reverse=True)
+
+        base = dex_base_stats(stats_species) or dex_base_stats(block.get("species_key"))
+        if not base:
+            return
+        acc = {st: 0.0 for st in STAT_ORDER}
+        for s in spreads:
+            stats = calc_full_stats(base, s["evs_actual"], s["nature"], level=self._level)
+            for st in STAT_ORDER:
+                acc[st] += s["p"] * stats[st]
+        block["expected_stats"] = {st: round(v, 1) for st, v in acc.items()}
+
+    def _narrow_spreads_by_boost_stat(self, block: dict, species: str,
+                                      stats_species: Optional[str]) -> None:
+        """In-place: a revealed Protosynthesis/Quark-Drive boost pins the mon's HIGHEST non-HP stat, so a
+        candidate spread whose argmax stat (Atk>Def>SpA>SpD>Spe tiebreak) differs is (near-)impossible →
+        down-weight it (never zeroed), renormalise, re-sort, recompute ``expected_stats``. A RANK reveal —
+        orthogonal to the damage/speed magnitude signals, so no double-count guard. No-op without a reveal."""
+        mb = self._mons.get(self._key(species))
+        if not mb or not mb.known_boosted_stat:
+            return
+        revealed = mb.known_boosted_stat
+        spreads = block.get("spreads") or []
+        if len(spreads) < 2:
+            return
+        base = dex_base_stats(stats_species) or dex_base_stats(block.get("species_key"))
+        if not base:
+            return
+        changed = False
+        for s in spreads:
+            full = calc_full_stats(base, s["evs_actual"], s["nature"], level=self._level)
+            argmax = max(_STAT_TIEBREAK, key=lambda st: (full.get(st, 0), -_STAT_TIEBREAK.index(st)))
+            if argmax != revealed:
+                s["p"] = s["p"] * _BOOST_STAT_PENALTY
+                changed = True
+        if not changed:
+            return   # every candidate's highest stat already matches the reveal → no-op
+
+        total = sum(s["p"] for s in spreads) or 1.0
+        for s in spreads:
+            s["p"] = round(s["p"] / total, 4)
+        spreads.sort(key=lambda s: s["p"], reverse=True)
         acc = {st: 0.0 for st in STAT_ORDER}
         for s in spreads:
             stats = calc_full_stats(base, s["evs_actual"], s["nature"], level=self._level)

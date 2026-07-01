@@ -76,15 +76,18 @@ DEFAULT_EVAL_TEAMS = (
 _FS_MONITOR_KEYS = ("forced_default", "retry", "retry_default", "forced_switch_escape",
                     "forfeit", "abandon_forfeit", "forced_switch", "rejected_resample",
                     "model_error", "no_model")
-# Mirror of game_runner.MODEL_DRIVEN_SOURCES (kept LOCAL so this module stays torch-free for
-# --dry-run; the set is stable — the complement is what makes the monitor robust to new edge labels).
-_MODEL_DRIVEN_SOURCES = ("model", "forced_switch_model")
+# Mirror of reward._MODEL_DRIVEN_SOURCES (kept LOCAL so this module stays torch-free for --dry-run;
+# the set is stable — the complement is what makes the monitor robust to new edge labels).
+# B1: "search" is a model-grounded decision (see reward.py), so it is model-driven, NOT an edge event.
+_MODEL_DRIVEN_SOURCES = ("model", "forced_switch_model", "search")
 # Non-edge source keys excluded from the complement: model-driven decisions + bookkeeping counters.
 # audit: `rejected_resample` is BOOKKEEPING (incremented alongside a re-sampled MODEL pick whose executed
 # action is still model-driven, per reward._NON_DECISION_COUNTERS) — it is NOT an edge event, so a benign
 # Choice-lock/Encore resample burst must not inflate the fs-monitor 'edge event' tally. (abandon_forfeit IS
 # a real edge event with its own _FS_MONITOR_KEYS slot, so it is deliberately NOT excluded here.)
-_NON_EDGE_SOURCE_KEYS = frozenset(_MODEL_DRIVEN_SOURCES) | {"rejected_resample", "games"}
+# `finalize_failed` is POST-GAME bookkeeping (a dropped game, per reward._NON_DECISION_COUNTERS), NOT a
+# per-turn engineering escape, so it too is excluded here to match the model-driven classification (audit 2026-06-30).
+_NON_EDGE_SOURCE_KEYS = frozenset(_MODEL_DRIVEN_SOURCES) | {"rejected_resample", "games", "finalize_failed"}
 
 
 def fs_monitor_counts(sources: dict) -> dict:
@@ -95,7 +98,9 @@ def fs_monitor_counts(sources: dict) -> dict:
     fs = {k: 0 for k in _FS_MONITOR_KEYS}                      # stable core, seeded 0
     for k, v in (sources or {}).items():
         k = str(k)
-        if k in _NON_EDGE_SOURCE_KEYS or k.startswith("tp_"):
+        # belief_*/search_* are DIAGNOSTIC feed/fire counters (A3/B1), not edge events — skip like tp_*.
+        if (k in _NON_EDGE_SOURCE_KEYS or k.startswith("tp_")
+                or k.startswith("belief_") or k.startswith("search_")):
             continue
         fs[k] = int(v or 0)                                    # known OR newly-seen non-model source
     fs["total"] = sum(fs.values())                            # fs holds only edge keys at this point

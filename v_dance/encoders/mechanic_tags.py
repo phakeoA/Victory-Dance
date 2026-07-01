@@ -71,6 +71,43 @@ def _axes(boosts: str, neg: bool = False) -> Set[str]:
     return out
 
 
+def _subarray(block: str, key: str) -> str:
+    """Text inside ``key: [ ... ]`` (balanced brackets), or '' if absent — for a plural
+    ``secondaries: [ {...}, {...} ]`` array (the ``{}``-only ``_subobj`` can't reach it)."""
+    m = re.search(rf"\b{key}:\s*\[", block)
+    if not m:
+        return ""
+    depth, start = 0, m.end() - 1
+    for j in range(start, len(block)):
+        if block[j] == "[":
+            depth += 1
+        elif block[j] == "]":
+            depth -= 1
+            if depth == 0:
+                return block[start + 1:j]
+    return ""
+
+
+def _strip_self_objs(s: str) -> str:
+    """Remove every ``self: { ... }`` sub-object (balanced braces) so a SELF-boost nested inside a
+    secondary is NOT read as a TARGET stat change (a self-debuff like Close Combat must never tag
+    stat_drop_target). Iterates until no ``self:`` object remains."""
+    while True:
+        m = re.search(r"\bself:\s*\{", s)
+        if not m:
+            return s
+        depth, j = 0, m.end() - 1
+        while j < len(s):
+            if s[j] == "{":
+                depth += 1
+            elif s[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        s = s[:m.start()] + s[j + 1:]
+
+
 def _derive_move_tags(mid: str, block: str) -> Set[str]:
     t: Set[str] = set()
     is_status = bool(re.search(r'category:\s*"Status"', block))
@@ -86,8 +123,13 @@ def _derive_move_tags(mid: str, block: str) -> Set[str]:
     pos = _axes(self_b) | _axes(sec_self_b) | (_axes(top_b) if (is_status and is_self) else set())
     for ax in pos:
         t.add(f"self_boost_{ax}")
-    # target stat drops (negative) — top-level on a foe STATUS move, or any secondary boosts
-    drop = (_axes(top_b, neg=True) if (is_status and not is_self) else set()) | _axes(sec_b, neg=True)
+    # target stat drops (negative) — top-level on a foe STATUS move, the SINGULAR secondary's boosts, or
+    # any PLURAL secondaries:[] element's boosts (e.g. Triple Arrows' {def:-1}). Self-nested boosts are
+    # stripped from the array first so a self-debuff in a secondary isn't read as a target drop (audit
+    # 2026-06-30 — secondaries[] was previously unparsed → Triple Arrows missed the tag).
+    secs = _strip_self_objs(_subarray(block, "secondaries"))
+    drop = ((_axes(top_b, neg=True) if (is_status and not is_self) else set())
+            | _axes(sec_b, neg=True) | _axes(secs, neg=True))
     if drop:
         t.add("stat_drop_target")
 

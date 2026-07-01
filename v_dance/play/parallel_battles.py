@@ -335,5 +335,21 @@ async def run_jobs(jobs: Sequence[Callable[[], Awaitable]], *, workers: int,
                 return None
             return await job()
 
-    return await asyncio.gather(*[_guard(j) for j in jobs],
-                                return_exceptions=return_exceptions)
+    async def _ctrl_c_heartbeat():
+        # Windows Ctrl-C fix: the (forced) WindowsSelectorEventLoop blocks in select() with an INFINITE
+        # timeout when every worker is parked on a websocket, so a queued SIGINT/KeyboardInterrupt is never
+        # delivered (bpo-23057) and Ctrl-C appears to do nothing (the user had to kill the terminal). A tiny
+        # recurring timer keeps the select() timeout bounded (~0.25s) so the interrupt fires promptly and the
+        # run tears down cleanly via the callers' `finally: stop_showdown` (audit 2026-07-01).
+        try:
+            while True:
+                await asyncio.sleep(0.25)
+        except asyncio.CancelledError:
+            pass
+
+    hb = asyncio.ensure_future(_ctrl_c_heartbeat())
+    try:
+        return await asyncio.gather(*[_guard(j) for j in jobs],
+                                    return_exceptions=return_exceptions)
+    finally:
+        hb.cancel()

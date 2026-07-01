@@ -193,8 +193,10 @@ def promotion_gate_v2(*, scripted_wins: int, scripted_games: int,
                            "p_mirror": (mirror_wins / mirror_games) if mirror_games else None}
 
     p_scr = scripted_wins / scripted_games if scripted_games else 0.0
-    se_scr = math.sqrt(p_scr * (1 - p_scr) / max(1, scripted_games))
-    scr_upper = p_scr + cfg.floor_z * se_scr
+    # Wilson UPPER bound (not the Wald p + z·se) so the scripted-collapse floor is consistent with the
+    # mirror-collapse side, which already uses wilson_upper_bound, and is well-behaved at small n / extreme
+    # p where the Wald interval degenerates (audit 2026-06-30 — deferred item now closed).
+    scr_upper = wilson_upper_bound(scripted_wins, scripted_games, cfg.floor_z) if scripted_games > 0 else 1.0
     floor = (high_water - cfg.floor_margin) if high_water is not None else None
     collapsed = floor is not None and scr_upper < floor
 

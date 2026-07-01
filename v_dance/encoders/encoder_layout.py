@@ -277,7 +277,8 @@ _PROTECT_MOVES = {
     "spikyshield", "silktrap", "burningbulwark", "maxguard",
 }
 
-_EST_STAT_NORM = 300.0   # L50 stats top out around ~290 (max-HP Blissey)
+_EST_STAT_NORM = 300.0   # L50 est-stat normaliser; the est_stats write is CLAMPED to [0,1] (bulky HP overshoots:
+#                          max-HP Blissey L50 HP = 362 → 1.21 unclamped) so the channel obeys the block's range.
 
 
 # Showdown protocol weather tokens → canonical WEATHER_NAMES entries
