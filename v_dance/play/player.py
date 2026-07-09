@@ -198,9 +198,19 @@ class VGCPlayer(VGCPlayerBase):
         try:
             mask0 = build_legal_action_mask(battle, 0)
             mask1 = build_legal_action_mask(battle, 1)
+            # B-L1 adapt-rules (default OFF): serve-time pattern tilt — a logit bias, never a
+            # mask edit, so the model still chooses. A bias failure must never cost the turn.
+            bias0 = bias1 = None
+            if getattr(self, "_adapt_rules", False):
+                try:
+                    from v_dance.play.adapt_rules import action_biases
+                    bias0, bias1 = action_biases(self, battle)
+                except Exception:
+                    log.debug("adapt-rules bias failed (non-fatal)", exc_info=True)
             a0, a1 = _M.bc_action_indices(
                 self._model, self._model_heads, state_vec, mask0, mask1, self._device,
                 temperature=self._temperature, top_p=self._top_p, rng=self._rng,
+                bias0=bias0, bias1=bias1,
             )
             # ── Cross-slot SWITCH dedup (doubles "can only switch in once") ──────
             # The two heads pick independently, so both active slots can choose the
@@ -214,6 +224,7 @@ class VGCPlayer(VGCPlayerBase):
                 _, a1 = _M.bc_action_indices(
                     self._model, self._model_heads, state_vec, mask0, mask1, self._device,
                     temperature=self._temperature, top_p=self._top_p, rng=self._rng,
+                    bias0=bias0, bias1=bias1,
                 )
             # #10: stash the masks the model was sampled under (mask1 carries the cross-slot switch dedup)
             # so the recorded behaviour mask matches the sampling distribution.

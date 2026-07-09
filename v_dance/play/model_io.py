@@ -169,6 +169,16 @@ def load_bc_policy(path, device: str = "cpu", _ckpt=None):
         gimmick_heads=cfg.get("gimmick_heads"),
         value_readout=cfg.get("value_readout", "mean"),
         opp_cond=cfg.get("opp_cond", False),    # Level B: rebuild the opp-conditioned our heads if stamped
+        # Phase 1a match-memory core — absent keys (every pre-memory checkpoint)
+        # default to 0/stateless, so old checkpoints rebuild byte-identically.
+        memory_dim=cfg.get("memory_dim", 0),
+        mem_layers=cfg.get("mem_layers", 2),
+        mem_heads=cfg.get("mem_heads", 4),
+        max_mem_len=cfg.get("max_mem_len", 64),
+        # Phase 2 archetype-z — absent keys (every pre-z checkpoint) default to
+        # 0/off, rebuilding byte-identically.
+        n_archetypes=cfg.get("n_archetypes", 0),
+        z_dim=cfg.get("z_dim", 0),
     )
     # A PRE-gimmick checkpoint has no ``gimmick_heads.*`` weights.  The model now
     # always carries gimmick heads, so load non-strictly for those old checkpoints
@@ -188,6 +198,14 @@ def load_bc_policy(path, device: str = "cpu", _ckpt=None):
     model._gimmick_trained = bool(has_gimmick and cfg.get("gimmick_trained", True))
     # Value head usable only if present AND trained on outcome-labelled data.
     model._value_trained = bool(has_value and cfg.get("value_trained", False))
+    # Memory models: the TRAINED window length (train_bc --sequence-len stamp).
+    # Serve/eval must not exceed it — frames at ages >= the trained window would
+    # read never-trained mem_pos_emb rows (audit 2026-07-02). 1 = stateless.
+    model._sequence_len = int(cfg.get("sequence_len", 1) or 1)
+    # Phase-2 z checkpoints embed the archetype centroids (centroids/mu/sd/
+    # mon_feature_dim) so serve-time nearest-centroid assignment needs no
+    # sidecar file — the checkpoint is self-contained. None for pre-z ckpts.
+    model._z_artifact = ckpt.get("z_artifact")
     model.to(device).eval()
     return model, tuple(cfg.get("heads", ("our_a", "our_b")))
 
@@ -204,18 +222,44 @@ def _head_logits(out, head_names) -> Tuple[np.ndarray, np.ndarray]:
             np.asarray(l1.detach().cpu()).ravel())
 
 
+def _policy_forward(model, state_input, device: str = "cpu"):
+    """One policy forward for ONE decision, single-frame or frame-stacked.
+
+    ``state_input``: a 1-D ``(STATE_DIM,)`` vector → the plain single-turn
+    forward (unchanged behaviour), or a 2-D ``(T, STATE_DIM)`` MATCH FRAME-STACK
+    → ``forward_with_memory`` on a memory model (Phase-3 serve-time memory
+    carry; the outputs answer for the LAST frame).  A 2-D input handed to a
+    STATELESS model degrades gracefully to the last frame alone, so callers may
+    stack unconditionally."""
+    t = torch.as_tensor(np.asarray(state_input, dtype=np.float32), device=device)
+    with torch.no_grad():
+        if t.dim() == 2:
+            if int(getattr(model, "memory_dim", 0) or 0):
+                return model.forward_with_memory(t)
+            return model(t[-1])
+        return model(t)
+
+
 def bc_action_indices(
     model, head_names, state_vec: np.ndarray,
     mask0: Sequence[bool], mask1: Sequence[bool], device: str = "cpu",
     temperature: float = 0.0, top_p: float = 1.0, rng=None,
+    bias0=None, bias1=None,
 ) -> Tuple[Optional[int], Optional[int]]:
-    """Run the policy on one state vector and return a LEGAL action index for each
-    active slot (None where no legal action exists).
+    """Run the policy on one state (vector OR frame-stack — see _policy_forward)
+    and return a LEGAL action index for each active slot (None where no legal
+    action exists).
 
     Defaults (``temperature=0``) → masked argmax, byte-identical to the original.
     Pass ``temperature > 0`` (and optionally ``top_p`` < 1) for serve-side
-    temperature / nucleus sampling (TIER-4)."""
+    temperature / nucleus sampling (TIER-4). ``bias0``/``bias1`` (optional
+    per-slot (ACTION_DIM,) arrays) are ADDED to the raw logits before the masked
+    pick — the B-L1 adapt-rules tilt; None (the default) is byte-identical."""
     l0, l1 = head_logits(model, head_names, state_vec, device)
+    if bias0 is not None:
+        l0 = l0 + np.asarray(bias0, dtype=l0.dtype)
+    if bias1 is not None:
+        l1 = l1 + np.asarray(bias1, dtype=l1.dtype)
     return (masked_sample(l0, mask0, temperature, top_p, rng),
             masked_sample(l1, mask1, temperature, top_p, rng))
 
@@ -227,10 +271,8 @@ def head_logits(
     (slot 0 = our_a, slot 1 = our_b).  Used when the caller needs the logits
     directly — e.g. the forced-replacement path applies a per-slot switch-only
     mask with cross-slot dedup, which a single bc_action_indices call can't
-    express."""
-    with torch.no_grad():
-        t = torch.as_tensor(np.asarray(state_vec, dtype=np.float32), device=device)
-        out = model(t)
+    express.  Accepts a (T, STATE_DIM) frame-stack for memory models."""
+    out = _policy_forward(model, state_vec, device)
     # forward now returns (actions, gimmicks); back-compat with an action-only dict.
     actions = out[0] if isinstance(out, tuple) else out
     return _head_logits(actions, head_names)
@@ -241,10 +283,9 @@ def gimmick_logits(
 ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
     """Run the policy once and return the two per-head raw GIMMICK logit vectors
     (slot 0 = our_a, slot 1 = our_b), or None for a legacy action-only model.
-    The caller masked-argmaxes these over the per-slot gimmick legal mask."""
-    with torch.no_grad():
-        t = torch.as_tensor(np.asarray(state_vec, dtype=np.float32), device=device)
-        out = model(t)
+    The caller masked-argmaxes these over the per-slot gimmick legal mask.
+    Accepts a (T, STATE_DIM) frame-stack for memory models."""
+    out = _policy_forward(model, state_vec, device)
     if not (isinstance(out, tuple) and len(out) >= 2):
         return None
     return _head_logits(out[1], head_names)
@@ -260,11 +301,11 @@ def gimmick_trained(model) -> bool:
 def value_logit(model, state_vec: np.ndarray, device: str = "cpu") -> Optional[float]:
     """Win PROBABILITY in [0,1] for one state from the value head, or None for a
     legacy (pre-value) model.  Runs the policy once and applies sigmoid to the
-    scalar value logit — the basis for a 1-ply value lookahead at serve (#2)."""
+    scalar value logit — the basis for a 1-ply value lookahead at serve (#2).
+    Accepts a (T, STATE_DIM) frame-stack for memory models (NOT a batch — batch
+    scoring is value_logit_batch)."""
     import math
-    with torch.no_grad():
-        t = torch.as_tensor(np.asarray(state_vec, dtype=np.float32), device=device)
-        out = model(t)
+    out = _policy_forward(model, state_vec, device)
     if not (isinstance(out, tuple) and len(out) >= 3):
         return None
     v = float(np.asarray(out[2].detach().cpu()).ravel()[0])
@@ -353,12 +394,16 @@ def load_team_chooser(path, device: str = "cpu"):
     if uses_tp_features(cfg):
         from v_dance.training.tp_features import FEAT_DIM, FEATURE_SCHEMA_VERSION
         schema = cfg.get("feature_schema")
-        if int(cfg.get("feat_dim", 0)) != FEAT_DIM or schema != FEATURE_SCHEMA_VERSION:
+        # v7 = v6 + the OTS opp-side overlay; dims and channel offsets are
+        # IDENTICAL, so a v6 checkpoint stays loadable (it just never trained on
+        # non-zero opp overlays — closed-sheet serving is byte-identical for it).
+        compat = {FEATURE_SCHEMA_VERSION, "tpfeat-v6"}
+        if int(cfg.get("feat_dim", 0)) != FEAT_DIM or schema not in compat:
             raise ValueError(
                 f"team-chooser checkpoint feature_schema={schema} (feat_dim={cfg.get('feat_dim')}) "
                 f"is out of lockstep with the current tp_features {FEATURE_SCHEMA_VERSION} "
-                f"(FEAT_DIM={FEAT_DIM}) at {path} — re-export + retrain the SBDA TP net on the "
-                f"current schema."
+                f"(FEAT_DIM={FEAT_DIM}, compatible: {sorted(compat)}) at {path} — re-export + "
+                f"retrain the SBDA TP net on the current schema."
             )
     from v_dance.models.teampreview_model import TeamPreviewModel
     model = TeamPreviewModel(
@@ -472,6 +517,7 @@ def team_order(
     our_species: Sequence[str], opp_species: Sequence[str],
     n: int, device: str = "cpu", *,
     belief=None, own_known: Optional[dict] = None,
+    opp_known: Optional[dict] = None,
 ) -> List[int]:
     """Return roster indices to bring, LEADS FIRST (matching how the trainer
     labels — the first two brought are the leads), capped at ``n``.
@@ -484,6 +530,9 @@ def team_order(
     prior match what the net was trained on; legacy 46-dim nets ignore it.
     ``own_known`` optionally turns on the sharp OWN overlay (gated to the self-play
     fine-tune; the BC-pretrained net serves overlay-off for train/serve parity).
+    ``opp_known`` (``{norm_species: OwnKnown}``) is the tpfeat-v7 OTS pathway: in
+    open-team-sheet play the opponent's revealed builds ride the opp overlay —
+    pass it only when sheets are actually visible; ``None`` = closed regime.
     """
     valid = min(len(our_species), 6)
     if valid == 0:
@@ -496,7 +545,7 @@ def team_order(
     oi, of = _pack_side(our_species, vocab, feat_dim,
                         belief=belief, own_known=own_known, use_tp_features=use_tp)
     pi, pf = _pack_side(opp_species, vocab, feat_dim,
-                        belief=belief, own_known=None, use_tp_features=use_tp)
+                        belief=belief, own_known=opp_known, use_tp_features=use_tp)
 
     # 15b-feat.1b: feed the Pikalytics co-occurrence prior as the self-attention
     # bias when the SBDA net was built with ``use_teammate_bias``.  Needs a belief;

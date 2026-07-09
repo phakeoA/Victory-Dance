@@ -226,6 +226,9 @@ def transition_to_example(
         "gimmick_targets": gimmick_targets,
         "gimmick_masks": gimmick_masks,
         "replay_id": t.get("replay_id"),
+        # Trajectory key half (Phase 1b sequence BC): one replay yields TWO
+        # independent trajectories, one per perspective — never mix them.
+        "perspective": t.get("perspective"),
         # Demonstrator metadata (TIER-1 #1): used to filter/weight by skill.
         "rating": rating,
         "rating_delta": rating_delta,
@@ -281,10 +284,14 @@ def build_examples(
     stats: Counter = Counter()
     examples: List[dict] = []
 
+    import time as _time
+    files = list(files)
     if limit_files is not None:
-        files = list(files)[:limit_files]
+        files = files[:limit_files]
 
-    for fp in files:
+    _n_files = len(files)
+    _t0 = _time.time()
+    for _fi, fp in enumerate(files, 1):
         stats["files"] += 1
         try:
             with open(fp, encoding="utf-8") as fh:
@@ -302,6 +309,13 @@ def build_examples(
         except (OSError, json.JSONDecodeError) as exc:  # pragma: no cover
             stats["bad_files"] += 1
             print(f"[bc_dataset] WARNING: skipping {fp}: {exc}", file=sys.stderr)
+        # Encode heartbeat: build_examples is the ~35-min SILENT gap before a first-launch
+        # train/ruler (cache-MISS path). A periodic line reassures the long encode is live.
+        # Gated on a large folder so small val sets / tests stay silent (no output change there).
+        if _n_files >= 4000 and (_fi % 2000 == 0 or _fi == _n_files):
+            _dt = max(_time.time() - _t0, 1e-6)
+            print(f"[bc_dataset] encoding {_fi}/{_n_files} files "
+                  f"({stats['transitions']} transitions, {_fi/_dt:.0f} files/s)", flush=True)
         if limit_transitions is not None and stats["transitions"] >= limit_transitions:
             break
 
@@ -360,6 +374,29 @@ def split_by_replay(
     train = [e for e in examples if e["replay_id"] not in val_ids]
     val = [e for e in examples if e["replay_id"] in val_ids]
     return train, val
+
+
+def split_with_reference(
+    extra_examples: Sequence[dict],
+    ref_examples: Sequence[dict],
+    val_frac: float = 0.1,
+    seed: int = 0,
+) -> Tuple[List[dict], List[dict]]:
+    """Split with the val set PINNED to a fixed reference corpus.
+
+    ``ref_examples`` (e.g. the anchor's original folders) is split exactly like
+    :func:`split_by_replay` — same seed + val_frac reproduce the SAME val
+    replays as a run trained on the reference corpus alone, so val metrics stay
+    comparable across data-expansion runs.  ``extra_examples`` only ever add
+    TRAIN data: any of them sharing a replay_id with the reference corpus is
+    dropped (no val leakage, no double-weighted duplicate games).
+
+    Returns ``(train, val)``.
+    """
+    ref_train, val = split_by_replay(ref_examples, val_frac=val_frac, seed=seed)
+    ref_rids = {e["replay_id"] for e in ref_examples}
+    extra = [e for e in extra_examples if e["replay_id"] not in ref_rids]
+    return list(ref_train) + extra, val
 
 
 # ── Demonstrator skill filtering / weighting (TIER-1 #1) ──────────────────────
@@ -432,6 +469,82 @@ def compute_sample_weights(
     return w.astype(np.float32)
 
 
+def compute_advantage_weights(
+    examples: Sequence[dict],
+    value_ckpt: str,
+    mode: str = "exp",
+    beta: float = 1.6,
+    w_min: float = 0.2,
+    w_max: float = 5.0,
+    batch_size: int = 512,
+    device: str = "cpu",
+) -> np.ndarray:
+    """Phase-2 offline advantage weights (Metamon's "Exp" / the binary filter).
+
+    Per decision, ``A = G − V(s)`` where ``G`` is the game outcome (1 won /
+    0 lost — already on every example as ``won``) and ``V(s)`` is the TRAINED
+    value head's sigmoid win-prob from ``value_ckpt`` — plain MC advantage, no
+    bootstrapping, computed once here with one batched no-grad value pass.
+    Shifts BC from "imitate everyone" to "imitate what beat expectation"
+    without ever leaving the data manifold (the OOD search-leaf lesson).
+
+      * ``mode="exp"``:    ``w = clip(exp(beta·A), w_min, w_max)``
+      * ``mode="filter"``: ``w = 1[A > 0]`` (keep only better-than-expected)
+
+    Unknown-outcome examples keep raw weight 1.0 (advantage needs a label).
+    The vector is MEAN-NORMALISED to 1.0 (compute_sample_weights' invariant) so
+    the loss scale is preserved; COMPOSE with other weight vectors by
+    multiplying and re-normalising.
+
+    ⚠ Calibration (P0.4 ruler 2026-07-02): current value heads' val Brier is
+    ~0.26–0.30, barely under the 0.25 coin-flip line.  Advantage only has to
+    RANK decisions within a game — that survives weak calibration — but keep
+    ``beta`` conservative and the clip tight until a stronger V lands.
+    """
+    if not _HAS_TORCH:  # pragma: no cover
+        raise RuntimeError("torch is required for compute_advantage_weights")
+    if mode not in ("exp", "filter"):
+        raise ValueError(f"unknown advantage mode: {mode!r} (want 'exp' or 'filter')")
+    n = len(examples)
+    w = np.ones(n, dtype=np.float64)
+    if n == 0:
+        return w.astype(np.float32)
+
+    from v_dance.play.model_io import load_bc_policy
+    model, _heads = load_bc_policy(value_ckpt, device=device)
+    model.eval()
+    if not bool(getattr(model, "_value_trained", False)):
+        raise ValueError(
+            f"advantage weighting needs a checkpoint with a TRAINED value head: "
+            f"{value_ckpt} is stamped value_trained=False (advantages from an "
+            f"untrained V would bake pure noise into every loss weight)")
+
+    labelled = np.array([i for i, e in enumerate(examples)
+                         if e.get("won") is not None], dtype=np.int64)
+    if labelled.size == 0:
+        return w.astype(np.float32)   # no outcome labels anywhere → all-ones
+    G = np.array([1.0 if examples[i]["won"] else 0.0 for i in labelled],
+                 dtype=np.float64)
+    V = np.empty(labelled.size, dtype=np.float64)
+    with torch.no_grad():
+        for s in range(0, int(labelled.size), int(batch_size)):
+            idx = labelled[s:s + batch_size]
+            xb = torch.from_numpy(np.stack(
+                [np.asarray(examples[i]["x"], dtype=np.float32) for i in idx]))
+            _a, _g, value = model(xb.to(device))
+            V[s:s + idx.size] = torch.sigmoid(value).double().cpu().numpy()
+
+    A = G - V
+    if mode == "exp":
+        w[labelled] = np.clip(np.exp(beta * A), w_min, w_max)
+    else:
+        w[labelled] = (A > 0).astype(np.float64)
+    mean = w.mean()
+    if mean > 0:
+        w = w / mean
+    return w.astype(np.float32)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Torch Dataset wrapper
 # ══════════════════════════════════════════════════════════════════════════════
@@ -452,9 +565,34 @@ class BCDataset(Dataset):
 
     def __init__(self, examples: Sequence[dict], augment_move_order: bool = False,
                  aug_seed: int = 0, with_opp: bool = False,
-                 weights: Optional[Sequence[float]] = None):
+                 weights: Optional[Sequence[float]] = None,
+                 sequence_len: int = 1,
+                 archetype_ids: Optional[Sequence[int]] = None,
+                 lazy_x: bool = False):
         if not _HAS_TORCH:  # pragma: no cover
             raise RuntimeError("torch is required for BCDataset")
+        # Step B low-RAM mode (train_bc --mmap-cache): keep each example's x as
+        # a reference (typically a read-only row view of the folder's mmap'd
+        # cache X) instead of materializing the (N, STATE_DIM) matrix here —
+        # ~26 GB for the full MA-Bo3 corpus.  __getitem__ copies ONE row per
+        # fetch.  Sequence mode gathers history frames through the in-RAM
+        # matrix, so it is unsupported (memory-seq is a closed null anyway).
+        self.lazy_x = bool(lazy_x)
+        if self.lazy_x and int(sequence_len) > 1:
+            raise ValueError(
+                f"lazy_x does not support sequence_len > 1 (got {sequence_len}): "
+                "the sequence path gathers history frames from the in-RAM X matrix")
+        # Phase 1b sequence BC: with sequence_len > 1 each item ALSO carries
+        # ``x_seq`` (T, STATE_DIM) — the last ``sequence_len`` decision states
+        # of the SAME (replay_id, perspective) trajectory ending at this item —
+        # plus ``frame_padding_mask`` (T,) bool, True on the LEFT-padded zero
+        # frames of early-game items.  Targets stay the item's own (the LAST
+        # frame is supervised).  Never crosses a replay/perspective boundary by
+        # construction.  sequence_len == 1 keeps every item byte-identical to
+        # the stateless dataset (no x_seq key at all).
+        self.sequence_len = int(sequence_len)
+        if self.sequence_len < 1:
+            raise ValueError(f"sequence_len must be >= 1, got {sequence_len}")
         # Train-only move-slot permutation augmentation (task #22): when True,
         # each fetch independently permutes every own active mon's 4 move blocks
         # AND remaps that head's action target + mask, so the net learns move
@@ -466,8 +604,13 @@ class BCDataset(Dataset):
         self.with_opp = bool(with_opp)
         self._rng = np.random.RandomState(aug_seed)
         n = len(examples)
+        self._n = n
         state_dim = get_state_dim()
-        self.X = np.zeros((n, state_dim), dtype=np.float32)
+        if self.lazy_x:
+            self.X = None
+            self._x_rows: List[np.ndarray] = [ex["x"] for ex in examples]
+        else:
+            self.X = np.zeros((n, state_dim), dtype=np.float32)
         self.target = np.full((n, len(HEADS)), -1, dtype=np.int64)
         self.mask = np.zeros((n, len(HEADS), ACTIONS_PER_SLOT), dtype=np.float32)
         self.valid = np.zeros((n, len(HEADS)), dtype=np.float32)
@@ -489,15 +632,37 @@ class BCDataset(Dataset):
                 raise ValueError(
                     f"weights length {wv.shape[0]} != number of examples {n}")
             self.weight = wv
+        # Phase-2 z: per-example own-team archetype id (team_archetypes join).
+        # None (default) → the "archetype" item key is not emitted at all, so
+        # the batch shape stays byte-identical for every non-z training run.
+        self.archetype: Optional[np.ndarray] = None
+        if archetype_ids is not None:
+            av = np.asarray(archetype_ids, dtype=np.int64).ravel()
+            if av.shape[0] != n:
+                raise ValueError(
+                    f"archetype_ids length {av.shape[0]} != number of examples {n}")
+            self.archetype = av
         if self.with_opp:
             self.opp_target = np.full((n, len(OPP_HEADS)), -1, dtype=np.int64)
             self.opp_mask = np.zeros((n, len(OPP_HEADS), ACTIONS_PER_SLOT), dtype=np.float32)
             self.opp_valid = np.zeros((n, len(OPP_HEADS)), dtype=np.float32)
         self.replay_ids: List[str] = []
+        # Per-example trajectory bookkeeping (sequence mode): examples arrive in
+        # file order = temporal order within each (replay_id, perspective), so
+        # grouping by key while preserving order reconstructs each trajectory.
+        self._traj_of: List[Tuple[str, Optional[str]]] = []
+        self._traj_indices: Dict[Tuple[str, Optional[str]], List[int]] = {}
+        self._pos_in_traj = np.zeros(n, dtype=np.int64)
 
         for i, ex in enumerate(examples):
-            self.X[i] = ex["x"]
+            if not self.lazy_x:
+                self.X[i] = ex["x"]
             self.replay_ids.append(ex["replay_id"])
+            tkey = (ex["replay_id"], ex.get("perspective"))
+            traj = self._traj_indices.setdefault(tkey, [])
+            self._pos_in_traj[i] = len(traj)
+            traj.append(i)
+            self._traj_of.append(tkey)
             won = ex.get("won")
             if won is not None:
                 self.value_target[i] = 1.0 if won else 0.0
@@ -523,7 +688,8 @@ class BCDataset(Dataset):
                         self.opp_valid[i, o_idx] = 1.0
 
         # Pre-convert to tensors once (dataset fits comfortably in RAM).
-        self.X_t = torch.from_numpy(self.X)
+        # Lazy mode: no X matrix — rows are fetched (and copied) per item.
+        self.X_t = torch.from_numpy(self.X) if not self.lazy_x else None
         self.target_t = torch.from_numpy(self.target)
         self.mask_t = torch.from_numpy(self.mask)
         self.valid_t = torch.from_numpy(self.valid)
@@ -533,13 +699,20 @@ class BCDataset(Dataset):
         self.value_target_t = torch.from_numpy(self.value_target)
         self.value_valid_t = torch.from_numpy(self.value_valid)
         self.weight_t = torch.from_numpy(self.weight)
+        self.archetype_t = (torch.from_numpy(self.archetype)
+                            if self.archetype is not None else None)
         if self.with_opp:
             self.opp_target_t = torch.from_numpy(self.opp_target)
             self.opp_mask_t = torch.from_numpy(self.opp_mask)
             self.opp_valid_t = torch.from_numpy(self.opp_valid)
 
     def __len__(self) -> int:
-        return self.X_t.shape[0]
+        return self._n
+
+    def _x_np(self, idx: int) -> np.ndarray:
+        """One example's x as a fresh writable float32 row (lazy mode only:
+        copies the — possibly mmap'd, read-only — stored row)."""
+        return np.array(self._x_rows[idx], dtype=np.float32)
 
     def _opp_fields(self, idx: int) -> dict:
         """Opponent aux targets/masks for this item (empty unless with_opp).  The
@@ -553,10 +726,43 @@ class BCDataset(Dataset):
             "opp_valid": self.opp_valid_t[idx],
         }
 
+    def _z_fields(self, idx: int) -> dict:
+        """Phase-2 archetype id (empty unless archetype_ids were supplied)."""
+        if self.archetype_t is None:
+            return {}
+        return {"archetype": self.archetype_t[idx]}
+
+    def _seq_fields(self, idx: int, x_last: "torch.Tensor") -> dict:
+        """``x_seq`` (T, D) + ``frame_padding_mask`` (T,) in sequence mode.
+
+        History frames come from the STORED (never-augmented) X — only the
+        supervised LAST frame is ``x_last`` (the possibly-augmented fetch), so
+        the action labels always match the frame they were remapped for.
+        Early-game items are LEFT-padded with zero frames + a True mask (the
+        model's memory attention ignores them)."""
+        T = self.sequence_len
+        if T <= 1:
+            return {}
+        traj = self._traj_indices[self._traj_of[idx]]
+        pos = int(self._pos_in_traj[idx])
+        hist = traj[max(0, pos - T + 1): pos]          # frames strictly before idx
+        n_pad = T - 1 - len(hist)
+        x_seq = torch.zeros(T, self.X_t.shape[1], dtype=torch.float32)
+        if hist:
+            x_seq[n_pad: T - 1] = self.X_t[hist]
+        x_seq[T - 1] = x_last
+        fpm = torch.zeros(T, dtype=torch.bool)
+        if n_pad:
+            fpm[:n_pad] = True
+        return {"x_seq": x_seq, "frame_padding_mask": fpm}
+
     def __getitem__(self, idx: int) -> dict:
         if not self.augment_move_order:
+            x_t = (torch.from_numpy(self._x_np(idx)) if self.lazy_x
+                   else self.X_t[idx])
             return {
-                "x": self.X_t[idx],
+                "x": x_t,
+                **self._seq_fields(idx, x_t),
                 "target": self.target_t[idx],
                 "mask": self.mask_t[idx],
                 "valid": self.valid_t[idx],
@@ -567,12 +773,13 @@ class BCDataset(Dataset):
                 "value_valid": self.value_valid_t[idx],
                 "weight": self.weight_t[idx],
                 **self._opp_fields(idx),
+                **self._z_fields(idx),
             }
 
         # Augmented fetch: permute each own active slot's move blocks + remap the
         # matching action label/mask.  Work on numpy copies so the stored tensors
         # stay pristine.  Gimmick (per-slot, not per-move) is unaffected.
-        x = self.X[idx].copy()
+        x = self._x_np(idx) if self.lazy_x else self.X[idx].copy()
         target = self.target[idx].copy()
         mask = self.mask[idx].copy()
         for h_idx in range(len(HEADS)):
@@ -582,8 +789,10 @@ class BCDataset(Dataset):
                 target[h_idx] = permute_action_index(int(target[h_idx]), perm)
                 mask[h_idx] = np.asarray(
                     permute_action_mask_row(mask[h_idx].tolist(), perm), dtype=np.float32)
+        x_aug = torch.from_numpy(x)
         return {
-            "x": torch.from_numpy(x),
+            "x": x_aug,
+            **self._seq_fields(idx, x_aug),
             "target": torch.from_numpy(target),
             "mask": torch.from_numpy(mask),
             "valid": self.valid_t[idx],
@@ -594,6 +803,7 @@ class BCDataset(Dataset):
             "value_valid": self.value_valid_t[idx],
             "weight": self.weight_t[idx],
             **self._opp_fields(idx),
+            **self._z_fields(idx),
         }
 
 
@@ -606,7 +816,12 @@ def print_stats(stats: Counter) -> None:
         "skipped_gimmick_dim_mismatch", "skipped_gimmick_illegal",
         "dropped_forced_replacement", "bad_files",
     ]
-    print("── BC dataset stats ─────────────────────────")
+    # cp1252 consoles (non-interactive bash on Windows) can't encode the box-drawing chars —
+    # a cosmetic header must never kill a multi-hour training launch (bit 2x on 2026-07-05/06).
+    try:
+        print("── BC dataset stats ─────────────────────────")
+    except UnicodeEncodeError:
+        print("-- BC dataset stats -------------------------")
     for k in order:
         if k in stats:
             print(f"  {k:28s}: {stats[k]}")

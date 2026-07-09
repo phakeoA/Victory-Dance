@@ -76,6 +76,7 @@ class BattleHost:
         # the teampreview timing (the host would defer to a |showteam| that a reject means never arrives).
         accept_open_team_sheet: bool = False,
         max_concurrent_battles: int = 100000,
+        adapt_rules: bool = False,
         loop=POKE_LOOP,
     ):
         self._loop = loop
@@ -105,6 +106,7 @@ class BattleHost:
             start_listening=False,                 # ← no socket, no login, no listen()
             accept_open_team_sheet=accept_open_team_sheet,
             max_concurrent_battles=max_concurrent_battles,
+            adapt_rules=adapt_rules,
             log_level=logging.WARNING,
             loop=loop,
         )

@@ -22,12 +22,16 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
+import os
 import random
 import sys
+import time
 import webbrowser
 from pathlib import Path
 
+from v_dance.play.model_io import DEFAULT_BC_CHECKPOINT, DEFAULT_TP_CHECKPOINT
 from v_dance.play.run_local_battle import (
     BATTLE_FORMAT, SHOWDOWN_HOST, SHOWDOWN_PORT,
     discover_teams, load_team, make_player, resolve_team_path,
@@ -35,6 +39,52 @@ from v_dance.play.run_local_battle import (
 )
 
 AI_NAME = "VictoryDanceAI"     # the username you challenge in the client
+
+# Human-benchmark recording (docs/human_benchmark_design.md): one JSONL row per finished battle,
+# appended+flushed immediately so a Ctrl-C mid-session loses nothing already played.
+BENCH_DIR = Path(__file__).resolve().parents[2] / "artifacts" / "human_benchmark"
+BENCH_LOG = BENCH_DIR / "human_bench.jsonl"
+
+
+class _BenchLog:
+    """Append one row per finished battle; result from the player's counter deltas (draw-correct)."""
+
+    def __init__(self, session_id: str, note: str, ai_team: str, human_team: str,
+                 ckpt: Path, tp_ckpt: Path):
+        self.session_id, self.note = session_id, note
+        self.ai_team, self.human_team = ai_team, human_team
+        self.ckpt, self.tp_ckpt = str(ckpt), str(tp_ckpt)
+        self.game_idx = 0
+        self._seen: set = set()                       # battle tags already logged
+        BENCH_DIR.mkdir(parents=True, exist_ok=True)
+
+    def record(self, ai, result: str) -> None:
+        """Log the battle that just finished. ``result`` ∈ ai|human|draw (from counter deltas);
+        tag/turns/opponent come from the newest finished battle object not yet seen."""
+        tag, turns, opp = None, None, None
+        try:
+            fresh = [b for t, b in ai.battles.items() if b.finished and t not in self._seen]
+            if fresh:
+                b = fresh[-1]                          # one battle at a time → at most one fresh
+                tag = b.battle_tag
+                turns = getattr(b, "turn", None)
+                opp = getattr(b, "opponent_username", None)
+                self._seen.add(tag.lstrip(">") if tag else tag)
+                self._seen.add(tag)
+                # B-L2 dossier capture (passive; never raises) + a summary line for the USER.
+                from v_dance.play.opponent_dossier import summary, update_from_battle
+                if update_from_battle(b, result, our_team=self.ai_team, note=self.note):
+                    print(f"  [dossier] {summary(opp)}")
+        except Exception:
+            pass                                       # a row with result-only still beats no row
+        self.game_idx += 1
+        row = {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+               "session_id": self.session_id, "note": self.note, "game_idx": self.game_idx,
+               "battle_tag": tag, "ai_team": self.ai_team, "human_team": self.human_team,
+               "opponent": opp, "result": result, "turns": turns,
+               "ckpt": self.ckpt, "tp_ckpt": self.tp_ckpt}
+        with BENCH_LOG.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row) + "\n")
 
 
 def _pick_teams(mode: str, ai_team: str | None, human_team: str | None) -> tuple[str, str]:
@@ -55,7 +105,8 @@ def _pick_teams(mode: str, ai_team: str | None, human_team: str | None) -> tuple
     return ai_team, human_team
 
 
-async def _serve(ai, human_name: str | None, n_battles: int | None) -> None:
+async def _serve(ai, human_name: str | None, n_battles: int | None,
+                 bench: "_BenchLog | None" = None) -> None:
     """Accept challenges ONE battle at a time until Ctrl-C (``n_battles=None``, the default) or until
     ``n_battles`` have finished. Accepting one at a time means we loop back to *waiting* after every
     battle, so the server stays up between matches — you can rematch, and the browser finishes its
@@ -69,6 +120,7 @@ async def _serve(ai, human_name: str | None, n_battles: int | None) -> None:
     always-on ps_client listener queues any challenge that arrives between iterations, so none is missed."""
     accepted = 0
     while n_battles is None or accepted < n_battles:
+        w0, l0, t0 = ai.n_won_battles, ai.n_lost_battles, ai.n_tied_battles
         serve = asyncio.ensure_future(ai.accept_challenges(human_name, 1))
         try:
             while not serve.done():
@@ -78,6 +130,11 @@ async def _serve(ai, human_name: str | None, n_battles: int | None) -> None:
                 serve.cancel()                              # Ctrl-C / cancellation -> stop accepting
         serve.result()                                      # re-raise any real error from accept_challenges
         accepted += 1
+        if bench is not None:                               # counter deltas → exact, draw-correct result
+            result = ("ai" if ai.n_won_battles > w0 else
+                      "human" if ai.n_lost_battles > l0 else
+                      "draw" if ai.n_tied_battles > t0 else "unknown")
+            bench.record(ai, result)
         if n_battles is None or accepted < n_battles:
             print(f"  [battle {accepted} done]  tally — AI {ai.n_won_battles} / you {ai.n_lost_battles} "
                   f"/ draws {ai.n_tied_battles}.  Challenge {AI_NAME} again to keep playing, or Ctrl-C to stop.")
@@ -85,12 +142,28 @@ async def _serve(ai, human_name: str | None, n_battles: int | None) -> None:
 
 
 async def _run(ai_team_str: str, ai_team_name: str, human_team_str: str, human_team_name: str,
-               human_name: str | None, n_battles: int | None, url: str) -> None:
-    ai = make_player(AI_NAME, ai_team_str)             # production checkpoints via model_io defaults
+               human_name: str | None, n_battles: int | None, url: str,
+               ckpt: Path = DEFAULT_BC_CHECKPOINT, tp_ckpt: Path = DEFAULT_TP_CHECKPOINT,
+               bench: _BenchLog | None = None, adapt_rules: bool = False) -> None:
+    # bench ON → the existing #18 plumbing saves a playable HTML replay per battle (embedded full
+    # protocol log — re-parseable later for the Phase-3 adaptation loop).
+    _rec = ({"save_replays": True, "live_dir": BENCH_DIR / "live",
+             "replay_dir": BENCH_DIR / "replays" / bench.session_id, "replay_label": "bench"}
+            if bench is not None else {})
+    ai = make_player(AI_NAME, ai_team_str, model_path=ckpt, team_chooser_path=tp_ckpt,
+                     adapt_rules=adapt_rules, **_rec)
+    if adapt_rules:
+        print("  adapt-rules ON (B-L1: Wide-Guard streak → spread-move tilt)")
     print("\n" + "=" * 70)
     print("  HUMAN  vs  AI   (you pilot a real team against the production bot)")
     print("=" * 70)
     print(f"  AI ({AI_NAME}) team : {ai_team_name}")
+    print(f"  AI battle ckpt     : {ckpt}")
+    print(f"  AI TP ckpt         : {tp_ckpt}")
+    if bench is not None:
+        print(f"  bench session      : {bench.session_id}"
+              + (f"  (note: {bench.note})" if bench.note else "")
+              + f"  ->  {BENCH_LOG}")
     print(f"  YOUR team          : {human_team_name}")
     print(f"  format             : {BATTLE_FORMAT}")
     print(f"  battles to play    : {n_battles}")
@@ -114,7 +187,7 @@ async def _run(ai_team_str: str, ai_team_name: str, human_team_str: str, human_t
         pass
     won0, lost0, tied0 = ai.n_won_battles, ai.n_lost_battles, ai.n_tied_battles
     try:
-        await _serve(ai, human_name, n_battles)         # human_name=None -> accept from anyone
+        await _serve(ai, human_name, n_battles, bench)  # human_name=None -> accept from anyone
     finally:
         # Print the tally on ANY exit — a clean end OR Ctrl-C (the unlimited default only returns via
         # cancellation), so you always see the session result before the server is torn down.
@@ -139,6 +212,18 @@ def _parse_args(argv=None) -> argparse.Namespace:
                     help="stop after this many FINISHED battles (default: keep the server up and accept "
                          "challenges until you press Ctrl-C).")
     ap.add_argument("--list-teams", action="store_true", help="print the team pool and exit.")
+    # Serve refresh (docs/human_benchmark_design.md): benchmark ANY checkpoint without touching
+    # the model_io production defaults (anchor promotion stays a separate USER decision).
+    ap.add_argument("--ckpt", default=None,
+                    help="battle-net checkpoint to serve (default: the model_io production default).")
+    ap.add_argument("--tp-ckpt", default=None,
+                    help="team-preview (SBDA) checkpoint to serve (default: production default).")
+    ap.add_argument("--bench-note", default="",
+                    help="free-text tag stamped on every benchmark row (e.g. hfdata_full).")
+    ap.add_argument("--no-bench", action="store_true",
+                    help="disable benchmark recording (rows + saved HTML replays). Default: ON.")
+    ap.add_argument("--adapt-rules", action="store_true",
+                    help="B-L1 serve-time pattern tilt (Wide-Guard streak → spread bias). Default OFF.")
     return ap.parse_args(argv)
 
 
@@ -157,12 +242,24 @@ def main() -> None:
     human_team_str = load_team(resolve_team_path(human_name_team))
     url = f"http://{SHOWDOWN_HOST}:{SHOWDOWN_PORT}"
 
+    ckpt = Path(args.ckpt) if args.ckpt else DEFAULT_BC_CHECKPOINT
+    tp_ckpt = Path(args.tp_ckpt) if args.tp_ckpt else DEFAULT_TP_CHECKPOINT
+    for p in (ckpt, tp_ckpt):
+        if not p.is_file():
+            raise SystemExit(f"[play] checkpoint not found: {p}")
+    bench = None
+    if not args.no_bench:
+        session_id = f"{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}-{os.getpid()}"
+        bench = _BenchLog(session_id, args.bench_note, Path(ai_name).name,
+                          Path(human_name_team).name, ckpt, tp_ckpt)
+
     # Server lifecycle lives HERE (main thread) so the tree-kill ALWAYS runs — including on a
     # Ctrl-C, which now unwinds cleanly (see _serve) instead of wedging the terminal.
     proc = start_showdown()
     try:
         asyncio.run(_run(ai_team_str, Path(ai_name).name, human_team_str, Path(human_name_team).name,
-                         args.human_name, args.n_battles, url))
+                         args.human_name, args.n_battles, url, ckpt, tp_ckpt, bench,
+                         args.adapt_rules))
     except KeyboardInterrupt:
         print("\n[play] Ctrl-C received — stopping the AI and the Showdown server …")
     finally:

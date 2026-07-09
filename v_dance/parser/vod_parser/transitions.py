@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -21,6 +22,10 @@ from v_dance.parser.vod_parser.replay_parser import (
     ShowdownReplayParser,
     extract_log_from_html,
     extract_replay_id_from_html,
+)
+from v_dance.parser.vod_parser.team_sheet import (
+    packed_team_to_known_side,
+    parse_showteam_sides,
 )
 
 
@@ -58,7 +63,8 @@ def _merge_known_moves(injected: Optional[list], revealed: Optional[list]) -> li
     return merged[:4]   # >4 revealed (called-move artifacts) → hard cap
 
 
-def _inject_known_stats(mon_dict: dict, inj: dict) -> None:
+def _inject_known_stats(mon_dict: dict, inj: dict,
+                        sheet_authoritative: bool = False) -> None:
     """Merge a user-supplied known_teams entry into one mon's state dict.
 
     Bug 8 (mega ability split): the user-injected ``ability`` always refers
@@ -69,6 +75,12 @@ def _inject_known_stats(mon_dict: dict, inj: dict) -> None:
                         revealed in the replay) and pre_mega_ability.
       * mega'd mon    → injected ability only fills pre_mega_ability;
                         known_ability stays/becomes the pokedex mega ability.
+
+    ``sheet_authoritative`` marks a SERVER-emitted team sheet (the OTS
+    ``|showteam|`` path) rather than user-typed data: the sheet's moveset is
+    complete ground truth, so revealed moves are NOT merged in (a revealed
+    Struggle / called-move artifact would evict a real sheet move under the
+    4-slot cap), and a sheet with no item is a CONFIRMED itemless mon.
     """
     if not inj:
         return
@@ -82,12 +94,22 @@ def _inject_known_stats(mon_dict: dict, inj: dict) -> None:
     if (inj.get("ev_spread") or inj.get("nature")) and not mon_dict.get("iv_spread"):
         mon_dict["iv_spread"] = [31] * 6
     mon_dict["known_item"] = mon_dict.get("known_item") or inj.get("item")
+    if (sheet_authoritative and not mon_dict.get("known_item")
+            and not mon_dict.get("item_consumed")):
+        mon_dict["sheet_itemless"] = True
     # Only an actual user-typed move makes the moveset "known" — a merge of
     # revealed moves alone stays in revealed_moves (it may be incomplete).
     if any(m and str(m).strip() for m in (inj.get("moves") or [])):
-        mon_dict["known_moves"] = _merge_known_moves(
-            inj["moves"], mon_dict.get("revealed_moves")
-        )
+        if sheet_authoritative:
+            mon_dict["known_moves"] = _merge_known_moves(inj["moves"], None)
+            mon_dict["sheet_moves"] = True
+        elif not mon_dict.get("sheet_moves"):
+            # A server-sheet moveset outranks user-typed data — never let a
+            # later per-perspective inject re-run the reveal-wins merge over
+            # an authoritative stamp (scan 2026-07-02 interplay guard).
+            mon_dict["known_moves"] = _merge_known_moves(
+                inj["moves"], mon_dict.get("revealed_moves")
+            )
 
     inj_ability = inj.get("ability")
     if mon_dict.get("is_mega"):
@@ -127,6 +149,60 @@ def _apply_known_injection(snaps, side_inj: dict) -> None:
         for bench_mon in (snap.get("our_bench") or []):
             if not bench_mon.get("exact"):
                 _inject_known_stats(bench_mon, _lookup(bench_mon))
+
+
+def _apply_ots_knowledge(battle: dict, sides: dict) -> None:
+    """Stamp OTS-revealed team sheets into every snapshot of every turn.
+
+    Open team sheets are decision-time knowledge for BOTH players from team
+    preview on, so both halves of both perspectives get their side's revealed
+    nature/item/ability/moves (via the same ``_inject_known_stats`` merge the
+    Type-A inject path uses) BEFORE ``fill_blanks`` runs — the belief system
+    then narrows its distributions around the reveals (same ordering rationale
+    as ``_retrofit_own_side_knowledge`` above).  ``ev_spread`` is None by
+    construction (OTS strips EVs/IVs), so every mon stays belief-estimated —
+    never sheet-exact.
+
+    Transformed mons are skipped: their in-battle moveset/ability are the copy
+    TARGET's, and a sheet ``known_moves`` stamp would clobber that log-derived
+    truth (the encoder prefers known_moves over revealed_moves).
+
+    Lookups are NORM-keyed (scan 2026-07-02): a NICKNAMED mon's packed species
+    field is packName'd ("ChienPao", "MrMime"), and the CamelCase restore is
+    only norm_species-identical — never string-identical — to the parser's
+    display species ("Chien-Pao", "Mr. Mime"), so an exact-string get would
+    silently skip the sheet stamp for every nicknamed punctuation/forme mon.
+    """
+    norm_sides = {pid: {norm_species(k): v for k, v in (side or {}).items()}
+                  for pid, side in (sides or {}).items()}
+
+    def _stamp(mon: dict, side_inj: dict) -> None:
+        if not isinstance(mon, dict) or mon.get("exact") or mon.get("is_transformed"):
+            return
+        base = mon.get("base_species") or mon.get("species", "")
+        inj = (side_inj.get(norm_species(base))
+               or side_inj.get(norm_species(mon.get("species", ""))) or {})
+        if inj:
+            _inject_known_stats(mon, inj, sheet_authoritative=True)
+
+    for turn in battle.get("turns") or []:
+        containers = [turn.get("state_before_actions"), turn.get("state_after_actions")]
+        for repl in turn.get("replacements") or []:
+            if isinstance(repl, dict):
+                containers.append(repl.get("state"))
+        for cont in containers:
+            if not isinstance(cont, dict) or "our_active" in cont:
+                continue          # flattened preview shape — not this path
+            for persp, snap in cont.items():
+                if not isinstance(snap, dict):
+                    continue
+                opp = "p2" if persp == "p1" else "p1"
+                for mon in (list((snap.get("our_active") or {}).values())
+                            + list(snap.get("our_bench") or [])):
+                    _stamp(mon, norm_sides.get(persp) or {})
+                for mon in (list((snap.get("opp_active") or {}).values())
+                            + list(snap.get("opp_bench") or [])):
+                    _stamp(mon, norm_sides.get(opp) or {})
 
 
 def _retrofit_own_side_knowledge(battle: dict) -> None:
@@ -318,9 +394,38 @@ def replay_to_transitions(
     players: Optional[list] = None,
     known_teams: Optional[dict] = None,
     source_type: Optional[str] = None,
+    ots: Optional[bool] = None,
+) -> list:
+    """Parse a replay .html file into JSONL-ready transition dicts.
+
+    Thin HTML-envelope wrapper around :func:`log_to_transitions` (which holds
+    the full schema documentation) — extracts the raw protocol log and the
+    replay id, then delegates.  All parameters are forwarded unchanged.
+    """
+    html_content = Path(replay_path).read_text(encoding="utf-8")
+    replay_id = extract_replay_id_from_html(html_content) or Path(replay_path).stem
+    log = extract_log_from_html(html_content)
+    return log_to_transitions(
+        log, replay_id,
+        belief=belief, encoder=encoder, players=players,
+        known_teams=known_teams, source_type=source_type, ots=ots,
+    )
+
+
+def log_to_transitions(
+    log: str,
+    replay_id: str,
+    *,
+    belief=None,
+    encoder=None,
+    players: Optional[list] = None,
+    known_teams: Optional[dict] = None,
+    source_type: Optional[str] = None,
+    ots: Optional[bool] = None,
 ) -> list:
     """
-    Parse a replay and convert every turn into a JSONL-ready transition dict.
+    Parse a raw Showdown protocol log and convert every turn into a
+    JSONL-ready transition dict.
 
     Each transition records the state visible to one player at decision time,
     the actions taken that turn, the resulting state, and a decomposed reward
@@ -333,6 +438,9 @@ def replay_to_transitions(
                      | "self_play",      # canonical Type A/B/C/D token
       "replay_id": str,
       "format": str | null,
+      "ots": bool,                       # open team sheets were revealed AND stamped
+      "rated": bool,                     # log carries a |rated line
+      "bo3_set_id": str | null,          # best-of-N set id (cross-game linkage)
       "perspective": "p1" | "p2",
       "turn": int,
       "winner": str | null,              # username of winning player
@@ -404,10 +512,15 @@ def replay_to_transitions(
         "bot_vod", "self_play", or a bare letter).  Canonicalised via
         belief_state.VodType and stamped on every transition.  Defaults to
         Type B ("ranked_player_vod") when omitted.
+    ots : bool, optional
+        Open-team-sheet handling.  ``None`` (default) auto-detects: when the
+        log carries ``|showteam|`` lines both sides' revealed sheets are
+        stamped into every snapshot as decision-time knowledge (known_item /
+        known_ability / known_moves / nature — EVs stay hidden, mons stay
+        belief-estimated).  ``False`` forces CLOSED handling (sheets ignored —
+        matches ladder-style hidden-team training).  ``True`` requires the
+        sheets and raises when the log has none.
     """
-    html_content = Path(replay_path).read_text(encoding="utf-8")
-    replay_id = extract_replay_id_from_html(html_content) or Path(replay_path).stem
-
     known_entry: dict = {}
     if known_teams:
         known_entry = known_teams.get(replay_id, {})
@@ -421,7 +534,6 @@ def replay_to_transitions(
 
     our_player = known_entry.get("_meta", {}).get("yourSide", "p1") or "p1"
 
-    log = extract_log_from_html(html_content)
     parser = ShowdownReplayParser(log, our_player=our_player)
     battle = parser.parse()
     battle["replay_id"] = replay_id
@@ -437,6 +549,27 @@ def replay_to_transitions(
     # (final movesets + brought-but-unentered bench stubs) BEFORE enrichment,
     # so belief blocks and the action codec see the acting player's view.
     _retrofit_own_side_knowledge(battle)
+
+    # ── OTS (open team sheets): stamp revealed sheets BEFORE enrichment ──
+    # Both sides' |showteam| reveals are decision-time knowledge from team
+    # preview on; fill_blanks then narrows belief around them.
+    ots_sides: dict = {}
+    if ots is not False:
+        sheet_mons = parse_showteam_sides(log)
+        if sheet_mons:
+            ots_sides = {pid: packed_team_to_known_side(mons)
+                         for pid, mons in sheet_mons.items()}
+            _apply_ots_knowledge(battle, ots_sides)
+        elif ots is True:
+            raise ValueError(
+                f"{replay_id}: ots=True but the log has no |showteam| lines"
+            )
+
+    # Log-level provenance metadata stamped on every transition below:
+    # rated ladder/tournament flag + the best-of-3 set id (cross-game linkage).
+    is_rated = bool(re.search(r"^\|rated", log, re.MULTILINE))
+    m_bo3 = re.search(r'href="/game-bestof\d+-([A-Za-z0-9-]+)"', log)
+    bo3_set_id = m_bo3.group(1) if m_bo3 else None
 
     # ── Belief / exact enrichment (the Type A–D fill modes) ──────────────
     # fill_blanks walks BOTH state_before_actions and state_after_actions of
@@ -572,6 +705,9 @@ def replay_to_transitions(
                 "source_type": battle.get("source_type", "ranked_player_vod"),
                 "replay_id":   replay_id,
                 "format":      battle.get("format"),
+                "ots":         bool(ots_sides),
+                "rated":       is_rated,
+                "bo3_set_id":  bo3_set_id,
                 "perspective": perspective,
                 "turn":        turn["turn"],
                 "total_turns": total_turns,
@@ -659,6 +795,9 @@ def replay_to_transitions(
                     "source_type": battle.get("source_type", "ranked_player_vod"),
                     "replay_id":   replay_id,
                     "format":      battle.get("format"),
+                    "ots":         bool(ots_sides),
+                    "rated":       is_rated,
+                    "bo3_set_id":  bo3_set_id,
                     "perspective": rp,
                     "turn":        turn["turn"],
                     "total_turns": total_turns,

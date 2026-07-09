@@ -17,6 +17,12 @@ data/smogon_stats_cache
 data/pkmn_sets_cache
 data/local_data
 data/vods
+# VGC-Bench redistributable raw logs (601MB; the 525MB regmabo3 JSON exceeds GitHub's 100MB
+# per-file limit — this is the actual push blocker). Fetch from HF cameronangliss/vgc-battle-logs.
+data/hf_vgc_bench/
+# trained model checkpoints — binary weights (~184MB of .pt, mostly backups + retired experiments);
+# distribute the deployed one via a GitHub Release, not source control.
+ai_train_scripts/
 .rust/
 .env
 target/

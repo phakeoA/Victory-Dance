@@ -18,8 +18,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import random
 import sys
+import time
 from pathlib import Path
 
 import v_dance  # noqa: F401  (Selector policy for poke-env's POKE_LOOP, on its own thread)
@@ -282,6 +284,7 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
                                 if Path(p).name == ai_name), ai_name)
                 ai_team = load_team(resolve_team_path(_scoped))
                 host.player.update_team(ai_team)                     # decision core uses this team
+                host.player._team_name = ai_name                     # bench-row ai_team stamp
                 packed = host.player._team.yield_team()
                 await page.evaluate("(t) => app.socket.send('|/utm ' + t)", packed)
                 await page.evaluate("(u) => app.socket.send('|/accept ' + u)", _toid(challenger))
@@ -357,7 +360,8 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
 
 
 async def run(headed: bool, human_name: str, self_test: bool, ai_team_pin: str | None = None,
-              self_test_battles: int = 1) -> dict:
+              self_test_battles: int = 1, ckpt=None, tp_ckpt=None,
+              bench_note: str = "local-browser", adapt_rules: bool = False) -> dict:
     from playwright.async_api import async_playwright
 
     teams = _load_pool()
@@ -366,7 +370,56 @@ async def run(headed: bool, human_name: str, self_test: bool, ai_team_pin: str |
     ai_pool = [n for n, _ in teams]
     if ai_team_pin and ai_team_pin not in ai_pool:
         raise SystemExit(f"[play] --ai-team {ai_team_pin!r} is not in the pool. Available: {ai_pool[:12]} …")
-    host = BattleHost(team=teams[0][1], username=_AI_NAME)           # team replaced per battle
+    # Serve refresh: benchmark ANY ckpt without touching the model_io defaults (None → defaults).
+    _ck = {}
+    if ckpt is not None:
+        _ck["model_path"] = ckpt
+    if tp_ckpt is not None:
+        _ck["team_chooser_path"] = tp_ckpt
+    host = BattleHost(team=teams[0][1], username=_AI_NAME, adapt_rules=adapt_rules,
+                      **_ck)                                         # team replaced per battle
+    if adapt_rules:
+        print("[play] adapt-rules ON (B-L1: Wide-Guard streak → spread-move tilt)")
+
+    # Bench recording (docs/human_benchmark_design.md), same end_battle hook as the online
+    # harness: one JSONL row per finished battle, appended+flushed (skipped for --self-test).
+    if not self_test:
+        from v_dance.play.play_vs_human import BENCH_DIR, BENCH_LOG
+        session_id = f"{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}-{os.getpid()}"
+        _row_ckpt = str(ckpt or "model_io-default")
+        _row_tp = str(tp_ckpt or "model_io-default")
+        _orig_end, _n = host.end_battle, {"n": 0}
+
+        def _rec_end_battle(tag: str) -> None:
+            try:
+                b = host.player._battles.get((tag or "").lstrip(">"))
+                if b is not None and getattr(b, "finished", False):
+                    _n["n"] += 1
+                    won = getattr(b, "won", None)
+                    BENCH_DIR.mkdir(parents=True, exist_ok=True)
+                    with BENCH_LOG.open("a", encoding="utf-8") as f:
+                        f.write(json.dumps({
+                            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                            "session_id": session_id, "note": bench_note, "game_idx": _n["n"],
+                            "battle_tag": getattr(b, "battle_tag", tag),
+                            "ai_team": getattr(host.player, "_team_name", None),
+                            "human_team": None,
+                            "opponent": getattr(b, "opponent_username", None),
+                            "result": "ai" if won else ("draw" if won is None else "human"),
+                            "turns": getattr(b, "turn", None),
+                            "ckpt": _row_ckpt, "tp_ckpt": _row_tp}) + "\n")
+                    # B-L2 dossier capture (passive; never raises).
+                    from v_dance.play.opponent_dossier import summary, update_from_battle
+                    if update_from_battle(b, "ai" if won else ("draw" if won is None else "human"),
+                                          our_team=getattr(host.player, "_team_name", None),
+                                          note=bench_note):
+                        print(f"[play] dossier: {summary(getattr(b, 'opponent_username', '') or '')}")
+            except Exception as exc:                   # recording must never break play
+                print(f"[play] bench-record failed (non-fatal): {exc!r}")
+            _orig_end(tag)
+
+        host.end_battle = _rec_end_battle  # type: ignore[method-assign]
+        print(f"[play] bench recording ON — session {session_id} (note {bench_note!r}) -> {BENCH_LOG}")
     tally = {"ai": 0, "you": 0, "draw": 0}
     stop = asyncio.Event()
 
@@ -446,14 +499,29 @@ def main() -> None:
                     help="number of SEQUENTIAL self-test battles (>=2 exercises the re-challenge path).")
     ap.add_argument("--headed", dest="headed", action="store_true", default=True, help="show the browser (default).")
     ap.add_argument("--headless", dest="headed", action="store_false", help="run headless.")
+    ap.add_argument("--ckpt", default=None,
+                    help="battle-net checkpoint to serve (default: the model_io production default).")
+    ap.add_argument("--tp-ckpt", default=None,
+                    help="team-preview (SBDA) checkpoint to serve (default: production default).")
+    ap.add_argument("--bench-note", default="local-browser",
+                    help="tag stamped on every benchmark row (e.g. adv_v7).")
+    ap.add_argument("--adapt-rules", action="store_true",
+                    help="B-L1 serve-time pattern tilt (Wide-Guard streak → spread bias). Default OFF.")
     args = ap.parse_args()
+
+    for _v in (args.ckpt, args.tp_ckpt):
+        if _v is not None and not Path(_v).is_file():
+            raise SystemExit(f"[play] checkpoint not found: {_v}")
 
     _use_proactor_loop()
     headed = args.headed and not args.self_test
     proc = start_showdown()
     try:
         tally = asyncio.run(run(headed=headed, human_name=args.human_name, self_test=args.self_test,
-                                ai_team_pin=args.ai_team, self_test_battles=args.self_test_battles))
+                                ai_team_pin=args.ai_team, self_test_battles=args.self_test_battles,
+                                ckpt=Path(args.ckpt) if args.ckpt else None,
+                                tp_ckpt=Path(args.tp_ckpt) if args.tp_ckpt else None,
+                                bench_note=args.bench_note, adapt_rules=args.adapt_rules))
     except KeyboardInterrupt:
         print("\n[play] Ctrl-C — shutting down …")
         tally = None

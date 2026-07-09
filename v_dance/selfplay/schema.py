@@ -111,6 +111,11 @@ class EpisodeMeta:
     won: Optional[bool]              # True win / False loss / None draw-or-undecided
     terminal_type: str               # a TerminalType value
     n_turns: int                     # shared turn clock at end (for the symmetry/discount checks)
+    sampling: Optional[dict] = None  # behaviour-policy params the recorded logprobs assume
+                                     # ({"tau": float, "top_p": float}); τ<=0 = deterministic argmax
+                                     # seat (logprob stamped 0.0); top_p<1 = the selection was
+                                     # nucleus-truncated but the stored logprob is the UNtruncated
+                                     # softmax — offline consumers must recompute if they need exact.
 
     def to_obj(self) -> dict:
         return {
@@ -120,6 +125,7 @@ class EpisodeMeta:
             "tp_leads": [int(i) for i in self.tp_leads],
             "won": self.won, "terminal_type": self.terminal_type,
             "n_turns": int(self.n_turns),
+            "sampling": self.sampling,
         }
 
     @classmethod
@@ -131,6 +137,7 @@ class EpisodeMeta:
             tp_leads=[int(i) for i in d.get("tp_leads", [])],
             won=d.get("won"), terminal_type=d["terminal_type"],
             n_turns=int(d.get("n_turns", 0)),
+            sampling=d.get("sampling"),
         )
 
     @property

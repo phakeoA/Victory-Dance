@@ -43,11 +43,13 @@ from v_dance.training.bc_dataset import (  # noqa: E402
     BCDataset,
     HEADS,
     build_examples,
+    compute_advantage_weights,
     compute_sample_weights,
     examples_from_folders,
     filter_by_rating,
     print_stats,
     split_by_replay,
+    split_with_reference,
 )
 from v_dance.models.bc_model_attn import build_attn_model  # noqa: E402
 
@@ -215,6 +217,8 @@ def run_epoch(
     opp_class_weight: Optional[torch.Tensor] = None,
     sample_weighted: bool = False,
     value_loss_weight: float = 1.0,
+    progress_every: int = 0,
+    progress_label: str = "",
 ) -> Dict[str, float]:
     """One pass over ``loader``.  Train if ``optimizer`` given, else eval.
 
@@ -238,8 +242,17 @@ def run_epoch(
     gim = {"tp": 0, "fn": 0}
 
     ctx = torch.enable_grad() if train else torch.no_grad()
+    import time as _time
+    _n_batches = len(loader)
+    _t0 = _time.time()
     with ctx:
-        for batch in loader:
+        for _bi, batch in enumerate(loader, 1):
+            if progress_every and train and (_bi % progress_every == 0 or _bi == _n_batches):
+                _dt = max(_time.time() - _t0, 1e-6)
+                _eta = (_n_batches - _bi) / max(_bi / _dt, 1e-9) / 60.0
+                print(f"    {_time.strftime('%H:%M:%S')} [{progress_label} "
+                      f"batch {_bi}/{_n_batches}] {_bi/_dt:.1f} batch/s, ETA {_eta:.1f} min",
+                      flush=True)
             x = batch["x"].to(device)
             target = batch["target"].to(device)   # (B, 2)
             mask = batch["mask"].to(device)        # (B, 2, A)
@@ -252,7 +265,22 @@ def run_epoch(
             sample_weight = (batch["weight"].to(device)
                              if sample_weighted and "weight" in batch else None)
 
-            actions, gimmicks, value = model(x)
+            # Phase-2 z: archetype ids ride the batch when the trainer joined
+            # them (--z-archetypes); absent → None (models without z ignore it).
+            aid = batch.get("archetype")
+            if aid is not None:
+                aid = aid.to(device)
+
+            # Phase 1b: sequence batches carry x_seq (B, T, D) — feed the memory
+            # path, supervising the LAST frame (targets are the item's own).
+            if "x_seq" in batch:
+                actions, gimmicks, value = model.forward_with_memory(
+                    batch["x_seq"].to(device),
+                    frame_padding_mask=batch["frame_padding_mask"].to(device),
+                    archetype_id=aid,
+                )
+            else:
+                actions, gimmicks, value = model(x, archetype_id=aid)
             v_target = batch["value_target"].to(device)    # (B,) win=1/loss=0
             v_valid = batch["value_valid"].to(device)      # (B,) 1 where known
 
@@ -380,23 +408,58 @@ def train(args: argparse.Namespace) -> dict:
         device = "cpu"
 
     # ── Load examples ─────────────────────────────────────────────────────────
+    # Step B low-RAM mode (--mmap-cache): X stays on disk (mmap'd caches +
+    # lazy dataset rows) — the only way the full 77.8k MA-Bo3 corpus (~26 GB
+    # of X) trains on 32 GB RAM.
+    if args.mmap_cache and not args.encoded_cache:
+        sys.exit("[train_bc] --mmap-cache requires the encoded cache "
+                 "(drop --no-encoded-cache): without a cache there is no "
+                 "on-disk X to page from")
+    if args.mmap_cache and args.sequence_len > 1:
+        sys.exit("[train_bc] --mmap-cache does not support --sequence-len > 1 "
+                 "(the sequence path gathers history frames from the in-RAM X "
+                 "matrix)")
+    if args.mmap_cache:
+        print("[train_bc] mmap cache: ON — X pages from the on-disk encoded "
+              "caches; dataset rows fetch lazily (one-row copy per item)")
     folders: List[str] = list(args.data)
     if args.type_a:
         folders.extend(args.type_a)
     print(f"[train_bc] loading examples from: {folders}")
     t0 = time.time()
-    examples, stats = examples_from_folders(
+    from v_dance.training.encoded_cache import cached_examples_from_folders
+    examples, stats = cached_examples_from_folders(
         folders,
         limit_transitions=args.limit_transitions,
         limit_files=args.limit_files,
         with_opp=args.aux_opp_head,
+        use_cache=args.encoded_cache,
+        mmap=args.mmap_cache,
     )
     print_stats(stats)
     print(f"[train_bc] loaded {len(examples)} examples in {time.time()-t0:.1f}s")
     if not examples:
         raise SystemExit("[train_bc] no usable examples found")
 
-    train_ex, val_ex = split_by_replay(examples, val_frac=args.val_frac, seed=args.seed)
+    if args.val_data:
+        # Data-expansion A/B mode: the val set is pinned to a fixed REFERENCE
+        # corpus (same seed + val_frac reproduce the anchor run's exact val
+        # replays), --data folders only add TRAIN examples, and any overlap
+        # with the reference corpus is dropped (no leakage/double-weighting).
+        print(f"[train_bc] val reference corpus: {args.val_data}")
+        ref_ex, ref_stats = cached_examples_from_folders(
+            args.val_data,
+            with_opp=args.aux_opp_head,
+            use_cache=args.encoded_cache,
+            mmap=args.mmap_cache,
+        )
+        print_stats(ref_stats)
+        if not ref_ex:
+            raise SystemExit("[train_bc] no usable examples in --val-data")
+        train_ex, val_ex = split_with_reference(
+            examples, ref_ex, val_frac=args.val_frac, seed=args.seed)
+    else:
+        train_ex, val_ex = split_by_replay(examples, val_frac=args.val_frac, seed=args.seed)
     print(
         f"[train_bc] split -> {len(train_ex)} train / {len(val_ex)} val examples "
         f"({len({e['replay_id'] for e in train_ex})} / "
@@ -433,12 +496,68 @@ def train(args: argparse.Namespace) -> dict:
               f"{n_won}/{len(train_ex)} won) -> weight min {train_weights.min():.3f} "
               f"max {train_weights.max():.3f} mean {train_weights.mean():.3f}")
 
+    # ── Phase-2 offline advantage weighting (TRAIN ONLY, default OFF) ──────────
+    # w = f(G − V(s)) from a trained value head: imitate what beat expectation.
+    # Composes multiplicatively with the rating/outcome weights above; val stays
+    # unweighted so its metrics remain comparable across runs.
+    if args.adv_weight != "off":
+        adv_ckpt = args.adv_value_ckpt or args.warm_start
+        if not adv_ckpt:
+            sys.exit("[train_bc] --adv-weight needs --adv-value-ckpt (or --warm-start, "
+                     "whose value head is borrowed when --adv-value-ckpt is omitted)")
+        adv_w = compute_advantage_weights(
+            train_ex, adv_ckpt, mode=args.adv_weight, beta=args.adv_beta,
+            w_min=args.adv_clip_min, w_max=args.adv_clip_max, device=args.device)
+        n_lab = sum(1 for e in train_ex if e.get("won") is not None)
+        if n_lab == 0:
+            print("[train_bc] WARNING: --adv-weight is ON but no train example has an "
+                  "outcome label — advantage weights are all-ones (no effect)")
+        train_weights = adv_w if train_weights is None else train_weights * adv_w
+        m = float(train_weights.mean())
+        if m > 0:
+            train_weights = (train_weights / m).astype(np.float32)
+        print(f"[train_bc] advantage weighting: mode={args.adv_weight} "
+              f"beta={args.adv_beta} clip=[{args.adv_clip_min},{args.adv_clip_max}] "
+              f"value_ckpt={adv_ckpt} ({n_lab}/{len(train_ex)} outcome-labelled) -> "
+              f"combined weight min {train_weights.min():.3f} "
+              f"max {train_weights.max():.3f} mean {train_weights.mean():.3f}")
+
+    # ── Phase-2 z: archetype-id join (TRAIN AND VAL — the conditioned model is
+    # evaluated with its real ids; examples missing from the artifact get the
+    # UNKNOWN id k, which trains the "no plan info" embedding) ─────────────────
+    z_art = None
+    train_z = val_z = None
+    if args.z_archetypes:
+        from v_dance.datatools.team_archetypes import (
+            load_archetype_assignments, load_artifact)
+        z_art = load_artifact(args.z_archetypes)
+        asg = load_archetype_assignments(args.z_archetypes)
+        k_unknown = int(z_art["k"])
+        train_z = [asg.get((e["replay_id"], e.get("perspective")), k_unknown)
+                   for e in train_ex]
+        val_z = [asg.get((e["replay_id"], e.get("perspective")), k_unknown)
+                 for e in val_ex]
+        n_unk = sum(1 for a in train_z if a == k_unknown)
+        print(f"[train_bc] archetype-z: k={z_art['k']} z_dim={args.z_dim} "
+              f"({len(train_z) - n_unk}/{len(train_z)} train examples labelled, "
+              f"{n_unk} → UNKNOWN)")
+        if n_unk == len(train_z):
+            print("[train_bc] WARNING: NO train example matched the artifact's "
+                  "assignments — z will only ever see the UNKNOWN embedding "
+                  "(wrong artifact for this corpus?)")
+
     # Move-slot permutation augmentation is TRAIN-ONLY (val stays raw so its
     # metrics are true).  It makes the policy order-invariant — see task #22.
     train_ds = BCDataset(train_ex, augment_move_order=args.augment_move_order,
                          aug_seed=args.seed, with_opp=args.aux_opp_head,
-                         weights=train_weights)
-    val_ds = BCDataset(val_ex, with_opp=args.aux_opp_head)
+                         weights=train_weights, sequence_len=args.sequence_len,
+                         archetype_ids=train_z, lazy_x=args.mmap_cache)
+    val_ds = BCDataset(val_ex, with_opp=args.aux_opp_head,
+                       sequence_len=args.sequence_len,
+                       archetype_ids=val_z, lazy_x=args.mmap_cache)
+    if args.sequence_len > 1:
+        print(f"[train_bc] sequence BC: T={args.sequence_len} frames per item "
+              f"(memory_dim={args.memory_dim})")
     print(f"[train_bc] move-slot permutation augmentation: "
           f"{'ON' if args.augment_move_order else 'OFF'} (train only)")
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
@@ -459,6 +578,17 @@ def train(args: argparse.Namespace) -> dict:
                  "conditions on). Re-run with both, or drop --opp-cond.")
     if args.opp_cond:
         print("[train_bc] Level-B opp-conditioning: ON (the OUR heads read the detached predicted opp action)")
+    if args.sequence_len > 1 and args.memory_dim <= 0:
+        sys.exit("[train_bc] --sequence-len > 1 requires --memory-dim > 0 (the "
+                 "match-memory core that consumes the frame stack).")
+    if args.sequence_len > args.max_mem_len:
+        sys.exit(f"[train_bc] --sequence-len {args.sequence_len} exceeds --max-mem-len "
+                 f"{args.max_mem_len}: forward_with_memory would SILENTLY truncate every "
+                 f"window to {args.max_mem_len} frames while the logs and the checkpoint "
+                 f"stamp claim {args.sequence_len}. Raise --max-mem-len or shrink the window.")
+    if args.memory_dim > 0 and args.sequence_len <= 1:
+        print("[train_bc] WARNING: --memory-dim set but --sequence-len is 1 — the "
+              "memory core will train on zero history (memory columns stay unused).")
     model = build_attn_model(
         d_model=args.d_model,
         n_heads=args.n_heads,
@@ -469,8 +599,33 @@ def train(args: argparse.Namespace) -> dict:
         gimmick_heads=list(HEADS),
         value_readout=args.value_readout,
         opp_cond=args.opp_cond,
+        memory_dim=args.memory_dim,
+        mem_layers=args.mem_layers,
+        mem_heads=args.mem_heads,
+        max_mem_len=args.max_mem_len,
+        n_archetypes=(int(z_art["k"]) if z_art else 0),
+        z_dim=(args.z_dim if z_art else 0),
         device=device,
     )
+    # Warm start (Phase 1b memory / Phase 2 z): initialise from a NARROWER
+    # checkpoint with zero-padded trailing head columns for whatever widening
+    # features (memory and/or z) this model adds over the checkpoint —
+    # forward(x) reproduces the checkpoint's logits exactly at epoch 0, so an
+    # A/B isolates the new feature's value.  Same-width → plain strict load.
+    if args.warm_start:
+        from v_dance.models.bc_model_attn import init_extended_model_from_ckpt
+        ck = torch.load(args.warm_start, map_location=device, weights_only=False)
+        state = ck.get("model_state", ck)
+        ck_cfg = (ck.get("config") or {}) if isinstance(ck, dict) else {}
+        extra = ((model.memory_dim + model.z_dim)
+                 - (int(ck_cfg.get("memory_dim", 0) or 0)
+                    + int(ck_cfg.get("z_dim", 0) or 0)))
+        if extra > 0:
+            init_extended_model_from_ckpt(model, state, extra_cols=extra)
+        else:
+            model.load_state_dict(state, strict=True)
+        print(f"[train_bc] warm-started from {args.warm_start}"
+              + (f" (zero-padded {extra} new trailing head columns)" if extra > 0 else ""))
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     # ── Class-imbalance weighting (optional) ──────────────────────────────────
@@ -540,6 +695,7 @@ def train(args: argparse.Namespace) -> dict:
         "val_frac": args.val_frac,
         "seed": args.seed,
         "data": folders,
+        "val_data": args.val_data,
         "class_weight": args.class_weight,
         "patience": args.patience,
         # Demonstrator skill filtering / weighting (TIER-1 #1).
@@ -548,6 +704,13 @@ def train(args: argparse.Namespace) -> dict:
         "rating_weight_floor": args.rating_weight_floor,
         "outcome_weight": bool(args.outcome_weight),
         "loss_weight": args.loss_weight,
+        # Phase-2 offline advantage weighting (audit trail — the weights only
+        # exist at train time; serve behaviour is unchanged).
+        "adv_weight": args.adv_weight,
+        "adv_beta": args.adv_beta,
+        "adv_clip": [args.adv_clip_min, args.adv_clip_max],
+        "adv_value_ckpt": (args.adv_value_ckpt or args.warm_start
+                           if args.adv_weight != "off" else None),
     }
     config.update({
         "d_model": args.d_model,
@@ -555,7 +718,28 @@ def train(args: argparse.Namespace) -> dict:
         "n_layers": args.n_layers,
         "ff_mult": args.ff_mult,
         "value_readout": args.value_readout,
+        # Phase 1a/1b match-memory core — model_io rebuilds from these; absent
+        # (pre-memory) checkpoints default to 0/stateless.
+        "memory_dim": args.memory_dim,
+        "mem_layers": args.mem_layers,
+        "mem_heads": args.mem_heads,
+        "max_mem_len": args.max_mem_len,
+        "sequence_len": args.sequence_len,
+        "warm_start": args.warm_start,
+        "encoded_cache": bool(args.encoded_cache),
+        "mmap_cache": bool(args.mmap_cache),
+        # Phase-2 archetype-z — model_io rebuilds from these; absent (pre-z)
+        # checkpoints default to 0/off.
+        "n_archetypes": (int(z_art["k"]) if z_art else 0),
+        "z_dim": (args.z_dim if z_art else 0),
+        "z_archetypes": args.z_archetypes,
     })
+    # The serve-side nearest-centroid lookup needs the centroid table — embed
+    # it in the checkpoint so serve is self-contained (no sidecar artifact).
+    z_artifact_slim = None
+    if z_art:
+        from v_dance.datatools.team_archetypes import artifact_slim
+        z_artifact_slim = artifact_slim(z_art)
 
     # ── Train loop (val-weighting OFF so val loss/acc stay true) ───────────────
     best_top1 = -1.0
@@ -567,7 +751,9 @@ def train(args: argparse.Namespace) -> dict:
                        gimmick_loss_weight=args.gimmick_loss_weight,
                        opp_loss_weight=args.aux_opp_weight if args.aux_opp_head else 0.0,
                        sample_weighted=sample_weighted,
-                       value_loss_weight=args.value_loss_weight)
+                       value_loss_weight=args.value_loss_weight,
+                       progress_every=args.progress_every,
+                       progress_label=f"e{epoch}")
         va = run_epoch(model, val_loader, device, optimizer=None)
         history.append({"epoch": epoch, "train": tr, "val": va})
         opp_str = f" | opp top1 {va['opp_top1']:.3f}" if args.aux_opp_head else ""
@@ -589,6 +775,7 @@ def train(args: argparse.Namespace) -> dict:
                     "config": config,
                     "epoch": epoch,
                     "val_metrics": va,
+                    "z_artifact": z_artifact_slim,
                 },
                 ckpt_path,
             )
@@ -616,7 +803,16 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap.add_argument("--type-a", nargs="+", default=None,
                     help="extra folder(s) to append (deduped). Type A is already in "
                          "the default --data; use only for ad-hoc extra data.")
+    ap.add_argument("--val-data", nargs="+", default=None,
+                    help="REFERENCE corpus folder(s) that pin the val split (same "
+                         "seed/val-frac reproduce that corpus's exact val replays, "
+                         "e.g. the 0.585 anchor's). --data then contributes TRAIN "
+                         "examples only; replay_id overlaps with the reference are "
+                         "dropped. Do NOT list the same folders in both.")
     ap.add_argument("--epochs", type=int, default=30)
+    ap.add_argument("--progress-every", type=int, default=0,
+                    help="print an intra-epoch batch heartbeat every N TRAIN batches "
+                         "(0 = off; e.g. 200 on a long run to confirm it's alive)")
     ap.add_argument("--batch-size", type=int, default=256)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--weight-decay", type=float, default=1e-4)
@@ -672,9 +868,66 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                     default=False,
                     help="weight the action loss by game outcome: won=1.0, "
                          "lost=--loss-weight, unknown=1.0; default off.")
+    ap.add_argument("--adv-weight", choices=["off", "exp", "filter"], default="off",
+                    help="Phase-2 offline advantage weighting (TRAIN only): weight each "
+                         "decision by A = outcome − V(s) using --adv-value-ckpt's value "
+                         "head. exp = clip(exp(beta·A)) (Metamon Exp); filter = keep "
+                         "only A>0 decisions. Composes with the rating/outcome weights.")
+    ap.add_argument("--adv-beta", type=float, default=1.6,
+                    help="exp-mode advantage temperature (keep conservative — the "
+                         "value head's calibration is weak, see the P0.4 ruler note)")
+    ap.add_argument("--adv-clip-min", type=float, default=0.2,
+                    help="lower clip for exp-mode advantage weights")
+    ap.add_argument("--adv-clip-max", type=float, default=5.0,
+                    help="upper clip for exp-mode advantage weights")
+    ap.add_argument("--adv-value-ckpt", default=None,
+                    help="checkpoint whose TRAINED value head scores V(s) for the "
+                         "advantage (defaults to --warm-start when omitted)")
+    ap.add_argument("--z-archetypes", default=None,
+                    help="Phase-2 z: team-archetype artifact (.npz from "
+                         "datatools.team_archetypes). Joins each example's own-team "
+                         "archetype id by (replay_id, perspective) and conditions "
+                         "every head on a learned per-archetype embedding; the "
+                         "centroids are embedded into the checkpoint for serve.")
+    ap.add_argument("--z-dim", type=int, default=24,
+                    help="archetype embedding width (only with --z-archetypes)")
     ap.add_argument("--loss-weight", type=float, default=0.5,
                     help="weight on decisions from games our side LOST when "
                          "--outcome-weight is on (default 0.5).")
+    # ── Phase 1a/1b: match-memory core + sequence BC ───────────────────────────
+    ap.add_argument("--sequence-len", type=int, default=1,
+                    help="frames per training item (the last sequence-len decision "
+                         "states of the same replay+perspective; the LAST frame is "
+                         "supervised). 1 = stateless BC (unchanged default). "
+                         ">1 requires --memory-dim.")
+    ap.add_argument("--memory-dim", type=int, default=0,
+                    help="width of the match-memory feature every head reads "
+                         "(frame-stacked causal time-axis transformer). 0 = build "
+                         "the exact stateless architecture (default).")
+    ap.add_argument("--mem-layers", type=int, default=2,
+                    help="memory core: causal transformer layers")
+    ap.add_argument("--mem-heads", type=int, default=4,
+                    help="memory core: attention heads")
+    ap.add_argument("--max-mem-len", type=int, default=64,
+                    help="memory core: maximum frames attended (positional table)")
+    ap.add_argument("--warm-start", default=None,
+                    help="path to a STATELESS BC checkpoint to initialise from "
+                         "(with --memory-dim the new memory columns are zero-padded "
+                         "so epoch-0 single-turn behaviour equals the checkpoint's).")
+    ap.add_argument("--encoded-cache", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="per-folder disk cache of ENCODED examples (~35 min load → "
+                         "seconds on a cache hit; fingerprint auto-invalidates on any "
+                         "corpus/layout change). --no-encoded-cache to force fresh "
+                         "encoding. Smoke limits always bypass the cache.")
+    ap.add_argument("--mmap-cache", action=argparse.BooleanOptionalAction,
+                    default=False,
+                    help="Step B low-RAM loader: page X from the on-disk encoded "
+                         "caches (np.load mmap_mode='r') and fetch dataset rows "
+                         "lazily instead of materializing the (N, STATE_DIM) matrix "
+                         "in RAM. Needed for the full 77.8k MA-Bo3 corpus (~26 GB X) "
+                         "on 32 GB RAM. Requires the encoded cache; incompatible "
+                         "with --sequence-len > 1.")
     ap.add_argument("--patience", type=int, default=0,
                     help="early-stop after N epochs with no val top-1 gain (0=off)")
     ap.add_argument("--val-frac", type=float, default=0.1)

@@ -78,11 +78,16 @@ def record_decision(collector: TrajectoryCollector, actor_critic, *, state,
     tmp = Transition(state=np.asarray(state, np.float32), action_s0=ra0, action_s1=ra1,
                      gimmick_s0=int(g0), gimmick_s1=int(g1),
                      mask_s0=m0, mask_s1=m1, gmask_s0=gm0, gmask_s1=gm1)
+    # τ<=0 = a deterministic argmax seat (--sample ab p2): logits/τ would NaN the
+    # log-softmax and the NaN would be silently stored. The argmax action has
+    # probability 1 in the τ→0 limit → behaviour log-prob 0.0; the critic value
+    # is τ-independent, so evaluate it at τ=1.
     with torch.no_grad():
-        lp, _ent, vpm = policy_eval.evaluate_actions(actor_critic, [tmp], tau=tau)
+        lp, _ent, vpm = policy_eval.evaluate_actions(
+            actor_critic, [tmp], tau=(tau if tau > 0 else 1.0))
     collector.add_step(state=tmp.state, action_s0=ra0, action_s1=ra1,
                        gimmick_s0=int(g0), gimmick_s1=int(g1),
-                       logprob=float(lp[0]), value=float(vpm[0]),
+                       logprob=(float(lp[0]) if tau > 0 else 0.0), value=float(vpm[0]),
                        mask_s0=m0, mask_s1=m1, gmask_s0=gm0, gmask_s1=gm1,
                        decision_type=decision_type, turn=int(turn))
     return ra0, ra1
@@ -109,15 +114,18 @@ def finalize_trajectory(collector: TrajectoryCollector, *, won: Optional[bool],
                         terminal_type: str, own_team: Sequence[str], n_turns: int,
                         tp_bring: Optional[Sequence[int]] = None,
                         tp_leads: Optional[Sequence[int]] = None,
-                        opp_team: Sequence[str] = ()) -> Trajectory:
+                        opp_team: Sequence[str] = (),
+                        sampling: Optional[dict] = None) -> Trajectory:
     """Finalise a collector into a Trajectory and place the terminal reward. ``n_turns``
     is the battle's real final Showdown turn (NOT the step count) so both perspectives
-    share the clock even if one skipped a non-model turn (zero-sum stays valid)."""
+    share the clock even if one skipped a non-model turn (zero-sum stays valid).
+    ``sampling`` labels the behaviour params (tau/top_p) the recorded logprobs assume."""
     bring = list(tp_bring) if tp_bring is not None else list(range(min(4, len(own_team))))
     leads = list(tp_leads) if tp_leads is not None else bring[:2]
     traj = collector.finish(own_team=list(own_team), opp_team=list(opp_team),
                             tp_bring=bring, tp_leads=leads, won=won,
-                            terminal_type=terminal_type, n_turns=int(n_turns))
+                            terminal_type=terminal_type, n_turns=int(n_turns),
+                            sampling=sampling)
     # T3.1: a FALLBACK trajectory (backstop-forfeit) carries no terminal reward — it must be
     # discarded from the batch, not rewarded. place_terminal_reward asserts is_trainable, so skip it.
     if traj.meta.is_trainable:
@@ -156,6 +164,18 @@ class SelfPlayVGCPlayer(VGCPlayer):
                          live_dir=live_dir, save_replays=save_replays, **kwargs)
         self._ac = actor_critic
         self._model = actor_critic.policy            # drive with the live actor
+        # Memory ckpt under RECORDING self-play (scan 2026-07-02): decisions run
+        # on the frame-stack, but evaluate_actions has no memory path, so the
+        # recorded behaviour logprob/value are SINGLE-FRAME approximations.
+        # Win-rate A/Bs stay valid (gameplay is correct); the recorded store
+        # must not feed importance-sampled offline RL without recomputation —
+        # warn once and stamp the trajectory meta so it can never be mistaken.
+        self._memory_single_frame = bool(int(getattr(self._model, "memory_dim", 0) or 0))
+        if self._memory_single_frame:
+            log.warning(
+                "recording self-play with a MEMORY checkpoint: recorded logprob/value "
+                "are single-frame approximations of stack-driven decisions — valid for "
+                "win-rate A/Bs, NOT for importance-sampled offline RL (meta-stamped).")
         self._collect_sample = True                  # #9/#9b: sample gimmick + forced-replacement at tau (match recorded log-prob)
         self._record_masks = True                    # #10/#11: log the deduped behaviour mask the model sampled under
         self._model_heads = actor_critic.head_names
@@ -253,7 +273,12 @@ class SelfPlayVGCPlayer(VGCPlayer):
                     c, won=None if _forfeited else won, terminal_type=_tt,
                     own_team=own_team, n_turns=getattr(battle, "turn", len(c)),
                     tp_bring=tp.get("bring"), tp_leads=tp.get("leads"),
-                    opp_team=tp.get("opp_team") or ())
+                    opp_team=tp.get("opp_team") or (),
+                    sampling={"tau": float(getattr(self, "_tau", 1.0)),
+                              "top_p": float(getattr(self, "_top_p", 1.0)),
+                              **({"memory_single_frame": True}
+                                 if getattr(self, "_memory_single_frame", False)
+                                 else {})})
         except Exception:
             # A finalize failure silently drops this game from self._finished → it can't be paired →
             # it vanishes from the A/B win-rate DENOMINATOR with no trace. Surface it (WARNING + a counted,
@@ -464,12 +489,31 @@ def _subdivide_matchups(matchups, target_chunks):
     return out
 
 
+def _seat_sampling(sample: str, tau: float, serve_tau: float, serve_top_p: float):
+    """Per-seat (p1_tau, p2_tau, p1_top_p, p2_top_p) for the serve-sampling modes.
+
+    Serve-sampling A/B (the anti-predictability lever): VGC is a SIMULTANEOUS-move
+    game, so a deterministic argmax policy is exploitable by construction — the
+    principled serve policy is a MIXED strategy.  ``"ab"`` = p1 samples the masked
+    policy softmax at ``serve_tau`` (optionally top-p nucleus-restricted) while p2
+    plays pure argmax (τ=0) with the SAME net → p1's win-rate isolates whether
+    serve-time mixing costs head-to-head strength.  ``"both"`` = smoke (both seats
+    sample at serve_tau).  ``"off"`` (default) keeps the collection ``tau`` on both
+    seats — byte-identical to the existing self-play path.
+    """
+    if sample == "ab":
+        return float(serve_tau), 0.0, float(serve_top_p), 1.0
+    if sample == "both":
+        return float(serve_tau), float(serve_tau), float(serve_top_p), float(serve_top_p)
+    return float(tau), float(tau), 1.0, 1.0
+
+
 async def run_self_play_games(
     actor_critic, team_pool: Sequence[str], n_games: int, *,
     store_path=None, tau: float = 1.0, seed: int = 0, manage_server: bool = True,
     battle_timeout: Optional[float] = 90.0, matchup_seed: int = 0, n_workers: int = 1,
     match_belief: str = "off", search: str = "off", live_dir=None, save_replays: bool = False,
-    n_servers: int = 1,
+    n_servers: int = 1, sample: str = "off", serve_tau: float = 0.45, serve_top_p: float = 1.0,
 ):
     """Play ``n_games`` self-play battles (the shared policy on BOTH sides) over a
     side-balanced team rotation, collect both perspectives of each game, and write the
@@ -485,6 +529,7 @@ async def run_self_play_games(
     p2_belief = match_belief == "both"
     p1_search = search in ("both", "ab")              # B1 search A/B: SP1 = search-on side
     p2_search = search == "both"
+    p1_tau, p2_tau, p1_top_p, p2_top_p = _seat_sampling(sample, tau, serve_tau, serve_top_p)
     import logging as _logging
     from collections import Counter
 
@@ -525,14 +570,14 @@ async def run_self_play_games(
         _srv = ({"server_configuration": R.localhost_server_config(pool.port_for_worker(uid))}
                 if _multi_server else {})
         p1 = SelfPlayVGCPlayer(
-            actor_critic, tau=tau, sample_seed=seed + uid,
+            actor_critic, tau=p1_tau, sample_seed=seed + uid, top_p=p1_top_p,
             replay_path=_REPO_ROOT / "artifacts" / "replay_buffer" / f"SP1_{uid}.jsonl",
             account_configuration=AccountConfiguration(f"SP1x{uid}", None),
             battle_format=R.BATTLE_FORMAT, team=ta, max_concurrent_battles=1,
             log_level=_logging.WARNING, use_match_belief=p1_belief, use_search=p1_search,
             live_dir=live_dir, save_replays=save_replays, **_srv)
         p2 = SelfPlayVGCPlayer(
-            actor_critic, tau=tau, sample_seed=seed + 100000 + uid,
+            actor_critic, tau=p2_tau, sample_seed=seed + 100000 + uid, top_p=p2_top_p,
             replay_path=_REPO_ROOT / "artifacts" / "replay_buffer" / f"SP2_{uid}.jsonl",
             account_configuration=AccountConfiguration(f"SP2x{uid}", None),
             battle_format=R.BATTLE_FORMAT, team=tb, max_concurrent_battles=1,
@@ -601,6 +646,16 @@ def main(argv=None) -> int:
                     help="B1 belief-weighted expectimax search: off | both (smoke — search on both seats) | "
                          "ab (strength A/B — search ON on p1 only vs the policy-argmax net on p2; ONE team = "
                          "clean MIRROR so p1's win-rate isolates the search effect)")
+    ap.add_argument("--sample", choices=["off", "both", "ab"], default="off",
+                    help="TIER-4 serve-sampling: off | both (smoke — both seats sample at --serve-tau) | "
+                         "ab (strength A/B — p1 samples the masked policy softmax at --serve-tau/--serve-top-p, "
+                         "p2 plays pure argmax, SAME net; ONE team = clean MIRROR so p1's win-rate isolates "
+                         "the mixing cost/benefit). Simultaneous-move games make deterministic play "
+                         "exploitable by construction — this measures what the mixing costs in head-to-head.")
+    ap.add_argument("--serve-tau", type=float, default=0.45,
+                    help="serve-sampling temperature for --sample modes (softmax over legal actions)")
+    ap.add_argument("--serve-top-p", type=float, default=1.0,
+                    help="top-p nucleus restriction for --sample modes (1.0 = no restriction)")
     ap.add_argument("--report-json", default=None, metavar="PATH",
                     help="also write the full report dict (incl. the A/B verdict + belief diagnostics) "
                          "as JSON to PATH, so a run is self-describing without scraping the terminal")
@@ -635,6 +690,11 @@ def main(argv=None) -> int:
     if not ckpt.exists():
         print(f"[phase0] checkpoint not found: {ckpt}", file=sys.stderr)
         return 2
+    # Single-variable protection: a sampling A/B must not overlap another A/B arm.
+    if args.sample == "ab" and (args.search != "off" or args.match_belief != "off"):
+        print("[phase0] --sample ab must run with --search off and --match-belief off "
+              "(one variable per A/B).", file=sys.stderr)
+        return 2
     from v_dance.selfplay.actor_critic import ActorCritic
     ac = ActorCritic.from_bc_checkpoint(ckpt)
 
@@ -651,7 +711,8 @@ def main(argv=None) -> int:
             tau=args.tau, seed=args.seed, manage_server=not args.no_server,
             battle_timeout=args.battle_timeout, matchup_seed=args.matchup_seed,
             n_workers=args.workers, match_belief=args.match_belief, search=args.search,
-            n_servers=args.servers, live_dir=args.live_dir, save_replays=bool(args.live_dir)))
+            n_servers=args.servers, live_dir=args.live_dir, save_replays=bool(args.live_dir),
+            sample=args.sample, serve_tau=args.serve_tau, serve_top_p=args.serve_top_p))
     except KeyboardInterrupt:
         # Ctrl-C now fires promptly (the parallel_battles heartbeat keeps the Windows select() loop awake);
         # run_self_play_games' `finally` has already stopped the Showdown server during unwind. Exit cleanly
@@ -664,6 +725,9 @@ def main(argv=None) -> int:
     rep = phase0_report(pairs, sources, min_games=args.min_games)
     rep["match_belief"] = args.match_belief
     rep["search"] = args.search
+    rep["sample"] = args.sample
+    rep["serve_tau"] = args.serve_tau
+    rep["serve_top_p"] = args.serve_top_p
     rep["n_servers"] = args.servers
     rep["ckpt"] = str(ckpt)
     rep["teams"] = list(args.teams)
@@ -716,6 +780,34 @@ def main(argv=None) -> int:
         print(f"  search decisions   : {fired} (fallbacks {fell}) "
               f"({'OK — search drove turns' if fired else 'ZERO — search never ran, A/B is NULL; check wiring'})")
         print(f"  VERDICT            : {verdict}")
+        print("============================================================")
+
+    # ── TIER-4 serve-sampling A/B verdict ────────────────────────────────────
+    # In 'ab' mode p1 = τ-sampled serve policy, p2 = pure argmax (same net), so
+    # p1's win-rate IS the head-to-head cost/benefit of serve-time mixing.  Note
+    # the asymmetric interpretation: mixing is expected to trade a LITTLE
+    # head-to-head strength for anti-exploitability vs a REPEATED human opponent
+    # (which this mirror cannot measure) — so 'no significant loss' is already a
+    # green light, and a CI entirely below ~45% is the real red flag.
+    if args.sample == "ab":
+        wr, ng = rep.get("p1_win_rate"), int(rep.get("p1_games") or 0)
+        wins = int(round((wr or 0.0) * ng))
+        lo, hi = _wilson_ci(wins, ng)
+        verdict = ("INCONCLUSIVE (CI spans 50%)" if lo is None or (lo <= 0.5 <= hi)
+                   else "sampling WINS head-to-head (CI > 50%)" if lo > 0.5
+                   else "sampling COSTS strength (CI < 50%)")
+        rep["sample_ab"] = {"sampling_win_rate": wr, "wins": wins, "games": ng,
+                            "ci95_low": lo, "ci95_high": hi, "verdict": verdict,
+                            "serve_tau": args.serve_tau, "serve_top_p": args.serve_top_p}
+        print(f"== serve-sampling A/B (τ={args.serve_tau} top-p={args.serve_top_p} p1 "
+              f"vs argmax p2, same net) ==")
+        print(f"  sampling win-rate  : {wr*100:.1f}%  ({wins}/{ng})" if wr is not None
+              else "  sampling win-rate  : n/a (no decisive games)")
+        if lo is not None:
+            print(f"  95% Wilson CI      : [{lo*100:.1f}%, {hi*100:.1f}%]")
+        print(f"  VERDICT            : {verdict}")
+        print("  (mixing that holds ~50% here is a GREEN light — its value is "
+              "anti-exploitability vs repeated opponents, which a mirror can't show)")
         print("============================================================")
 
     print_phase0_report(rep)

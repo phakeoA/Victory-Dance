@@ -812,6 +812,9 @@ class VGCPlayerBase(Player):
         always empty — falls back to battle.team directly.
         """
         team = list(battle.teampreview_team) or list(battle.team.values())
+        # Phase-2 z: stamp the model's own-team archetype id (once per player —
+        # the serve-time nearest-centroid lookup; no-op for non-z checkpoints).
+        self._ensure_archetype(team)
         max_size = battle.max_team_size if battle.max_team_size else VGC_TEAM_SIZE
         n = min(VGC_TEAM_SIZE, len(team), max_size)
 
@@ -856,6 +859,41 @@ class VGCPlayerBase(Player):
             log.debug("teampreview decision capture failed (non-fatal)", exc_info=True)
 
         return f"/team {showdown_order}"
+
+    def _ensure_archetype(self, team) -> None:
+        """Phase-2 z serve lookup: nearest-centroid archetype of OUR OWN team,
+        computed ONCE per player instance (the team is fixed per player today;
+        a Phase-4 TeamBuilder would need per-battle stamping) and set as the
+        model's default archetype id — every forward then reads the right z
+        embedding with zero call-site changes.  No-op for non-z checkpoints;
+        a failed lookup serves the UNKNOWN embedding and logs loudly."""
+        mdl = getattr(self, "_model", None)
+        if (mdl is None or not int(getattr(mdl, "n_archetypes", 0) or 0)
+                or getattr(self, "_archetype_stamped", False)):
+            return
+        self._archetype_stamped = True                 # one attempt per instance
+        try:
+            art = getattr(mdl, "_z_artifact", None)
+            if not art:
+                raise ValueError(
+                    "z checkpoint has no embedded z_artifact (retrain with "
+                    "--z-archetypes to stamp the centroid table)")
+            from v_dance.datatools.team_archetypes import assign_team_sheet
+            mons = [{
+                "species": getattr(m, "species", None),
+                "item": getattr(m, "item", None),
+                "ability": getattr(m, "ability", None),
+                "moves": list(getattr(m, "moves", {}) or {}),
+                "nature": None,
+            } for m in team]
+            aid, dist = assign_team_sheet(mons, art)
+            mdl.set_default_archetype(aid)
+            log.info("Phase-2 z: own team → archetype %d (centroid distance %.2f)",
+                     aid, dist)
+        except Exception:
+            log.warning(
+                "Phase-2 z: own-team archetype lookup FAILED — serving with the "
+                "UNKNOWN embedding (unconditioned play)", exc_info=True)
 
     def choose_move(self, battle: DoubleBattle):
         """

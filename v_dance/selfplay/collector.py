@@ -77,10 +77,12 @@ class TrajectoryCollector:
         self, *, own_team: Sequence[str], opp_team: Sequence[str],
         tp_bring: Sequence[int], tp_leads: Sequence[int],
         won: Optional[bool], terminal_type, n_turns: Optional[int] = None,
+        sampling: Optional[dict] = None,
     ) -> Trajectory:
         """Finalise: mark the last step ``done`` and attach ``EpisodeMeta``. Does NOT
         place the terminal reward (task 3a.3). ``n_turns`` defaults to the last step's
-        turn (the shared clock used by the symmetry / discount checks)."""
+        turn (the shared clock used by the symmetry / discount checks). ``sampling``
+        labels the behaviour-policy params (tau/top_p) the recorded logprobs assume."""
         if self._steps:
             self._steps[-1].done = True
         if n_turns is None:
@@ -90,7 +92,7 @@ class TrajectoryCollector:
             own_team=list(own_team), opp_team=list(opp_team),
             tp_bring=[int(i) for i in tp_bring], tp_leads=[int(i) for i in tp_leads],
             won=won, terminal_type=str(TerminalType(terminal_type).value),
-            n_turns=int(n_turns),
+            n_turns=int(n_turns), sampling=sampling,
         )
         return Trajectory(meta=meta, transitions=list(self._steps))
 

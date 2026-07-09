@@ -39,7 +39,11 @@ from v_dance.training.teampreview_dataset import (
     mon_dex_features, MON_FEAT_DIM, NUM_TYPES, _TYPE_IDX, _canon_type,
 )
 
-FEATURE_SCHEMA_VERSION = "tpfeat-v6"   # v6: defensive type-effectiveness profile (complementarity)
+FEATURE_SCHEMA_VERSION = "tpfeat-v7"   # v7: OTS — the OPP side may carry the revealed-sheet
+                                       # overlay (open team sheets are preview-visible).  DIMS
+                                       # AND OFFSETS ARE UNCHANGED from v6 — v6 checkpoints stay
+                                       # loadable (model_io compat set); they simply never see a
+                                       # non-zero opp overlay, exactly like closed-sheet play.
 
 # ── mechanic axes (ORDER IS LOAD-BEARING — asserted at import) ─────────────────
 WEATHERS = ("sand", "rain", "sun", "snow")
@@ -395,11 +399,18 @@ def own_mon_features(species: str, belief, known: Optional[OwnKnown] = None) -> 
     return f
 
 
-def opp_mon_features(species: str, belief) -> np.ndarray:
-    """(FEAT_DIM,) OPP-side vector — species + belief PRIOR only. By signature it can
-    never see a revealed opp item/ability/move (hidden at preview). Overlay stays zero."""
+def opp_mon_features(species: str, belief,
+                     revealed: Optional[OwnKnown] = None) -> np.ndarray:
+    """(FEAT_DIM,) OPP-side vector — species + belief prior, PLUS the revealed
+    sheet overlay when open team sheets make the opponent's build preview-visible
+    (tpfeat-v7 / the OTS regimes).  ``revealed=None`` (closed sheets — ladder)
+    keeps the overlay zero, byte-identical to v6: the ``has_own_detail`` bit acts
+    as the per-mon open/closed regime marker, mirroring the battle encoder's
+    known-vs-belief marks."""
     f = np.zeros(FEAT_DIM, dtype=np.float32)
     _fill_base(f, species, belief)
+    if revealed is not None:
+        _fill_overlay(f, revealed)
     return f
 
 

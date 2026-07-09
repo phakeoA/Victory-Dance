@@ -106,15 +106,22 @@ def mon_dex_features(species: Optional[str]) -> np.ndarray:
 
 
 # ── SBDA feature recipe (15b-data.1) — the SAME extractor model_io serves ─────
-def sbda_feature_fn(belief) -> Callable[[Optional[str]], np.ndarray]:
-    """Closure ``species -> (FEAT_DIM,)`` for the SBDA TP recipe — IDENTICAL to the
-    serve-side ``model_io._pack_side`` (``tp_features.opp_mon_features`` with the OWN
-    overlay OFF: a Type-B replay carries no sharp own build, so ``has_own_detail`` is 0
-    on both sides — exactly what a BC-pretrained net serves).  This shared CALL — not
-    merely a shared dim — is the train==serve lockstep the 15b plumbing exists to
-    guarantee.  Imported lazily to avoid a tp_features <-> teampreview_dataset cycle."""
-    from v_dance.training.tp_features import opp_mon_features
-    return lambda species: opp_mon_features(norm_species(species), belief)
+def sbda_feature_fn(belief) -> Callable[..., np.ndarray]:
+    """Closure ``(species, known=None) -> (FEAT_DIM,)`` for the SBDA TP recipe —
+    IDENTICAL to the serve-side ``model_io._pack_side``.  ``known=None`` is the
+    symmetric belief-only base (a Type-B/closed-sheet mon — ``has_own_detail`` 0,
+    exactly what a BC-pretrained net serves); ``known`` (an ``OwnKnown``) rides
+    the overlay — the tpfeat-v7 OTS pathway where a REVEALED sheet is
+    preview-visible on either side.  This shared CALL — not merely a shared dim —
+    is the train==serve lockstep the 15b plumbing exists to guarantee.  Imported
+    lazily to avoid a tp_features <-> teampreview_dataset cycle."""
+    from v_dance.training.tp_features import own_mon_features
+
+    def _fn(species: Optional[str], known=None) -> np.ndarray:
+        return own_mon_features(norm_species(species), belief, known)
+
+    _fn.supports_known = True          # _example_for_side gates the sheet map on this
+    return _fn
 
 
 def feature_recipe(mode: str = "legacy", belief=None):
@@ -155,6 +162,64 @@ def _first_transition(path: str) -> Optional[dict]:
     return None
 
 
+def _first_transitions(path: str) -> Dict[str, dict]:
+    """First transition PER PERSPECTIVE.  Preview labels are constant, but the
+    OTS sheet map needs BOTH sides' views: one perspective's own containers hold
+    only the 4 brought mons — the other perspective's opp stubs carry its full 6."""
+    out: Dict[str, dict] = {}
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            t = json.loads(line)
+            p = t.get("perspective") or "p1"
+            if p not in out:
+                out[p] = t
+            if len(out) >= 2:
+                break
+    return out
+
+
+def _revealed_of(mon: dict):
+    """A mon dict's OTS-revealed build as an ``OwnKnown`` (None when nothing is
+    revealed — a closed-sheet stub contributes no overlay).  Turn-1 mons are
+    never mega'd yet, so ``known_ability`` is the sheet's base ability; the item
+    has no channel in the TP feature schema and is skipped."""
+    if not isinstance(mon, dict):
+        return None
+    ab = mon.get("known_ability") or mon.get("pre_mega_ability")
+    mv = [m for m in (mon.get("known_moves") or []) if m]
+    tera = mon.get("known_tera_type")
+    if not ab and not mv and not tera:
+        return None
+    from v_dance.training.tp_features import OwnKnown
+    return OwnKnown(ability=ab, moves=mv, tera=tera, will_mega=False)
+
+
+def _ots_sheet_map(firsts: Dict[str, dict]) -> Dict[str, "object"]:
+    """{norm_species: OwnKnown} across ALL 12 preview mons of one OTS battle.
+
+    Every container of every perspective's first transition contributes (the
+    opp containers carry the full 6-mon preview stubs; own containers the 4
+    brought with the same sheet stamps — post the 2026-07-02 sheet-authoritative
+    fix both views agree, so first-seen wins)."""
+    out: Dict[str, object] = {}
+    for t in firsts.values():
+        snap = t.get("state_before_actions") or {}
+        for key in ("opp_active", "opp_bench", "our_active", "our_bench"):
+            cont = snap.get(key) or {}
+            mons = cont.values() if isinstance(cont, dict) else cont
+            for mon in mons:
+                if not isinstance(mon, dict) or not mon.get("species"):
+                    continue
+                r = _revealed_of(mon)
+                if r is not None:
+                    out.setdefault(
+                        norm_species(mon.get("base_species") or mon["species"]), r)
+    return out
+
+
 def _label_indices(roster_norm: List[str], picks: Sequence[str]) -> Tuple[List[int], int]:
     """Map brought species to their roster positions (by normalised species).
 
@@ -179,7 +244,8 @@ def _label_indices(roster_norm: List[str], picks: Sequence[str]) -> Tuple[List[i
 
 def _example_for_side(t: dict, side: str, opp: str,
                       stats: Optional[Counter],
-                      feat_fn: Callable = mon_dex_features) -> Optional[dict]:
+                      feat_fn: Callable = mon_dex_features,
+                      sheet_map: Optional[dict] = None) -> Optional[dict]:
     players = t.get("players") or {}
     me = players.get(side) or {}
     them = players.get(opp) or {}
@@ -215,11 +281,25 @@ def _example_for_side(t: dict, side: str, opp: str,
         stats["valid_bring"] += int(valid_bring)
         stats["valid_lead"] += int(valid_lead)
 
+    # tpfeat-v7 OTS: the OPPONENT's revealed sheets ride the overlay when open
+    # team sheets made them preview-visible.  OWN side stays symmetric base
+    # (overlay off) — parity with the prod serve path, whose own_known is None.
+    use_sheet = bool(sheet_map) and getattr(feat_fn, "supports_known", False)
+
+    def _opp_f(s):
+        if use_sheet:
+            return feat_fn(s, sheet_map.get(norm_species(s)))
+        return feat_fn(s)
+
+    if use_sheet and stats is not None:
+        stats["ots_opp_overlay_mons"] += sum(
+            1 for s in opp_roster if sheet_map.get(norm_species(s)) is not None)
+
     return {
         "our_species": roster_norm,
         "opp_species": [norm_species(s) for s in opp_roster],
         "our_feat": np.stack([feat_fn(s) for s in roster]),
-        "opp_feat": np.stack([feat_fn(s) for s in opp_roster]),
+        "opp_feat": np.stack([_opp_f(s) for s in opp_roster]),
         "bring": bring,
         "lead": lead,
         "valid_bring": valid_bring,
@@ -244,17 +324,25 @@ def build_examples(
     for fp in files:
         stats["files"] += 1
         try:
-            t = _first_transition(fp)
+            firsts = _first_transitions(fp)
         except (OSError, json.JSONDecodeError) as exc:  # pragma: no cover
             stats["bad_files"] += 1
             print(f"[teampreview_dataset] WARNING skipping {fp}: {exc}", file=sys.stderr)
             continue
-        if not t:
+        if not firsts:
             continue
+        t = firsts.get("p1") or next(iter(firsts.values()))
+        # tpfeat-v7: OTS battles expose both sides' sheets at preview — build the
+        # revealed map once per file (only when the recipe can consume it).
+        sheet_map = None
+        if t.get("ots") and getattr(feat_fn, "supports_known", False):
+            sheet_map = _ots_sheet_map(firsts)
+            if sheet_map:
+                stats["ots_sheet_replays"] += 1
         for side, opp in (("p1", "p2"), ("p2", "p1")):
             if side not in sides:
                 continue
-            ex = _example_for_side(t, side, opp, stats, feat_fn)
+            ex = _example_for_side(t, side, opp, stats, feat_fn, sheet_map=sheet_map)
             if ex is not None:
                 examples.append(ex)
     stats["replays"] = len({e["replay_id"] for e in examples})

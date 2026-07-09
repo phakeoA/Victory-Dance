@@ -1209,7 +1209,9 @@ def resolve_item_json(mon: dict) -> tuple[str, float]:
 
     A revealed/injected ``known_item`` (incl. the ``"mega stone"`` placeholder the
     parser stamps on a mega'd mon) wins at confidence 1.0; an exact (team-sheet)
-    mon with no item is a confirmed-itemless 1.0; else the belief top item
+    mon with no item is a confirmed-itemless 1.0, as is an OTS ``sheet_itemless``
+    mon (the server ``|showteam|`` sheet showed no item — without the sentinel the
+    belief fallback hands it a phantom top item); else the belief top item
     (belief["items"][0]) at 0.5; else unknown ("", 0.0).
 
     A CONSUMED item (item_consumed; berry eaten / Sash popped / Knocked Off) is
@@ -1221,7 +1223,7 @@ def resolve_item_json(mon: dict) -> tuple[str, float]:
     ki = mon.get("known_item")
     if ki:
         return norm_species(ki), 1.0
-    if mon.get("exact"):
+    if mon.get("exact") or mon.get("sheet_itemless"):
         return "", 1.0                      # team sheet vouches: itemless
     items = (mon.get("belief") or {}).get("items") or []
     if items and items[0].get("name"):

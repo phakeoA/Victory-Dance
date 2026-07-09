@@ -562,7 +562,8 @@ class BeliefState:
         return sorted(result, key=lambda x: x[1], reverse=True)
 
     # ── Distribution API (used by fill_blanks) ────────────────────────────────
-    def spread_distribution(self, species: str, top_k: int = 5) -> list[dict]:
+    def spread_distribution(self, species: str, top_k: int = 5,
+                            revealed_nature: Optional[str] = None) -> list[dict]:
         """
         Top-K EV spreads as a renormalised probability distribution::
 
@@ -572,11 +573,24 @@ class BeliefState:
         ``evs`` are bucket scale (0–32), ``evs_actual`` classic 0–252.
         Probabilities are renormalised over the returned subset so they sum
         to 1.0 (the raw Pikalytics pcts are kept implicitly via the ratios).
+
+        revealed_nature: an OTS-revealed (or otherwise known) nature prunes the
+        prior to matching spreads — the sheet reveals nature but not EVs, so
+        this is the item-coherence pattern applied to spreads.  Falls back to
+        the unfiltered prior when no listed spread runs that nature (a rare
+        off-meta set: better the broad prior than an empty distribution).
         """
         entry = self._entry(species)
         if not entry or not entry.get("spreads"):
             return []
-        spreads = sorted(entry["spreads"], key=lambda x: x["pct"], reverse=True)[:top_k]
+        ranked = sorted(entry["spreads"], key=lambda x: x["pct"], reverse=True)
+        if revealed_nature:
+            want = norm_species(revealed_nature)
+            matching = [s for s in ranked
+                        if norm_species(s.get("nature") or "") == want]
+            if matching:
+                ranked = matching
+        spreads = ranked[:top_k]
         total = sum(s["pct"] for s in spreads) or 1.0
         return [
             {
@@ -618,12 +632,14 @@ class BeliefState:
         base_stats: dict[str, int],
         level: int = DEFAULT_LEVEL,
         top_k: int = 5,
+        revealed_nature: Optional[str] = None,
     ) -> Optional[dict[str, float]]:
         """
         Probability-weighted in-battle stats over the top-K spreads
         (a softer estimate than expected_stats(), which uses only the #1).
         """
-        spreads = self.spread_distribution(species, top_k=top_k)
+        spreads = self.spread_distribution(species, top_k=top_k,
+                                           revealed_nature=revealed_nature)
         if not spreads:
             return None
         acc = {s: 0.0 for s in STAT_ORDER}
@@ -641,6 +657,7 @@ class BeliefState:
         revealed_moves: Optional[list[str]] = None,
         revealed_item: Optional[str] = None,
         revealed_ability: Optional[str] = None,
+        revealed_nature: Optional[str] = None,
         stats_species: Optional[str] = None,
         ability_species: Optional[str] = None,
         can_have_choice_item: Optional[bool] = None,
@@ -651,7 +668,9 @@ class BeliefState:
 
         Revealed information conditions the distributions: a revealed item or
         ability collapses that distribution to p=1.0; revealed moves are listed
-        as known and excluded from the predicted-move marginals.
+        as known and excluded from the predicted-move marginals; a revealed
+        nature (OTS sheets reveal nature but not EVs) prunes the spread prior
+        to matching spreads and sharpens expected_stats accordingly.
 
         can_have_choice_item: replay-derived constraint — False means the mon
         used two different moves during one stay on the field, which rules out
@@ -714,7 +733,8 @@ class BeliefState:
 
         base = dex_base_stats(stats_species or species) or dex_base_stats(key)
         expected = (
-            self.expected_stats_weighted(key, base, level=level, top_k=top_k)
+            self.expected_stats_weighted(key, base, level=level, top_k=top_k,
+                                         revealed_nature=revealed_nature)
             if base else None
         )
 
@@ -722,7 +742,8 @@ class BeliefState:
             "source": "pikalytics",
             "species_key": key,
             "usage_pct": entry.get("usage_pct"),
-            "spreads": self.spread_distribution(key, top_k=top_k),
+            "spreads": self.spread_distribution(key, top_k=top_k,
+                                                revealed_nature=revealed_nature),
             "expected_stats": expected,
             "items": items,
             "abilities": abilities,
@@ -1246,11 +1267,17 @@ def _enrich_mon_belief(
     block = belief.belief_block(
         lookup,
         top_k=top_k,
-        revealed_moves=mon.get("revealed_moves") or [],
+        # known_moves (OTS sheet / inject — the complete authoritative set) wins
+        # over the progressive revealed_moves; byte-identical for pre-OTS data
+        # (known_moves was never populated before fill time on this path).
+        revealed_moves=mon.get("known_moves") or mon.get("revealed_moves") or [],
         # a CONSUMED item is no longer HELD → don't collapse the held-item belief to it (audit 2026-06-30);
         # its identity stays on known_item for the encoder's consume-gated path, but belief reverts to the prior.
         revealed_item=(mon.get("known_item") if not mon.get("item_consumed") else None),
         revealed_ability=mon.get("known_ability"),
+        # an OTS sheet reveals nature (EVs stay hidden) — prunes the spread prior;
+        # None everywhere nature is unknown (all pre-OTS distribution mons).
+        revealed_nature=mon.get("nature"),
         ability_species=ability_species,
         can_have_choice_item=mon.get("can_have_choice_item"),
         # expected stats from the CURRENT forme (mega base stats if mega'd)
