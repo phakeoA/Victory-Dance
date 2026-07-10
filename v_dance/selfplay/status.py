@@ -296,7 +296,8 @@ class LiveBattles:
             pass
         self._last.pop(tag, None)
 
-    def save_html_replay(self, tag: str, battle, *, out_dir=None, label: Optional[str] = None) -> Optional[Path]:
+    def save_html_replay(self, tag: str, battle, *, out_dir=None, label: Optional[str] = None,
+                         copy_dir=None) -> Optional[Path]:
         """Save a finished battle as a real, playable Showdown **HTML** replay and DROP the transient
         live JSON. This is what ``--save-replays`` keeps (the artifact you can open in a browser),
         instead of the cosmetic live-feed JSON.
@@ -322,6 +323,19 @@ class LiveBattles:
             d.mkdir(parents=True, exist_ok=True)
             html = render_replay_html(battle_replay_lines(battle), replayid=_safe_tag(tag))
             out.write_text(html, encoding="utf-8")
+            # Training-corpus copy (2026-07-10, USER request): a second copy of the SAME
+            # Showdown-native HTML into ``copy_dir`` (data/vods/Type_C) so real games feed the
+            # ingest pipeline later. The copy's name is prefixed with out_dir's basename (the
+            # harness SESSION id) — local battle tags restart numbering with the server, so the
+            # bare tag is not collision-safe across sessions. Copy failure never breaks the save.
+            if copy_dir is not None:
+                try:
+                    cd = Path(copy_dir)
+                    cd.mkdir(parents=True, exist_ok=True)
+                    prefix = f"{d.name}_" if out_dir else ""
+                    (cd / f"{prefix}{stem}.html").write_text(html, encoding="utf-8")
+                except Exception:
+                    pass
             return out
         except Exception:
             return None

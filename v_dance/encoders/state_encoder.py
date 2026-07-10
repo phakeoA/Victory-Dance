@@ -207,7 +207,7 @@ from v_dance.encoders.battle_mechanics import (  # noqa: F401
     _type_chart, _type_eff_signed_immune, _type_mult, ability_effect_indices, champ_acc_raw,
     champ_bp, champ_type, dex_unique_ability, field_dependent_move_type, field_duration_scalars, is_spread_target,
     item_effect_indices, move_redundant_condition, move_redundant_status, pp_max,
-    resolve_ability_json, resolve_active_ability_json, resolve_item_json,
+    priority_blocked, resolve_ability_json, resolve_active_ability_json, resolve_item_json,
 )
 from v_dance.encoders.action_codec import (  # noqa: F401
     ABILITY_ID_REL, ABILITY_KNOWN_REL, ITEM_ID_REL, MOVE_ID_RELS, OPP_HEADS,
@@ -831,9 +831,11 @@ class VodStateEncoder:
         # v11 N4: expected-crit multiplier (Super Luck / Sniper / Scope Lens + high-crit moves) — the band is
         # otherwise crit-blind. Defender-independent → computed once; folded into each enemy's _sit below.
         _crit = _expected_crit_mult(_mid, ability_id, _ac.get("scope_lens"))
+        _prio = data.get("priority") or 0              # move-data priority (damage block + B.1b below)
         for e in range(2):
             d = enemy_defenders[e] if (enemy_defenders and e < len(enemy_defenders)) else None
-            if d and not _move_immune(mtype, d, ability_id, _mid):
+            if d and not _move_immune(mtype, d, ability_id, _mid) \
+                    and not priority_blocked(_prio, _terrain, d, enemy_defenders):
                 _tmult = _type_mult(mtype, d.get("types") or [], _neg[e])   # v11 C.2d negation
                 if mtype == "FIRE" and d.get("tar_shot"):
                     _tmult *= 2.0                                  # v11 C.2c: Tar Shot Fire ×2
@@ -883,7 +885,9 @@ class VodStateEncoder:
                     d.get("hp"), d.get("hp_frac"), _tmult,
                     _stab, _spread, _sit, hits_min=_hmin, hits_max=_hmax)   # v11 A1: multi-hit
             else:
-                dmin, dmax = 0.0, 0.0                # empty slot OR defender-ability immunity → 0 damage
+                # empty slot OR defender-ability immunity OR priority-block (Psychic Terrain /
+                # Dazzling-class vs a boosted-priority move) → 0 damage
+                dmin, dmax = 0.0, 0.0
             vec[i] = dmin
             vec[i + 1] = dmax
             i += 2
@@ -893,7 +897,6 @@ class VodStateEncoder:
         # time). A nonzero bracket hard-overrides speed (the Fake Out / Sucker Punch read), TR-invariant;
         # an equal bracket falls back to the soft speed/TR margin. Empty enemy slot → 0.
         _att_spd = _ac.get("eff_speed") or 0.0
-        _prio = data.get("priority") or 0
         _tr = bool(_ac.get("trick_room"))
         for e in range(2):
             d = enemy_defenders[e] if (enemy_defenders and e < len(enemy_defenders)) else None

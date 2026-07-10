@@ -33,16 +33,29 @@ def wilson(w: int, n: int, z: float = 1.96) -> tuple[float, float]:
 
 
 def load_rows(path: Path) -> list[dict]:
-    rows = []
+    """Game rows, with any ``rating_update`` rows FOLDED IN by battle_tag (2026-07-10: on the
+    browser transport the server's ladder-rating lines arrive after the game row was written —
+    the online harness appends them as separate crash-safe rows instead of rewriting the log)."""
+    rows, updates = [], []
     with path.open(encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             try:
-                rows.append(json.loads(line))
+                r = json.loads(line)
             except json.JSONDecodeError:
                 print(f"  [warn] unparseable row skipped: {line[:80]}")
+                continue
+            (updates if r.get("type") == "rating_update" else rows).append(r)
+    if updates:
+        by_tag = {r.get("battle_tag"): r for r in rows if r.get("battle_tag")}
+        for u in updates:
+            g = by_tag.get(u.get("battle_tag"))
+            if g is not None:
+                for k in ("rating", "opponent_rating"):
+                    if u.get(k) is not None and g.get(k) is None:
+                        g[k] = u[k]
     return rows
 
 

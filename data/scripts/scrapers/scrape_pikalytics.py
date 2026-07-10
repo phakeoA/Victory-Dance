@@ -775,6 +775,15 @@ def cli() -> None:
                                else "pikalytics_regma.json")
     print(f"[config] format={FORMAT_SLUG}  url={INDEX_URL}  output={OUTPUT_FILE.name}")
 
+    # ⚠ Playwright must SPAWN its driver subprocess, which the Windows SelectorEventLoop cannot
+    # do (asyncio raises NotImplementedError) — and the ``v_dance.formats`` import above just
+    # installed the Selector policy GLOBALLY (v_dance/__init__'s poke-env Ctrl-C fix). This
+    # process runs no poke-env, so restore the Proactor policy before the crawl — the same
+    # dance as play_vs_human_browser._use_proactor_loop. (2026-07-10: without this, every
+    # scrape died at AsyncWebCrawler start the moment the format-lockstep import existed.)
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
     if args.debug_markdown:
         asyncio.run(_debug_markdown(args.debug_markdown))
     else:

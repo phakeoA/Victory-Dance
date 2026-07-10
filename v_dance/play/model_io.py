@@ -512,12 +512,61 @@ def _pack_side(species: Sequence[str], vocab: dict, feat_dim: int, *,
     return idx, feat
 
 
+# ── TP joint conditional re-decode (2026-07-10) ────────────────────────────────
+# The greedy decode takes the top-bring_k mons by INDEPENDENT per-mon logits — it cannot express
+# teammate-conditional structure ("Mawile's value depends on who else comes"), which mode-mixed
+# brings on mode teams (both mega-stone holders in 3 of 4 online losses). Joint decode re-scores
+# every C(valid, k) bring-subset with the SAME net: the left-behind mons are pad-masked (idx 0 +
+# zero feature rows — the exact _pack_side pad convention whose rows the model's attention keys
+# and context mean already exclude), so each candidate set is scored by its members' bring logits
+# IN THE CONTEXT OF exactly its teammates. No rules, no retrain; exceptions (a both-megas bring
+# that genuinely fits a matchup) emerge from the net per opponent. Gate: the S3 ruler --joint-ab
+# must show joint ≥ greedy on human bring-set agreement before TP_JOINT_BRING flips to True.
+TP_JOINT_BRING = False     # serve default; flip only after the offline gate passes
+
+
+def _joint_bring_order(model, oi, of, pi, pf, aff_t, valid: int, bring_k: int, lead_k: int,
+                       n: int, device: str):
+    """(order, True) via joint subset re-scoring, or (None, False) when not applicable
+    (nothing to choose / a mean-pool legacy net whose context is not pad-safe)."""
+    from itertools import combinations
+    k = min(bring_k, valid, n)
+    if k <= 0 or valid <= k:
+        return None, False                       # ≤ one candidate subset → greedy is already exact
+    if not (getattr(model, "use_self_attn", False) or getattr(model, "use_cross_attn", False)):
+        return None, False                       # pad-safety needs the attention path (v6+ SBDA)
+    subsets = list(combinations(range(valid), k))            # ≤ C(6,4)=15
+    B = len(subsets)
+    oi_b = np.tile(np.asarray(oi, dtype=np.int64), (B, 1))   # (B, 6)
+    of_b = np.tile(of[None], (B, 1, 1))                      # (B, 6, F)
+    for b, sub in enumerate(subsets):
+        excl = [j for j in range(oi_b.shape[1]) if j not in sub]
+        oi_b[b, excl] = 0
+        of_b[b, excl] = 0.0                      # pad convention: idx 0 + all-zero feature row
+    pi_b = np.tile(np.asarray(pi, dtype=np.int64), (B, 1))
+    pf_b = np.tile(pf[None], (B, 1, 1))
+    with torch.no_grad():
+        bl, ll = model(torch.as_tensor(oi_b, device=device),
+                       torch.as_tensor(pi_b, device=device),
+                       torch.as_tensor(of_b, device=device),
+                       torch.as_tensor(pf_b, device=device),
+                       aff_t.expand(B, -1, -1) if aff_t is not None else None)
+    bl = np.asarray(bl.detach().cpu())
+    ll = np.asarray(ll.detach().cpu())
+    scores = [float(bl[b, list(sub)].mean()) for b, sub in enumerate(subsets)]
+    best = int(np.argmax(scores))
+    brought = list(subsets[best])
+    leads = sorted(brought, key=lambda i: -ll[best, i])[:lead_k]
+    return (leads + [b for b in brought if b not in leads])[:n], True
+
+
 def team_order(
     model, vocab: dict, cfg: dict,
     our_species: Sequence[str], opp_species: Sequence[str],
     n: int, device: str = "cpu", *,
     belief=None, own_known: Optional[dict] = None,
     opp_known: Optional[dict] = None,
+    joint_bring: Optional[bool] = None,
 ) -> List[int]:
     """Return roster indices to bring, LEADS FIRST (matching how the trainer
     labels — the first two brought are the leads), capped at ``n``.
@@ -556,6 +605,15 @@ def team_order(
         from v_dance.training.tp_features import teammate_affinity_matrix
         aff = teammate_affinity_matrix(our_species, belief, n=6)
         aff_t = torch.as_tensor(aff[None], device=device)
+
+    # Joint conditional re-decode (2026-07-10, flag-gated): score bring-SETS, not mons.
+    # Falls through to the greedy decode when disabled or not applicable.
+    joint = TP_JOINT_BRING if joint_bring is None else bool(joint_bring)
+    if joint and use_tp:
+        order, ok = _joint_bring_order(model, oi, of, pi, pf, aff_t,
+                                       valid, bring_k, lead_k, n, device)
+        if ok:
+            return order
 
     with torch.no_grad():
         bring_logits, lead_logits = model(

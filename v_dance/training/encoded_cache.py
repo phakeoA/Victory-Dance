@@ -68,7 +68,10 @@ from v_dance.training.bc_dataset import (
 )
 
 _CACHE_DIRNAME = ".encoded_cache"
-_CACHE_SCHEMA = 1          # bump when the serialized example schema changes
+_CACHE_SCHEMA = 2          # bump when the serialized schema OR encoder SEMANTICS change without
+                           # a layout/dim bump (schema 2 = 2026-07-10 priority-block: blocked
+                           # priority moves' damage bands now 0/0 — same dims, new values; the
+                           # bump re-encodes stale caches while v19 checkpoints keep loading)
 _STREAM_CHUNK_FILES = 2000  # ~30-60k examples ≈ 1-2 GB peak per build chunk
 
 # fixed-width string dtypes (replay ids are showdown battle ids ≤ ~64 chars)

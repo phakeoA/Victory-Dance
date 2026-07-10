@@ -133,6 +133,9 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
         # eval gauntlet can file replays into eval/<kind>/ and eval/league/ named gen<N>_vs_<...>.
         replay_dir = kwargs.pop("replay_dir", None)
         replay_label = kwargs.pop("replay_label", None)
+        # 2026-07-10 (USER): SECOND copy of every saved replay into the training-corpus folder
+        # (data/vods/Type_C) — session-prefixed names, see LiveBattles.save_html_replay.
+        replay_copy_dir = kwargs.pop("replay_copy_dir", None)
         # Level C / A3 (live wiring): within-game opponent belief (MatchBelief) PRE-ENRICHMENT of the
         # gap-#6 opponent snapshot. OFF by default → prod serving stays byte-identical (the un-spliced
         # static-belief path); the A/B harness / overnight self-play flips it on. See _apply_match_belief.
@@ -190,6 +193,7 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
         self._save_html_replays = bool(save_replays)
         self._replay_dir = replay_dir
         self._replay_label = replay_label
+        self._replay_copy_dir = replay_copy_dir
         self._live = None
         if live_dir:
             from v_dance.selfplay.status import LiveBattles
@@ -946,7 +950,8 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
                 if getattr(self, "_save_html_replays", False):
                     live.save_html_replay(tag, battle,    # playable HTML + drop the live JSON
                                           out_dir=getattr(self, "_replay_dir", None),
-                                          label=getattr(self, "_replay_label", None))
+                                          label=getattr(self, "_replay_label", None),
+                                          copy_dir=getattr(self, "_replay_copy_dir", None))
                 else:
                     live.remove(tag)
             except Exception:

@@ -72,6 +72,62 @@ _IMPORT_TEAMS_JS = (
 )
 
 
+def _sockjs_unwrap(payload: str) -> list:
+    """play.pokemonshowdown.com (psim.us) delivers protocol messages SockJS-framed: ``o`` (open),
+    ``h`` (heartbeat), ``c[…]`` (close) and ``a["msg", …]`` — each msg a JSON string holding the
+    raw ``|``-protocol text (newlines escaped). The LOCAL server's endpoint delivers BARE protocol
+    text, which is why the local harness never needed this — online, nothing parsed until 2026-07-09
+    (no auto-accept, no teampreview: every frame silently missed the ``>battle``/challenge branches).
+    Unwrap ``a`` frames into their messages, drop control frames, pass bare frames through."""
+    if not payload:
+        return []
+    if payload.startswith("a["):
+        try:
+            return [m for m in json.loads(payload[1:]) if isinstance(m, str)]
+        except Exception:
+            return [payload]                       # not actually SockJS → pass through untouched
+    if payload in ("o", "h") or payload.startswith("c["):
+        return []
+    return [payload]
+
+
+def _sync_avatar_from_frame(payload: str, env_path: Path = _REPO / ".env") -> None:
+    """Persist a browser-side avatar change to ``.env`` (USER request 2026-07-09): the server
+    confirms every avatar change with ``|updateuser|USER|NAMED|AVATAR|{settings}``, so watching
+    the incoming frames catches changes made through the client UI. Only NAMED (post-login)
+    updates for OUR account are applied — the guest frames of the login dance never touch .env.
+    Atomic write (temp + replace): .env holds credentials, a torn write is never acceptable."""
+    try:
+        if "|updateuser|" not in payload:
+            return
+        uid = "".join(c for c in (_ENV.get("PS_USERNAME") or "").lower() if c.isalnum())
+        for line in payload.split("\n"):
+            parts = line.split("|")
+            if len(parts) < 5 or parts[1] != "updateuser":
+                continue
+            user, named, avatar = parts[2], parts[3], parts[4].strip()
+            # rank chars (space/+/*/#/…) are non-alnum → the filter normalizes them away
+            if named != "1" or not avatar or "".join(c for c in user.lower() if c.isalnum()) != uid:
+                continue
+            if avatar == (_ENV.get("PS_AVATAR") or "").strip():
+                return
+            lines = env_path.read_text(encoding="utf-8").splitlines()
+            for i, ln in enumerate(lines):
+                if ln.split("=", 1)[0].strip() == "PS_AVATAR":
+                    lines[i] = f"PS_AVATAR={avatar}"
+                    break
+            else:
+                lines.append(f"PS_AVATAR={avatar}")
+            tmp = env_path.with_name(env_path.name + ".tmp")
+            tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            os.replace(tmp, env_path)
+            _ENV["PS_AVATAR"] = avatar
+            print(f"[online] avatar changed in the browser → saved to .env (PS_AVATAR={avatar})")
+            return
+    except Exception as exc:                       # a sync failure must never break play
+        print(f"[online] avatar .env sync failed (non-fatal): {exc!r}")
+
+
 async def _login(page, username: str, password: str) -> bool:
     """Log the tab into the registered account. Scripted via the client's own rename flow (the
     challstr/assertion dance is the client's job); on any failure fall back to MANUAL login —
@@ -148,11 +204,30 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
     if args.ai_team and args.ai_team not in ai_pool:
         raise SystemExit(f"[online] --ai-team {args.ai_team!r} not in the pool ({ai_pool[:10]} …)")
 
+    session_id = f"{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}-{os.getpid()}"
     host = BattleHost(team=teams[0][1], username=username,       # username → correct battle side
                       model_path=ckpt, team_chooser_path=tp_ckpt,
-                      adapt_rules=args.adapt_rules)
-    session_id = f"{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}-{os.getpid()}"
+                      adapt_rules=args.adapt_rules,
+                      # HTML replays (S4 online protocol: the stop-loss review + Phase-3 data)
+                      live_dir=BENCH_DIR / "live", save_replays=True,
+                      replay_dir=BENCH_DIR / "replays" / session_id, replay_label="online",
+                      # Type_C training copy (2026-07-10, USER): real games → corpus folder
+                      replay_copy_dir=_REPO / "data" / "vods" / "Type_C")
     _wrap_bench_recording(host, session_id, args.bench_note, ckpt, tp_ckpt)
+    print(f"[online] replays -> {BENCH_DIR / 'replays' / session_id}")
+
+    # Ladder-rating capture (2026-07-10): the post-battle |raw| rating lines arrive after the
+    # game row is written, so they land as separate crash-safe "rating_update" rows keyed by
+    # battle_tag; human_benchmark_report joins them onto the game rows at read time.
+    def _rating_row(tag: str, user: str, rating: int) -> None:
+        key = "rating" if _pvhb._toid(user) == _pvhb._toid(username) else "opponent_rating"
+        BENCH_DIR.mkdir(parents=True, exist_ok=True)
+        with BENCH_LOG.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                                "type": "rating_update", "session_id": session_id,
+                                "battle_tag": tag, key: rating}) + "\n")
+
+    _pvhb.RATING_HOOK = _rating_row
     # The reused consumer/_credit print + fall back on the module's _AI_NAME; online, the AI IS
     # the .env account. (The local harness isn't running in this process — safe to repoint.)
     _pvhb._AI_NAME = username
@@ -179,7 +254,13 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
             frame_q: asyncio.Queue = asyncio.Queue()
             ctx = await browser.new_context(no_viewport=True)
             page = await ctx.new_page()
-            page.on("websocket", lambda ws: ws.on("framereceived", lambda p: frame_q.put_nowait(p)))
+
+            def _on_frame(p) -> None:              # SockJS unwrap → consumer feed + avatar watch
+                for msg in _sockjs_unwrap(p):
+                    frame_q.put_nowait(msg)
+                    _sync_avatar_from_frame(msg)
+
+            page.on("websocket", lambda ws: ws.on("framereceived", _on_frame))
             await page.goto(args.client_url, wait_until="domcontentloaded")
             await page.wait_for_function(
                 "() => window.app && app.socket && app.socket.readyState === 1", timeout=30000)
@@ -206,12 +287,19 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
             print("=" * 64 + "\n")
             sys.stdout.flush()
             if args.dry_run:
-                print("[online] DRY RUN — no battles will be played; Ctrl-C to exit.")
-                while True:
+                print("[online] DRY RUN — no battles will be played; Ctrl-C (or close the window) to exit.")
+                while not page.is_closed():        # window closed = auto-Ctrl-C, same as the consumer
                     await asyncio.sleep(1.0)
+                print("[online] browser window closed — exiting dry run.")
+                return tally
             await _ai_consumer(page, host, frame_q, ai_pool, tally, stop, args.ai_team)
         finally:
-            await browser.close()
+            try:
+                await browser.close()
+            except Exception:
+                # window-close auto-stop: the browser (and its driver pipe) are already gone —
+                # close() then raises "Connection closed while reading from the driver". Benign.
+                pass
     return tally
 
 

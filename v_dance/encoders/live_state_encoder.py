@@ -43,6 +43,7 @@ from v_dance.encoders.state_encoder import (
     _disguise_intact,                              # v11 B1: Mimikyu Disguise intact-block (shared, parity)
     _accuracy_modifiers, _move_always_hit, _move_is_ohko, _per_enemy_hit_chance,  # v11 B2/B2b (shared, parity)
     _TYPE_BOOST_TYPE, _RESIST_BERRY_TYPE, _BAND_ITEM_MULT,   # v11 B3: item band mults (shared, parity)
+    priority_blocked,                              # 2026-07-10: Psychic-Terrain/Dazzling priority block (shared, parity)
     VodStateEncoder,
     # v9 (B1-mechanics): mechanic substrate (re-exported from state_encoder's namespace)
     NUM_MOVE_TAGS, NUM_ABILITY_TAGS, NUM_ITEM_TAGS, VOLATILE_FEATURES,
@@ -1332,9 +1333,11 @@ class LiveStateEncoder:
             _hmin = 4
         # v11 N4: expected-crit multiplier (parity twin of offline — defender-independent, computed once).
         _crit = _expected_crit_mult(_mid, ability_id, _ac.get("scope_lens"))
+        _prio = getattr(move, "priority", 0) or 0      # move priority (damage block + B.1b below; parity twin)
         for e in range(2):
             d = enemy_defenders[e] if (enemy_defenders and e < len(enemy_defenders)) else None
-            if d and not _move_immune(_mt, d, ability_id, _mid):
+            if d and not _move_immune(_mt, d, ability_id, _mid) \
+                    and not priority_blocked(_prio, _terrain, d, enemy_defenders):
                 _tmult = _type_mult(_mt, d.get("types") or [], _neg[e])   # v11 C.2d negation
                 if _mt == "FIRE" and d.get("tar_shot"):
                     _tmult *= 2.0                                  # v11 C.2c: Tar Shot Fire ×2
@@ -1377,14 +1380,15 @@ class LiveStateEncoder:
                     d.get("hp"), d.get("hp_frac"), _tmult,
                     _stab, _spread, _sit, hits_min=_hmin, hits_max=_hmax)   # v11 A1: multi-hit
             else:
-                dmin, dmax = 0.0, 0.0                # empty slot OR defender-ability immunity → 0 damage
+                # empty slot OR defender-ability immunity OR priority-block (Psychic Terrain /
+                # Dazzling-class vs a boosted-priority move) → 0 damage (parity with offline)
+                dmin, dmax = 0.0, 0.0
             vec[i] = dmin
             vec[i + 1] = dmax
             i += 2
 
         # v11 B.1b: priority-aware who-moves-first vs each enemy active (2 channels; parity with offline).
         _att_spd = _ac.get("eff_speed") or 0.0
-        _prio = getattr(move, "priority", 0) or 0
         _tr = bool(_ac.get("trick_room"))
         for e in range(2):
             d = enemy_defenders[e] if (enemy_defenders and e < len(enemy_defenders)) else None

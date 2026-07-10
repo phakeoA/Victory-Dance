@@ -37,6 +37,7 @@ URL = f"http://{SHOWDOWN_HOST}:{SHOWDOWN_PORT}"
 # Per-battle inactivity watchdog (the consumer frees the AI if one battle runs absurdly long / the tab
 # went silent). Module-level so the self-test budget can be sized ABOVE it (#16) from a single source.
 _MAX_BATTLE_S = 600.0
+_OPP_TIMER_S = 30.0    # opponent think-time before the consumer sends /timer on (USER, 2026-07-10)
 
 # The local client redirects to https://localhost.psim.us then opens insecure ws://localhost:8000;
 # fresh Chromium blocks that (mixed-content / private-network). These flags allow it (LOCAL dev only).
@@ -164,7 +165,11 @@ def _parse_challenge(payload: str):
     also send ``|updatechallenges|{json}``. Handle both."""
     for line in payload.split("\n"):
         parts = line.split("|")
-        if len(parts) >= 5 and parts[1] == "pm" and parts[4].startswith("/challenge"):
+        # skip pms WE sent (an outgoing challenge lists us as the sender) — the receiver's
+        # /accept of its own challenge is a server error. Only matters online, where the AI
+        # window can also be used to send challenges.
+        if (len(parts) >= 5 and parts[1] == "pm" and parts[4].startswith("/challenge")
+                and _toid(parts[2]) != _toid(_AI_NAME)):
             fmt = parts[4][len("/challenge"):].strip()
             if fmt:
                 return parts[2].strip(), fmt
@@ -205,6 +210,34 @@ def _result_line(payload: str):
         if line.startswith(("|win|", "|tie|")):
             return line
     return None
+
+
+# Ladder-rating capture (2026-07-10): the server's post-battle ``|raw|<user>'s rating: N …``
+# ladder updates arrive AFTER the consumer already recorded + tore the battle down (end_battle →
+# the ended-tag guard then drops those frames before poke-env), so ``battle.rating`` can never be
+# set on the browser transport. The consumer instead captures them TEXTUALLY and calls
+# ``RATING_HOOK(battle_tag, username, rating)`` — the online harness points it at a crash-safe
+# ``rating_update`` bench row that ``human_benchmark_report`` joins by battle_tag. None = off
+# (local play: challenges are unrated, the lines never occur).
+RATING_HOOK = None
+
+
+def _parse_rating_lines(payload: str) -> list:
+    """[(username, rating)] from a frame's ``|raw|…'s rating: NNNN…`` lines — the same parse
+    poke-env's abstract_battle uses (split on "'s rating: ", int of the first 4 chars = the
+    PRE-battle rating, matching what play_ladder's poke-env-native rows record)."""
+    out = []
+    if "'s rating: " not in payload:
+        return out
+    for line in payload.split("\n"):
+        parts = line.split("|")
+        if len(parts) >= 3 and parts[1] == "raw" and "'s rating: " in parts[2]:
+            try:
+                user, rest = parts[2].split("'s rating: ", 1)
+                out.append((user.strip(), int(rest[:4])))
+            except (ValueError, IndexError):
+                pass
+    return out
 
 
 def _credit(host: BattleHost, tag: str, result_line: str, tally: dict) -> None:
@@ -260,6 +293,11 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
     pending = None               # a challenger (our format) seen while busy — accepted once free
     seen_wrong_fmt: set = set()  # (challenger, fmt) pairs already warned about (dedup the repeated frames)
     errors = 0                   # consecutive frame-handling errors → stop if the tab is dead
+    last_ship = 0.0              # loop.time() of our last shipped /choose|/team — from then until our
+                                 # NEXT ship, the opponent (or server) is the one we're waiting on
+    timer_sent: set = set()      # battles we already sent /timer on for (once per battle)
+    t0_tag = None                # ladder battles ARRIVE without an accept (the Battle! queue), so
+                                 # busy_since was never set → stamp it on a battle's FIRST frame
     # _MAX_BATTLE_S is module-level (#16) so run()'s self-test budget can be sized above it.
     while not stop.is_set():
         # watchdog: free up if a battle ran absurdly long / went silent (tab closed, desync)
@@ -297,6 +335,28 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
         try:
             payload = await asyncio.wait_for(frame_q.get(), timeout=1.0)
         except asyncio.TimeoutError:
+            # Window closed → auto-Ctrl-C (USER request 2026-07-09): a closed tab sends no frames,
+            # so this timeout branch is guaranteed to run within ~1s of the close — even mid-battle.
+            # Without this, an IDLE consumer would spin on timeouts forever (is_closed was only
+            # checked on exceptions), leaving the process running headless after the window died.
+            if page.is_closed():
+                print("[ai] browser window closed — stopping (auto Ctrl-C).")
+                stop.set()
+                return
+            # Opponent-stall timer (USER request 2026-07-10): our decision shipped >30s ago and the
+            # battle hasn't advanced (no frames since → we're on idle ticks) → /timer on, once per
+            # battle. A rare false positive (e.g. an extremely long turn resolution) is harmless —
+            # the timer is a legitimate tool either way.
+            if (active_tag and last_ship and active_tag not in timer_sent
+                    and active_tag not in host._ended
+                    and loop.time() - last_ship > _OPP_TIMER_S):
+                timer_sent.add(active_tag)
+                try:
+                    await page.evaluate("(d) => app.socket.send(d.r + '|' + d.m)",
+                                        {"r": active_tag, "m": "/timer on"})
+                    print(f"[ai] opponent slow (>{_OPP_TIMER_S:.0f}s) — /timer on ({active_tag})")
+                except Exception as exc:
+                    print(f"[ai] timer-on failed (non-fatal): {exc!r}")
             # Heartbeat while serving: if we accepted a battle but no frames are arriving, surface the
             # stall (battle never started / frames not captured / desync) instead of failing silently.
             if busy and loop.time() >= hb_next:
@@ -325,16 +385,34 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
             # 2) battle frame → host decides → ship its commands back into the tab
             elif payload.startswith(">battle"):
                 active_tag = payload.split("\n", 1)[0].lstrip(">")
+                # ladder-queue battles arrive with NO accept step → busy_since was never stamped
+                # (the "battle done in 686352s" print) — stamp it on the battle's first frame.
+                if not busy and active_tag != t0_tag and active_tag not in host._ended:
+                    busy_since, t0_tag = loop.time(), active_tag
+                # ladder-rating capture: these |raw| lines belong to an already-ENDED battle
+                # (recorded + torn down), so scan the text BEFORE the host's ended-tag guard
+                # drops the frame. No-op unless a harness installed RATING_HOOK.
+                if RATING_HOOK is not None:
+                    for _u, _rt in _parse_rating_lines(payload):
+                        try:
+                            RATING_HOOK(active_tag, _u, _rt)
+                        except Exception as exc:                     # capture must never break play
+                            print(f"[ai] rating-capture failed (non-fatal): {exc!r}")
                 result = _result_line(payload)                       # prefix-matched terminal line, or None
                 try:
                     decisions = await asyncio.wrap_future(
                         asyncio.run_coroutine_threadsafe(host.feed_async(payload), POKE_LOOP))
                     for r, msg in decisions:
-                        # ship every ROOM-scoped decision: /choose, /team AND /forfeit (the forced-switch
-                        # backstop — dropping it would hang the battle). The client auto-handles the
-                        # roomless OTS/timer commands, so we don't ship those.
-                        if msg.startswith(("/choose", "/team", "/forfeit")):
+                        # ship every ROOM-scoped decision: /choose, /team, /forfeit (the forced-switch
+                        # backstop — dropping it would hang the battle) AND the OTS answer + timer.
+                        # ⚠ the old "the client auto-handles the OTS command" assumption is FALSE on
+                        # the official server (2026-07-10: /rejectopenteamsheets sat unanswered every
+                        # game, so the closed-sheets production regime was never actually enforced).
+                        if msg.startswith(("/choose", "/team", "/forfeit", "/timer",
+                                           "/rejectopenteamsheets", "/acceptopenteamsheets")):
                             await page.evaluate("(d) => app.socket.send(d.r + '|' + d.m)", {"r": r, "m": msg})
+                            if msg.startswith(("/choose", "/team")):
+                                last_ship = loop.time()          # the opponent's think-clock starts now
                         elif r:
                             print(f"[ai] (battle command not shipped: {msg[:30]})")
                 finally:
@@ -346,7 +424,8 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
                     if result is not None and active_tag and active_tag not in host._ended:
                         _credit(host, active_tag, result, tally)
                         host.end_battle(active_tag)
-                        busy, active_tag = False, None
+                        timer_sent.discard(active_tag)
+                        busy, active_tag, last_ship = False, None, 0.0
                         print(f"[ai] battle done in {loop.time() - busy_since:.0f}s — "
                               f"tally: AI {tally['ai']} / you {tally['you']} / draws {tally['draw']}")
             errors = 0                                               # a clean iteration resets the failure streak
@@ -376,7 +455,19 @@ async def run(headed: bool, human_name: str, self_test: bool, ai_team_pin: str |
         _ck["model_path"] = ckpt
     if tp_ckpt is not None:
         _ck["team_chooser_path"] = tp_ckpt
+    # HTML-replay recording (docs/human_benchmark_design.md): same wiring as play_vs_human /
+    # play_ladder, so USER-set games are reviewable + become the Phase-3 adaptation data.
+    # ON for --self-test too — the self-test then proves the whole record path end-to-end.
+    from v_dance.play.play_vs_human import BENCH_DIR, BENCH_LOG
+    session_id = f"{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}-{os.getpid()}"
+    # Type_C training copy (2026-07-10, USER): every REAL game's replay also lands in the
+    # corpus folder for later ingest — self-test games are junk data and stay out.
+    _type_c = (None if self_test
+               else Path(__file__).resolve().parents[2] / "data" / "vods" / "Type_C")
     host = BattleHost(team=teams[0][1], username=_AI_NAME, adapt_rules=adapt_rules,
+                      live_dir=BENCH_DIR / "live", save_replays=True,
+                      replay_dir=BENCH_DIR / "replays" / session_id, replay_label="bench",
+                      replay_copy_dir=_type_c,
                       **_ck)                                         # team replaced per battle
     if adapt_rules:
         print("[play] adapt-rules ON (B-L1: Wide-Guard streak → spread-move tilt)")
@@ -384,8 +475,6 @@ async def run(headed: bool, human_name: str, self_test: bool, ai_team_pin: str |
     # Bench recording (docs/human_benchmark_design.md), same end_battle hook as the online
     # harness: one JSONL row per finished battle, appended+flushed (skipped for --self-test).
     if not self_test:
-        from v_dance.play.play_vs_human import BENCH_DIR, BENCH_LOG
-        session_id = f"{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}-{os.getpid()}"
         _row_ckpt = str(ckpt or "model_io-default")
         _row_tp = str(tp_ckpt or "model_io-default")
         _orig_end, _n = host.end_battle, {"n": 0}
@@ -419,13 +508,15 @@ async def run(headed: bool, human_name: str, self_test: bool, ai_team_pin: str |
             _orig_end(tag)
 
         host.end_battle = _rec_end_battle  # type: ignore[method-assign]
-        print(f"[play] bench recording ON — session {session_id} (note {bench_note!r}) -> {BENCH_LOG}")
+        print(f"[play] bench recording ON — session {session_id} (note {bench_note!r}) -> {BENCH_LOG}\n"
+              f"[play] replays -> {BENCH_DIR / 'replays' / session_id}")
     tally = {"ai": 0, "you": 0, "draw": 0}
     stop = asyncio.Event()
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=not headed, args=_CHROMIUM_ARGS)
-        try:
+        consumer = None            # created mid-try; the finally must not mask a setup
+        try:                       # failure with an UnboundLocalError (bug found 2026-07-09)
             frame_q: asyncio.Queue = asyncio.Queue()
             # no_viewport=True → the page tracks the real OS window size and resizes with it (the default
             # fixed 1280x720 viewport stays static when you resize the window).
@@ -474,11 +565,12 @@ async def run(headed: bool, human_name: str, self_test: bool, ai_team_pin: str |
                     print(f"[play] AI consumer crashed: {consumer.exception()!r}")
         finally:
             stop.set()
-            consumer.cancel()
-            try:
-                await consumer
-            except BaseException:                                  # CancelledError or a propagated error
-                pass
+            if consumer is not None:
+                consumer.cancel()
+                try:
+                    await consumer
+                except BaseException:                              # CancelledError or a propagated error
+                    pass
             await browser.close()
     return tally
 
@@ -527,7 +619,12 @@ def main() -> None:
         tally = None
     finally:
         stop_showdown(proc)
-        print("[play] Showdown server stopped.")
+        # proc None = the port was already serving when we started (someone else's server —
+        # possibly a STALE leaked one). Say so instead of claiming we stopped it (2026-07-09:
+        # an unconditional "stopped." here masked a leaked-cluster reuse for a whole session).
+        print("[play] Showdown server stopped." if proc is not None else
+              "[play] ⚠ Showdown server was already running (not ours) — left running. "
+              "If unexpected, check for a stale server: Get-Process node")
     if args.self_test:
         n = args.self_test_battles
         ok = tally is not None and (tally["ai"] + tally["you"] + tally["draw"]) >= n

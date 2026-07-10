@@ -77,6 +77,16 @@ class BattleHost:
         accept_open_team_sheet: bool = False,
         max_concurrent_battles: int = 100000,
         adapt_rules: bool = False,
+        # HTML-replay recording (the same #18 contract as play_vs_human / play_ladder): with
+        # live_dir + save_replays set, every finished battle writes a playable Showdown replay to
+        # <replay_dir>/<label>_<tag>.html from battle._replay_data — which poke-env accumulates
+        # unconditionally, so the connection-less host records exactly like a connected player.
+        # All default-OFF → every existing host consumer is byte-identical.
+        live_dir: Optional[Path] = None,
+        save_replays: bool = False,
+        replay_dir: Optional[Path] = None,
+        replay_label: Optional[str] = None,
+        replay_copy_dir: Optional[Path] = None,   # 2026-07-10: training-corpus copy (Type_C)
         loop=POKE_LOOP,
     ):
         self._loop = loop
@@ -107,6 +117,9 @@ class BattleHost:
             accept_open_team_sheet=accept_open_team_sheet,
             max_concurrent_battles=max_concurrent_battles,
             adapt_rules=adapt_rules,
+            live_dir=live_dir, save_replays=save_replays,
+            replay_dir=replay_dir, replay_label=replay_label,
+            replay_copy_dir=replay_copy_dir,
             log_level=logging.WARNING,
             loop=loop,
         )

@@ -405,9 +405,27 @@ class TeamPreviewDataset(Dataset):
 
     def __init__(self, examples: Sequence[dict], vocab: Dict[str, int],
                  feat_dim: Optional[int] = None,
-                 affinity_fn: Optional[Callable] = None):
+                 affinity_fn: Optional[Callable] = None,
+                 subset_mask_p: float = 0.0, subset_mask_k: int = 0, aug_seed: int = 0):
         if not _HAS_TORCH:  # pragma: no cover
             raise RuntimeError("torch is required for TeamPreviewDataset")
+        # Subset-mask augmentation (2026-07-10, TP tier-2 — docs/teampreview_bring_lead_design.md
+        # addendum): with prob ``subset_mask_p`` an item masks K∈{1,2} random roster slots
+        # (idx 0 + zero feats = the pad convention) so PARTIAL rosters are in-distribution and
+        # model_io's joint subset re-decode becomes valid. Brought and unbrought slots are masked
+        # ALIKE (masking only left-behind mons would teach the "4 mons left ⇒ bring all" count
+        # shortcut); masked slots are EXCLUDED from the BCE via the returned ``slot_mask`` (they
+        # are absent, not choices). Labels are otherwise unchanged. TRAIN-only (val keeps p=0);
+        # only full 6-mon rosters are augmented. ⚠ train-metric noise on augmented rows is
+        # expected (a masked brought slot still carries label 1) — checkpoint selection uses the
+        # clean val split, so it is monitoring noise only.
+        # ``subset_mask_k``: 0 = draw K∈{1,2} per item (the first aug run); 2 = mask EXACTLY two
+        # slots, making every augmented item precisely the joint decode's 4-mon context (gate
+        # round 2 — the {1,2} dose left true 4-mon contexts in only ~p/2 of items and the joint
+        # decode recovered +6.3pp but stayed −10.9pp vs greedy).
+        self.subset_mask_p = float(subset_mask_p)
+        self.subset_mask_k = int(subset_mask_k)
+        self._aug_rng = np.random.default_rng(aug_seed) if self.subset_mask_p > 0 else None
         n = len(examples)
         # feat_dim follows the example recipe (46 legacy dex / FEAT_DIM SBDA), inferred
         # from the data unless pinned, so one Dataset class serves both nets.
@@ -467,9 +485,25 @@ class TeamPreviewDataset(Dataset):
             "lead": self.t_lead[idx],
             "valid_bring": self.t_valid[idx],
             "valid_lead": self.t_valid_lead[idx],
+            "slot_mask": torch.ones(TEAM_SIZE),   # per-slot loss weights (aug masks zero some)
         }
         if self.use_affinity:
             item["our_affinity"] = self.t_our_affinity[idx]
+        # Subset-mask augmentation (train-only; see __init__). Fresh draw per access → different
+        # masks per epoch. Only full 6-mon rosters are touched; the model's own pad handling
+        # (feat-zero test → attention-key + context-mean exclusion) does the rest in forward.
+        if self._aug_rng is not None and self._aug_rng.random() < self.subset_mask_p:
+            valid_n = int((self.our_feat[idx] != 0).any(axis=-1).sum())
+            if valid_n == TEAM_SIZE:
+                k = self.subset_mask_k or int(self._aug_rng.integers(1, 3))   # fixed K or K∈{1,2}
+                slots = self._aug_rng.choice(TEAM_SIZE, size=k, replace=False)
+                our_idx = item["our_idx"].clone()
+                our_feat = item["our_feat"].clone()
+                slot_mask = item["slot_mask"].clone()
+                our_idx[slots] = 0                                     # pad convention: idx 0 +
+                our_feat[slots] = 0.0                                  # all-zero feature row
+                slot_mask[slots] = 0.0                                 # absent ≠ a choice → no BCE
+                item.update(our_idx=our_idx, our_feat=our_feat, slot_mask=slot_mask)
         return item
 
 

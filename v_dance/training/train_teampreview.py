@@ -97,13 +97,26 @@ def run_epoch(model, loader, device, optimizer=None) -> Dict[str, float]:
 
             bring_logits, lead_logits = model(our_idx, opp_idx, our_feat, opp_feat, our_aff)
 
+            # Per-slot loss weights (subset-mask aug, 2026-07-10): an aug-masked slot is ABSENT,
+            # not a choice — exclude it from both heads' BCE. Unaugmented rows carry an all-ones
+            # mask (sum/count == the old plain mean, numerically identical); batches without the
+            # key (older callers) fall back to mean(dim=1) unchanged.
+            slot_m = batch.get("slot_mask")
+            if slot_m is not None:
+                slot_m = slot_m.to(device)
+
+            def _slot_mean(bce):                                     # (B,6) -> (B,)
+                if slot_m is None:
+                    return bce.mean(dim=1)
+                return (bce * slot_m).sum(dim=1) / slot_m.sum(dim=1).clamp_min(1.0)
+
             # lead head: only valid_lead rows (audit: a species-match-shifted lead is masked out, same as
             # valid_bring masks the bring head). On a clean corpus (all valid) this == the old plain mean.
-            lead_bce = F.binary_cross_entropy_with_logits(
-                lead_logits, lead, reduction="none").mean(dim=1)     # (B,)
+            lead_bce = _slot_mean(F.binary_cross_entropy_with_logits(
+                lead_logits, lead, reduction="none"))                # (B,)
             lead_loss = (lead_bce * valid_lead).sum() / valid_lead.sum().clamp_min(1.0)
-            bring_bce = F.binary_cross_entropy_with_logits(
-                bring_logits, bring, reduction="none").mean(dim=1)   # (B,)
+            bring_bce = _slot_mean(F.binary_cross_entropy_with_logits(
+                bring_logits, bring, reduction="none"))              # (B,)
             denom = valid.sum().clamp_min(1.0)
             bring_loss = (bring_bce * valid).sum() / denom
             loss = lead_loss + bring_loss
@@ -189,8 +202,12 @@ def train(args: argparse.Namespace) -> dict:
           f"({len({e['replay_id'] for e in train_ex})} / "
           f"{len({e['replay_id'] for e in val_ex})} replays)")
 
+    # Subset-mask aug is TRAIN-only — the val split stays clean (checkpoint selection + the
+    # tp_val_report gates must measure the un-augmented task).
     train_loader = DataLoader(
-        TeamPreviewDataset(train_ex, vocab, feat_dim=feat_dim, affinity_fn=affinity_fn),
+        TeamPreviewDataset(train_ex, vocab, feat_dim=feat_dim, affinity_fn=affinity_fn,
+                           subset_mask_p=args.subset_mask_aug, subset_mask_k=args.subset_mask_k,
+                           aug_seed=args.seed),
         batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(
         TeamPreviewDataset(val_ex, vocab, feat_dim=feat_dim, affinity_fn=affinity_fn),
@@ -225,6 +242,8 @@ def train(args: argparse.Namespace) -> dict:
         "lead_k": LEAD_K,
         "lr": args.lr,
         "data": folders,
+        "subset_mask_aug": args.subset_mask_aug,   # tier-2 stamp: joint decode valid iff > 0
+        "subset_mask_k": args.subset_mask_k,
         "patience": args.patience,
         # 15b-train.1: architecture + feature-recipe stamps so model_io.load_team_chooser rebuilds the
         # exact net and uses_tp_features/the lockstep guard select the matching SERVE recipe. The
@@ -301,6 +320,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap.add_argument("--emb-dim", type=int, default=32)
     ap.add_argument("--hidden", type=int, default=128)
     ap.add_argument("--dropout", type=float, default=0.1)
+    ap.add_argument("--subset-mask-aug", type=float, default=0.0,
+                    help="TP tier-2 (2026-07-10): prob of masking roster slots per TRAIN item "
+                         "so partial rosters are in-distribution (enables model_io's joint bring "
+                         "decode; gate = tp_val_report --joint-ab). 0 = off (byte-identical).")
+    ap.add_argument("--subset-mask-k", type=int, default=0,
+                    help="slots to mask per augmented item: 0 = random K in {1,2}; 2 = exactly "
+                         "two (every augmented item = the joint decode's 4-mon context).")
     ap.add_argument("--patience", type=int, default=0,
                     help="early-stop after N epochs with no val mean-exact gain (0=off)")
     ap.add_argument("--val-frac", type=float, default=0.1)

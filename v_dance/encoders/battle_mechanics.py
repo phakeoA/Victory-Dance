@@ -522,6 +522,33 @@ def _situational_damage_mult(move_type, is_physical, weather, terrain, defender,
     return mult
 
 
+# Priority-block (2026-07-10, from the online misplay review — the AI clicked Sucker Punch into
+# Psychic Terrain twice): an INCREASED-priority damaging move FAILS OUTRIGHT vs a GROUNDED target
+# under Psychic Terrain (conditions.ts psychicterrain onTryHit: priority > 0, target grounded,
+# not the attacker's own side) and vs ANY target on a side with a Dazzling-class ability active
+# (abilities.ts Dazzling / Queenly Majesty / Armor Tail onFoeTryMove — they protect the holder
+# AND its ally). Both encoders call this inside the per-enemy damage loop so a blocked move's
+# band reads 0/0 — the same "dead move" signal the net already avoids for type/ability
+# immunities. Deliberately NOT modelled: ability-GRANTED priority (Gale Wings / Prankster —
+# data priority only; Prankster boosts status moves, which carry no damage band anyway) and the
+# turn-order channels (a failed move has no order to model).
+_PRIORITY_BLOCK_AB = ("dazzling", "armortail", "queenlymajesty")
+
+
+def priority_blocked(priority, terrain, defender, defender_side=None) -> bool:
+    """True when a damaging move with boosted ``priority`` (> 0, the move-data bracket) fails vs
+    ``defender`` — Psychic Terrain (grounded defender) or a Dazzling-class ability anywhere on
+    the defending side (``defender_side`` = that side's active profiles; None → just ``defender``)."""
+    if not priority or priority <= 0 or not defender:
+        return False
+    if terrain == "PSYCHIC_TERRAIN" and defender.get("grounded"):
+        return True
+    for s in (defender_side if defender_side is not None else (defender,)):
+        if s and s.get("ability") in _PRIORITY_BLOCK_AB:
+            return True
+    return False
+
+
 def _accuracy_modifiers(base_acc: float, *, ability_id: Optional[str], is_physical: bool,
                         is_ohko: bool, acc_stage: int, wide_lens: bool,
                         victory_star: bool = False) -> float:

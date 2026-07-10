@@ -51,7 +51,8 @@ _LOCAL_AUTH = "https://play.pokemonshowdown.com/action.php?"
 def make_ladder_player(*, username: str, password: str | None, team_str: str,
                        server_url: str, auth_url: str, battle_format: str,
                        ckpt: Path | None, tp_ckpt: Path | None,
-                       session_dir: str, save_replays: bool = True) -> VGCPlayer:
+                       session_dir: str, save_replays: bool = True,
+                       copy_to_corpus: bool = True) -> VGCPlayer:
     """The production player (encoder + battle net + SBDA TP + gap-#6 splice) pointed at an
     ARBITRARY server/account. Mirrors run_local_battle.make_player's wiring; adds auth."""
     return VGCPlayer(
@@ -67,6 +68,9 @@ def make_ladder_player(*, username: str, password: str | None, team_str: str,
         log_level=logging.WARNING,
         live_dir=BENCH_DIR / "live", save_replays=save_replays,
         replay_dir=BENCH_DIR / "replays" / session_dir, replay_label="ladder",
+        # Type_C training copy (2026-07-10, USER): real games → corpus folder for later ingest;
+        # the --self-test (model vs our own searcher) is junk data and stays out.
+        replay_copy_dir=(_REPO / "data" / "vods" / "Type_C") if copy_to_corpus else None,
         ping_timeout=WS_PING_TIMEOUT, ping_interval=WS_PING_INTERVAL,
         open_timeout=WS_OPEN_TIMEOUT,
     )
@@ -131,7 +135,7 @@ async def _self_test(args, ckpt: Path, tp_ckpt: Path, session_id: str) -> int:
                             team_str=load_team(resolve_team_path(t_ai)),
                             server_url=_LOCAL_WS, auth_url=_LOCAL_AUTH,
                             battle_format=args.format, ckpt=ckpt, tp_ckpt=tp_ckpt,
-                            session_dir=session_id)
+                            session_dir=session_id, copy_to_corpus=False)
     opp = make_player("VDLadderOpp", load_team(resolve_team_path(t_opp)))
     both = asyncio.gather(ai.ladder(1), opp.ladder(1))
     try:
@@ -161,9 +165,11 @@ def main() -> None:
     ap.add_argument("--server-url", default=None,
                     help="websocket URL (default: the LOCAL server, which is auto-started).")
     ap.add_argument("--auth-url", default=_LOCAL_AUTH)
-    ap.add_argument("--username", default="VictoryDanceAI")
+    ap.add_argument("--username", default=None,
+                    help="account name (default: .env PS_USERNAME, else VictoryDanceAI).")
     ap.add_argument("--password", default=None,
-                    help="registered-account password (or set VD_LADDER_PASSWORD).")
+                    help="registered-account password (default: .env PS_PASSWORD; "
+                         "VD_LADDER_PASSWORD env var still overrides).")
     ap.add_argument("--team", default=None, help="pool team NAME (default: first pool team).")
     ap.add_argument("--games", type=int, default=1)
     ap.add_argument("--format", default=DEFAULT_FORMAT)
@@ -174,12 +180,18 @@ def main() -> None:
                     help="local end-to-end check: two players ladder-search and get matched.")
     args = ap.parse_args()
 
-    ckpt = Path(args.ckpt) if args.ckpt else DEFAULT_BC_CHECKPOINT
-    tp_ckpt = Path(args.tp_ckpt) if args.tp_ckpt else DEFAULT_TP_CHECKPOINT
+    # S5: credentials + deploy defaults come from .env like the browser harness (flags override;
+    # the legacy VD_LADDER_PASSWORD env var still wins over the .env password).
+    from v_dance.play.play_online_browser import _load_env
+    env = _load_env()
+    ckpt = Path(args.ckpt or env.get("VD_BATTLE_CKPT") or DEFAULT_BC_CHECKPOINT)
+    tp_ckpt = Path(args.tp_ckpt or env.get("VD_TP_CKPT") or DEFAULT_TP_CHECKPOINT)
     for p in (ckpt, tp_ckpt):
         if not p.is_file():
             raise SystemExit(f"[ladder] checkpoint not found: {p}")
-    password = args.password or os.environ.get("VD_LADDER_PASSWORD") or None
+    args.username = args.username or env.get("PS_USERNAME") or "VictoryDanceAI"
+    password = (os.environ.get("VD_LADDER_PASSWORD") or args.password
+                or env.get("PS_PASSWORD") or None)
     session_id = f"{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}-{os.getpid()}"
 
     local = args.server_url is None
