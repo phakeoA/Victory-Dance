@@ -1,0 +1,3 @@
+{
+  "_doc": "Phase-4b router priors (DS-4b): {'<archetype_id>': {'<team name>': score}} — higher = better matchup for OUR team vs THAT opponent archetype. UNSEEDED template: derive archetype ids from team_archetypes_k10_full.npz cluster exemplars first (the old TR=z4/Rain=z8 mapping belonged to the superseded k10 artifact). While empty, the router always answers 'no opinion' and play is unchanged."
+}

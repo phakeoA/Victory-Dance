@@ -24,22 +24,21 @@ from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 
-# ── Canonical PRODUCTION checkpoints — the single source of truth so generation.py / gauntlet.py /
-#    run_local_battle.py (and any future caller) never drift apart again.  #27 deleted the flat
-#    Models use a ``<type>_<variant>[_genN].pt`` naming scheme (2026-06-25).
-#    ⚠ ENCODER-v18 INTERIM (2026-06-26): the self-play champion ``checkpoints_attn/battle_selfplay_gen141.pt``
-#    (gen141) is a v17 model and is UNLOADABLE on the current v18 encoder — the stale-layout guard in
-#    load_bc_policy() rejects it (STATE_DIM / layout-version mismatch). Until a v18 self-play champion exists,
-#    PRODUCTION serves the v18 BC anchor ``checkpoints_attn_pre_gen141/battle_base.pt`` (retrained on
-#    M-A + M-B + Bo3, layout v18, STATE_DIM 4961, val top1 0.536). ⟵ once a v18 champion exists, restore the
-#    champion path on the DEFAULT_BC_CHECKPOINT line below.
-#    Team-preview: ``checkpoints/teampreview_sbda.pt`` (SBDA tpfeat-v6, feat_dim 253) is UNAFFECTED by the v18
-#    bump and still serves — the gen141+SBDA pair beat the old prod (BC base + legacy 46-dim TP) 61.8% over
-#    1480 M-B battles. Variant kept alongside: ``checkpoints_pre_sbda/teampreview_base.pt`` (legacy 46-dim).
-#    ⚠ Self-play TRAINING points its base/KL-anchor ckpt at ``battle_base.pt`` (the BC anchor) — which is now
-#    ALSO the interim served file; this is fine (the anchor IS the best v18 model we have). See the configs.
+# ── Canonical PRODUCTION checkpoints — the single source of truth so every caller
+#    (harnesses / gauntlet / run_local_battle) never drifts. ``<type>_<variant>[_genN].pt``
+#    naming scheme (2026-06-25).
+#    ⚠ STATE (M1 comment refresh, 2026-07-11): these DEFAULTS are the *fallback* when no
+#    override is given — the LIVE deploy rides ``.env`` (VD_BATTLE_CKPT / VD_TP_CKPT, currently
+#    ``checkpoints_attn_adv`` + v6 TP; era-2 pending its gate). DEFAULT_BC below is still the
+#    v19 BC anchor ``checkpoints_attn_pre_gen141/battle_base.pt`` (val 0.5853) — promoting the
+#    era winner onto this line is playbook decision D6 (USER call, one line + suite). The old
+#    v17 self-play champion ``checkpoints_attn/battle_selfplay_gen141.pt`` stays unloadable on
+#    v19 (stale-layout guard) and is history, not a restore target.
+#    Era-chain rule: warm-start + adv-value base for era N+1 = the gated era-N net; the
+#    pre_gen141 anchor FILE stays untouched as the fixed historical reference.
+#    Team-preview default: ``checkpoints/teampreview_sbda.pt`` (SBDA tpfeat-v6, feat_dim 253,
+#    D4 verdict winner). Legacy 46-dim variant kept at ``checkpoints_pre_sbda/``.
 _AI_TRAIN = Path(__file__).resolve().parents[2] / "ai_train_scripts"
-# INTERIM v18 serve (see note above): v17 gen141 is unloadable on v18 → serve the v18 BC anchor battle_base.pt.
 DEFAULT_BC_CHECKPOINT = _AI_TRAIN / "BC_model" / "checkpoints_attn_pre_gen141" / "battle_base.pt"
 DEFAULT_TP_CHECKPOINT = _AI_TRAIN / "teamPreview_model" / "checkpoints" / "teampreview_sbda.pt"
 
@@ -417,6 +416,8 @@ def load_team_chooser(path, device: str = "cpu"):
         use_cross_attn=cfg.get("use_cross_attn", False),
         attn_heads=cfg.get("attn_heads", 4),
         use_teammate_bias=cfg.get("use_teammate_bias", False),
+        # 2026-07-11: contrastive set head — absent in older configs -> False -> byte-identical.
+        use_set_head=cfg.get("use_set_head", False),
     )
     model.load_state_dict(ckpt["model_state"])
     model.to(device).eval()
@@ -524,6 +525,40 @@ def _pack_side(species: Sequence[str], vocab: dict, feat_dim: int, *,
 # must show joint ≥ greedy on human bring-set agreement before TP_JOINT_BRING flips to True.
 TP_JOINT_BRING = False     # serve default; flip only after the offline gate passes
 
+# ── TP contrastive set-head decode (2026-07-11) ────────────────────────────────
+# docs/tp_contrastive_set_head_design.md: a checkpoint trained with --set-head carries a
+# use_set_head stamp and a head that scores complete 4-subsets AS UNITS (marginal-sum +
+# pairwise + set-level terms, trained with a 15-way listwise CE against the human's set).
+# Unlike the null-#8 joint decode there is NO masking: the trunk always forwards the FULL
+# 6-mon preview (train == serve, nothing OOD) and subset scores are assembled from tables.
+# Dispatch is BY CKPT STAMP; this constant is only the kill-switch (TP_JOINT_BRING pattern).
+TP_SET_HEAD = True
+
+
+def _set_head_order(model, oi, of, pi, pf, aff_t, valid: int, bring_k: int, lead_k: int,
+                    n: int, device: str):
+    """(order, True) via the contrastive set head, or (None, False) when not applicable
+    (model has no set head / nothing to choose)."""
+    from itertools import combinations
+    if not getattr(model, "use_set_head", False):
+        return None, False
+    k = min(bring_k, valid, n)
+    if k <= 0 or valid <= k:
+        return None, False                       # ≤ one candidate subset → greedy is already exact
+    subsets = list(combinations(range(valid), k))             # ≤ C(6,4)=15
+    with torch.no_grad():
+        scores, _bl, ll = model.score_subsets(
+            torch.as_tensor([list(oi)], device=device),
+            torch.as_tensor([list(pi)], device=device),
+            torch.as_tensor(of[None], device=device),
+            torch.as_tensor(pf[None], device=device),
+            aff_t, subsets=subsets)
+    scores = np.asarray(scores[0].detach().cpu())
+    ll = np.asarray(ll[0].detach().cpu())
+    brought = list(subsets[int(np.argmax(scores))])
+    leads = sorted(brought, key=lambda i: -ll[i])[:lead_k]    # lead decode unchanged (within bring)
+    return (leads + [b for b in brought if b not in leads])[:n], True
+
 
 def _joint_bring_order(model, oi, of, pi, pf, aff_t, valid: int, bring_k: int, lead_k: int,
                        n: int, device: str):
@@ -605,6 +640,14 @@ def team_order(
         from v_dance.training.tp_features import teammate_affinity_matrix
         aff = teammate_affinity_matrix(our_species, belief, n=6)
         aff_t = torch.as_tensor(aff[None], device=device)
+
+    # Contrastive set-head decode (2026-07-11): a --set-head checkpoint scores bring-SETS
+    # with a head TRAINED on exactly that question — dispatched by its config stamp.
+    if TP_SET_HEAD and getattr(model, "use_set_head", False):
+        order, ok = _set_head_order(model, oi, of, pi, pf, aff_t,
+                                    valid, bring_k, lead_k, n, device)
+        if ok:
+            return order
 
     # Joint conditional re-decode (2026-07-10, flag-gated): score bring-SETS, not mons.
     # Falls through to the greedy decode when disabled or not applicable.

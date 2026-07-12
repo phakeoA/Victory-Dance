@@ -85,6 +85,7 @@ from v_dance.parser.vod_parser.transitions import replay_to_transitions   # noqa
 from v_dance.parser.vod_parser.replay_parser import (                      # noqa: E402
     extract_log_from_html, extract_replay_id_from_html,
 )
+from v_dance.datatools.filter_type_c import classify_log                   # noqa: E402
 from v_dance.parser.vod_parser.team_sheet import (                          # noqa: E402
     parse_showdown_team, team_to_known_side, detect_our_side,
 )
@@ -121,6 +122,55 @@ def _rosters_from_html(html_text: str) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _junk_status(html_text: str, max_turn: int = 1):
+    """TRAINING-PIPELINE junk gate (USER, 2026-07-10): a turn-≤``max_turn`` forfeit / timeout /
+    disconnect, a no-result abort, or a zero-move game carries nothing to imitate — it must never
+    become corpus JSONL, whichever folder it sits in. Returns the junk status string, or None for
+    a real game. A log that can't even be extracted returns None so the normal parse path surfaces
+    the REAL error (never silently reclassify corruption as junk)."""
+    try:
+        st = classify_log(extract_log_from_html(html_text), max_turn=max_turn)["status"]
+    except Exception:
+        return None
+    return None if st in ("ok", "unreadable") else st
+
+
+def _ident(s: str) -> str:
+    """Showdown user-id normalisation (lowercase alnum) — matches _toid everywhere else."""
+    return "".join(c for c in (s or "").lower() if c.isalnum())
+
+
+def _winner_side(html_text: str):
+    """'p1'/'p2' of the |win| player, or None (tie / no result / unmatched name). The
+    --winner-only Type_C ingest (USER, 2026-07-10): each of OUR online games exports ONLY the
+    winning player's perspective — a bot win = self-imitation of a successful game; a bot loss =
+    imitate the human who beat us. No negative gradients, every game teaches from its winner."""
+    try:
+        log = extract_log_from_html(html_text)
+    except Exception:
+        return None
+    names = dict(re.findall(r"^\|player\|(p[12])\|([^|\n]*)", log, re.MULTILINE))
+    m = re.search(r"^\|win\|(.+)$", log, re.MULTILINE)
+    if not m:
+        return None
+    w = _ident(m.group(1))
+    for pid in ("p1", "p2"):
+        if w and _ident(names.get(pid, "")) == w:
+            return pid
+    return None
+
+
+def _purge_stale_exports(out_path: Path, legacy_path: Path) -> int:
+    """Remove ALREADY-EXPORTED jsonl for a junk replay (an older, unfiltered export run could have
+    left it in the corpus folder) — junk must not survive via staleness. Returns files removed."""
+    n = 0
+    for stale in {out_path, legacy_path}:
+        if stale.exists():
+            stale.unlink()
+            n += 1
+    return n
+
 
 def _load_belief(pika_path: Path | None):
     """Load the Pikalytics BeliefState for opponent enrichment.
@@ -295,7 +345,21 @@ def main() -> int:
                     help="Re-export replays whose .jsonl already exists.")
     ap.add_argument("--players", default=None,
                     help='Force perspectives, e.g. "p1" or "p1,p2".')
+    ap.add_argument("--keep-junk", action="store_true",
+                    help="disable the junk gate (turn-1 forfeit/timeout/disconnect games are "
+                         "SKIPPED by default and their stale exports removed — USER 2026-07-10; "
+                         "⚠ only use this for a deliberately-unfiltered diagnostic export).")
+    ap.add_argument("--junk-max-turn", type=int, default=1,
+                    help="forfeit/timeout games ending at turn <= this are junk (default 1).")
+    ap.add_argument("--winner-only", action="store_true",
+                    help="export ONLY each game's WINNING perspective (the Type_C ingest rule — "
+                         "USER 2026-07-10: bot wins teach the bot's own play, bot losses teach "
+                         "the human who beat us; combine with train_bc --rating-weight). "
+                         "Mutually exclusive with --team / --players; ties are skipped.")
     args = ap.parse_args()
+    if args.winner_only and (args.team or args.players):
+        ap.error("--winner-only cannot combine with --team or --players "
+                 "(the winner decides the perspective per replay).")
 
     # GUI mode: any path the user didn't pass on the command line is chosen from
     # a folder dialog.  Clicking "Run" in VS Code passes no args → both dialogs.
@@ -386,6 +450,11 @@ def main() -> int:
         if args.type == "B":
             source_type = "own_vod"
 
+    if args.winner_only and team_mode:            # GUI-picked team + --winner-only conflict
+        print("ERROR: --winner-only cannot combine with a team file "
+              "(the winner decides the perspective per replay).", file=sys.stderr)
+        _gui_close()
+        return 2
     players = None if team_mode else _players_for(source_type, args.players)
 
     print(f"[plan] {len(replays)} replay(s) | type={source_type}"
@@ -393,12 +462,14 @@ def main() -> int:
     if team_mode:
         print(f"[plan] team: {team_path.name}  "
               f"({len(team_base)} mons: {', '.join(sorted(team_base))})")
+    elif args.winner_only:
+        print("[plan] perspectives=WINNER-ONLY (each replay exports the winning side)")
     else:
         print(f"[plan] perspectives={players}")
     print(f"[plan] in : {input_dir}")
     print(f"[plan] out: {output_dir}\n")
 
-    n_written = n_skipped = n_empty = n_no_side = 0
+    n_written = n_skipped = n_empty = n_no_side = n_junk = n_no_winner = 0
     total_transitions = 0
     errors: list[tuple[str, str]] = []
     t0 = time.time()
@@ -422,6 +493,17 @@ def main() -> int:
         # over a folder of older stem-named exports skips them instead of
         # writing duplicate-content files under the new naming.
         legacy_path = output_dir / f"{html.stem}.jsonl"
+        # Junk gate BEFORE the exists-skip: a junk replay exported by an older, unfiltered run
+        # must lose its stale JSONL too — not survive into the corpus via "already exists".
+        if not args.keep_junk:
+            _js = _junk_status(html_text, args.junk_max_turn)
+            if _js is not None:
+                n_junk += 1
+                _purged = _purge_stale_exports(out_path, legacy_path)
+                print(f"[{idx}/{len(replays)}] junk ({_js}) — skipped"
+                      + (f", {_purged} stale export(s) removed" if _purged else "")
+                      + f"  {html.name}")
+                continue
         if not args.overwrite and (out_path.exists() or legacy_path.exists()):
             n_skipped += 1
             print(f"[{idx}/{len(replays)}] skip (exists)  {rid}")
@@ -443,6 +525,15 @@ def main() -> int:
                 transitions = replay_to_transitions(
                     html, belief=belief, players=[side],
                     known_teams=known_teams, source_type=source_type,
+                )
+            elif args.winner_only:
+                _wside = _winner_side(html_text)
+                if _wside is None:                 # tie / unmatched winner name — no perspective
+                    n_no_winner += 1
+                    print(f"[{idx}/{len(replays)}] no winner (tie/aborted) — skipped  {html.name}")
+                    continue
+                transitions = replay_to_transitions(
+                    html, belief=belief, players=[_wside], source_type=source_type,
                 )
             else:
                 transitions = replay_to_transitions(
@@ -482,7 +573,11 @@ def main() -> int:
         f"  written   : {n_written} file(s), {total_transitions} transitions\n"
         f"  skipped   : {n_skipped} (already existed; use --overwrite to redo)\n"
         + (f"  no team   : {n_no_side} (team matched neither roster)\n" if team_mode else "")
-        + f"  empty     : {n_empty} (0 turns)\n"
+        + (f"  no winner : {n_no_winner} (tie/aborted — no perspective to export)\n"
+           if args.winner_only else "")
+        + f"  junk      : {n_junk} (turn-≤{args.junk_max_turn} forfeit/timeout/disconnect — "
+          f"never exported; --keep-junk to disable)\n"
+        f"  empty     : {n_empty} (0 turns)\n"
         f"  errored   : {len(errors)}"
     )
     print("\n" + "─" * 60)

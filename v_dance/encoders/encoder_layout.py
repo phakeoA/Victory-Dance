@@ -239,6 +239,13 @@ STATE_DIM = (ACTIVE_SLOTS + BENCH_SLOTS + OPP_BENCH_SLOTS) * POKEMON_FEATURES + 
 #       move type — Weather Ball follows the weather (rain→Water/sun→Fire/snow→Ice/sand→Rock) and Terrain
 #       Pulse the terrain, so the type-eff / damage-band channels rate them correctly (a rain Weather Ball
 #       now reads Water/super-effective, not neutral Normal). See battle_mechanics.field_dependent_move_type.
+#       ALSO bundled post-hoc in v19 (v19c 2026-07-10, VALUE-only, no slot change; _CACHE_SCHEMA 3):
+#       WEATHER-CONDITIONAL move mechanics — Solar Beam/Blade damage band ×0.5 under rain/sand/snow and the
+#       two_turn_charge tag now DYNAMIC (cleared when sun / Electro-Shot-rain lets the move fire instantly);
+#       Weather Ball band ×2 under any weather; Hydro Steam sun boost; Thunder/Hurricane/Blizzard weather
+#       accuracy (rain/snow bypass → always-hit, sun Thunder/Hurricane → 50%). The band stopped selling a
+#       rain Solar Beam as a full instant nuke (the 2026-07-10 online rain-loss defect). See
+#       battle_mechanics.weather_bp_mult / charge_skipped_now / weather_accuracy.
 # train_bc stamps this into the checkpoint config; model_io.load_bc_policy asserts
 # it (and the dim) match the running code.
 STATE_LAYOUT_VERSION = 19

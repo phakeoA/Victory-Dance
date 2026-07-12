@@ -68,10 +68,14 @@ from v_dance.training.bc_dataset import (
 )
 
 _CACHE_DIRNAME = ".encoded_cache"
-_CACHE_SCHEMA = 2          # bump when the serialized schema OR encoder SEMANTICS change without
+_CACHE_SCHEMA = 3          # bump when the serialized schema OR encoder SEMANTICS change without
                            # a layout/dim bump (schema 2 = 2026-07-10 priority-block: blocked
                            # priority moves' damage bands now 0/0 — same dims, new values; the
                            # bump re-encodes stale caches while v19 checkpoints keep loading)
+                           # (schema 3 = 2026-07-10 v19c weather-conditional moves: Solar Beam/
+                           # Blade band halved in rain/sand/snow + dynamic two_turn_charge tag ·
+                           # Weather Ball band ×2 in weather · Hydro Steam sun ×1.5 · Thunder/
+                           # Hurricane/Blizzard weather accuracy — same dims, new values)
 _STREAM_CHUNK_FILES = 2000  # ~30-60k examples ≈ 1-2 GB peak per build chunk
 
 # fixed-width string dtypes (replay ids are showdown battle ids ≤ ~64 chars)
@@ -224,6 +228,11 @@ def load_cache(folder: str, with_opp: bool,
     ``mmap=True`` pages X from disk (``np.load(..., mmap_mode='r')``): each
     example's ``x`` is a READ-ONLY row view of the on-disk array — copy before
     writing.  The small meta arrays are always loaded into RAM.
+
+    Every example also carries ``x_src = (X.npy path, row)`` (M6, 2026-07-11):
+    DataLoader worker processes cannot inherit a memmap row view (pickling one
+    materializes the full array), so ``BCDataset`` workers re-open the cache by
+    this path instead.  Purely additive — nothing else reads the key.
     """
     fp = folder_fingerprint(folder)
     d = _cache_dir(folder) / fp
@@ -243,6 +252,7 @@ def load_cache(folder: str, with_opp: bool,
         return None
 
     n = X.shape[0]
+    x_path = str(d / "X.npy")          # one shared str; per-example tuples are tiny
     target, mask = m["target"], m["mask"]
     g_target, g_mask = m["g_target"], m["g_mask"]
     o_target, o_mask = m["o_target"], m["o_mask"]
@@ -265,6 +275,7 @@ def load_cache(folder: str, with_opp: bool,
                 g_masks[head] = g_mask[i, h_idx]
         ex = {
             "x": X[i],
+            "x_src": (x_path, i),
             "targets": targets, "masks": masks,
             "gimmick_targets": g_targets, "gimmick_masks": g_masks,
             "replay_id": str(rid[i]),

@@ -52,9 +52,12 @@ from v_dance.encoders.state_encoder import (
     ability_index, move_index, item_index,
 )
 # v18 (Option 1): redundant-condition helper (shared, parity) + the canonical SC names it keys on.
+# v19c: weather-conditional move hooks (shared, parity) — band BP mult · dynamic charge tag · accuracy.
 from v_dance.encoders.battle_mechanics import (
     move_redundant_condition, move_redundant_status, _REDUNDANT_OWN_SIDE_NAMES,
+    charge_skipped_now, weather_accuracy, weather_bp_mult,
 )
+from v_dance.encoders.state_encoder import _TWO_TURN_CHARGE_IDX  # v19c: dynamic-tag slot (shared)
 from v_dance.encoders import damage_mechanics as _DMG
 from v_dance.parser.vod_parser.battle_models import volatile_flags
 
@@ -1259,10 +1262,16 @@ class LiveStateEncoder:
         # in RAW moves.ts form (percent int / True) → normalize to live's 0–1 float so both encoders emit equal.
         _acc_ov = champ_acc_raw(_mid, None)
         acc = move.accuracy if _acc_ov is None else (1.0 if _acc_ov is True else _acc_ov / 100.0)
+        # v19c: weather accuracy hooks — Thunder/Hurricane rain-bypass / sun-50%, Blizzard snow-bypass.
+        # Applied BEFORE Gravity (parity twin of the offline writer).
+        _wacc, _wah = weather_accuracy(_mid, field_mods[0] if field_mods else None)
+        if _wacc is not None:
+            acc = _wacc
         if gravity and acc < 1.0:        # v11 C.2e: Gravity ×6840/4096 on numeric accuracy, cap 1.0
             acc = min(acc * (6840.0 / 4096.0), 1.0)
         _base_acc = acc                  # v11 B2b: post-Gravity numeric base for the per-enemy hit-chance
-        if not _move_always_hit(_mid):   # v11 B2: attacker-side accuracy mods (skip always-hit moves)
+        if not (_move_always_hit(_mid) or _wah):   # v11 B2 attacker-side accuracy mods (skip always-hit
+            # moves — incl. a v19c weather bypass: battle-actions.ts skips the whole accuracy check)
             _ac2 = att_ctx or {}
             acc = _accuracy_modifiers(acc, ability_id=ability_id,
                                       is_physical=move.category == MoveCategory.PHYSICAL,
@@ -1353,6 +1362,9 @@ class LiveStateEncoder:
                                                 _ac.get("burned"), _ac.get("life_orb"), _ac.get("choice"),
                                                 hits_def=_hits_def,
                                                 grassy_eq=_mid in _GRASSY_WEAKENED) * _abm  # v11 G7
+                # v19c: per-MOVE weather BP hooks (Solar Beam/Blade · Weather Ball · Hydro Steam) —
+                # parity twin of the offline writer; charge-turn cost = the dynamic tag below.
+                _sit *= weather_bp_mult(_mid, _weather)
                 # v11 B3 attacker item band mults + B3b defender resist berry (parity twin of the offline writer).
                 if _ac.get("type_boost") == _mt:
                     _sit *= _BAND_ITEM_MULT
@@ -1408,7 +1420,8 @@ class LiveStateEncoder:
         i += 4
 
         # v11 B2b: per-enemy realized HIT CHANCE vs each enemy active (parity twin of the offline writer).
-        _ah_b2b = _move_always_hit(_mid)
+        # v19c: a weather accuracy-bypass (rain Thunder/Hurricane, snow Blizzard) counts as always-hit NOW.
+        _ah_b2b = _move_always_hit(_mid) or _wah
         _oh_b2b = _move_is_ohko(_mid)
         for e in range(2):
             d = enemy_defenders[e] if (enemy_defenders and e < len(enemy_defenders)) else None
@@ -1440,6 +1453,10 @@ class LiveStateEncoder:
         # v9: move effect-tags + identity index, BEFORE the trailing is_known
         for idx in move_tag_indices(_mid):
             vec[i + idx] = 1.0
+        # v19c: two_turn_charge is DYNAMIC (parity twin of the offline writer) — cleared when the
+        # current weather lets the move fire instantly (Solar Beam/Blade in sun, Electro Shot in rain).
+        if charge_skipped_now(_mid, _weather):
+            vec[i + _TWO_TURN_CHARGE_IDX] = 0.0
         i += NUM_MOVE_TAGS
         vec[i] = float(move_index(_mid))
         i += 1

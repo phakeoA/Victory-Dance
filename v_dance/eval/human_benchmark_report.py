@@ -66,6 +66,53 @@ def _tally(rows) -> tuple[int, int, int, int]:
     return ai, hu, dr, ai + hu + dr
 
 
+def report_text(rows: list[dict], min_games: int = 1) -> str:
+    """The full report as a string — shared by the CLI and the online session logger
+    (2026-07-10: the harness appends this to artifacts/logs/online_<session>.log on exit)."""
+    out: list[str] = []
+    out.append("== human benchmark ==========================================")
+    ai, hu, dr, n = _tally(rows)
+    lo, hi = wilson(ai, max(1, ai + hu))                     # CI over decisive games
+    out.append(f"  games                : {n}  (AI {ai} / human {hu} / draw {dr})")
+    out.append(f"  AI win% (decisive)   : {100 * ai / max(1, ai + hu):.1f}%   Wilson95 [{100 * lo:.1f}, {100 * hi:.1f}]")
+    notes = sorted({r.get("note") or "" for r in rows})
+    if len(notes) > 1:
+        out.append("  -- by note (era) --")
+        for note in notes:
+            sub = [r for r in rows if (r.get("note") or "") == note]
+            a, h, d, m = _tally(sub)
+            out.append(f"    {note or '(none)':<20}: {m} games, AI {a} / human {h} / draw {d}")
+
+    out.append("  -- sessions (sets) --")
+    by_sess: dict = defaultdict(list)
+    for r in rows:
+        by_sess[r.get("session_id", "?")].append(r)
+    for sid in sorted(by_sess):
+        sub = by_sess[sid]
+        a, h, d, m = _tally(sub)
+        note = sub[0].get("note") or ""
+        team = sub[0].get("ai_team") or "?"
+        out.append(f"    {sid}  [{note}] AI on {team:<16} : {m} games  AI {a} / human {h} / draw {d}")
+
+    out.append("  -- exploitability curve (AI win% by game index within a session, pooled) --")
+    by_idx: dict = defaultdict(list)
+    for r in rows:
+        by_idx[int(r.get("game_idx", 0))].append(r)
+    for idx in sorted(by_idx):
+        sub = by_idx[idx]
+        a, h, d, m = _tally(sub)
+        if m < min_games:
+            continue
+        if a + h == 0:                                   # draws only -> no decisive rate to show
+            out.append(f"    game {idx:>2}:   n/a       ({a}W/{h}L/{d}D of {m})")
+            continue
+        bar = "#" * round(20 * a / (a + h))
+        out.append(f"    game {idx:>2}: {100 * a / (a + h):5.1f}% AI  ({a}W/{h}L/{d}D of {m})  {bar}")
+    out.append("  (flat curve = an exploit stops paying, G3 holds; dropping = the human is learning the bot)")
+    out.append("=============================================================")
+    return "\n".join(out)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Human-benchmark report (goal metric + exploitability curve).")
     ap.add_argument("--log", type=Path, default=DEFAULT_LOG)
@@ -82,47 +129,7 @@ def main() -> None:
         rows = [r for r in rows if r.get("note") == args.note]
     if not rows:
         raise SystemExit("[bench] no rows match.")
-
-    print("== human benchmark ==========================================")
-    ai, hu, dr, n = _tally(rows)
-    lo, hi = wilson(ai, max(1, ai + hu))                     # CI over decisive games
-    print(f"  games                : {n}  (AI {ai} / human {hu} / draw {dr})")
-    print(f"  AI win% (decisive)   : {100 * ai / max(1, ai + hu):.1f}%   Wilson95 [{100 * lo:.1f}, {100 * hi:.1f}]")
-    notes = sorted({r.get("note") or "" for r in rows})
-    if len(notes) > 1:
-        print("  -- by note (era) --")
-        for note in notes:
-            sub = [r for r in rows if (r.get("note") or "") == note]
-            a, h, d, m = _tally(sub)
-            print(f"    {note or '(none)':<20}: {m} games, AI {a} / human {h} / draw {d}")
-
-    print("  -- sessions (sets) --")
-    by_sess: dict = defaultdict(list)
-    for r in rows:
-        by_sess[r.get("session_id", "?")].append(r)
-    for sid in sorted(by_sess):
-        sub = by_sess[sid]
-        a, h, d, m = _tally(sub)
-        note = sub[0].get("note") or ""
-        team = sub[0].get("ai_team") or "?"
-        print(f"    {sid}  [{note}] AI on {team:<16} : {m} games  AI {a} / human {h} / draw {d}")
-
-    print("  -- exploitability curve (AI win% by game index within a session, pooled) --")
-    by_idx: dict = defaultdict(list)
-    for r in rows:
-        by_idx[int(r.get("game_idx", 0))].append(r)
-    for idx in sorted(by_idx):
-        sub = by_idx[idx]
-        a, h, d, m = _tally(sub)
-        if m < args.min_games:
-            continue
-        if a + h == 0:                                   # draws only -> no decisive rate to show
-            print(f"    game {idx:>2}:   n/a       ({a}W/{h}L/{d}D of {m})")
-            continue
-        bar = "#" * round(20 * a / (a + h))
-        print(f"    game {idx:>2}: {100 * a / (a + h):5.1f}% AI  ({a}W/{h}L/{d}D of {m})  {bar}")
-    print("  (flat curve = an exploit stops paying, G3 holds; dropping = the human is learning the bot)")
-    print("=============================================================")
+    print(report_text(rows, min_games=args.min_games))
 
 
 if __name__ == "__main__":

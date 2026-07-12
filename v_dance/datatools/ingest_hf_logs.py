@@ -70,6 +70,13 @@ _belief_cache: dict = {}
 
 
 def _pika_path_for_era(era: str) -> Path:
+    # 2026-07-11 era-retrain: per-era OVERRIDE via env (spawn-safe — workers re-import this module
+    # and inherit os.environ, the same pattern VDANCE_BATTLE_FORMAT documents). Lets a re-ingest
+    # use the era's BLENDED belief snapshot while the LIVE pikalytics file keeps serving the
+    # currently-deployed net. Set by --pikalytics-regma/--pikalytics-regmb in main().
+    ov = os.environ.get(f"VD_PIKA_REGM{era.upper()}_OVERRIDE")
+    if ov:
+        return Path(ov)
     return _PROJECT_ROOT / "data" / f"pikalytics_regm{era}.json"
 
 
@@ -167,6 +174,12 @@ def main(argv=None) -> int:
                          "'__closed'-suffixed output).")
     ap.add_argument("--rated-only", action="store_true",
                     help="Skip logs without a |rated line.")
+    ap.add_argument("--pikalytics-regma", default=None,
+                    help="override the regma belief file (era-retrain: pass the era's frozen/"
+                         "blended snapshot instead of the live pikalytics_regma.json).")
+    ap.add_argument("--pikalytics-regmb", default=None,
+                    help="override the regmb belief file (era-retrain: pass the era's frozen/"
+                         "blended snapshot instead of the live pikalytics_regmb.json).")
     ap.add_argument("--limit", "-n", type=int, default=None,
                     help="Stop after processing N battles (test runs).")
     ap.add_argument("--overwrite", action="store_true",
@@ -180,6 +193,16 @@ def main(argv=None) -> int:
                          "the TP retrain. ⚠ tp-only folders are TP corpora ONLY — "
                          "never pass them to battle-BC --data or corpus_qa.")
     args = ap.parse_args(argv)
+
+    # Era-belief overrides → env BEFORE the worker pool spawns (children inherit os.environ).
+    for era, ov in (("A", args.pikalytics_regma), ("B", args.pikalytics_regmb)):
+        if ov:
+            p = Path(ov)
+            if not p.is_file():
+                print(f"[FATAL] --pikalytics-regm{era.lower()} does not exist: {p}", file=sys.stderr)
+                return 2
+            os.environ[f"VD_PIKA_REGM{era}_OVERRIDE"] = str(p.resolve())
+            print(f"[belief] regm{era.lower()} OVERRIDE → {p}  <-- era snapshot, not the live file")
 
     out_dir = Path(args.output).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)

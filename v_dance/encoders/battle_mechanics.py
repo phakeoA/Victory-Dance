@@ -1376,6 +1376,68 @@ def field_dependent_move_type(move_id: Optional[str], base_type, weather, terrai
     return base_type
 
 
+# ── v19c: WEATHER-CONDITIONAL move mechanics (online rain-loss defect, 2026-07-10) ─────────────────────
+# The band/accuracy channels were blind to per-MOVE weather hooks: in rain the band sold Solar Beam as a
+# full instant 120 BP nuke (real: 60 BP + a charge turn) — the bot spammed it into both confirmed rain
+# losses. All three helpers are SHARED by the offline + live writers → parity by construction. Value-only
+# (no new slots): the band / accuracy / hit-chance / two_turn_charge channels change MEANING under weather,
+# so _CACHE_SCHEMA is bumped (priority-block playbook: no retrain — the corrected inputs stop the lie).
+_SOLAR_CHARGE_MOVES = frozenset({"solarbeam", "solarblade"})
+# moves.ts solarbeam/solarblade onBasePower weathers (raindance/primordialsea/sandstorm/hail/snowscape),
+# expressed as _weather_key buckets — the extremes alias into the same buckets.
+_SOLAR_WEAK_WEATHER = frozenset({"rain", "sand", "snow"})
+
+
+def weather_bp_mult(move_id: Optional[str], weather) -> float:
+    """moves.ts weather hooks on BASE POWER, multiplied into the damage-band situational chain:
+      · Solar Beam / Solar Blade ×0.5 under rain/sand/snow (full power in sun AND in clear weather)
+      · Weather Ball ×2 under ANY active weather (its type morph is v19b field_dependent_move_type)
+      · Hydro Steam ×3 in sun = the real ×1.5 sun boost × cancelling the generic Water-in-Sun ×0.5 that
+        _situational_damage_mult has ALREADY applied by type (net ×1.5; Desolate Land's ×0 stays 0).
+    1.0 for every other move. The raw BP channel stays untouched (same convention as variable-BP moves —
+    the band is the weather-aware channel)."""
+    mid = move_id or ""
+    if mid in _SOLAR_CHARGE_MOVES:
+        return 0.5 if _weather_key(weather) in _SOLAR_WEAK_WEATHER else 1.0
+    if mid == "weatherball":
+        return 2.0 if _weather_key(weather) else 1.0
+    if mid == "hydrosteam":
+        return 3.0 if _weather_key(weather) == "sun" else 1.0
+    return 1.0
+
+
+def charge_skipped_now(move_id: Optional[str], weather) -> bool:
+    """True iff this two-turn charge move fires INSTANTLY under the current weather — Solar Beam /
+    Solar Blade in sun, Electro Shot in rain (the Archaludon rain staple). Both writers use this to make
+    the static two_turn_charge move-tag DYNAMIC (= 'costs a charge turn NOW'). The Power Herb skip is
+    item-dependent and intentionally NOT modelled (belief-padded opp items would guess it wrong more
+    often than right)."""
+    mid = move_id or ""
+    if mid in _SOLAR_CHARGE_MOVES:
+        return _weather_key(weather) == "sun"
+    if mid == "electroshot":
+        return _weather_key(weather) == "rain"
+    return False
+
+
+def weather_accuracy(move_id: Optional[str], weather) -> tuple[Optional[float], bool]:
+    """(accuracy_override, bypasses_accuracy_now) from moves.ts onModifyMove weather hooks:
+    Thunder / Hurricane — rain: no accuracy check at all (1.0, True); sun: 50% (0.5, False).
+    Blizzard — snow/hail: no accuracy check (1.0, True). (None, False) when no hook applies.
+    When the bypass flag is True the writers treat the move exactly like an always-hit move
+    (evasion / Sand Veil / Bright Powder never apply — battle-actions.ts skips the whole check)."""
+    mid = move_id or ""
+    if mid in ("thunder", "hurricane"):
+        wk = _weather_key(weather)
+        if wk == "rain":
+            return 1.0, True
+        if wk == "sun":
+            return 0.5, False
+    elif mid == "blizzard" and _weather_key(weather) == "snow":
+        return 1.0, True
+    return None, False
+
+
 def move_redundant_condition(move_id: Optional[str], side_active, weather, terrain) -> float:
     """1.0 if casting ``move_id`` would re-set a non-stackable condition ALREADY active on the relevant
     side, else 0.0. ``side_active`` = the casting mon's OWN-side active SIDE_COND names (canonical, e.g.

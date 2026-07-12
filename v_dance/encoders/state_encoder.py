@@ -106,18 +106,21 @@ MOVE_FEATURES per move (= 57 = 25 core + 1 redundant-condition + 29 move-tags + 
     category             (1)   ← 0=phys 0.5=spec 1=status
     priority / 7         (1)
     accuracy             (1)   ← 0–1; v11 B2a attacker fold (acc-stage · Compound Eyes · Hustle · Wide Lens ·
-                                 Victory Star · Gravity); an always-hit move → 1.0
+                                 Victory Star · Gravity); an always-hit move → 1.0; v19c weather hooks
+                                 (rain Thunder/Hurricane · snow Blizzard → 1.0 bypass; sun T/H → 0.5)
     pp_fraction          (1)   ← remaining PP / max (gap #7); max = base·8//5
     is_protect           (1)
     is_stab              (1)
     is_spread            (1)   ← gap #6; hits both foes (allAdjacentFoes/allAdjacent)
     type_eff vs enemy0/1 (4)   ← B1.1: signed log2(mult)/2 + immune flag, ×2 enemies (C.2d negation)
-    damage vs enemy0/1   (4)   ← B1.2 + A1-A4/B2-B3/N1/N4/G7: [min,max] roll as frac of current HP, ×2 enemies
+    damage vs enemy0/1   (4)   ← B1.2 + A1-A4/B2-B3/N1/N4/G7: [min,max] roll as frac of current HP, ×2 enemies;
+                                 v19c per-move weather BP (Solar Beam/Blade · Weather Ball · Hydro Steam)
     who-moves-first 0/1  (2)   ← B1.4b: priority-aware signed speed margin of THIS move vs each enemy
     intrinsics           (4)   ← B1.3: contact · recoil · drain · multihit-count/5 (per-move, public)
     hit-chance vs enemy0/1(2)  ← B2b: realized hit chance vs each enemy (evasion / Sand Veil / No Guard / …)
     redundant-condition  (1)   ← v18 Option 1: this move re-sets a screen/weather/terrain already active on the caster's side
-    move tags            (29)  ← v9: mechanic-tag multi-hot prior
+    move tags            (29)  ← v9: mechanic-tag multi-hot prior; v19c: two_turn_charge is DYNAMIC
+                                 (cleared when the current weather lets the move fire instantly)
     identity index       (1)   ← v9: move embedding index (feeds nn.Embedding, NOT the flat dim)
     is_known             (1)   ← 1.0 revealed/exact · p(usage) belief-padded · 0 empty slot
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -161,8 +164,11 @@ from v_dance.parser.belief_state import BeliefState, dex_base_stats, STAT_ORDER
 # 1 float the model embeds; vocab sizes feed the model's nn.Embeddings (NOT the flat dim). No circular
 # import — mechanic_tags/vocab/damage_mechanics never import the encoder.
 from v_dance.encoders.mechanic_tags import (  # noqa: E402
-    NUM_MOVE_TAGS, NUM_ABILITY_TAGS, NUM_ITEM_TAGS,
+    MOVE_TAG_NAMES, NUM_MOVE_TAGS, NUM_ABILITY_TAGS, NUM_ITEM_TAGS,
     move_tag_indices, ability_tag_indices, item_tag_indices, ABILITY_SUPPRESSED_IDX)
+
+# v19c: two_turn_charge is written DYNAMICALLY (0 when the current weather lets the move fire instantly).
+_TWO_TURN_CHARGE_IDX = MOVE_TAG_NAMES.index("two_turn_charge")
 from v_dance.encoders.mechanic_vocab import (  # noqa: E402
     ability_index, move_index, item_index,
     ABILITY_VOCAB_SIZE, MOVE_VOCAB_SIZE, ITEM_VOCAB_SIZE)  # noqa: F401 (re-exported for bc_model_attn + tests)
@@ -205,9 +211,11 @@ from v_dance.encoders.battle_mechanics import (  # noqa: F401
     _move_ignores_all_immunity, _move_ignores_evasion, _move_immune, _move_is_ohko,
     _moves_data, _moves_first, _per_enemy_hit_chance, _side_screens, _situational_damage_mult,
     _type_chart, _type_eff_signed_immune, _type_mult, ability_effect_indices, champ_acc_raw,
-    champ_bp, champ_type, dex_unique_ability, field_dependent_move_type, field_duration_scalars, is_spread_target,
+    champ_bp, champ_type, charge_skipped_now, dex_unique_ability, field_dependent_move_type,
+    field_duration_scalars, is_spread_target,
     item_effect_indices, move_redundant_condition, move_redundant_status, pp_max,
     priority_blocked, resolve_ability_json, resolve_active_ability_json, resolve_item_json,
+    weather_accuracy, weather_bp_mult,
 )
 from v_dance.encoders.action_codec import (  # noqa: F401
     ABILITY_ID_REL, ABILITY_KNOWN_REL, ITEM_ID_REL, MOVE_ID_RELS, OPP_HEADS,
@@ -763,10 +771,16 @@ class VodStateEncoder:
 
         acc = champ_acc_raw(_mid, data.get("accuracy"))   # v11 N1: Champions accuracy override (raw percent / True)
         _acc = 1.0 if acc is True else (acc or 0) / 100.0
+        # v19c: weather accuracy hooks — Thunder/Hurricane rain-bypass / sun-50%, Blizzard snow-bypass.
+        # Applied BEFORE Gravity (onModifyMove sets move.accuracy first; Gravity then multiplies numerics).
+        _wacc, _wah = weather_accuracy(_mid, field_mods[0] if field_mods else None)
+        if _wacc is not None:
+            _acc = _wacc
         if gravity and acc is not True:        # v11 C.2e: Gravity ×6840/4096 on numeric accuracy, cap 1.0
             _acc = min(_acc * _GRAVITY_ACC_MULT, 1.0)
         _base_acc = _acc                       # v11 B2b: post-Gravity numeric base for the per-enemy hit-chance
-        if not _move_always_hit(_mid):         # v11 B2: attacker-side accuracy mods (skip always-hit moves)
+        if not (_move_always_hit(_mid) or _wah):   # v11 B2 attacker-side accuracy mods (skip always-hit
+            # moves — incl. a v19c weather bypass: battle-actions.ts skips the whole accuracy check)
             _ac2 = att_ctx or {}
             _acc = _accuracy_modifiers(_acc, ability_id=ability_id,
                                        is_physical=(data.get("category") or "").lower() == "physical",
@@ -851,6 +865,10 @@ class VodStateEncoder:
                                                 _ac.get("burned"), _ac.get("life_orb"), _ac.get("choice"),
                                                 hits_def=_hits_def,
                                                 grassy_eq=_mid in _GRASSY_WEAKENED) * _abm  # v11 G7
+                # v19c: per-MOVE weather BP hooks (Solar Beam/Blade halved in rain/sand/snow · Weather
+                # Ball ×2 in any weather · Hydro Steam sun) — the band was selling rain Solar Beam as a
+                # full instant nuke. The charge-turn cost lives in the DYNAMIC two_turn_charge tag below.
+                _sit *= weather_bp_mult(_mid, _weather)
                 # v11 B3 attacker item band mults (×4915/4096): type-boost on a matching-type move + Expert
                 # Belt on a super-effective hit. v11 B3b: defender resist berry ×0.5 on a SE hit of its type
                 # (Chilan = all Normal — Normal is never SE). _tmult = the resolved per-enemy type multiplier.
@@ -923,7 +941,8 @@ class VodStateEncoder:
         # evasion stage / Sand Veil / Snow Cloak / Tangled Feet / Bright Powder + No Guard + the Showdown
         # acc−eva combined boost into the actual hit chance of THIS move vs that enemy. Empty slot → 0.0;
         # an always-hit move → 1.0 (evasion never applies). _base_acc = the post-Gravity numeric accuracy.
-        _ah_b2b = _move_always_hit(_mid)
+        # v19c: a weather accuracy-bypass (rain Thunder/Hurricane, snow Blizzard) counts as always-hit NOW.
+        _ah_b2b = _move_always_hit(_mid) or _wah
         _oh_b2b = _move_is_ohko(_mid)
         for e in range(2):
             d = enemy_defenders[e] if (enemy_defenders and e < len(enemy_defenders)) else None
@@ -958,6 +977,11 @@ class VodStateEncoder:
         # v9: move effect-tags (multi-hot priors) + identity index, BEFORE the trailing is_known
         for idx in move_tag_indices(move_name):
             vec[i + idx] = 1.0
+        # v19c: two_turn_charge is DYNAMIC — cleared when the current weather lets the move fire
+        # instantly (Solar Beam/Blade in sun, Electro Shot in rain), so the tag means 'costs a charge
+        # turn NOW' instead of a static property the net can't cross with weather.
+        if charge_skipped_now(_mid, _weather):
+            vec[i + _TWO_TURN_CHARGE_IDX] = 0.0
         i += NUM_MOVE_TAGS
         vec[i] = float(move_index(move_name))
         i += 1

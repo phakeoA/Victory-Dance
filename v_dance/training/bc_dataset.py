@@ -376,6 +376,22 @@ def split_by_replay(
     return train, val
 
 
+def canonical_rid(rid: str) -> str:
+    """Canonical replay-id for CROSS-SOURCE duplicate detection (M8, 2026-07-11).
+
+    The same battle can appear as ``gen9…`` (TypeB/HF exports), ``battle-gen9…``
+    (Type_C live-recorded replays) or ``gen9…__closed`` (a closed-strip re-ingest
+    twin) — raw string comparison misses all of those collisions. Strips the
+    ``battle-`` prefix and the ``__closed`` suffix for COMPARISON ONLY (storage,
+    filenames and stored replay_id fields are untouched)."""
+    r = str(rid)
+    if r.startswith("battle-"):
+        r = r[len("battle-"):]
+    if r.endswith("__closed"):
+        r = r[: -len("__closed")]
+    return r
+
+
 def split_with_reference(
     extra_examples: Sequence[dict],
     ref_examples: Sequence[dict],
@@ -394,8 +410,10 @@ def split_with_reference(
     Returns ``(train, val)``.
     """
     ref_train, val = split_by_replay(ref_examples, val_frac=val_frac, seed=seed)
-    ref_rids = {e["replay_id"] for e in ref_examples}
-    extra = [e for e in extra_examples if e["replay_id"] not in ref_rids]
+    # M8: compare CANONICAL ids so a "battle-" or "__closed" twin of a val
+    # replay can never slip into train (raw-string comparison missed those).
+    ref_rids = {canonical_rid(e["replay_id"]) for e in ref_examples}
+    extra = [e for e in extra_examples if canonical_rid(e["replay_id"]) not in ref_rids]
     return list(ref_train) + extra, val
 
 
@@ -606,11 +624,33 @@ class BCDataset(Dataset):
         n = len(examples)
         self._n = n
         state_dim = get_state_dim()
+        # M6 loader-workers (2026-07-11): a spawned DataLoader worker cannot inherit
+        # memmap row views (pickling them materializes the FULL X — ~28 GB on the big
+        # corpus), so lazy mode ALSO records each row's (cache file, row) from the
+        # ``x_src`` stamps encoded_cache.load_cache writes; a worker re-opens the
+        # cache by path on first fetch (see __getstate__/_x_np). In-process fetches
+        # keep using the inherited views — byte-identical to the pre-M6 path.
+        self._x_open: Dict[int, np.ndarray] = {}    # process-local mmap handles
+        self._x_files: List[str] = []
+        self._x_src: Optional[np.ndarray] = None    # (N, 2) int64 [file_id, row]
         if self.lazy_x:
             self.X = None
-            self._x_rows: List[np.ndarray] = [ex["x"] for ex in examples]
+            self._x_rows: Optional[List[np.ndarray]] = [ex["x"] for ex in examples]
+            fid: Dict[str, int] = {}
+            src = np.full((len(examples), 2), -1, dtype=np.int64)
+            for i, ex in enumerate(examples):
+                s = ex.get("x_src")
+                if not s:
+                    src = None                      # non-cache examples: no worker path
+                    break
+                j = fid.setdefault(str(s[0]), len(fid))
+                if j == len(self._x_files):
+                    self._x_files.append(str(s[0]))
+                src[i, 0], src[i, 1] = j, int(s[1])
+            self._x_src = src
         else:
             self.X = np.zeros((n, state_dim), dtype=np.float32)
+            self._x_rows = None
         self.target = np.full((n, len(HEADS)), -1, dtype=np.int64)
         self.mask = np.zeros((n, len(HEADS), ACTIONS_PER_SLOT), dtype=np.float32)
         self.valid = np.zeros((n, len(HEADS)), dtype=np.float32)
@@ -709,10 +749,75 @@ class BCDataset(Dataset):
     def __len__(self) -> int:
         return self._n
 
+    @property
+    def workers_safe(self) -> bool:
+        """True when this dataset can be shipped to DataLoader worker processes:
+        non-lazy (tensors ride torch shared memory) or lazy WITH x_src cache
+        stamps (workers re-open the encoded caches by path). A lazy dataset from
+        non-cache examples (--limit-* / --no-cache runs) is main-process-only."""
+        return (not self.lazy_x) or self._x_src is not None
+
     def _x_np(self, idx: int) -> np.ndarray:
         """One example's x as a fresh writable float32 row (lazy mode only:
-        copies the — possibly mmap'd, read-only — stored row)."""
-        return np.array(self._x_rows[idx], dtype=np.float32)
+        copies the — possibly mmap'd, read-only — stored row). In a DataLoader
+        worker the inherited views are gone (see __getstate__): the row is read
+        from a per-process re-open of the encoded cache instead."""
+        if self._x_rows is not None:
+            return np.array(self._x_rows[idx], dtype=np.float32)
+        j, row = int(self._x_src[idx, 0]), int(self._x_src[idx, 1])
+        arr = self._x_open.get(j)
+        if arr is None:
+            arr = np.load(self._x_files[j], mmap_mode="r")
+            self._x_open[j] = arr
+        return np.array(arr[row], dtype=np.float32)
+
+    # ── M6 loader-workers: worker-view pickling ────────────────────────────────
+    # What crosses to a spawned worker: the torch tensors (shared memory — no
+    # copy) + the small config fields + _x_files/_x_src. What must NOT cross:
+    # memmap row views (materialize X), the numpy twins of the tensors (would
+    # copy; rebuilt as tensor views), and the per-example python bookkeeping the
+    # fetch path never touches when sequence_len == 1 (lazy forbids >1 anyway).
+    _NUMPY_TWINS = ("X", "target", "mask", "valid", "gimmick_target",
+                    "gimmick_mask", "gimmick_valid", "value_target",
+                    "value_valid", "weight", "archetype",
+                    "opp_target", "opp_mask", "opp_valid")
+
+    def __getstate__(self):
+        if self.lazy_x and self._x_src is None:
+            raise RuntimeError(
+                "BCDataset(lazy_x=True) built from non-cache examples carries no x_src "
+                "stamps, so DataLoader workers cannot re-open its X rows — run without "
+                "--loader-workers (smoke --limit-*/--no-cache runs bypass the encoded cache).")
+        st = self.__dict__.copy()
+        st["_x_rows"] = None
+        st["_x_open"] = {}
+        for k in self._NUMPY_TWINS:
+            st.pop(k, None)
+        if self.sequence_len <= 1:      # fetch path never reads these when T == 1
+            st["replay_ids"] = []
+            st["_traj_of"] = []
+            st["_traj_indices"] = {}
+        return st
+
+    def __setstate__(self, st):
+        self.__dict__.update(st)
+        # Rebuild the numpy twins as views of the (shared-memory) tensors.
+        self.X = self.X_t.numpy() if self.X_t is not None else None
+        self.target = self.target_t.numpy()
+        self.mask = self.mask_t.numpy()
+        self.valid = self.valid_t.numpy()
+        self.gimmick_target = self.gimmick_target_t.numpy()
+        self.gimmick_mask = self.gimmick_mask_t.numpy()
+        self.gimmick_valid = self.gimmick_valid_t.numpy()
+        self.value_target = self.value_target_t.numpy()
+        self.value_valid = self.value_valid_t.numpy()
+        self.weight = self.weight_t.numpy()
+        self.archetype = (self.archetype_t.numpy()
+                          if self.archetype_t is not None else None)
+        if self.with_opp:
+            self.opp_target = self.opp_target_t.numpy()
+            self.opp_mask = self.opp_mask_t.numpy()
+            self.opp_valid = self.opp_valid_t.numpy()
 
     def _opp_fields(self, idx: int) -> dict:
         """Opponent aux targets/masks for this item (empty unless with_opp).  The
@@ -805,6 +910,17 @@ class BCDataset(Dataset):
             **self._opp_fields(idx),
             **self._z_fields(idx),
         }
+
+
+def bc_worker_init(worker_id: int) -> None:  # pragma: no cover - exercised via DataLoader
+    """DataLoader ``worker_init_fn`` (M6): give each worker's move-order
+    augmentation RNG an independent, run-deterministic stream. Without this,
+    every worker would inherit the SAME pickled RandomState and draw identical
+    permutation sequences. ``info.seed`` is torch's per-worker seed (derived
+    from the run's base seed), so runs stay reproducible at a fixed worker count."""
+    info = torch.utils.data.get_worker_info()
+    if info is not None and getattr(info.dataset, "_rng", None) is not None:
+        info.dataset._rng = np.random.RandomState(info.seed % (2 ** 32))
 
 
 # ══════════════════════════════════════════════════════════════════════════════

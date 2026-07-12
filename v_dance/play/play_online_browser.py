@@ -58,6 +58,40 @@ from v_dance.play.run_local_battle import BATTLE_FORMAT          # noqa: E402
 
 BENCH_DIR = _REPO / "artifacts" / "human_benchmark"
 BENCH_LOG = BENCH_DIR / "human_bench.jsonl"
+# 2026-07-10 (USER): artifacts/logs = THE home for all future logs (see artifacts/README.md).
+# The online session logger writes online_<session>.log there — per-game detail lines + rating
+# updates as they happen, and on exit the era benchmark report + an observed-meta refresh, so
+# the grind-to-plateau loop needs no manual report commands.
+LOG_DIR = _REPO / "artifacts" / "logs"
+
+
+def _slog(path: Path, text: str) -> None:
+    """Append one line to the session log, crash-safe; logging must never break play."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(text.rstrip("\n") + "\n")
+    except Exception:
+        pass
+
+# 2026-07-10 (USER): default client settings, applied EVERY launch — the Playwright context is
+# fresh so saved prefs never persist. Pref keys + live side-effects verified against the served
+# client source (js/oldclient/client-topbar.js OptionsPopup + storage.js Storage.prefs): theme
+# needs the html.dark class toggle, onepanel needs app.updateLayout(), sprite prefs need
+# Dex.loadSpriteData — the same calls the popup's own change handlers make, so no page reload.
+# (Block PMs/Challenges + Language are SERVER-side app.user.updateSetting settings whose defaults
+# already match the wanted state — intentionally not touched.)
+_CLIENT_PREFS_JS = (
+    "(prefs) => {"
+    "  for (const k in prefs) Storage.prefs(k, prefs[k]);"
+    "  let th = prefs.theme;"
+    "  if (th === 'system') th = (window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';"
+    "  if (prefs.theme) $('html').toggleClass('dark', th === 'dark');"
+    "  if ('onepanel' in prefs) { app.singlePanelMode = !!prefs.onepanel; app.updateLayout(); }"
+    "  if (window.Dex && Dex.loadSpriteData) Dex.loadSpriteData((prefs.noanim || prefs.bwgfx) ? 'bw' : 'xy');"
+    "  return Object.keys(prefs).length; }"
+)
+
 
 # Same team-import JS as the local _setup_client (see its ⚠ packTeam/capacity:6 comments —
 # verified live in scratch/browser_team_import_probe.py / browser_capacity_probe.py).
@@ -91,39 +125,51 @@ def _sockjs_unwrap(payload: str) -> list:
     return [payload]
 
 
-def _sync_avatar_from_frame(payload: str, env_path: Path = _REPO / ".env") -> None:
-    """Persist a browser-side avatar change to ``.env`` (USER request 2026-07-09): the server
-    confirms every avatar change with ``|updateuser|USER|NAMED|AVATAR|{settings}``, so watching
-    the incoming frames catches changes made through the client UI. Only NAMED (post-login)
-    updates for OUR account are applied — the guest frames of the login dance never touch .env.
-    Atomic write (temp + replace): .env holds credentials, a torn write is never acceptable."""
+def _write_avatar(avatar: str, env_path: Path = _REPO / ".env") -> None:
+    """Persist an avatar choice to ``.env`` PS_AVATAR (no-op when unchanged). Atomic write
+    (temp + replace): .env holds credentials, a torn write is never acceptable."""
+    avatar = (avatar or "").strip()
+    if not avatar or avatar == (_ENV.get("PS_AVATAR") or "").strip():
+        return
+    lines = env_path.read_text(encoding="utf-8").splitlines()
+    for i, ln in enumerate(lines):
+        if ln.split("=", 1)[0].strip() == "PS_AVATAR":
+            lines[i] = f"PS_AVATAR={avatar}"
+            break
+    else:
+        lines.append(f"PS_AVATAR={avatar}")
+    tmp = env_path.with_name(env_path.name + ".tmp")
+    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    os.replace(tmp, env_path)
+    _ENV["PS_AVATAR"] = avatar
+    print(f"[online] avatar changed in the browser → saved to .env (PS_AVATAR={avatar})")
+
+
+_AVATAR_CMD = "/avatar "
+
+
+def _sync_avatar_from_send(payload: str, env_path: Path = _REPO / ".env") -> None:
+    """Persist browser-side avatar picks by watching the OUTGOING frames (2026-07-10 v2): the
+    client sends ``room|/avatar <x>`` when the USER picks an avatar in the UI. v1 watched the
+    incoming ``|updateuser|`` — but the server only sends that on LOGIN/RENAME, never on an
+    avatar change, so real picks were never saved and the next session's startup ``/avatar``
+    (from the stale .env) snapped the avatar back — the observed "refuses to save, defaults
+    back to 2". The harness's own startup send passes through here too = a same-value no-op.
+    Client→server frames arrive JSON-array-wrapped (``["msg", …]``) or bare."""
     try:
-        if "|updateuser|" not in payload:
+        if _AVATAR_CMD not in payload:
             return
-        uid = "".join(c for c in (_ENV.get("PS_USERNAME") or "").lower() if c.isalnum())
-        for line in payload.split("\n"):
-            parts = line.split("|")
-            if len(parts) < 5 or parts[1] != "updateuser":
-                continue
-            user, named, avatar = parts[2], parts[3], parts[4].strip()
-            # rank chars (space/+/*/#/…) are non-alnum → the filter normalizes them away
-            if named != "1" or not avatar or "".join(c for c in user.lower() if c.isalnum()) != uid:
-                continue
-            if avatar == (_ENV.get("PS_AVATAR") or "").strip():
+        msgs = [payload]
+        if payload.startswith("["):
+            try:
+                msgs = [m for m in json.loads(payload) if isinstance(m, str)]
+            except Exception:
+                msgs = [payload]
+        for m in msgs:
+            text = m.split("|", 1)[1] if "|" in m else m   # strip the room prefix
+            if text.startswith(_AVATAR_CMD):
+                _write_avatar(text[len(_AVATAR_CMD):], env_path)
                 return
-            lines = env_path.read_text(encoding="utf-8").splitlines()
-            for i, ln in enumerate(lines):
-                if ln.split("=", 1)[0].strip() == "PS_AVATAR":
-                    lines[i] = f"PS_AVATAR={avatar}"
-                    break
-            else:
-                lines.append(f"PS_AVATAR={avatar}")
-            tmp = env_path.with_name(env_path.name + ".tmp")
-            tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
-            os.replace(tmp, env_path)
-            _ENV["PS_AVATAR"] = avatar
-            print(f"[online] avatar changed in the browser → saved to .env (PS_AVATAR={avatar})")
-            return
     except Exception as exc:                       # a sync failure must never break play
         print(f"[online] avatar .env sync failed (non-fatal): {exc!r}")
 
@@ -154,6 +200,30 @@ async def _login(page, username: str, password: str) -> bool:
             return False
 
 
+def _write_session_summary(session_log: Path, note: str, tally: dict) -> None:
+    """On session exit (2026-07-10, USER): append the era benchmark report + refresh the
+    observed-meta aggregate — the grind loop's bookkeeping, automated. Never raises."""
+    try:
+        _slog(session_log, f"=== session end — tally AI {tally.get('ai', 0)} / "
+                           f"opp {tally.get('you', 0)} / draws {tally.get('draw', 0)}")
+        from v_dance.eval.human_benchmark_report import load_rows, report_text
+        if BENCH_LOG.is_file():
+            rows = [r for r in load_rows(BENCH_LOG) if r.get("note") == note]
+            if rows:
+                _slog(session_log, report_text(rows))
+        import re as _re
+        from v_dance.datatools.observed_meta import DOSSIER_DIR, _display_names, aggregate
+        m = _re.search(r"(reg[a-z0-9]+)", BATTLE_FORMAT or "")
+        reg = m.group(1) if m else "regma"
+        data = aggregate(DOSSIER_DIR, fmt=BATTLE_FORMAT, names=_display_names(reg))
+        out = _REPO / "data" / f"observed_meta_{reg}.json"
+        out.write_text(json.dumps(data, indent=1, ensure_ascii=False), encoding="utf-8")
+        _slog(session_log, f"observed-meta refreshed: {data['n_opponents']} opponents / "
+                           f"{data['n_games']} games / {len(data['pokemon'])} species -> {out}")
+    except Exception as exc:                       # bookkeeping must never break shutdown
+        _slog(session_log, f"(session summary failed: {exc!r})")
+
+
 def _wrap_bench_recording(host: BattleHost, session_id: str, note: str,
                           ckpt: Path, tp_ckpt: Path) -> None:
     """Append a bench-JSONL row for every finished battle. Hook = host.end_battle (the consumer
@@ -182,11 +252,18 @@ def _wrap_bench_recording(host: BattleHost, session_id: str, note: str,
                 BENCH_DIR.mkdir(parents=True, exist_ok=True)
                 with BENCH_LOG.open("a", encoding="utf-8") as f:
                     f.write(json.dumps(row) + "\n")
+                # session detail log (2026-07-10): one human-readable line per game as it lands
+                _slog(LOG_DIR / f"online_{session_id}.log",
+                      f"{row['ts']}  game {row['game_idx']:>3}  {row['result'].upper():<5} "
+                      f"vs {(row['opponent'] or '?'):<20} {row['turns']}t  "
+                      f"team {row['ai_team'] or '?'}  {row['battle_tag']}")
                 # B-L2 dossier capture (passive; never raises) — key data for online opponents.
                 from v_dance.play.opponent_dossier import summary, update_from_battle
                 if update_from_battle(b, row["result"],
                                       our_team=row["ai_team"], note=note):
-                    print(f"[online] dossier: {summary(row['opponent'] or '')}")
+                    s = summary(row["opponent"] or "")
+                    print(f"[online] dossier: {s}")
+                    _slog(LOG_DIR / f"online_{session_id}.log", f"    dossier: {s}")
         except Exception as exc:                       # recording must never break play
             print(f"[online] bench-record failed (non-fatal): {exc!r}")
         orig(tag)
@@ -226,18 +303,32 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
             f.write(json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                                 "type": "rating_update", "session_id": session_id,
                                 "battle_tag": tag, key: rating}) + "\n")
+        _slog(LOG_DIR / f"online_{session_id}.log",
+              f"    rating: {user} {rating} ({'us' if key == 'rating' else 'them'})  {tag}")
 
     _pvhb.RATING_HOOK = _rating_row
+    session_log = LOG_DIR / f"online_{session_id}.log"
+    _slog(session_log, f"=== ONLINE session {session_id} — {username} @ {args.client_url}")
+    _slog(session_log, f"    format {BATTLE_FORMAT}  note {args.bench_note!r}")
+    _slog(session_log, f"    ckpt {ckpt}\n    tp   {tp_ckpt}")
+    print(f"[online] session log -> {session_log}")
     # The reused consumer/_credit print + fall back on the module's _AI_NAME; online, the AI IS
     # the .env account. (The local harness isn't running in this process — safe to repoint.)
     _pvhb._AI_NAME = username
 
     # Team-pick wrapper: remember the picked name (for the bench row), and make .env
     # VD_DEFAULT_TEAM the RANDOM-fallback — an explicitly OPENED Teambuilder team still wins.
+    # 2026-07-10 control panel: a team pinned in the panel OUTRANKS everything (the panel's
+    # dropdown is the user's live 'use this team' gesture; challenge-accepts honour it too).
     default_team = _ENV.get("VD_DEFAULT_TEAM")
     _orig_pick = _pvhb._pick_ai_team
+    ctrl_ref: dict = {"c": None}                   # filled after login (the panel needs the page)
 
     async def _pick(page, pool, pin):
+        c = ctrl_ref.get("c")
+        if c is not None and c.team_pin and c.team_pin in pool:
+            host.player._team_name = c.team_pin
+            return c.team_pin, "control panel"
         nm, src = await _orig_pick(page, pool, pin)
         if src == "random" and default_team in pool:
             nm, src = default_team, ".env default"
@@ -255,12 +346,20 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
             ctx = await browser.new_context(no_viewport=True)
             page = await ctx.new_page()
 
-            def _on_frame(p) -> None:              # SockJS unwrap → consumer feed + avatar watch
+            def _on_frame(p) -> None:              # incoming: SockJS unwrap → consumer feed
                 for msg in _sockjs_unwrap(p):
                     frame_q.put_nowait(msg)
-                    _sync_avatar_from_frame(msg)
+                    c = ctrl_ref.get("c")          # control panel's read-only frame tap
+                    if c is not None:
+                        c.tap_frame(msg)
 
-            page.on("websocket", lambda ws: ws.on("framereceived", _on_frame))
+            def _on_ws(ws) -> None:
+                ws.on("framereceived", _on_frame)
+                # outgoing: the USER's avatar picks send `/avatar <x>` — the only reliable
+                # signal (the server sends no updateuser on avatar changes; see the sync's doc).
+                ws.on("framesent", _sync_avatar_from_send)
+
+            page.on("websocket", _on_ws)
             await page.goto(args.client_url, wait_until="domcontentloaded")
             await page.wait_for_function(
                 "() => window.app && app.socket && app.socket.readyState === 1", timeout=30000)
@@ -268,6 +367,12 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
                 raise SystemExit("[online] login did not complete — aborting.")
             if _ENV.get("PS_AVATAR"):
                 await page.evaluate("(a) => app.socket.send('|/avatar ' + a)", _ENV["PS_AVATAR"])
+            if _ENV.get("PS_CLIENT_PREFS"):        # 2026-07-10: USER's default client settings
+                try:
+                    _n = await page.evaluate(_CLIENT_PREFS_JS, json.loads(_ENV["PS_CLIENT_PREFS"]))
+                    print(f"[online] applied {_n} client prefs from .env PS_CLIENT_PREFS")
+                except Exception as exc:
+                    print(f"[online] PS_CLIENT_PREFS failed (non-fatal): {exc!r}")
             if not args.no_import:
                 failed = await page.evaluate(_IMPORT_TEAMS_JS, [BATTLE_FORMAT, teams])
                 if failed:
@@ -275,15 +380,36 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
                 print(f"[online] {len(teams) - len(failed)} pool teams available in the Teambuilder")
             await _default_format(page, "online")
 
+            # 2026-07-10 (USER): local control panel — ladder-run count / team+format dropdowns /
+            # private challenges / auto-accept toggle, all without touching the bot window. Own
+            # module by request; non-fatal: the manual window flow works unchanged without it.
+            # NOT in --dry-run: the consumer isn't serving there, so a panel-queued game would
+            # sit unplayed and time out.
+            if args.control_port and not args.dry_run:
+                try:
+                    from v_dance.play.bot_control_ui import start_control_ui
+                    ctrl_ref["c"] = start_control_ui(
+                        page=page, host=host, tally=tally, ai_pool=ai_pool,
+                        fmt=BATTLE_FORMAT, username=username,
+                        loop=asyncio.get_running_loop(), env_path=_REPO / ".env",
+                        port=args.control_port,
+                        team_pin_default=args.ai_team or default_team,
+                        auto_close_default=(_ENV.get("VD_AUTO_CLOSE_ROOMS", "0").strip() == "1"),
+                        log_line=lambda t: _slog(session_log, t))
+                except Exception as exc:
+                    print(f"[online] control panel failed to start (non-fatal): {exc!r}")
+
             print("\n" + "=" * 64)
             print(f"  ONLINE — {username} @ {args.client_url}   format {BATTLE_FORMAT}")
             print(f"  battle ckpt : {ckpt}")
             print(f"  TP ckpt     : {tp_ckpt}")
             print(f"  bench       : session {session_id} (note {args.bench_note!r}) -> {BENCH_LOG}")
+            if ctrl_ref["c"] is not None:
+                print(f"  control     : {ctrl_ref['c'].url}  (ladder runs / challenges / auto-accept)")
             print("  YOU find the matches in this window (ladder Battle! / send a challenge).")
-            print(f"  Incoming challenges in {BATTLE_FORMAT} are AUTO-ACCEPTED.")
-            print(f"  AI team per battle = pinned --ai-team, else the team OPEN in the "
-                  f"Teambuilder, else random. Ctrl-C here to stop.")
+            print(f"  Incoming challenges in {BATTLE_FORMAT} are AUTO-ACCEPTED (toggle in the panel).")
+            print(f"  AI team per battle = control-panel pin, else --ai-team, else the team OPEN "
+                  f"in the Teambuilder, else random. Ctrl-C here to stop.")
             print("=" * 64 + "\n")
             sys.stdout.flush()
             if args.dry_run:
@@ -294,12 +420,26 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
                 return tally
             await _ai_consumer(page, host, frame_q, ai_pool, tally, stop, args.ai_team)
         finally:
+            if ctrl_ref.get("c") is not None:      # stop the panel's HTTP thread (best-effort)
+                ctrl_ref["c"].stop()
             try:
                 await browser.close()
             except Exception:
                 # window-close auto-stop: the browser (and its driver pipe) are already gone —
                 # close() then raises "Connection closed while reading from the driver". Benign.
                 pass
+            _write_session_summary(session_log, args.bench_note, tally)
+            print(f"[online] session summary + era report -> {session_log}")
+            # 2026-07-10 (USER): keep Type_C training-clean automatically — DELETE any junk
+            # replays this session recorded (turn-1 forfeit/timeout/disconnect: nothing to learn,
+            # and the elo they granted is already captured in the bench rows regardless).
+            try:
+                _tc = _REPO / "data" / "vods" / "Type_C"
+                if _tc.is_dir():
+                    from v_dance.datatools.filter_type_c import run as _filter_type_c
+                    _filter_type_c(_tc, apply=True)
+            except Exception as exc:
+                print(f"[online] Type_C junk filter failed (non-fatal): {exc!r}")
     return tally
 
 
@@ -317,6 +457,8 @@ def main() -> None:
                     help="connect + login + import teams, then idle — the safe first live test.")
     ap.add_argument("--adapt-rules", action="store_true",
                     help="B-L1 serve-time pattern tilt (Wide-Guard streak → spread bias). Default OFF.")
+    ap.add_argument("--control-port", type=int, default=8777,
+                    help="local control-panel port (ladder runs / challenges / auto-accept); 0 = off.")
     args = ap.parse_args()
 
     username = _ENV.get("PS_USERNAME")

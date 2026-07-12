@@ -221,6 +221,11 @@ def _result_line(payload: str):
 # (local play: challenges are unrated, the lines never occur).
 RATING_HOOK = None
 
+# 2026-07-10 (control panel): gate for the consumer's incoming-challenge auto-accept. The online
+# control UI (bot_control_ui) flips it at the user's request; default True preserves the local
+# harness + prior online behaviour exactly. A declined challenge is SURFACED, never silent-dropped.
+AUTO_ACCEPT = True
+
 
 def _parse_rating_lines(payload: str) -> list:
     """[(username, rating)] from a frame's ``|raw|…'s rating: NNNN…`` lines — the same parse
@@ -269,11 +274,20 @@ async def _ai_selected_team(page) -> str | None:
         return None
 
 
-async def _pick_ai_team(page, ai_pool: list[str], pin: str | None) -> tuple[str, str]:
+async def _pick_ai_team(page, ai_pool: list[str], pin: str | None,
+                        route_for: str | None = None) -> tuple[str, str]:
     """Choose the AI's team for the next battle, returning (name, source): a PINNED ``--ai-team`` →
-    the team you have OPEN in the AI Teambuilder → a random team from the list."""
+    the Phase-4b router vs a KNOWN opponent (``route_for``, flag-gated VD_ROUTE_TEAMS=1, default
+    OFF = byte-identical) → the team you have OPEN in the AI Teambuilder → a random team."""
     if pin:
         return pin, "pinned"
+    if route_for:
+        from v_dance.play import team_router
+        if team_router.ROUTE_TEAMS:
+            routed, why = team_router.route(route_for, ai_pool)
+            if routed:
+                print(f"[ai] team router: {why}")
+                return routed, "routed"
     picked = await _ai_selected_team(page)
     if picked and picked in ai_pool:
         return picked, "your pick"
@@ -313,7 +327,8 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
             try:
                 busy, busy_since, active_tag = True, loop.time(), None
                 hb_next = busy_since + 15.0                           # first heartbeat 15s after accept
-                ai_name, src = await _pick_ai_team(page, ai_pool, ai_team_pin)
+                ai_name, src = await _pick_ai_team(page, ai_pool, ai_team_pin,
+                                                   route_for=challenger)
                 # audit: resolve the AI team WITHIN the active reg. A bare name through resolve_team_path
                 # cross-reg rglobs and returns the alphabetically-first match (M-A sorts before M-B), so a
                 # same-named paste in two reg folders would load the wrong-reg (possibly illegal) team. Map
@@ -369,7 +384,11 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
             if not payload.startswith(">battle"):
                 ch = _parse_challenge(payload)
                 if ch and ch[1] == BATTLE_FORMAT:
-                    pending = ch[0]
+                    if AUTO_ACCEPT:
+                        pending = ch[0]
+                    else:                                            # control-panel toggle (2026-07-10):
+                        print(f"[ai] auto-accept is OFF — challenge from {ch[0]} NOT accepted "
+                              f"(toggle it in the control panel or accept manually in the window).")
                 elif ch and ch not in seen_wrong_fmt:                # surface (don't silently drop) a
                     seen_wrong_fmt.add(ch)                            # wrong-format challenge — it's why a
                     print(f"[ai] ignoring challenge from {ch[0]} in format {ch[1]!r} — "
@@ -398,6 +417,21 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
                             RATING_HOOK(active_tag, _u, _rt)
                         except Exception as exc:                     # capture must never break play
                             print(f"[ai] rating-capture failed (non-fatal): {exc!r}")
+                # M5 (DS-M5): OTS |showteam| capture → player._ots_sheets, keyed by the room's
+                # base tag, so team preview can (flag-gated VD_TP_OTS_OVERLAY) feed the
+                # opponent's revealed builds to the TP net. Closed play: no such frames.
+                if "|showteam|" in payload:
+                    try:
+                        from v_dance.parser.vod_parser.team_sheet import parse_showteam_sides
+                        from v_dance.play.player import room_base_tag
+                        _sides = parse_showteam_sides(payload)
+                        if _sides:
+                            _store = host.player.__dict__.setdefault("_ots_sheets", {})
+                            _store.setdefault(room_base_tag(active_tag), {}).update(_sides)
+                            print(f"[ai] OTS sheets captured for {active_tag} "
+                                  f"(sides: {sorted(_sides)})")
+                    except Exception as exc:                         # capture must never break play
+                        print(f"[ai] showteam capture failed (non-fatal): {exc!r}")
                 result = _result_line(payload)                       # prefix-matched terminal line, or None
                 try:
                     decisions = await asyncio.wrap_future(

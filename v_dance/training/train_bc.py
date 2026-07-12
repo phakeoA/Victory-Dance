@@ -42,6 +42,7 @@ from v_dance.training.bc_dataset import (  # noqa: E402
     ACTIONS_PER_SLOT,
     BCDataset,
     HEADS,
+    bc_worker_init,
     build_examples,
     compute_advantage_weights,
     compute_sample_weights,
@@ -560,8 +561,26 @@ def train(args: argparse.Namespace) -> dict:
               f"(memory_dim={args.memory_dim})")
     print(f"[train_bc] move-slot permutation augmentation: "
           f"{'ON' if args.augment_move_order else 'OFF'} (train only)")
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
+    # M6 loader-workers (2026-07-11): the feed is Python-bound (GPU ~20% on the
+    # era-2 run) — worker processes parallelize __getitem__ + collate. 0 (default)
+    # = the in-process legacy path, byte-identical. Workers receive the tensors
+    # via torch shared memory and re-open mmap caches by x_src path (BCDataset
+    # worker-view pickling); a lazy dataset without cache stamps fails loud here
+    # rather than deep inside a worker.
+    loader_kw = {}
+    if args.loader_workers > 0:
+        for split_name, ds_ in (("train", train_ds), ("val", val_ds)):
+            if not ds_.workers_safe:
+                sys.exit(f"[train_bc] --loader-workers: the {split_name} dataset has no "
+                         f"x_src cache stamps (smoke --limit-*/--no-cache runs bypass the "
+                         f"encoded cache) — drop --loader-workers for this run.")
+        loader_kw = dict(num_workers=args.loader_workers, persistent_workers=True,
+                         worker_init_fn=bc_worker_init, prefetch_factor=4,
+                         pin_memory=(args.device == "cuda"))
+        print(f"[train_bc] DataLoader workers: {args.loader_workers} (persistent, "
+              f"prefetch 4, pin_memory={loader_kw['pin_memory']})")
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, **loader_kw)
+    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, **loader_kw)
 
     # ── Auxiliary opponent head (task #9): adds opp_a/opp_b ACTION heads (no opp
     # gimmick head).  OUR action/gimmick heads + reported our top1 are unchanged,
@@ -928,6 +947,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                          "in RAM. Needed for the full 77.8k MA-Bo3 corpus (~26 GB X) "
                          "on 32 GB RAM. Requires the encoded cache; incompatible "
                          "with --sequence-len > 1.")
+    ap.add_argument("--loader-workers", type=int, default=0,
+                    help="M6 (2026-07-11): DataLoader worker processes for the feed. "
+                         "0 (default) = in-process, byte-identical legacy path. >0 "
+                         "parallelizes item fetch + collate (the era-2 run fed the GPU "
+                         "at ~20%% util = Python-bound); tensors ride torch shared "
+                         "memory, mmap caches re-open per worker via x_src stamps. "
+                         "Needs cache-backed data (not --limit-*/--no-encoded-cache). "
+                         "Start with 4 on the 3070 Ti box.")
     ap.add_argument("--patience", type=int, default=0,
                     help="early-stop after N epochs with no val top-1 gain (0=off)")
     ap.add_argument("--val-frac", type=float, default=0.1)

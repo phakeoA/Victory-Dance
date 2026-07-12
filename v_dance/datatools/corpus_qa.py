@@ -41,6 +41,20 @@ OUR_HEADS = ("our_a", "our_b")
 RATING_BUCKETS = [0, 1600, 1700, 1800, 1900, 2000, 10_000]
 
 
+def _canonical_rid(rid: str) -> str:
+    """M8 (2026-07-11): canonical replay-id for the duplicate scan — Type_C
+    exports carry a ``battle-`` prefix and a closed-strip twin a ``__closed``
+    suffix; raw keys would miss a same-battle cross-source duplicate.
+    LOCAL COPY (this module is deliberately stdlib-only): keep in sync with
+    ``bc_dataset.canonical_rid`` — tests/test_rid_dedupe.py asserts parity."""
+    r = str(rid)
+    if r.startswith("battle-"):
+        r = r[len("battle-"):]
+    if r.endswith("__closed"):
+        r = r[: -len("__closed")]
+    return r
+
+
 def iter_jsonl_files(folder: str) -> List[str]:
     return sorted(glob.glob(os.path.join(str(folder), "**", "*.jsonl"), recursive=True))
 
@@ -153,7 +167,7 @@ def _audit_transition(t: dict, report: dict, fname: str, replay_to_files) -> Non
 
     rid = t.get("replay_id")
     if rid is not None:
-        replay_to_files[rid].add(fname)
+        replay_to_files[_canonical_rid(rid)].add(fname)
 
     rating, won = _our_meta(t)
     if rating is not None:

@@ -67,6 +67,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import random
 import re
 import sys
@@ -647,9 +648,14 @@ async def main(limit: int, concurrency: int, resume: bool, min_usage: float,
             batch_data = await scrape_all(batch, concurrency)
             result["pokemon"].update(batch_data)
 
-            # Incremental save after every batch
-            with OUTPUT_FILE.open("w", encoding="utf-8") as f:
+            # Incremental save after every batch — ATOMIC (tmp + replace, 2026-07-10): this file
+            # is READ LIVE by BeliefState (serving, the test suite, the parser pipeline); the old
+            # in-place rewrite left a partial JSON visible mid-dump and a concurrent reader got a
+            # JSONDecodeError (observed: the suite failed while a scrape was running).
+            _tmp = OUTPUT_FILE.with_name(OUTPUT_FILE.name + ".tmp")
+            with _tmp.open("w", encoding="utf-8") as f:
                 json.dump(result, f, indent=2, ensure_ascii=False)
+            os.replace(_tmp, OUTPUT_FILE)
             print(f"    [saved] {OUTPUT_FILE} ({OUTPUT_FILE.stat().st_size / 1024:.1f} KB)")
 
             # Inter-batch pause — give the server a breather

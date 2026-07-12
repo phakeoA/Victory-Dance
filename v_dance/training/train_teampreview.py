@@ -23,6 +23,7 @@ import argparse
 import json
 import sys
 import time
+from itertools import combinations
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
@@ -45,6 +46,44 @@ from v_dance.training.teampreview_dataset import (  # noqa: E402
     split_by_replay,
 )
 from v_dance.models.teampreview_model import build_model  # noqa: E402
+
+# Contrastive set head (2026-07-11, docs/tp_contrastive_set_head_design.md): the canonical
+# subset order shared by the loss, the metrics and model.score_subsets' default — all C(6,4)
+# bring-subsets in itertools.combinations order, so a target index is well-defined everywhere.
+SET_SUBSETS = tuple(combinations(range(TEAM_SIZE), BRING_K))
+_SET_TARGET = {s: i for i, s in enumerate(SET_SUBSETS)}
+
+
+def apply_warm_start(model, state: dict) -> int:
+    """Load a donor checkpoint's weights into a set-head model. Every backbone key must
+    load; ONLY fresh set-head keys may be missing (they keep their zero-init) — anything
+    else is a config drift and fails loud. Returns the number of fresh keys."""
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    bad = [k for k in missing if not k.startswith(("set_pair_mlp.", "set_global_mlp."))]
+    if bad or unexpected:
+        raise SystemExit(
+            f"[train_teampreview] warm-start key mismatch — the donor checkpoint does not fit "
+            f"this architecture: missing(non-set)={bad} unexpected={list(unexpected)}")
+    return len(missing)
+
+
+def _set_targets(batch) -> torch.Tensor:
+    """(B,) long: index into SET_SUBSETS of the human 4-set, or -1 when the row cannot
+    supervise the set head (incomplete observed bring, partial/aug-masked roster)."""
+    bring = batch["bring"]
+    valid = batch["valid_bring"]
+    full = (batch["our_feat"].abs().sum(dim=-1) > 0).sum(dim=-1) == TEAM_SIZE   # (B,)
+    slot_m = batch.get("slot_mask")
+    tgt = torch.full((bring.shape[0],), -1, dtype=torch.long)
+    for r in range(bring.shape[0]):
+        if float(valid[r]) < 0.5 or not bool(full[r]):
+            continue
+        if slot_m is not None and float(slot_m[r].sum()) < TEAM_SIZE:
+            continue                                     # aug-masked roster: members absent
+        members = tuple(torch.nonzero(bring[r] > 0.5, as_tuple=False).flatten().tolist())
+        if len(members) == BRING_K:
+            tgt[r] = _SET_TARGET[members]
+    return tgt
 
 
 def _topk_set_metrics(logits: torch.Tensor, target: torch.Tensor, k: int,
@@ -70,14 +109,16 @@ def _topk_set_metrics(logits: torch.Tensor, target: torch.Tensor, k: int,
     return n_exact, sum_overlap, n
 
 
-def run_epoch(model, loader, device, optimizer=None) -> Dict[str, float]:
+def run_epoch(model, loader, device, optimizer=None, set_weight: float = 1.0) -> Dict[str, float]:
     train = optimizer is not None
     model.train(train)
+    use_set = bool(getattr(model, "use_set_head", False))
 
     tot_loss = 0.0
     n_batches = 0
     bring_exact = bring_overlap = bring_n = 0
     lead_exact = lead_overlap = lead_n = 0
+    set_exact = set_n = 0
 
     ctx = torch.enable_grad() if train else torch.no_grad()
     with ctx:
@@ -95,7 +136,12 @@ def run_epoch(model, loader, device, optimizer=None) -> Dict[str, float]:
             if our_aff is not None:
                 our_aff = our_aff.to(device)
 
-            bring_logits, lead_logits = model(our_idx, opp_idx, our_feat, opp_feat, our_aff)
+            if use_set:
+                # ONE trunk forward yields subset scores AND the marginal logits.
+                set_scores, bring_logits, lead_logits = model.score_subsets(
+                    our_idx, opp_idx, our_feat, opp_feat, our_aff, subsets=SET_SUBSETS)
+            else:
+                bring_logits, lead_logits = model(our_idx, opp_idx, our_feat, opp_feat, our_aff)
 
             # Per-slot loss weights (subset-mask aug, 2026-07-10): an aug-masked slot is ABSENT,
             # not a choice — exclude it from both heads' BCE. Unaugmented rows carry an all-ones
@@ -121,6 +167,21 @@ def run_epoch(model, loader, device, optimizer=None) -> Dict[str, float]:
             bring_loss = (bring_bce * valid).sum() / denom
             loss = lead_loss + bring_loss
 
+            if use_set:
+                # Listwise contrastive: 15-way CE, target = the human 4-set, ALL other
+                # subsets of the same roster are the negatives (no sampling — C(6,4)=15).
+                # Rows that cannot supervise the set (incomplete bring / partial roster)
+                # are masked out of this term only; they still train the BCEs above.
+                tgt = _set_targets(batch)
+                mask = tgt >= 0
+                if bool(mask.any()):
+                    set_loss = F.cross_entropy(set_scores[mask.to(device)],
+                                               tgt[mask].to(device))
+                    loss = loss + set_weight * set_loss
+                    pred = set_scores.argmax(dim=1).cpu()
+                    set_exact += int((pred[mask] == tgt[mask]).sum())
+                    set_n += int(mask.sum())
+
             if train:
                 optimizer.zero_grad()
                 loss.backward()
@@ -145,6 +206,8 @@ def run_epoch(model, loader, device, optimizer=None) -> Dict[str, float]:
         "lead_overlap": lead_overlap / (ln * LEAD_K),
         "bring_n": bring_n,
         "lead_n": lead_n,
+        "set_exact": set_exact / max(set_n, 1),
+        "set_n": set_n,
     }
 
 
@@ -159,6 +222,31 @@ def train(args: argparse.Namespace) -> dict:
     folders = list(args.data)
     if args.type_a:
         folders.extend(args.type_a)
+
+    # Set-head warm start (2026-07-11): adopt the donor's vocab + architecture stamps so
+    # every backbone weight fits exactly; only the fresh (zero-inited) set-head keys differ.
+    # Loaded BEFORE the feature-recipe block because the adopted attn flags feed it.
+    warm_ckpt = None
+    if args.warm_start:
+        warm_ckpt = torch.load(args.warm_start, map_location="cpu", weights_only=False)
+        if not (isinstance(warm_ckpt, dict) and "model_state" in warm_ckpt):
+            raise SystemExit(f"[train_teampreview] --warm-start {args.warm_start} is not a "
+                             f"dict checkpoint")
+        wcfg = warm_ckpt.get("config", {})
+        if wcfg.get("features", "legacy") != args.features:
+            raise SystemExit(f"[train_teampreview] --warm-start features="
+                             f"{wcfg.get('features')!r} != --features {args.features!r}")
+        args.emb_dim = wcfg.get("emb_dim", args.emb_dim)
+        args.hidden = wcfg.get("hidden", args.hidden)
+        args.dropout = wcfg.get("dropout", args.dropout)
+        args.attn_heads = wcfg.get("attn_heads", args.attn_heads)
+        args.self_attn = wcfg.get("use_self_attn", args.self_attn)
+        args.cross_attn = wcfg.get("use_cross_attn", args.cross_attn)
+        args.teammate_bias = wcfg.get("use_teammate_bias", args.teammate_bias)
+        print(f"[train_teampreview] warm-start donor {args.warm_start}: adopted arch stamps "
+              f"(emb={args.emb_dim} hidden={args.hidden} self_attn={args.self_attn} "
+              f"cross_attn={args.cross_attn} teammate_bias={args.teammate_bias}) + vocab "
+              f"({len(warm_ckpt.get('vocab', {}))} species; new-corpus species -> PAD)")
 
     # 15b-train.1: choose the per-mon feature recipe + (for the teammate-bias) the affinity provider.
     # 'legacy' = the original 46-dim dex net (no belief, no schema -> byte-identical). 'sbda' = the
@@ -186,6 +274,11 @@ def train(args: argparse.Namespace) -> dict:
               f"self_attn={args.self_attn} cross_attn={args.cross_attn} "
               f"teammate_bias={args.teammate_bias}")
     feat_fn, feat_dim, feature_schema = feature_recipe(args.features, belief)
+    if warm_ckpt is not None and int(warm_ckpt.get("config", {}).get("feat_dim", 0)) != feat_dim:
+        raise SystemExit(
+            f"[train_teampreview] --warm-start feat_dim="
+            f"{warm_ckpt.get('config', {}).get('feat_dim')} is out of lockstep with the current "
+            f"extractor ({feat_dim}) — the donor predates a tp_features schema change.")
 
     print(f"[train_teampreview] loading from: {folders}")
     t0 = time.time()
@@ -195,7 +288,9 @@ def train(args: argparse.Namespace) -> dict:
     if not examples:
         raise SystemExit("[train_teampreview] no examples found")
 
-    vocab = build_vocab(examples)
+    # Warm start adopts the donor vocab (backbone emb rows must keep their meaning);
+    # species only in the new corpus map to PAD 0 — the exact serve OOV behavior.
+    vocab = warm_ckpt["vocab"] if warm_ckpt is not None else build_vocab(examples)
     train_ex, val_ex = split_by_replay(examples, val_frac=args.val_frac, seed=args.seed)
     print(f"[train_teampreview] vocab={len(vocab)} species | "
           f"split -> {len(train_ex)} train / {len(val_ex)} val "
@@ -224,7 +319,12 @@ def train(args: argparse.Namespace) -> dict:
         use_cross_attn=args.cross_attn,
         attn_heads=args.attn_heads,
         use_teammate_bias=args.teammate_bias,
+        use_set_head=args.set_head,
     )
+    if warm_ckpt is not None:
+        n_fresh = apply_warm_start(model, warm_ckpt["model_state"])
+        print(f"[train_teampreview] warm-started backbone ({n_fresh} fresh set-head keys keep "
+              f"their zero-init -> set decode == donor greedy at epoch 0)")
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr,
                                  weight_decay=args.weight_decay)
 
@@ -252,6 +352,9 @@ def train(args: argparse.Namespace) -> dict:
         "use_cross_attn": bool(args.cross_attn),
         "attn_heads": args.attn_heads,
         "use_teammate_bias": bool(args.teammate_bias),
+        "use_set_head": bool(args.set_head),   # model_io dispatches the set decode on this stamp
+        "set_weight": args.set_weight,
+        "warm_start": str(args.warm_start) if args.warm_start else None,
         "features": args.features,
     }
     if feature_schema:
@@ -261,16 +364,20 @@ def train(args: argparse.Namespace) -> dict:
     epochs_no_improve = 0
     history: List[dict] = []
     for epoch in range(1, args.epochs + 1):
-        tr = run_epoch(model, train_loader, device, optimizer)
-        va = run_epoch(model, val_loader, device, optimizer=None)
+        tr = run_epoch(model, train_loader, device, optimizer, set_weight=args.set_weight)
+        va = run_epoch(model, val_loader, device, optimizer=None, set_weight=args.set_weight)
         history.append({"epoch": epoch, "train": tr, "val": va})
+        set_col = f"set exact {va['set_exact']:.3f} | " if args.set_head else ""
         print(
             f"epoch {epoch:3d} | train loss {tr['loss']:.4f} | "
-            f"val loss {va['loss']:.4f} "
+            f"val loss {va['loss']:.4f} {set_col}"
             f"lead exact {va['lead_exact']:.3f} ovlp {va['lead_overlap']:.3f} | "
             f"bring exact {va['bring_exact']:.3f} ovlp {va['bring_overlap']:.3f}"
         )
-        score = 0.5 * (va["lead_exact"] + va["bring_exact"])
+        # Set-head runs are selected on the SERVE metric (the set decode picks the bring);
+        # marginal-only runs keep the historical bring_exact score.
+        score = 0.5 * (va["lead_exact"] + (va["set_exact"] if args.set_head
+                                           else va["bring_exact"]))
         if score > best:
             best = score
             epochs_no_improve = 0
@@ -327,6 +434,16 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap.add_argument("--subset-mask-k", type=int, default=0,
                     help="slots to mask per augmented item: 0 = random K in {1,2}; 2 = exactly "
                          "two (every augmented item = the joint decode's 4-mon context).")
+    ap.add_argument("--set-head", action="store_true",
+                    help="contrastive set-scoring head (2026-07-11 design): score complete "
+                         "4-subsets as units; listwise 15-way CE vs the human set. The ckpt "
+                         "stamp switches model_io to the set decode (TP_SET_HEAD kill-switch).")
+    ap.add_argument("--set-weight", type=float, default=1.0,
+                    help="weight of the set CE in the joint loss (lead_bce + bring_bce + λ·set_ce)")
+    ap.add_argument("--warm-start", default=None,
+                    help="donor TP checkpoint: adopt its vocab + arch stamps, load every "
+                         "backbone weight; only fresh set-head keys stay zero-inited (so the "
+                         "run STARTS at the donor's serve behavior).")
     ap.add_argument("--patience", type=int, default=0,
                     help="early-stop after N epochs with no val mean-exact gain (0=off)")
     ap.add_argument("--val-frac", type=float, default=0.1)

@@ -44,6 +44,50 @@ import v_dance.play.model_io as _M   # dict-checkpoint load + mask-aware logit d
 
 log = logging.getLogger(__name__)
 
+# ── M5 (DS-M5, 2026-07-11): OTS opp-sheet → TP overlay serve wiring ───────────
+# In open-team-sheet games the consumer captures |showteam| frames into
+# ``player._ots_sheets[room_base_tag] = {"p1": [mons], "p2": [mons]}``; at team
+# preview the opponent's revealed builds ride team_order's ``opp_known`` (the
+# tpfeat-v7 pathway). DEFAULT OFF (flag below) — enable ONLY with a TP ckpt that
+# actually trained on non-zero opp overlays (v7 / a future OTS-mixed ckpt); the
+# deployed v6 never saw them. Ladder is unaffected either way: OTS-reject means
+# |showteam| never arrives there, so the store stays empty (closed regime).
+import os as _os
+TP_OTS_OVERLAY = _os.environ.get("VD_TP_OTS_OVERLAY", "") == "1"
+
+
+def room_base_tag(tag: str) -> str:
+    """``battle-<fmt>-<num>[-privsuffix]`` → ``battle-<fmt>-<num>`` (the panel's
+    _base_tag convention) so the capture and the lookup key identically."""
+    parts = (tag or "").lstrip(">").split("-")
+    return "-".join(parts[:3]) if len(parts) >= 3 else (tag or "")
+
+
+def ots_opp_known(player, battle) -> Optional[dict]:
+    """{norm_species: OwnKnown} for the OPPONENT's revealed sheets of this battle,
+    or None (flag off / closed sheets / nothing captured). Never raises."""
+    if not TP_OTS_OVERLAY:
+        return None
+    try:
+        sides = (getattr(player, "_ots_sheets", None) or {}).get(
+            room_base_tag(getattr(battle, "battle_tag", "") or ""))
+        if not sides:
+            return None
+        role = getattr(battle, "player_role", None)
+        opp = sides.get("p2" if role == "p1" else "p1") or []
+        from v_dance.parser.vod_parser.pokedex import norm_species
+        from v_dance.training.tp_features import OwnKnown
+        out = {}
+        for m in opp:
+            sp, ab = m.get("species"), m.get("ability")
+            mv = [x for x in (m.get("moves") or []) if x]
+            if sp and (ab or mv):                    # nothing revealed → no overlay
+                out[norm_species(sp)] = OwnKnown(ability=ab, moves=mv)
+        return out or None
+    except Exception as exc:                          # noqa: BLE001 — never break TP
+        log.warning("OTS opp_known build failed (%s) — serving without overlay.", exc)
+        return None
+
 # ── Optional torch import ─────────────────────────────────────────────────────
 try:
     import torch
@@ -402,6 +446,7 @@ class VGCPlayer(VGCPlayerBase):
             order = _M.team_order(
                 self._team_chooser, self._tc_vocab, self._tc_cfg,
                 our_species, opp_species, n, self._device, belief=belief,
+                opp_known=ots_opp_known(self, battle),
             )
             valid = [i for i in order if 0 <= i < len(team)]
             if valid and len(set(valid)) == len(valid):

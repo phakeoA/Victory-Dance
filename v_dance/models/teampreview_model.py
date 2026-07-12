@@ -21,6 +21,7 @@ right inductive bias for a set-selection problem.
 
 from __future__ import annotations
 
+from itertools import combinations
 from typing import Optional, Sequence, Tuple
 
 import torch
@@ -56,6 +57,7 @@ class TeamPreviewModel(nn.Module):
         use_cross_attn: bool = False,
         attn_heads: int = 4,
         use_teammate_bias: bool = False,
+        use_set_head: bool = False,
     ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -63,6 +65,7 @@ class TeamPreviewModel(nn.Module):
         self.use_self_attn = use_self_attn
         self.use_cross_attn = use_cross_attn
         self.use_teammate_bias = use_teammate_bias
+        self.use_set_head = use_set_head
         self.emb = nn.Embedding(vocab_size, emb_dim, padding_idx=0)
         self.mon_mlp = _mlp([emb_dim + feat_dim, hidden, hidden], dropout)
         # 15b-arch.1: positionless self-attention over OUR 6 mons makes the synergy TAGS interact
@@ -81,7 +84,22 @@ class TeamPreviewModel(nn.Module):
             self.cross_ln = nn.LayerNorm(hidden)
         # per-mon score sees: own vector | our context | opp context
         self.score_mlp = _mlp([hidden * 3, hidden, 2], dropout)
+        # Contrastive set-scoring head (2026-07-11, docs/tp_contrastive_set_head_design.md):
+        # score(S) = Σ bring_logit_i + Σ_pairs MLP_pair(h_i+h_j ‖ h_i⊙h_j) + MLP_gl(mean h_S ‖ ctx).
+        # Created ONLY when enabled so v6/legacy checkpoints load with NO missing/unexpected keys
+        # (the use_self_attn pattern). The pairwise term is symmetric by construction.
+        if use_set_head:
+            self.set_pair_mlp = _mlp([hidden * 2, 64, 1], dropout)
+            self.set_global_mlp = _mlp([hidden * 3, hidden, 1], dropout)
         self._init_weights()
+        if use_set_head:
+            # Zero-init the two final linears -> score(S) == Σ bring_logit_i at initialization,
+            # i.e. the set decode is EXACTLY the greedy top-k decode until training earns a
+            # deviation (a warm-started run starts at the donor checkpoint's serve behavior).
+            with torch.no_grad():
+                for head in (self.set_pair_mlp, self.set_global_mlp):
+                    head[-1].weight.zero_()
+                    head[-1].bias.zero_()
 
     def encode_team(self, idx: torch.Tensor, feat: torch.Tensor) -> torch.Tensor:
         """(B, 6) ids + (B, 6, F) feats -> (B, 6, hidden) per-mon vectors."""
@@ -89,14 +107,16 @@ class TeamPreviewModel(nn.Module):
         x = torch.cat([emb, feat], dim=-1)        # (B, 6, emb+F)
         return self.mon_mlp(x)                     # (B, 6, hidden)
 
-    def forward(
+    def _forward_internals(
         self,
         our_idx: torch.Tensor,
         opp_idx: torch.Tensor,
         our_feat: torch.Tensor,
         opp_feat: torch.Tensor,
         our_affinity: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ):
+        """Shared trunk: (bring_logits, lead_logits, our_h, our_ctx, opp_ctx) — identical ops
+        to the historical forward(); the extra returns feed the set head only."""
         our_h = self.encode_team(our_idx, our_feat)   # (B, 6, H)
         opp_h = self.encode_team(opp_idx, opp_feat)   # (B, 6, H)
         if self.use_self_attn or self.use_cross_attn:
@@ -136,7 +156,72 @@ class TeamPreviewModel(nn.Module):
         ctx_exp = ctx.unsqueeze(1).expand(-1, our_h.shape[1], -1)  # (B, 6, 2H)
         per = torch.cat([our_h, ctx_exp], dim=-1)      # (B, 6, 3H)
         logits = self.score_mlp(per)                   # (B, 6, 2)
-        return logits[..., 0], logits[..., 1]          # bring_logits, lead_logits
+        return logits[..., 0], logits[..., 1], our_h, our_ctx, opp_ctx
+
+    def forward(
+        self,
+        our_idx: torch.Tensor,
+        opp_idx: torch.Tensor,
+        our_feat: torch.Tensor,
+        opp_feat: torch.Tensor,
+        our_affinity: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        bring_logits, lead_logits, *_ = self._forward_internals(
+            our_idx, opp_idx, our_feat, opp_feat, our_affinity)
+        return bring_logits, lead_logits               # bring_logits, lead_logits
+
+    def score_subsets(
+        self,
+        our_idx: torch.Tensor,
+        opp_idx: torch.Tensor,
+        our_feat: torch.Tensor,
+        opp_feat: torch.Tensor,
+        our_affinity: Optional[torch.Tensor] = None,
+        subsets: Optional[Sequence[Sequence[int]]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Score candidate bring-subsets AS UNITS (the contrastive set head).
+
+        ``subsets``: index tuples over our roster slots (default: all C(6,4)=15 in
+        ``itertools.combinations`` order). ONE trunk forward on the FULL roster — no
+        masking, no re-forwarding (the null-#8 OOD trap never opens) — then every
+        subset score is assembled from a 6-entry unary table (the bring logits), a
+        C(6,2) pairwise table and one set-level MLP term.
+
+        Returns ``(subset_scores (B, S), bring_logits (B, 6), lead_logits (B, 6))``.
+        """
+        if not self.use_set_head:
+            raise RuntimeError("score_subsets requires a model built with use_set_head=True")
+        bring_logits, lead_logits, our_h, our_ctx, opp_ctx = self._forward_internals(
+            our_idx, opp_idx, our_feat, opp_feat, our_affinity)
+        n = our_h.shape[1]
+        if subsets is None:
+            subsets = tuple(combinations(range(n), 4))
+        subsets = [tuple(sorted(s)) for s in subsets]
+        dev = our_h.device
+        sub_idx = torch.tensor(subsets, dtype=torch.long, device=dev)        # (S, k)
+        # unary: Σ member bring logits — greedy's exact objective, so with the two heads
+        # below zero-inited, argmax over subsets == greedy top-k.
+        unary = bring_logits[:, sub_idx].sum(dim=-1)                          # (B, S)
+        # pairwise: symmetric compatibility of every roster pair, summed within each subset
+        # via a {0,1} membership matrix (a table lookup-sum, shared across subsets).
+        pairs = tuple(combinations(range(n), 2))                              # P = C(n,2)
+        pair_pos = {p: i for i, p in enumerate(pairs)}
+        pi = torch.tensor([p[0] for p in pairs], dtype=torch.long, device=dev)
+        pj = torch.tensor([p[1] for p in pairs], dtype=torch.long, device=dev)
+        hi, hj = our_h[:, pi], our_h[:, pj]                                   # (B, P, H)
+        pair_scores = self.set_pair_mlp(
+            torch.cat([hi + hj, hi * hj], dim=-1)).squeeze(-1)                # (B, P)
+        member = torch.zeros(len(subsets), len(pairs), dtype=our_h.dtype, device=dev)
+        for si, s in enumerate(subsets):
+            for p in combinations(s, 2):
+                member[si, pair_pos[p]] = 1.0
+        pair_sum = pair_scores @ member.t()                                   # (B, S)
+        # set-level: mean of member vectors | our ctx | opp ctx (third-order+ capacity).
+        mean_h = our_h[:, sub_idx].mean(dim=2)                                # (B, S, H)
+        ctx = torch.cat([our_ctx, opp_ctx], dim=-1)                           # (B, 2H)
+        glob = self.set_global_mlp(torch.cat(
+            [mean_h, ctx.unsqueeze(1).expand(-1, len(subsets), -1)], dim=-1)).squeeze(-1)
+        return unary + pair_sum + glob, bring_logits, lead_logits
 
     def _init_weights(self) -> None:
         for m in self.modules():
@@ -163,13 +248,16 @@ def build_model(
     use_cross_attn: bool = False,
     attn_heads: int = 4,
     use_teammate_bias: bool = False,
+    use_set_head: bool = False,
 ) -> TeamPreviewModel:
     model = TeamPreviewModel(vocab_size, feat_dim, emb_dim, hidden, dropout,
                              use_self_attn=use_self_attn, use_cross_attn=use_cross_attn,
-                             attn_heads=attn_heads, use_teammate_bias=use_teammate_bias).to(device)
+                             attn_heads=attn_heads, use_teammate_bias=use_teammate_bias,
+                             use_set_head=use_set_head).to(device)
     print(
         f"[TeamPreviewModel] {model.count_parameters():,} params | "
         f"vocab={vocab_size} feat_dim={feat_dim} emb={emb_dim} hidden={hidden} "
-        f"self_attn={use_self_attn} cross_attn={use_cross_attn} device={device}"
+        f"self_attn={use_self_attn} cross_attn={use_cross_attn} set_head={use_set_head} "
+        f"device={device}"
     )
     return model
