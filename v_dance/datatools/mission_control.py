@@ -388,8 +388,8 @@ REGISTRY = [
     dict(id="ingest_hf", cat="data", heavy=True, title="Ingest HF VGC-Bench logs",
          module="v_dance.datatools.ingest_hf_logs",
          desc="Champions MA/MB subsets only (Gen9-standard/tera is a different game — HELD).",
-         opts=[dict(name="input", type="text", label="--input"),
-               dict(name="output", type="text", label="--output"),
+         opts=[dict(name="input", type="text", label="--input", required=True),
+               dict(name="output", type="text", label="--output", required=True),
                dict(name="ots-mode", type="choice", label="--ots-mode", choices=["open", "closed"], default="open"),
                dict(name="tp-only", type="flag", label="--tp-only"),
                dict(name="workers", type="int", label="--workers", default=1, min=1, max=8)]),
@@ -537,14 +537,14 @@ def _build_argv(entry: dict, options: dict, teams: list, ckpts: dict) -> list:
     tp_paths = {r["path"] for r in ckpts["tp"]}
     for opt in entry.get("opts", []):
         name, typ = opt["name"], opt["type"]
-        raw = options.get(name, "")
+        raw = options.get(name, None)
+        if raw is None and "default" in opt:      # apply the registry default SERVER-SIDE so a
+            raw = opt["default"]                    # launch is robust even if the client omits it
         raw = raw.strip() if isinstance(raw, str) else raw
         if raw in ("", None, False):
             if opt.get("required"):
                 raise ValueError(f"--{name} is required")
-            if typ == "flag" and opt.get("default") and name not in options:
-                argv.append(f"--{name}")
-            continue
+            continue                                # flag default True falls through to the flag branch
         if typ == "flag":
             argv.append(f"--{name}")
         elif typ == "int":
