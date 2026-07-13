@@ -285,6 +285,7 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
     host = BattleHost(team=teams[0][1], username=username,       # username → correct battle side
                       model_path=ckpt, team_chooser_path=tp_ckpt,
                       adapt_rules=args.adapt_rules,
+                      use_dossier=args.dossier,              # S1 L2b (default OFF)
                       # HTML replays (S4 online protocol: the stop-loss review + Phase-3 data)
                       live_dir=BENCH_DIR / "live", save_replays=True,
                       replay_dir=BENCH_DIR / "replays" / session_id, replay_label="online",
@@ -324,12 +325,16 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
     _orig_pick = _pvhb._pick_ai_team
     ctrl_ref: dict = {"c": None}                   # filled after login (the panel needs the page)
 
-    async def _pick(page, pool, pin):
+    async def _pick(page, pool, pin, route_for=None):
+        # ⚠ MUST accept route_for: _ai_consumer's challenge-accept path calls
+        # _pick_ai_team(..., route_for=challenger) (the 4b router param). Without it this
+        # wrapper raised TypeError on every incoming challenge accept (caught + swallowed as
+        # "accept failed"), so the online bot silently declined all direct challenges.
         c = ctrl_ref.get("c")
         if c is not None and c.team_pin and c.team_pin in pool:
             host.player._team_name = c.team_pin
             return c.team_pin, "control panel"
-        nm, src = await _orig_pick(page, pool, pin)
+        nm, src = await _orig_pick(page, pool, pin, route_for=route_for)
         if src == "random" and default_team in pool:
             nm, src = default_team, ".env default"
         host.player._team_name = nm
@@ -457,6 +462,9 @@ def main() -> None:
                     help="connect + login + import teams, then idle — the safe first live test.")
     ap.add_argument("--adapt-rules", action="store_true",
                     help="B-L1 serve-time pattern tilt (Wide-Guard streak → spread bias). Default OFF.")
+    ap.add_argument("--dossier", action="store_true",
+                    help="S1 L2b: warm-start unknown opp item/ability/moves from the per-opponent "
+                         "dossier (cross-game; in-battle evidence always wins). Default OFF.")
     ap.add_argument("--control-port", type=int, default=8777,
                     help="local control-panel port (ladder runs / challenges / auto-accept); 0 = off.")
     args = ap.parse_args()

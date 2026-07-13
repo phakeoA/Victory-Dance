@@ -59,7 +59,8 @@ def apply_warm_start(model, state: dict) -> int:
     load; ONLY fresh set-head keys may be missing (they keep their zero-init) — anything
     else is a config drift and fails loud. Returns the number of fresh keys."""
     missing, unexpected = model.load_state_dict(state, strict=False)
-    bad = [k for k in missing if not k.startswith(("set_pair_mlp.", "set_global_mlp."))]
+    bad = [k for k in missing if not k.startswith(("set_pair_mlp.", "set_global_mlp.",
+                                                   "set_ctx_proj."))]
     if bad or unexpected:
         raise SystemExit(
             f"[train_teampreview] warm-start key mismatch — the donor checkpoint does not fit "
@@ -135,13 +136,21 @@ def run_epoch(model, loader, device, optimizer=None, set_weight: float = 1.0) ->
             our_aff = batch.get("our_affinity")
             if our_aff is not None:
                 our_aff = our_aff.to(device)
+            # DS-4c stage 3: Bo3 previous-game context (None unless the dataset emitted it
+            # AND the model consumes it — zero rows are the zero-init identity either way).
+            ctx_kw = {}
+            if getattr(model, "use_set_ctx", False) and batch.get("our_set_ctx") is not None:
+                ctx_kw = {"our_set_ctx": batch["our_set_ctx"].to(device),
+                          "opp_set_ctx": batch["opp_set_ctx"].to(device)}
 
             if use_set:
                 # ONE trunk forward yields subset scores AND the marginal logits.
                 set_scores, bring_logits, lead_logits = model.score_subsets(
-                    our_idx, opp_idx, our_feat, opp_feat, our_aff, subsets=SET_SUBSETS)
+                    our_idx, opp_idx, our_feat, opp_feat, our_aff, subsets=SET_SUBSETS,
+                    **ctx_kw)
             else:
-                bring_logits, lead_logits = model(our_idx, opp_idx, our_feat, opp_feat, our_aff)
+                bring_logits, lead_logits = model(our_idx, opp_idx, our_feat, opp_feat,
+                                                  our_aff, **ctx_kw)
 
             # Per-slot loss weights (subset-mask aug, 2026-07-10): an aug-masked slot is ABSENT,
             # not a choice — exclude it from both heads' BCE. Unaugmented rows carry an all-ones
@@ -302,11 +311,16 @@ def train(args: argparse.Namespace) -> dict:
     train_loader = DataLoader(
         TeamPreviewDataset(train_ex, vocab, feat_dim=feat_dim, affinity_fn=affinity_fn,
                            subset_mask_p=args.subset_mask_aug, subset_mask_k=args.subset_mask_k,
-                           aug_seed=args.seed),
+                           aug_seed=args.seed, with_set_ctx=args.set_ctx),
         batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(
-        TeamPreviewDataset(val_ex, vocab, feat_dim=feat_dim, affinity_fn=affinity_fn),
+        TeamPreviewDataset(val_ex, vocab, feat_dim=feat_dim, affinity_fn=affinity_fn,
+                           with_set_ctx=args.set_ctx),
         batch_size=args.batch_size, shuffle=False)
+    if args.set_ctx:
+        n_ctx = sum(1 for e in train_ex if e.get("our_set_ctx") is not None)
+        print(f"[train_teampreview] Bo3 set-context: ON — {n_ctx}/{len(train_ex)} train "
+              f"examples carry previous-game context (zeros elsewhere = identity)")
 
     model = build_model(
         vocab_size=len(vocab) + 1,   # +1 for the reserved PAD id 0
@@ -320,6 +334,7 @@ def train(args: argparse.Namespace) -> dict:
         attn_heads=args.attn_heads,
         use_teammate_bias=args.teammate_bias,
         use_set_head=args.set_head,
+        use_set_ctx=args.set_ctx,
     )
     if warm_ckpt is not None:
         n_fresh = apply_warm_start(model, warm_ckpt["model_state"])
@@ -353,6 +368,10 @@ def train(args: argparse.Namespace) -> dict:
         "attn_heads": args.attn_heads,
         "use_teammate_bias": bool(args.teammate_bias),
         "use_set_head": bool(args.set_head),   # model_io dispatches the set decode on this stamp
+        "use_set_ctx": bool(args.set_ctx),     # DS-4c: serve feeds Bo3 prev-game context when stamped
+        # M5 guard (2026-07-13): only a run that ACTUALLY trained on non-zero opp OTS overlays may
+        # receive them at serve — schema=tpfeat-v7 does not imply it (checkpoints_set is v7, closed).
+        "ots_overlay_trained": bool(args.ots_overlay),
         "set_weight": args.set_weight,
         "warm_start": str(args.warm_start) if args.warm_start else None,
         "features": args.features,
@@ -444,6 +463,16 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                     help="donor TP checkpoint: adopt its vocab + arch stamps, load every "
                          "backbone weight; only fresh set-head keys stay zero-inited (so the "
                          "run STARTS at the donor's serve behavior).")
+    ap.add_argument("--set-ctx", action="store_true",
+                    help="DS-4c stage 3: consume Bo3 previous-game [brought, led] per mon as "
+                         "a zero-init side input (bo3_set_id groups the corpus; game-1/off-set "
+                         "rows carry zeros = identity). Serve feeds it via bo3_state.")
+    ap.add_argument("--ots-overlay", action="store_true",
+                    help="CERTIFY that this run's data exercises non-zero opponent OTS overlays "
+                         "(open-team-sheet reveals). Stamps config.ots_overlay_trained=True so the "
+                         "M5 serve guard (player.ots_opp_known) will feed VD_TP_OTS_OVERLAY input "
+                         "to THIS ckpt only. Omit for closed-sheet data (e.g. Type A/B) — the "
+                         "tpfeat-v7 schema alone does NOT certify overlay training.")
     ap.add_argument("--patience", type=int, default=0,
                     help="early-stop after N epochs with no val mean-exact gain (0=off)")
     ap.add_argument("--val-frac", type=float, default=0.1)

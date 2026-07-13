@@ -15,6 +15,7 @@ keys are base-species; forme/mega shows up in the revealed moves/items instead.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Optional
@@ -78,10 +79,15 @@ def update_from_battle(battle, result: str, our_team: Optional[str] = None,
             ability = getattr(mon, "ability", None)
             if ability:
                 rec["ability"] = ability
+        # Per-game revealed species (the 4b router uses THIS game's team, not the all-time
+        # union of every mon this opponent ever showed — a chimera if they switch teams).
+        revealed = sorted({_toid(getattr(mon, "species", "") or "")
+                           for mon in (getattr(battle, "opponent_team", None) or {}).values()
+                           if getattr(mon, "species", None)})
         d["games"].append({"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                            "battle_tag": getattr(battle, "battle_tag", None),
                            "result": result, "turns": getattr(battle, "turn", None),
-                           "our_team": our_team, "note": note})
+                           "our_team": our_team, "note": note, "revealed": revealed})
         d["games"] = d["games"][-MAX_GAMES:]
         DOSSIER_DIR.mkdir(parents=True, exist_ok=True)
         p = dossier_path(opp)
@@ -89,6 +95,73 @@ def update_from_battle(battle, result: str, our_team: Optional[str] = None,
         return p
     except Exception:
         return None                                     # capture is best-effort by contract
+
+
+def apply_dossier(opp_snapshot: Optional[dict], battle) -> Optional[dict]:
+    """S1 L2b (2026-07-12): warm-start the opponent snapshot from this opponent's
+    dossier — cross-GAME knowledge only, merged STRICTLY fill-only-unknowns so
+    in-battle evidence always wins:
+
+      * ability / item: filled only when the snapshot has none (and the item
+        only when not ``item_consumed``);
+      * moves: dossier moves APPEND after in-battle reveals, deduped by
+        norm_species, CAPPED at 4 — reveals keep priority, dossier extras drop.
+
+    Dossier values are poke-env ids ("suckerpunch"); snapshots carry display
+    names ("Sucker Punch") — converted via team_sheet's display maps so the
+    belief narrowers key correctly. Applied BEFORE belief enrichment (the
+    encoder's narrowers then tighten around these knowns). Never raises;
+    returns the snapshot (enriched in place)."""
+    if opp_snapshot is None:
+        return None
+    try:
+        opp = getattr(battle, "opponent_username", None)
+        if not opp:
+            return opp_snapshot
+        recs = (load(opp).get("mons") or {})
+        if not recs:
+            return opp_snapshot
+        from v_dance.parser.vod_parser.pokedex import norm_species
+        from v_dance.parser.vod_parser.team_sheet import _packed_display
+        n_fill = 0
+        for key in ("opp_active", "opp_bench"):
+            cont = opp_snapshot.get(key) or {}
+            for mon in (cont.values() if isinstance(cont, dict) else cont):
+                if not isinstance(mon, dict) or not mon.get("species"):
+                    continue
+                rec = recs.get(_toid(str(mon.get("base_species") or mon["species"])))
+                if not rec:
+                    continue                                # species mismatch → skip
+                if not mon.get("known_ability") and rec.get("ability"):
+                    disp = _packed_display("abilities", rec["ability"])
+                    if disp:
+                        mon["known_ability"] = disp
+                        n_fill += 1
+                if (not mon.get("known_item") and not mon.get("item_consumed")
+                        and rec.get("item")):
+                    disp = _packed_display("items", rec["item"])
+                    if disp:
+                        mon["known_item"] = disp
+                        n_fill += 1
+                moves = [m for m in (mon.get("known_moves") or []) if m]
+                if len(moves) < 4 and rec.get("moves"):
+                    have = {norm_species(m) for m in moves}
+                    for mv in rec["moves"]:
+                        if len(moves) >= 4:
+                            break                           # cap: reveals keep priority
+                        disp = _packed_display("moves", mv)
+                        if disp and norm_species(disp) not in have:
+                            moves.append(disp)
+                            have.add(norm_species(disp))
+                            n_fill += 1
+                    mon["known_moves"] = moves
+        if n_fill:
+            logging.getLogger(__name__).info(
+                "dossier warm-start [%s]: filled %d unknown opp fields from %s",
+                getattr(battle, "battle_tag", "?"), n_fill, dossier_path(opp).name)
+        return opp_snapshot
+    except Exception:                                       # noqa: BLE001 — never break play
+        return opp_snapshot
 
 
 def summary(opponent: str) -> str:

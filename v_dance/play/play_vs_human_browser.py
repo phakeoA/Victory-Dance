@@ -432,6 +432,12 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
                                   f"(sides: {sorted(_sides)})")
                     except Exception as exc:                         # capture must never break play
                         print(f"[ai] showteam capture failed (non-fatal): {exc!r}")
+                # DS-4c stage 2: a Bo3 game room announces itself via |uhtml|bestof| —
+                # register (parent set, game idx) so game-2/3 previews can see the
+                # previous game (bo3_state; capture must never break play).
+                if "|uhtml|bestof|" in payload:
+                    from v_dance.play import bo3_state
+                    bo3_state.note_bestof_frame(host.player, active_tag, payload)
                 result = _result_line(payload)                       # prefix-matched terminal line, or None
                 try:
                     decisions = await asyncio.wrap_future(
@@ -456,6 +462,10 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
                     # NOT double-count the tally or fall back to the collision-prone win-name (feed_async
                     # already drops the stray frame; mirror that here).
                     if result is not None and active_tag and active_tag not in host._ended:
+                        # DS-4c stage 2: harvest the finished game into its set state
+                        # BEFORE end_battle tears the battle object down (no-op off-set).
+                        from v_dance.play import bo3_state
+                        bo3_state.record_game_end(host.player, active_tag, result)
                         _credit(host, active_tag, result, tally)
                         host.end_battle(active_tag)
                         timer_sent.discard(active_tag)
@@ -474,7 +484,8 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
 
 async def run(headed: bool, human_name: str, self_test: bool, ai_team_pin: str | None = None,
               self_test_battles: int = 1, ckpt=None, tp_ckpt=None,
-              bench_note: str = "local-browser", adapt_rules: bool = False) -> dict:
+              bench_note: str = "local-browser", adapt_rules: bool = False,
+              use_dossier: bool = False) -> dict:
     from playwright.async_api import async_playwright
 
     teams = _load_pool()
@@ -499,12 +510,15 @@ async def run(headed: bool, human_name: str, self_test: bool, ai_team_pin: str |
     _type_c = (None if self_test
                else Path(__file__).resolve().parents[2] / "data" / "vods" / "Type_C")
     host = BattleHost(team=teams[0][1], username=_AI_NAME, adapt_rules=adapt_rules,
+                      use_dossier=use_dossier,
                       live_dir=BENCH_DIR / "live", save_replays=True,
                       replay_dir=BENCH_DIR / "replays" / session_id, replay_label="bench",
                       replay_copy_dir=_type_c,
                       **_ck)                                         # team replaced per battle
     if adapt_rules:
         print("[play] adapt-rules ON (B-L1: Wide-Guard streak → spread-move tilt)")
+    if use_dossier:
+        print("[play] dossier ON (S1 L2b: cross-game opp item/ability/move warm-start)")
 
     # Bench recording (docs/human_benchmark_design.md), same end_battle hook as the online
     # harness: one JSONL row per finished battle, appended+flushed (skipped for --self-test).
@@ -633,6 +647,9 @@ def main() -> None:
                     help="tag stamped on every benchmark row (e.g. adv_v7).")
     ap.add_argument("--adapt-rules", action="store_true",
                     help="B-L1 serve-time pattern tilt (Wide-Guard streak → spread bias). Default OFF.")
+    ap.add_argument("--dossier", action="store_true",
+                    help="S1 L2b: warm-start unknown opp item/ability/moves from the per-opponent "
+                         "dossier (cross-game knowledge; in-battle evidence always wins). Default OFF.")
     args = ap.parse_args()
 
     for _v in (args.ckpt, args.tp_ckpt):
@@ -647,7 +664,8 @@ def main() -> None:
                                 ai_team_pin=args.ai_team, self_test_battles=args.self_test_battles,
                                 ckpt=Path(args.ckpt) if args.ckpt else None,
                                 tp_ckpt=Path(args.tp_ckpt) if args.tp_ckpt else None,
-                                bench_note=args.bench_note, adapt_rules=args.adapt_rules))
+                                bench_note=args.bench_note, adapt_rules=args.adapt_rules,
+                                use_dossier=args.dossier))
     except KeyboardInterrupt:
         print("\n[play] Ctrl-C — shutting down …")
         tally = None

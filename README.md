@@ -1,16 +1,17 @@
 # Victory-Dance ![shiny Hisuian Zoroark](https://play.pokemonshowdown.com/sprites/ani-shiny/zoroark-hisui.gif)
 
-**A deep-learning agent that plays competitive VGC doubles Pokémon on [Pokémon Showdown](https://pokemonshowdown.com/)** — trained by behavior cloning on ~86,000 human battles, improved with offline advantage-weighting, and served through a full deployment stack (local, browser-transport, and online) with a recorded human-benchmark protocol. In its first recorded benchmark set it beat its own creator 4–1.
+**A deep-learning agent that plays competitive VGC doubles Pokémon on [Pokémon Showdown](https://pokemonshowdown.com/)** — trained by behavior cloning on ~86,000 human battles, improved with offline advantage-weighting and a contrastive team-preview set head, and served through a full deployment stack (local, browser-transport, and online) with a recorded human-benchmark protocol. In its first recorded benchmark set it beat its own creator 4–1; on the official ladder its elo-adjusted performance rating climbed from **1212 → 1271 → 1425** across three measured 50-game deployment blocks (peak rating 1499).
 
 Format: **Gen 9 "Pokémon Champions" VGC 2026** doubles (Regulations M-A / M-B). Mega Evolution is legal in this format; Terastallization is disabled by the mod.
 
-> This is an educational research project. Its most valuable output, beyond the agent itself, is a set of **honestly-measured results** — including five carefully-run negative results that mirror what the academic literature found at 100× the compute.
+> This is an educational research project, but the README describes the **shipped agent** — the model, the pipeline that trains it, and the stack that deploys and measures it. The deliverable is a team-agnostic VGC-doubles player you can point at any legal team, run locally or on the live ladder from a single control UI, and measure against real humans with a recorded exploitability protocol.
 
 ---
 
 ## Table of contents
 - [Why this problem is hard](#why-this-problem-is-hard)
 - [System overview](#system-overview)
+- [Mission Control — one UI for the whole project](#mission-control--one-ui-for-the-whole-project)
 - [1. Data & the parser](#1-data--the-parser)
 - [2. The belief system](#2-the-belief-system)
 - [3. The state encoder](#3-the-state-encoder)
@@ -21,13 +22,13 @@ Format: **Gen 9 "Pokémon Champions" VGC 2026** doubles (Regulations M-A / M-B).
 - [8. The adaptation layer](#8-the-adaptation-layer)
 - [9. How a single turn actually works](#9-how-a-single-turn-actually-works)
 - [Results](#results)
-- [Negative results (reported with the same care)](#negative-results)
-- [Engineering journey: the bugs that shaped the design](#engineering-journey-the-bugs-that-shaped-the-design)
 - [Acknowledgements & prior art](#acknowledgements--prior-art)
 - [Repository layout](#repository-layout)
+- [Building & specializing teams](#building--specializing-teams)
 - [Setup: playing locally](#setup-playing-locally)
 - [Setup: playing online](#setup-playing-online)
 - [Tech stack](#tech-stack)
+- [Appendix: research history (for technical readers)](#appendix-research-history-for-technical-readers)
 
 ---
 
@@ -59,16 +60,42 @@ VGC doubles is a deep test-bed for sequential decision-making under uncertainty:
    heads: our-action ×2 · opp-action ×2 (aux) · mega/tera · win-prob value
         │
         ├── Behavior cloning (streaming memmap loader → full corpus on 32 GB RAM)
-        ├── Offline advantage weighting  w = exp(β·(outcome − V(s)))   ["imitate what won"]
-        └── Latent team-archetype conditioning (k-means z over 31k teams)
+        └── Offline advantage weighting  w = exp(β·(outcome − V(s)))   ["imitate what won"]
         │
         ▼
    Serving: local harness · browser transport (BattleHost) · online (play.pokemonshowdown.com)
-   + adaptation layer (pattern tilt, per-opponent dossiers)
+   + SBDA team preview w/ contrastive set-scoring head (bring-4 + leads as a UNIT)
+   + adaptation layer (pattern tilt · dossiers · dossier belief warm-start ·
+     archetype team routing · Bo3 set context)
    + human-benchmark recording (win rates, ratings, exploitability curve, replays)
+   + RL exploiter — worst-case robustness meter (frozen target; never trains the bot)
 ```
 
 Everything downstream of the encoder reads a **frozen, versioned feature layout** (`STATE_LAYOUT_VERSION = 19`, `STATE_DIM = 5057`) with load-time guards, so a layout change fails loudly instead of silently corrupting a trained net.
+
+---
+
+## Mission Control — one UI for the whole project
+
+Every part of the project — data prep, belief scraping/blending, training the battle and team-preview nets, evaluation, deployment, and both local and online play — is driven from a single local page:
+
+```bash
+python -m v_dance.datatools.mission_control      # opens http://127.0.0.1:8990/
+```
+
+It's a dependency-light, **torch-free** stdlib server (starts instantly, safe to run alongside anything) that knows every entry point in the project through a typed command registry. Tabs:
+
+- **Overview** — the pipeline map, a live **deploy-parity check** (`.env` ↔ `model_io` defaults, shown ✓/✗), belief freshness, the exploiter curve, and which services are up.
+- **Online bot** — launch the online bot and then drive it live *from this page*: start a **ladder run of N rated games**, toggle **auto-accept challenges** and auto-close, send **private challenges**, pin a team, and watch the rating / W–L tally / activity log. (These controls are proxied from the bot's own control panel, so you never open a second window.)
+- **Play** — local AI-vs-AI, vs-human (terminal or browser), and the online launcher, each with team/checkpoint/format pickers.
+- **Train** — the battle-net era retrain, both team-preview trainers, the exploiter, and self-play. Heavy runs launch **one at a time** (GPU/RAM guard) and stream **live progress** — epoch N/total with a progress bar and metric chips (val top-1, set-exact, bring-exact) for trainers; games-trained + exploit win-rate for the exploiter. Prefer a terminal? Every card has a **"Copy command"** button with the exact one-liner.
+- **Parser / Teams** — the combined VOD replay parser/annotator (upload a replay → export JSONL training transitions) and team builder (generate/validate/score teams), embedded.
+- **Data / Eval** — replay parsing, belief blend, corpus QA, ingest; the pytest suite, rulers, the human-benchmark report, gauntlets.
+- **Deploy** — edit the `.env` deploy keys (checkpoint/team/format) from dropdowns of what's actually on disk, with the parity check.
+- **Monitor** — the self-play dashboard (live generations, launcher, console), embedded.
+- **Jobs** — every launched job with a live log tail and a stop button.
+
+Heavy runs are launchable but **you** click the button; the server never auto-starts training. Credentials never leave the server (a strict env whitelist — `PS_PASSWORD` is never sent to the page).
 
 ---
 
@@ -102,14 +129,27 @@ The agent maintains an explicit **belief** over the opponent's hidden sets: prio
 
 ## 4. The neural network
 
-**`AttnBCPolicy`** (`models/bc_model_attn.py`, ~2.3M params): the flat state is reshaped in-model into **12 Pokémon tokens**; a shared per-mon encoder + learned slot embeddings feed a Transformer self-attention stack (the twelve Pokémon attend to one another — synergy and threat assessment become attention), plus a global field encoder. Heads: two own-action heads, two **auxiliary opponent-action heads**, gimmick heads, and a **win-probability value head**. Optional, flag-gated research extensions (opponent-conditioning, C51 distributional value, frame-stack memory, latent-z conditioning) are built in — and honestly evaluated (see negative results).
+**`AttnBCPolicy`** (`models/bc_model_attn.py`, ~2.3M params): the flat state is reshaped in-model into **12 Pokémon tokens**; a shared per-mon encoder + learned slot embeddings feed a Transformer self-attention stack (the twelve Pokémon attend to one another — synergy and threat assessment become attention), plus a global field encoder. Heads: two own-action heads (one per active slot), two **auxiliary opponent-action heads** (they sharpen the shared trunk's threat model), gimmick heads for the Mega decision, and a **win-probability value head** that drives both the advantage weighting below and the serve-time exploitability meter.
 
 ## 5. Training
 
 - **Behavior cloning** (`training/train_bc.py`): masked per-slot action cross-entropy + value BCE + gimmick and auxiliary-opponent losses; re-encodes snapshots at train time.
-- **Streaming memmap loader** (`training/encoded_cache.py`): the full corpus is a ~27 GB encoded matrix — far beyond a 32 GB workstation with PyTorch overhead — so the cache is built in streaming chunks and memory-mapped read-only at train time (one-row copies per item). The full-corpus retrain runs on a single RTX 3070 Ti + 32 GB RAM.
-- **Offline advantage weighting** (Metamon's "exp" scheme): each decision is reweighted by `exp(β·(outcome − V(s)))` using the trained value head — shifting BC from "imitate everyone" to "imitate what beat expectation" without ever leaving the data manifold (the lesson of our search-hurts result).
-- **Team-archetype latent z**: k-means over 31k team feature vectors (no species identity, same mechanic philosophy) → a per-battle archetype embedding, aimed at the "averaged mush" failure mode of one-policy-fits-all-styles.
+- **Streaming memmap loader** (`training/encoded_cache.py`): the full corpus is a ~27 GB encoded matrix — far beyond a 32 GB workstation with PyTorch overhead — so the cache is built in streaming chunks and memory-mapped read-only at train time (one-row copies per item). The full-corpus retrain runs on a single RTX 3070 Ti + 32 GB RAM. DataLoader **worker processes** re-open the caches by path (memmap views can't cross a spawn) and share the label tensors via shared memory — the fix for a feed that left the GPU at 20%.
+- **The era-retrain cycle**: every real online game auto-copies into a training folder; a junk gate filters forfeits/timeouts; retrains ingest the winner's perspective only ("imitate whoever won — including whoever beat us"), weighted by opponent rating, against a belief blended from Pikalytics priors and the actually-observed ladder meta.
+- **Offline advantage weighting** (Metamon's "exp" scheme): each decision is reweighted by `exp(β·(outcome − V(s)))` using the trained value head — shifting BC from "imitate everyone" to "imitate what beat expectation" without ever leaving the data manifold. This is the sole place a reward signal (the ±1 game outcome) enters the shipped weights, and it's the recipe of the deployed `checkpoints_attn_era2` net.
+
+### How the shipped agent learns
+
+The agent's skill is **behavior cloning (BC)** sharpened by **offline advantage weighting** — supervised learning, no environment interaction:
+
+- **Behavior cloning** is the backbone: ~1.4M human decisions as `(state → the action the human took)`, trained to maximize the log-probability of that action under per-slot legality masks, jointly with the value head (did this player go on to win?) and the auxiliary heads. BC gives a strong, human-like prior for free, and it is the honest ceiling of the data: val top-1 saturated at ~0.61 because the available ladder replays average ~1600 Elo, not because the model ran out of capacity.
+- **Advantage weighting** is the only reward-driven step: the ±1 win/loss outcome, compared to the value head's prediction, up-weights the decisions that beat expectation and down-weights the ones that didn't. It's a light, offline form of RL that never leaves the demonstration data — the property that makes it safe (a hand-built forward-model *search* was tried and dropped precisely because evaluating the value head on synthetic states it never trained on pulled the policy off-manifold).
+
+**Online reinforcement learning is not part of the shipped agent.** A full PPO/self-play stack with a principled reward (sparse ±1 terminal, γ=0.997 discounting for speed-without-a-stall-penalty, a KL-to-BC anchor, and gated potential-based shaping off the win-prob value head) exists in `selfplay/`, but at this corpus scale it plateaued at the BC anchor's strength, so the deployed model does not use it. The strength levers that actually shipped are **data, offline advantage weighting, the contrastive set-preview head, and serve-time adaptation**.
+
+### The exploiter — the agent's robustness meter
+
+One piece of RL *is* part of the product, but as **measurement, never training**: an `exploiter` (`selfplay/exploiter.py`) trains a best-response against a **frozen copy** of the deployed net and reports the **exploitability curve** — how fast a dedicated opponent's win-rate climbs vs games trained. The frozen target is loaded from disk and never mutated; the exploiter's own checkpoint is written to a logs folder and its games never touch any training corpus. The number is expected to be high in absolute terms (a best-response can beat any fixed policy); the *product* signal is the trend **across eras at equal games-trained** — a later net whose curve rises more slowly is more robust to a human who's learning its habits. The current deployed net (`checkpoints_attn_era2`) plateaus around **0.65–0.70** exploitability at an 8-hour budget — the baseline the next era has to push down.
 
 ## 6. Evaluation
 
@@ -127,15 +167,18 @@ Three transports, one decision core (encoder + net + team-preview model + belief
 - **`play/play_vs_human_browser.py`** — two-browser-tab local play driven by **`BattleHost`**: a connection-less poke-env player fed raw websocket frames captured from a browser tab, its `/choose` commands shipped back in. The decision pipeline is reused byte-for-byte with no socket of its own.
 - **`play/play_online_browser.py`** — the same transport pointed at **play.pokemonshowdown.com**: logs into a real account, the human supervises matchmaking, the AI plays every battle that opens. **`play/play_ladder.py`** is the autonomous alternative (direct websocket, `.ladder()` search) for any server.
 
-All transports record the benchmark data automatically. A separate **team-preview network** (SBDA architecture with self/cross-attention over both rosters) picks the bring-4 and leads.
+All transports record the benchmark data automatically. A separate **team-preview network** (SBDA architecture with self/cross-attention over both rosters) picks the bring-4 and leads — since 2026-07 through a **contrastive set-scoring head**: instead of ranking Pokémon individually (which mode-mixed brings on two-mode teams), it scores every complete 4-subset as a unit — a marginal-sum term plus explicit pairwise-compatibility and set-level terms, trained with a 15-way listwise loss against the human's actual pick. Zero-initialized so it *starts* at exactly the old greedy behavior and has to earn every deviation; it cleared the adoption gate at +3.8pp bring-set accuracy and +154 elo-adjusted performance in its measured online block. In **best-of-3 sets** it additionally receives each side's previous-game bring/leads as a zero-init side input (`bo3_state`), so game-2/3 previews can react to what the opponent actually showed.
 
 ## 8. The adaptation layer
 
 Static policies get exploited — our own benchmark proved it (the creator found a Wide Guard exploit in game 3). The counter-exploitation stack keeps the trained net frozen and adapts around it:
 
 - **Serve-time pattern tilt** (`play/adapt_rules.py`): when the opponent shows a high-confidence repeated pattern (e.g. Wide Guard multiple turns running), a small logit bias tilts the policy toward single-target play. A tilt, not an override — the model still chooses, and an overwhelming preference survives.
-- **Per-opponent dossiers** (`play/opponent_dossier.py`): every finished game updates a JSON dossier per opponent — revealed sets, items, abilities, W-L history — the substrate for cross-game adaptation (belief warm-starting between games of a set).
-- Serve-side sampling, policy switching, and an RL exploiter (as a worst-case *metric*) are specced next, gated on benchmark evidence.
+- **Per-opponent dossiers** (`play/opponent_dossier.py`): every finished game updates a JSON dossier per opponent — revealed sets, items, abilities, W-L history — and can **warm-start the belief** in later games (`apply_dossier`, flag-gated): unknown items/abilities/moves fill from what that opponent showed before, with in-battle evidence always winning.
+- **Between-game team routing** (`play/team_router.py`): against a known opponent we just lost to, pick the pool team with the best prior against their revealed archetype — priors seeded from a 172k-sample archetype-vs-archetype win matrix computed over the corpus, never hand-waved.
+- **Best-of-3 set state** (`play/bo3_state.py`): games of a Bo3 are linked (protocol-verified on the pinned server); brings, leads, and the opponent's shown Pokémon carry across games into the team-preview net's set-context input.
+
+How well the whole stack resists a *learning* opponent is quantified by the **exploiter** described in the training section — the worst-case robustness meter, run per era against a frozen copy of the deployed net.
 
 ## 9. How a single turn actually works
 
@@ -156,42 +199,12 @@ The property that makes the whole thing trustworthy is **train/serve parity**: t
 
 ## Results
 
-- **Data was the lever that worked.** Val top-1 on held-out human decisions: **0.585** (6.6k battles) → **0.595** (+11k) → **0.608** (+30k) — and then **flat** at the full 69k, isolating a *data-quality ceiling* (the available ladder replays average ~1600 Elo) rather than a volume or capacity limit. Doubling data of the same quality moved nothing; the value head kept improving (Brier 0.26 → 0.19).
-- **Offline advantage weighting** added a targeted endgame improvement (+2.9pp on turn-11+ decisions, the game-deciding ones) at zero cost elsewhere — the deployed configuration.
+- **Data was the lever that worked first.** Val top-1 on held-out human decisions: **0.585** (6.6k battles) → **0.595** (+11k) → **0.608** (+30k) — and then **flat** at the full 69k, isolating a *data-quality ceiling* (the available ladder replays average ~1600 Elo) rather than a volume or capacity limit. Doubling data of the same quality moved nothing; the value head kept improving (Brier 0.26 → 0.19).
+- **Offline advantage weighting** added a targeted endgame improvement (+2.9pp on turn-11+ decisions, the game-deciding ones) at zero cost elsewhere.
+- **The era-retrain cycle works.** Retraining on the bot's own online games (winner's-perspective only: imitate whoever won, weighted by opponent rating) plus a Pikalytics×observed-ladder belief blend lifted the elo-adjusted performance rating from **1212 to 1271** in a controlled 50-game block.
+- **The contrastive team-preview set head** is the architecture that shipped: scoring complete 4-subsets instead of individual Pokémon cleared its offline gate at **+3.8pp bring-set accuracy** over the greedy decode, then delivered **1425 elo-adjusted performance** (peak rating 1499) in its measured block — +154 over the same battle net with the old preview decode, against opponents ~170 elo stronger.
 - **First recorded human benchmark: the bot beat its creator 4–1** (best team vs best counter-effort). The one loss came from a discovered exploit — which did not keep paying in the following games, and which the adaptation layer now addresses directly.
-- **A production-grade deployment stack**: three serving transports, checkpoint hot-swap flags, closed-team-sheet discipline matching the ladder, automatic benchmark/dossier recording, and a 1,100+ test suite with byte-parity guards between training and serving.
-
-## Negative results
-
-Each of these was built properly, evaluated with controlled A/Bs and confidence intervals, and **retired on evidence** — the same wall the field hit at datacenter scale (VGC-Bench's PPO league needed 8×A40 and still collapsed on generalization; every agent they trained was ~100% exploitable by a best-response):
-
-| Idea | Verdict |
-|---|---|
-| Belief-weighted expectimax search over a white-box forward model | **Hurts** (38.6% vs argmax, CI [36.5, 40.8]) — an imperfect forward model drags the policy off-manifold |
-| PPO-style league self-play from the BC anchor | Plateaued at the anchor's strength |
-| C51 distributional value head | No strength change |
-| Opponent-conditioned policy heads | No strength change |
-| Recurrent / frame-stack memory over the battle | No strength change, value head degraded |
-| Serve-time stochastic sampling (τ=0.45) | Costs 5.5pp head-to-head — anti-predictability is a dial with a price, not a free win |
-
-The pattern behind all six: **at this corpus size and quality, the bottleneck is the demonstration data, not the architecture** — sharper estimates of the opponent don't convert into wins when the policy prior itself caps skill. That conclusion redirected the project toward data levers, offline improvement, and serve-time adaptation, which is where the wins came from.
-
----
-
-## Engineering journey: the bugs that shaped the design
-
-The current architecture is scar tissue from real failures. A selection, because these taught more than the successes:
-
-- **Illusion broke everything, repeatedly.** Zoroark's Illusion means the replay log *lies about which Pokémon is on the field* — damage attribution, faint attribution, targeting, even which side's bench a mon returns to. It took several iterations (species-clause cross-checks, doubles-parity fixes, switch dedup) before the parser survived a corpus scan clean. Lesson: in adversarial log formats, parse defensively and audit with invariants (`corpus_qa` counts illegal-under-mask decisions; the gate is zero).
-- **The forward-model audit — and its punchline.** A depth-1 search over a hand-built battle simulator initially looked promising. A targeted audit found **seven** silent bugs in the simulator (Choice Scarf's ×1.5 unapplied, -ate ability retyping omitted, Intimidate-on-entry missed, spread moves hitting the caster's ally, Mega opponents simulated with base-forme stats…). We fixed all seven, re-ran the 2,000-game A/B — and search **still lost by 11 points**. The simulator wasn't the problem: evaluating a value head on *synthetic states it never trained on* was. That off-manifold lesson now guards every design decision (it's why advantage weighting — which never leaves the data — replaced search).
-- **The retry storm.** A deterministic policy whose order Showdown rejects will submit the same illegal order forever. Worse, some legal situations are *unrepresentable* in a 16-action codec (Struggle, recharge turns). The fix is an escalation ladder — perturb to fresh legal actions, detect exhaustion, fall back to `/choose default` — with every non-model decision *counted and reported*, because a bot that silently plays random moves invalidates your evaluation without telling you.
-- **26 GB of features vs 32 GB of RAM.** The full corpus encodes to a matrix that simply does not fit in memory next to PyTorch. Solution: build the encoded cache in streaming 2,000-file chunks appended to disk, then memory-map it read-only at train time with a lazy dataset (one-row copy per `__getitem__`). Full-corpus training on a desktop. Corollary lesson: Windows' "96% memory used" during mmap training is *reclaimable page cache*, not leak — we verified commit charge (21/52 GB) before panicking.
-- **Windows asyncio, three separate times.** Ctrl-C is not delivered to a parked `select()` (fix: accept loops wake every 250 ms); Playwright needs the Proactor loop while poke-env's background loop must stay Selector (fix: two loops, bridge with `run_coroutine_threadsafe`); and a `cp1252` console killed two multi-hour training launches on a *cosmetic box-drawing header* (fix: UTF-8 forced in launch scripts, and the print hardened). Long commands are now shipped as verified `.sh` scripts after a shell paste mangled a flag — losing `--mmap-cache` from a command is the difference between training and OOM.
-- **The browser transport's event-loop wedge.** Feeding a captured frame for an *already-finished* battle made poke-env block forever waiting for a battle object that would never come — freezing the whole session. Late frames are real (Showdown re-sends room logs on rejoin). The host now tracks ended battles and drops their strays, bounded so the set can't leak.
-- **The teambuilder import that looked right and wasn't.** Injecting teams into the Showdown client's localStorage produced teams that *displayed* but were empty — `Storage.importTeam` returns a parsed array, not the packed wrapper the client saves, and the team picker silently requires `capacity: 6`. Both discovered by live probing the client, both now documented in code comments with the probe scripts kept.
-- **Measure twice: the z confound.** The first latent-archetype run looked like a −1.2pp regression — until we noticed 80% of training examples had been assigned the UNKNOWN archetype (the clustering artifact predated the corpus growth). A rebuilt artifact (31k teams, 100% labelled) and a rerun gave z a *fair* trial. Verdicts are only verdicts when the wiring is verified — the same discipline that caught the sampling A/B's "did it actually fire" checks.
-
----
+- **A production-grade deployment stack**: three serving transports plus a single control UI, checkpoint hot-swap flags with a live deploy-parity check, closed-team-sheet discipline matching the ladder, automatic benchmark/dossier recording, and a 1,200+ test suite with byte-parity guards between training and serving.
 
 ## Acknowledgements & prior art
 
@@ -221,7 +234,7 @@ Victory-Dance/
 │   ├── selfplay/           # A/B game runner, league/gate machinery, multiprocess collection
 │   ├── play/               # serving: local/browser/online transports, adapt_rules, dossiers
 │   ├── eval/               # checkpoint ruler, human-benchmark report, gauntlet + Elo
-│   └── datatools/          # HF-dataset ingest, corpus QA, team archetypes, dashboards
+│   └── datatools/          # Mission Control UI, team generator/builder, HF ingest, corpus QA, dashboards
 ├── data/                   # dex data, Pikalytics usage, teams, prepared training corpora
 ├── docs/                   # design docs + the execution playbook (audit, decisions, specs)
 ├── tests/                  # pytest suite: byte-parity, legality, QA gates, unit tests
@@ -229,9 +242,19 @@ Victory-Dance/
 └── artifacts/              # run logs, benchmark records, dossiers, replays (gitignored)
 ```
 
+## Building & specializing teams
+
+A crucial design property: **the battle net is team-agnostic.** Because the encoder uses mechanics (types, computed stats, item/ability *effect* categories) and never species identities, the *same* checkpoint pilots any Champions-doubles team. `maw_zard` is only the **default team** it brings (`VD_DEFAULT_TEAM`) and the **proving team** used in eval — it is *not* baked into the weights. "Specializing on a different team" therefore needs **no retraining** — you just give the bot the team:
+
+1. **Get a legal paste.** Either write a Showdown export and drop it as a file in `teams/Champions/<regulation>/`, or generate one in the **team-builder** (Mission Control → *Teams*, or `python -m v_dance.datatools.server` → `http://localhost:5174/`). The generator grows a roster by belief-driven beam search over teammate co-occurrence, fills each set from usage stats, and **scores** it three ways (archetype coherence, team-preview-net confidence, and a corpus matchup prior). Every generated or pasted team is checked by **Showdown's own validator**, so illegal teams are dropped, not silently played.
+   - ⚠ Champions uses the **0–32 stat-point budget** (66 total), *not* classic 0–252 EVs, and enforces the VGC **Item Clause** (one of each item). The generator and validator handle both; hand-written pastes must too.
+2. **Point the bot at it** — any of: set `VD_DEFAULT_TEAM=<name>` (Mission Control → *Deploy*), pass `--ai-team <name>` to any play harness, or pin it live in the Online-bot tab's team dropdown.
+
+Every harness auto-discovers the pool under `teams/Champions/`, so a new file is usable immediately. (If you instead want to RL-*fine-tune* a net's habits to one team via self-play, the machinery exists — `generation.py --train-teams <name>` — but note the honest finding above: self-play-for-strength plateaus; the team-agnostic net + a good team is the intended path.)
+
 ## Setup: playing locally
 
-**Prerequisites:** Python 3.11+ (venv recommended), Node.js, and a local Pokémon Showdown checkout that includes the Champions-format mod (exact pinned commits for Showdown and poke-env are in `PINS.md` — the encoder's enum-name mapping and the format both depend on them).
+**Prerequisites:** Python 3.11+ (venv recommended), Node.js, and a local Pokémon Showdown checkout that includes the Champions-format mod (exact pinned commits for Showdown and poke-env are in `PINS.md` — the encoder's enum-name mapping and the format both depend on them). The quickest path to *any* of the workflows below — play, train, evaluate — is **Mission Control** (`python -m v_dance.datatools.mission_control`); the explicit commands are given here so you know what each button runs.
 
 ```bash
 # 1. install the package + the pinned server
@@ -245,9 +268,11 @@ Teams live in `teams/Champions/<regulation>/` as Showdown paste files — drop a
 **Option A — two-tab browser flow (recommended).** One command starts the server and opens two logged-in browser tabs with every pool team pre-imported into both Teambuilders. You challenge the AI from your tab; it auto-accepts and plays. The AI's team is `--ai-team <name>` if pinned, else whichever team you have *open* in the AI tab's Teambuilder, else random:
 
 ```bash
+# The battle + team-preview checkpoints default to the deployed pair (model_io + .env), so you
+# can omit --ckpt/--tp-ckpt entirely; they're shown here only to make the override explicit.
 python -m v_dance.play.play_vs_human_browser --ai-team maw_zard \
-    --ckpt ai_train_scripts/BC_model/checkpoints_attn_adv/battle_base.pt \
-    --tp-ckpt ai_train_scripts/teamPreview_model/checkpoints/teampreview_sbda_v7.pt \
+    --ckpt ai_train_scripts/BC_model/checkpoints_attn_era2/battle_base.pt \
+    --tp-ckpt ai_train_scripts/teamPreview_model/checkpoints_set/teampreview_sbda.pt \
     --adapt-rules --bench-note my_session
 ```
 
@@ -278,10 +303,12 @@ PS_AVATAR=cynthia                       # optional
 PS_CLIENT_URL=https://play.pokemonshowdown.com
 WEBSOCKET_URI=wss://sim.smogon.com/showdown/websocket   # for the autonomous ladder harness
 VDANCE_BATTLE_FORMAT=gen9championsvgc2026regmb          # exported stack-wide at startup
-VD_BATTLE_CKPT=ai_train_scripts/BC_model/checkpoints_attn_adv/battle_base.pt
-VD_TP_CKPT=ai_train_scripts/teamPreview_model/checkpoints/teampreview_sbda_v7.pt
+VD_BATTLE_CKPT=ai_train_scripts/BC_model/checkpoints_attn_era2/battle_base.pt
+VD_TP_CKPT=ai_train_scripts/teamPreview_model/checkpoints_set/teampreview_sbda.pt
 VD_DEFAULT_TEAM=maw_zard
 ```
+
+These `VD_*` deploy defaults must match the canonical checkpoints hard-coded in `play/model_io.py` (Mission Control's Deploy tab shows a live ✓/✗ parity check). To roll a new checkpoint out, point both at it; to roll back, point both at the previous pair — the anchor `checkpoints_attn_pre_gen141/battle_base.pt` is the fixed historical reference and is never overwritten.
 
 2. **Dry-run first** — connects, logs in (scripted; if the login UI changes it falls back to "log in manually in the window" and waits), imports the team pool, and idles so you can verify everything without playing:
 
@@ -294,6 +321,8 @@ python -m v_dance.play.play_online_browser --dry-run
 ```bash
 python -m v_dance.play.play_online_browser --adapt-rules --bench-note online_v1
 ```
+
+Once it's live, a **control panel** comes up (its own local page, and mirrored into Mission Control's *Online bot* tab) where you drive matchmaking without touching the browser: start a **ladder run of N rated games** (it re-queues after each finished game until the target is hit), toggle **auto-accept** for incoming challenges, send **private challenges** by username, pin the AI's team, and watch the live rating / W–L tally / activity feed. `--dossier` warm-starts the belief against opponents you've faced before; `VD_ROUTE_TEAMS=1` lets the bot pick its best-matchup pool team against a known opponent on challenge-accepts.
 
 There is also a fully-autonomous direct-websocket harness (`play/play_ladder.py`) that searches ladder matches by itself on any server (`--server-url`, `--username/--password`, `--games N`) — the browser flow above is the supervised default.
 
@@ -308,3 +337,39 @@ pytest tests -q                                                               # 
 ## Tech stack
 
 **Python** (PyTorch, NumPy) · **poke-env** for the Showdown protocol · **Node.js** Pokémon Showdown as the battle engine · **Playwright** for the browser transports · spawn-multiprocessing for GIL-free battle collection · **pytest** (1,100+ tests).
+
+---
+
+## Appendix: research history (for technical readers)
+
+> Everything above describes the shipped agent. This appendix is the R&D record behind it — the ideas that were built, measured with controlled A/Bs, and *retired on evidence*, plus the bugs that shaped the current design. It's kept because the negative results are, honestly, some of the project's most useful output: they mirror what the academic literature found at ~100× the compute.
+
+### Negative results
+
+Each of these was built properly, evaluated with controlled A/Bs and confidence intervals, and **retired on evidence** — the same wall the field hit at datacenter scale (VGC-Bench's PPO league needed 8×A40 and still collapsed on generalization; every agent they trained was ~100% exploitable by a best-response):
+
+| Idea | Verdict |
+|---|---|
+| Belief-weighted expectimax search over a white-box forward model | **Hurts** (38.6% vs argmax, CI [36.5, 40.8]) — an imperfect forward model drags the policy off-manifold |
+| PPO-style league self-play from the BC anchor | Plateaued at the anchor's strength |
+| C51 distributional value head | No strength change |
+| Opponent-conditioned policy heads | No strength change |
+| Recurrent / frame-stack memory over the battle | No strength change, value head degraded |
+| Latent team-archetype conditioning (z) — run twice, second time with a clean 100%-labelled artifact | No gain either time; closed |
+| Team-preview joint decode via subset-mask augmentation | Dose-response trade: the augmentation converts full-roster accuracy into partial-roster validity and cannot win in absolute terms |
+| Serve-time stochastic sampling (τ=0.45) | Costs 5.5pp head-to-head — anti-predictability is a dial with a price, not a free win |
+
+The pattern behind all eight: **at this corpus size and quality, the bottleneck is the demonstration data, not bolted-on architecture** — sharper estimates of the opponent don't convert into wins when the policy prior itself caps skill. That conclusion redirected the project toward data levers, offline improvement, and serve-time adaptation — and the one architecture change that *did* win (the set-scoring preview head) is the exception that proves the rule: it fixed a **decode-expressiveness** gap (greedy per-mon ranking mathematically cannot represent "bring A or B, not both"), not a representation-learning one.
+
+### Engineering journey: the bugs that shaped the design
+
+The current architecture is scar tissue from real failures. A selection, because these taught more than the successes:
+
+- **Illusion broke everything, repeatedly.** Zoroark's Illusion means the replay log *lies about which Pokémon is on the field* — damage attribution, faint attribution, targeting, even which side's bench a mon returns to. It took several iterations (species-clause cross-checks, doubles-parity fixes, switch dedup) before the parser survived a corpus scan clean. Lesson: in adversarial log formats, parse defensively and audit with invariants (`corpus_qa` counts illegal-under-mask decisions; the gate is zero).
+- **The forward-model audit — and its punchline.** A depth-1 search over a hand-built battle simulator initially looked promising. A targeted audit found **seven** silent bugs in the simulator (Choice Scarf's ×1.5 unapplied, -ate ability retyping omitted, Intimidate-on-entry missed, spread moves hitting the caster's ally, Mega opponents simulated with base-forme stats…). We fixed all seven, re-ran the 2,000-game A/B — and search **still lost by 11 points**. The simulator wasn't the problem: evaluating a value head on *synthetic states it never trained on* was. That off-manifold lesson now guards every design decision (it's why advantage weighting — which never leaves the data — replaced search).
+- **The retry storm.** A deterministic policy whose order Showdown rejects will submit the same illegal order forever. Worse, some legal situations are *unrepresentable* in a 16-action codec (Struggle, recharge turns). The fix is an escalation ladder — perturb to fresh legal actions, detect exhaustion, fall back to `/choose default` — with every non-model decision *counted and reported*, because a bot that silently plays random moves invalidates your evaluation without telling you.
+- **26 GB of features vs 32 GB of RAM.** The full corpus encodes to a matrix that simply does not fit in memory next to PyTorch. Solution: build the encoded cache in streaming 2,000-file chunks appended to disk, then memory-map it read-only at train time with a lazy dataset (one-row copy per `__getitem__`). Full-corpus training on a desktop. Corollary lesson: Windows' "96% memory used" during mmap training is *reclaimable page cache*, not leak — we verified commit charge (21/52 GB) before panicking.
+- **Windows asyncio, three separate times.** Ctrl-C is not delivered to a parked `select()` (fix: accept loops wake every 250 ms); Playwright needs the Proactor loop while poke-env's background loop must stay Selector (fix: two loops, bridge with `run_coroutine_threadsafe`); and a `cp1252` console killed two multi-hour training launches on a *cosmetic box-drawing header* (fix: UTF-8 forced in launch scripts, and the print hardened). Long commands are now shipped as verified `.sh` scripts after a shell paste mangled a flag — losing `--mmap-cache` from a command is the difference between training and OOM.
+- **The browser transport's event-loop wedge.** Feeding a captured frame for an *already-finished* battle made poke-env block forever waiting for a battle object that would never come — freezing the whole session. Late frames are real (Showdown re-sends room logs on rejoin). The host now tracks ended battles and drops their strays, bounded so the set can't leak.
+- **The teambuilder import that looked right and wasn't.** Injecting teams into the Showdown client's localStorage produced teams that *displayed* but were empty — `Storage.importTeam` returns a parsed array, not the packed wrapper the client saves, and the team picker silently requires `capacity: 6`. Both discovered by live probing the client, both now documented in code comments with the probe scripts kept.
+- **Measure twice: the z confound.** The first latent-archetype run looked like a −1.2pp regression — until we noticed 80% of training examples had been assigned the UNKNOWN archetype (the clustering artifact predated the corpus growth). A rebuilt artifact (31k teams, 100% labelled) and a rerun gave z a *fair* trial. Verdicts are only verdicts when the wiring is verified — the same discipline that caught the sampling A/B's "did it actually fire" checks.

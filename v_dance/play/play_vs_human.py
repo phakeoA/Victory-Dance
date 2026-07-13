@@ -144,16 +144,19 @@ async def _serve(ai, human_name: str | None, n_battles: int | None,
 async def _run(ai_team_str: str, ai_team_name: str, human_team_str: str, human_team_name: str,
                human_name: str | None, n_battles: int | None, url: str,
                ckpt: Path = DEFAULT_BC_CHECKPOINT, tp_ckpt: Path = DEFAULT_TP_CHECKPOINT,
-               bench: _BenchLog | None = None, adapt_rules: bool = False) -> None:
+               bench: _BenchLog | None = None, adapt_rules: bool = False,
+               use_dossier: bool = False) -> None:
     # bench ON → the existing #18 plumbing saves a playable HTML replay per battle (embedded full
     # protocol log — re-parseable later for the Phase-3 adaptation loop).
     _rec = ({"save_replays": True, "live_dir": BENCH_DIR / "live",
              "replay_dir": BENCH_DIR / "replays" / bench.session_id, "replay_label": "bench"}
             if bench is not None else {})
     ai = make_player(AI_NAME, ai_team_str, model_path=ckpt, team_chooser_path=tp_ckpt,
-                     adapt_rules=adapt_rules, **_rec)
+                     adapt_rules=adapt_rules, use_dossier=use_dossier, **_rec)
     if adapt_rules:
         print("  adapt-rules ON (B-L1: Wide-Guard streak → spread-move tilt)")
+    if use_dossier:
+        print("  dossier ON (S1 L2b: cross-game opp item/ability/move warm-start)")
     print("\n" + "=" * 70)
     print("  HUMAN  vs  AI   (you pilot a real team against the production bot)")
     print("=" * 70)
@@ -224,6 +227,9 @@ def _parse_args(argv=None) -> argparse.Namespace:
                     help="disable benchmark recording (rows + saved HTML replays). Default: ON.")
     ap.add_argument("--adapt-rules", action="store_true",
                     help="B-L1 serve-time pattern tilt (Wide-Guard streak → spread bias). Default OFF.")
+    ap.add_argument("--dossier", action="store_true",
+                    help="S1 L2b: warm-start unknown opp item/ability/moves from the per-opponent "
+                         "dossier (cross-game; in-battle evidence always wins). Default OFF.")
     return ap.parse_args(argv)
 
 
@@ -259,7 +265,7 @@ def main() -> None:
     try:
         asyncio.run(_run(ai_team_str, Path(ai_name).name, human_team_str, Path(human_name_team).name,
                          args.human_name, args.n_battles, url, ckpt, tp_ckpt, bench,
-                         args.adapt_rules))
+                         args.adapt_rules, args.dossier))
     except KeyboardInterrupt:
         print("\n[play] Ctrl-C received — stopping the AI and the Showdown server …")
     finally:

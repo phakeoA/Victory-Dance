@@ -68,6 +68,18 @@ def ots_opp_known(player, battle) -> Optional[dict]:
     or None (flag off / closed sheets / nothing captured). Never raises."""
     if not TP_OTS_OVERLAY:
         return None
+    # Footgun guard: the overlay writes tpfeat-v7 channels that are ZERO unless the ckpt
+    # actually trained on open-sheet overlays. The schema stamp does NOT certify that
+    # (checkpoints_set is tpfeat-v7 yet trained closed-sheet). Require an explicit
+    # config marker so the env flag can't feed OOD input to a closed-sheet net.
+    cfg = getattr(player, "_tc_cfg", None) or {}
+    if not cfg.get("ots_overlay_trained"):
+        if not getattr(player, "_ots_overlay_warned", False):
+            log.warning("VD_TP_OTS_OVERLAY=1 but the TP ckpt config lacks "
+                        "ots_overlay_trained=True — serving WITHOUT the opp overlay "
+                        "(it would be out-of-distribution for this net).")
+            player._ots_overlay_warned = True
+        return None
     try:
         sides = (getattr(player, "_ots_sheets", None) or {}).get(
             room_base_tag(getattr(battle, "battle_tag", "") or ""))
@@ -443,10 +455,17 @@ class VGCPlayer(VGCPlayerBase):
                                 "synergy/usage features degrade to typing-only.",
                                 battle.battle_tag)
 
+            # DS-4c stage 3: Bo3 previous-game context (None = game 1 / off-set / no
+            # ctx-trained ckpt — the zero-init identity path in all three cases).
+            from v_dance.play import bo3_state
+            _ctx = (bo3_state.set_ctx_for(self, battle, our_species, opp_species)
+                    if getattr(self._team_chooser, "use_set_ctx", False) else None)
             order = _M.team_order(
                 self._team_chooser, self._tc_vocab, self._tc_cfg,
                 our_species, opp_species, n, self._device, belief=belief,
                 opp_known=ots_opp_known(self, battle),
+                our_set_ctx=_ctx[0] if _ctx else None,
+                opp_set_ctx=_ctx[1] if _ctx else None,
             )
             valid = [i for i in order if 0 <= i < len(team)]
             if valid and len(set(valid)) == len(valid):
@@ -461,6 +480,8 @@ class VGCPlayer(VGCPlayerBase):
                 picks = valid[:n]
                 lead_k = int((self._tc_cfg or {}).get("lead_k", 2))
                 brought = [getattr(team[i], "species", "?") for i in picks]
+                # DS-4c stage 2: remember OUR picks for this game's set (no-op off-set).
+                bo3_state.record_our_picks(self, battle, brought)
                 self._tp_source["model"] += 1
                 log.info("Team-preview [%s] NET drove: bring=%s leads=%s (vs opp %s)",
                          battle.battle_tag, brought, brought[:lead_k],

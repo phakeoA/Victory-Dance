@@ -1,0 +1,666 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Victory Dance — Mission Control</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin:0; padding:0; font: 10pt Verdana, sans-serif; color:#d7e2ec;
+               background:#1b2733; min-height:100vh; }
+  a { color:#7fb5e6; }
+  .header { background: linear-gradient(#32506e, #1b3a5b); color:#fff; padding:10px 18px;
+            border-bottom:2px solid #12283d; display:flex; align-items:center; gap:14px;
+            position:sticky; top:0; z-index:5; }
+  .header b { font-size:13pt; letter-spacing:.3px; }
+  .header .sub { font-size:8.5pt; opacity:.85; }
+  .tabs { margin-left:auto; display:flex; gap:4px; }
+  .tab { padding:7px 14px; cursor:pointer; border-radius:6px 6px 0 0; font:bold 9.5pt Verdana;
+         color:#c8d6e2; background:transparent; border:1px solid transparent; }
+  .tab:hover { background:#2b4257; }
+  .tab.on { background:#1b2733; border:1px solid #12283d; border-bottom-color:#1b2733; color:#fff; }
+  .page { max-width:1180px; margin:16px auto 60px; padding:0 14px; display:none; }
+  .page.on { display:block; }
+  h2.sec { font:bold 11pt Verdana; color:#9fc3e3; border-bottom:1px solid #34506e;
+           padding-bottom:4px; margin:22px 0 10px; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fill,minmax(340px,1fr)); gap:12px; }
+  .card { background:#22303e; border:1px solid #34506e; border-radius:8px; padding:12px;
+          box-shadow:0 2px 5px rgba(0,0,0,.35); }
+  .card h3 { margin:0 0 4px; font:bold 10pt Verdana; color:#e8f1f8; display:flex; gap:8px;
+             align-items:center; }
+  .card .desc { color:#9db0c0; font-size:8.5pt; margin-bottom:8px; line-height:1.45; }
+  .card .note { color:#e0b36a; font-size:8.5pt; margin-top:6px; line-height:1.4; }
+  .pill { font:bold 7.5pt Verdana; padding:2px 7px; border-radius:9px; }
+  .pill.heavy { background:#5a3324; color:#ffb08a; border:1px solid #8a4a2e; }
+  .pill.light { background:#24503a; color:#8ae0ae; border:1px solid #2e7a4e; }
+  label.fld { display:block; font:bold 8pt Verdana; color:#8fa0b0; color:#8aa0b4; margin:7px 0 2px; }
+  select, input[type=text], input[type=number] { width:100%; padding:4px 7px; font:9.5pt Verdana;
+      border:1px solid #46627e; border-radius:4px; background:#17222c; color:#dde8f1; }
+  .chk { display:flex; align-items:center; gap:7px; margin:5px 0; font:9pt Verdana; color:#c4d3e0; }
+  .row { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
+  .btn { padding:5px 13px; cursor:pointer; font:bold 9pt Verdana; color:#fff;
+      background:linear-gradient(#4d81b5,#2c5a8c); border:1px solid #16324f; border-radius:5px; }
+  .btn:hover { background:linear-gradient(#5a8ec2,#336598); }
+  .btn.gray { background:linear-gradient(#5a6b7a,#42525f); border-color:#2c3944; }
+  .btn.red  { background:linear-gradient(#b55555,#8c3232); border-color:#4f1616; }
+  .btn:disabled { opacity:.5; cursor:default; }
+  .cmdline { margin-top:8px; background:#141d25; border:1px solid #2c3f52; border-radius:5px;
+             padding:7px 9px; font:8.5pt Consolas,monospace; color:#a9c8e2; white-space:pre-wrap;
+             word-break:break-all; }
+  table { border-collapse:collapse; width:100%; font-size:8.8pt; }
+  th, td { border:1px solid #34506e; padding:5px 8px; text-align:left; }
+  th { background:#26384a; color:#aecbe6; }
+  td { color:#c9d7e3; }
+  .ok  { color:#8ae0ae; font-weight:bold; }
+  .bad { color:#ff9d8a; font-weight:bold; }
+  .muted { color:#7f93a5; font-size:8.5pt; }
+  /* overview */
+  .flow { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin:8px 0 16px; }
+  .stage { background:#26384a; border:1px solid #46627e; border-radius:7px; padding:9px 13px;
+           cursor:pointer; text-align:center; }
+  .stage b { display:block; font-size:9.5pt; color:#e8f1f8; }
+  .stage span { font-size:7.8pt; color:#93a9bc; }
+  .stage:hover { background:#31485e; }
+  .arrow { color:#5c7democracy; color:#5c7d9d; font-size:13pt; }
+  .stat { display:flex; justify-content:space-between; gap:8px; padding:3px 0;
+          border-bottom:1px dashed #2c3f52; font-size:9pt; }
+  .stat b { color:#e8f1f8; text-align:right; word-break:break-all; }
+  .dot { width:9px; height:9px; border-radius:50%; display:inline-block; margin-right:6px; }
+  .dot.up { background:#5cab3c; box-shadow:0 0 4px #5cab3c; }
+  .dot.dn { background:#7a8894; }
+  #log { height:420px; overflow-y:auto; background:#141d25; border:1px solid #2c3f52;
+         border-radius:6px; padding:9px 11px; font:8.5pt Consolas,monospace; white-space:pre-wrap;
+         color:#b9cfe2; }
+  svg text { font:8pt Verdana; fill:#93a9bc; }
+  .toast { position:fixed; bottom:18px; right:18px; background:#24503a; color:#c9f2d8;
+           border:1px solid #2e7a4e; border-radius:7px; padding:9px 14px; font:9pt Verdana;
+           opacity:0; transition:opacity .25s; pointer-events:none; z-index:20; }
+  .toast.err { background:#5a2a24; color:#ffc4b5; border-color:#8a4a2e; }
+  .toast.show { opacity:1; }
+  .heavy-btn { background:linear-gradient(#b5824d,#8c5f2c); border-color:#4f3316; }
+  .heavy-btn:hover { background:linear-gradient(#c2925a,#986a33); }
+  .pbar { position:relative; height:20px; background:#141d25; border:1px solid #2c3f52;
+          border-radius:5px; overflow:hidden; margin:4px 0; }
+  .pfill { position:absolute; top:0; left:0; height:100%;
+           background:linear-gradient(#4d81b5,#2c5a8c); transition:width .4s; }
+  .ptext { position:absolute; width:100%; text-align:center; line-height:20px;
+           font:bold 8.5pt Verdana; color:#eaf3fb; text-shadow:0 1px 1px #12283d; }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
+  .mchip { background:#26384a; border:1px solid #46627e; border-radius:10px; padding:2px 9px;
+           font:8.5pt Verdana; color:#aecbe6; }
+  .mchip b { color:#8ae0ae; }
+  iframe.embed { width:100%; height:80vh; border:1px solid #34506e; border-radius:8px;
+                 background:#fff; }
+  .battlebtn { display:block; width:100%; margin-top:12px; padding:11px 0; cursor:pointer;
+      font:bold 13pt Verdana; color:#fff; text-shadow:0 1px 0 #16324f;
+      background:linear-gradient(#4d81b5,#2c5a8c); border:1px solid #16324f; border-radius:9px; }
+  .battlebtn:hover { background:linear-gradient(#5a8ec2,#336598); }
+  .battlebtn:disabled { opacity:.55; cursor:default; }
+  #oblog { height:180px; overflow-y:auto; background:#141d25; border:1px solid #2c3f52;
+           border-radius:6px; padding:8px 10px; font:8.5pt Consolas,monospace; white-space:pre-wrap;
+           color:#b9cfe2; margin-top:6px; }
+</style></head><body>
+
+<div class="header"><b>🕺 Victory Dance</b><span class="sub">Mission Control</span>
+  <span class="sub" id="hdrDeploy"></span>
+  <div class="tabs" id="tabs"></div>
+</div>
+
+<div class="page" id="page-overview"></div>
+<div class="page" id="page-online"></div>
+<div class="page" id="page-play"></div>
+<div class="page" id="page-train"></div>
+<div class="page" id="page-teams"></div>
+<div class="page" id="page-data"></div>
+<div class="page" id="page-eval"></div>
+<div class="page" id="page-deploy"></div>
+<div class="page" id="page-monitor"></div>
+<div class="page" id="page-jobs"></div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const TABS = [["overview","Overview"],["online","Online bot"],["play","Play"],["train","Train"],
+              ["teams","Parser / Teams"],["data","Data"],["eval","Eval"],["deploy","Deploy"],
+              ["monitor","Monitor"],["jobs","Jobs"]];
+let S = null, CMDS = null, OB = {up:false}, curTab = "overview", logName = null, logOffset = 0, logTimer = null;
+
+function toast(msg, err) {
+  const t = $("toast");
+  t.textContent = msg; t.className = "toast show" + (err ? " err" : "");
+  setTimeout(() => t.className = "toast" + (err ? " err" : ""), err ? 5200 : 2600);
+}
+function esc(s) { return String(s ?? "").replace(/[&<>"]/g,
+  c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+async function api(path, body) {
+  const r = await fetch(path, { method:"POST", headers:{"Content-Type":"application/json"},
+                                body: JSON.stringify(body || {}) });
+  const js = await r.json();
+  if (!js.ok) { toast(js.error || "action failed", true); throw new Error(js.error); }
+  return js;
+}
+
+/* ── tabs ── */
+$("tabs").innerHTML = TABS.map(([k, l]) =>
+  `<div class="tab" id="tab-${k}" onclick="showTab('${k}')">${l}</div>`).join("");
+function showTab(k) {
+  curTab = k;
+  TABS.forEach(([t]) => { $("tab-" + t).classList.toggle("on", t === k);
+                          $("page-" + t).classList.toggle("on", t === k); });
+  if (k === "online") refreshOnline();
+  if (k === "teams" && S) renderTeams();
+  if (k === "monitor" && S) renderMonitor();
+  if (k === "jobs" && S) renderJobs();
+  if (k === "overview" && S) renderOverview();
+}
+
+/* ── command card rendering (generic over the registry) ── */
+function optField(e, o) {
+  const id = `opt-${e.id}-${o.name}`;
+  const def = o.default ?? "";
+  if (o.type === "flag")
+    return `<div class="chk"><input type="checkbox" id="${id}" ${def ? "checked" : ""}>
+            <label for="${id}">${esc(o.label || "--" + o.name)}</label></div>`;
+  if (o.type === "choice")
+    return `<label class="fld">${esc(o.label)}</label><select id="${id}">` +
+      o.choices.map(c => `<option ${c === def ? "selected" : ""}>${esc(c)}</option>`).join("") +
+      `</select>`;
+  if (o.type === "team")
+    return `<label class="fld">${esc(o.label)}</label><select id="${id}" class="teamsel"
+             data-def="${esc(def)}"><option value="">— default —</option></select>`;
+  if (o.type === "ckpt" || o.type === "tpckpt")
+    return `<label class="fld">${esc(o.label)}</label><select id="${id}"
+             class="ckptsel-${o.type}" data-def="${esc(def)}">
+             <option value="">— default (deployed) —</option></select>`;
+  const t = (o.type === "int" || o.type === "float") ? "number" : "text";
+  return `<label class="fld">${esc(o.label)}</label>
+          <input type="${t}" id="${id}" value="${esc(def)}" ${o.type==="float"?'step="any"':""}>`;
+}
+
+function cardHTML(e) {
+  const pill = e.heavy ? `<span class="pill heavy">HEAVY — run in terminal</span>`
+                       : `<span class="pill light">launchable</span>`;
+  const opts = (e.opts || []).map(o => optField(e, o)).join("");
+  const envs = (e.envopts || []).map(o =>
+    `<div class="chk"><input type="checkbox" id="env-${e.id}-${o.key}">
+     <label for="env-${e.id}-${o.key}">${esc(o.label)}</label></div>`).join("");
+  const launch = e.heavy
+    ? `<button class="btn heavy-btn" onclick="launch('${e.id}', true)">▶ Launch (heavy)</button>`
+    : `<button class="btn" onclick="launch('${e.id}')">▶ Launch</button>`;
+  return `<div class="card" id="card-${e.id}">
+    <h3>${esc(e.title)} ${pill}</h3>
+    ${e.desc ? `<div class="desc">${esc(e.desc)}</div>` : ""}
+    ${opts}${envs}
+    <div class="row">${launch}
+      <button class="btn gray" onclick="copyCmd('${e.id}')">Copy command</button></div>
+    <div class="cmdline" id="cmd-${e.id}"></div>
+    ${e.note ? `<div class="note">⚠ ${esc(e.note)}</div>` : ""}
+  </div>`;
+}
+
+function q(a) { return /[ "]/.test(a) ? '"' + a.replace(/"/g, '\\"') + '"' : a; }
+
+function buildArgs(e) {
+  const args = [];
+  for (const o of (e.opts || [])) {
+    const el = $(`opt-${e.id}-${o.name}`);
+    if (!el) continue;
+    if (o.type === "flag") { if (el.checked) args.push("--" + o.name); continue; }
+    const v = (el.value || "").trim();
+    if (v) args.push("--" + o.name, v);
+  }
+  return args;
+}
+
+function cmdLine(e) {
+  const envs = (e.envopts || []).filter(o => $(`env-${e.id}-${o.key}`)?.checked)
+                                .map(o => o.key + "=1 ").join("");
+  let core;
+  if (e.module) core = "-m " + e.module;
+  else if (e.script) core = e.script;
+  else core = (e.raw || []).join(" ");
+  const fixed = (e.fixed || []).map(q).join(" ");
+  const args = buildArgs(e).map(q).join(" ");
+  const tee = e.id === "pytest" ? "" : ` 2>&1 | tee artifacts/logs/${e.id}.log`;
+  return `PYTHONUTF8=1 ${envs}.venv/Scripts/python.exe -X utf8 -u ${core}` +
+         (fixed ? " " + fixed : "") + (args ? " " + args : "") + tee;
+}
+
+function refreshCmd(e) { const el = $(`cmd-${e.id}`); if (el) el.textContent = cmdLine(e); }
+
+async function copyCmd(id) {
+  const e = CMDS.find(c => c.id === id);
+  refreshCmd(e);
+  try { await navigator.clipboard.writeText(cmdLine(e)); toast("command copied — run it from the repo root (bash)"); }
+  catch { toast("copy failed — select the text below the buttons", true); }
+}
+
+async function launch(id, heavy) {
+  const e = CMDS.find(c => c.id === id);
+  if (heavy && !confirm(
+      `"${e.title}" is a HEAVY run — it uses the GPU/RAM and only ONE heavy run can go at a ` +
+      `time.\n\nLaunch it now through Mission Control? (You can also "Copy command" to run it ` +
+      `in a terminal instead.)`)) return;
+  const options = {}, env = {};
+  for (const o of (e.opts || [])) {
+    const el = $(`opt-${e.id}-${o.name}`);
+    if (el) options[o.name] = (o.type === "flag") ? el.checked : el.value;
+  }
+  for (const o of (e.envopts || []))
+    env[o.key] = $(`env-${e.id}-${o.key}`)?.checked || false;
+  const js = await api("/api/job/start", { id, options, env });
+  toast(`started ${js.job.job} — log ${js.job.log}`);
+  showTab("jobs"); openLog(js.job.log);
+  refresh();
+}
+
+/* ── pages ── */
+function renderCommandPages() {
+  const byCat = {};
+  for (const e of CMDS) (byCat[e.cat] = byCat[e.cat] || []).push(e);
+  const put = (page, cats, intro) => {
+    $(page).innerHTML = intro + cats.map(([cat, title]) =>
+      `<h2 class="sec">${title}</h2><div class="cards">` +
+      (byCat[cat] || []).map(cardHTML).join("") + `</div>`).join("");
+  };
+  put("page-play", [["play", "Battle — local & online"]],
+      `<div class="muted">All play harnesses read the deployed checkpoints from .env unless
+       overridden. Format + default team are set in the <a href="#" onclick="showTab('deploy')">
+       Deploy</a> tab. Heavy training stays in the terminal — play is launchable here.</div>`);
+  put("page-train", [["train", "Training & self-improvement"]],
+      `<div class="muted">Heavy runs (marked <span class="pill heavy">heavy</span>) launch right here
+       — <b>one at a time</b> (GPU/RAM), with live epoch/loss/metric progress on the
+       <a href="#" onclick="showTab('jobs')">Jobs</a> tab. Prefer a terminal? "Copy command" gives
+       the exact verified one-liner instead.</div>`);
+  put("page-data", [["data", "Data pipeline (replays → JSONL → belief)"]],
+      `<div class="muted">Replay annotation UI = the <a href="http://127.0.0.1:5174"
+       target="_blank">team builder</a> (start it in Services on the Overview tab). ⚠ A belief
+       change ⇒ re-export affected corpora before any retrain.</div>`);
+  put("page-eval", [["eval", "Gates & reports"]],
+      `<div class="muted">The deploy gate chain: pytest suite → ruler (bc_val_report) → type-eff
+       probe → measured ladder block (human benchmark). The exploiter curve is the G3 meter.</div>`);
+  for (const e of CMDS) {
+    for (const o of (e.opts || [])) {
+      const el = $(`opt-${e.id}-${o.name}`);
+      if (el) el.addEventListener("input", () => refreshCmd(e));
+      if (el && el.type === "checkbox") el.addEventListener("change", () => refreshCmd(e));
+    }
+    for (const o of (e.envopts || []))
+      $(`env-${e.id}-${o.key}`)?.addEventListener("change", () => refreshCmd(e));
+    refreshCmd(e);
+  }
+}
+
+function fillSelects() {
+  document.querySelectorAll(".teamsel").forEach(sel => {
+    const cur = sel.value || sel.dataset.def || "";
+    sel.innerHTML = `<option value="">— default —</option>` +
+      S.teams.map(t => `<option ${t === cur ? "selected" : ""}>${esc(t)}</option>`).join("");
+  });
+  const fill = (cls, rows) => document.querySelectorAll(cls).forEach(sel => {
+    const cur = sel.value || sel.dataset.def || "";
+    sel.innerHTML = `<option value="">— default (deployed) —</option>` +
+      rows.map(r => `<option value="${esc(r.path)}" ${r.path === cur ? "selected" : ""}>
+                     ${esc(r.dir + "/" + r.file)}</option>`).join("");
+  });
+  fill(".ckptsel-ckpt", S.ckpts.battle);
+  fill(".ckptsel-tpckpt", S.ckpts.tp);
+  CMDS.forEach(refreshCmd);
+}
+
+function renderOverview() {
+  const p = S.parity;
+  const stages = [
+    ["data", "1 · Data", "replays → JSONL"], ["data", "2 · Belief", "scrape + blend"],
+    ["train", "3 · Train", "battle + TP nets"], ["eval", "4 · Gate", "suite · ruler · probe"],
+    ["deploy", "5 · Deploy", ".env + parity"], ["play", "6 · Play", "local / online"],
+    ["eval", "7 · Measure", "benchmark + exploiter"]];
+  const svc = Object.entries(S.services).map(([k, s]) => {
+    const link = s.up ? ` — <a href="http://127.0.0.1:${s.port}" target="_blank">open</a>` : "";
+    let act = "";
+    if (s.job) {
+      const running = S.jobs.find(j => j.id === s.job && j.alive);
+      act = running ? ` <button class="btn red" style="padding:2px 8px;font-size:8pt"
+                        onclick="stopJob('${running.job}')">stop</button>`
+          : (s.up ? "" : ` <button class="btn" style="padding:2px 8px;font-size:8pt"
+                          onclick="startSvc('${s.job}')">start</button>`);
+    }
+    return `<div class="stat"><span><span class="dot ${s.up ? "up" : "dn"}"></span>
+            ${esc(s.label)} <span class="muted">:${s.port}${s.note ? " · " + esc(s.note) : ""}</span></span>
+            <b>${s.up ? "up" : "down"}${link}${act}</b></div>`;
+  }).join("");
+  const par = (label, x) => `<div class="stat"><span>${label}</span>
+      <b class="${x.match ? "ok" : "bad"}">${x.match ? "✓" : "✗ MISMATCH"}</b></div>
+      <div class="muted" style="word-break:break-all">.env: ${esc(x.env || "—")}<br>
+      model_io: ${esc(x.model_io || "—")}</div>`;
+  const aliveJobs = S.jobs.filter(j => j.alive);
+  const runningBanner = aliveJobs.length ? `<div class="card full" style="border-color:#4d81b5">
+      <h3>▶ Running now (${aliveJobs.length}) <a href="#" style="margin-left:auto;font-size:8.5pt"
+        onclick="showTab('jobs')">Jobs tab →</a></h3>` +
+      aliveJobs.reverse().map(j => `<div style="margin:8px 0">
+        <div style="font:bold 9pt Verdana;color:#e8f1f8">${esc(j.id)}
+          <span class="muted">· ${fmtElapsed(j.elapsed_s)}</span></div>
+        ${jobProgressHTML(j)}</div>`).join("") + `</div>` : "";
+  $("page-overview").innerHTML = runningBanner + `
+    <h2 class="sec">Pipeline — click a stage</h2>
+    <div class="flow">` + stages.map(([tab, b, s], i) =>
+      (i ? `<span class="arrow">→</span>` : "") +
+      `<div class="stage" onclick="showTab('${tab}')"><b>${b}</b><span>${s}</span></div>`).join("") + `
+    </div>
+    <div class="cards">
+      <div class="card"><h3>Deployed models</h3>
+        ${par("Battle net (VD_BATTLE_CKPT ↔ model_io)", p.battle)}
+        ${par("Team preview (VD_TP_CKPT ↔ model_io)", p.tp)}
+        <div class="stat"><span>Format</span><b>${esc(S.format)}</b></div>
+        <div class="stat"><span>Default team</span><b>${esc(S.env.VD_DEFAULT_TEAM || "—")}</b></div>
+        <div class="stat"><span>Showdown account</span><b>${esc(S.env.PS_USERNAME || "—")}</b></div>
+      </div>
+      <div class="card"><h3>Services</h3>${svc}
+        <div class="muted" style="margin-top:6px">The bot control panel (:8777) appears when the
+        online bot is running — launch it from the Play tab.</div></div>
+      <div class="card"><h3>Exploiter curve (G3 meter)</h3><div id="exploit"></div></div>
+      <div class="card"><h3>Getting started</h3><div class="desc">
+        ① Deploy tab — confirm ckpt parity is ✓.<br>
+        ② Eval tab — run the pytest suite (expect EXIT 0, 4 stale-v17 SKIPs).<br>
+        ③ Play tab — “AI vs AI local battle” to watch the bot, or “Online bot” to ladder
+        (the :8777 panel opens with it).<br>
+        ④ Data tab — team builder for VOD annotation; belief blend after meta shifts.<br>
+        ⑤ Train tab — copy the verified one-liners when an era retrain is due.<br>
+        ⑥ Measure — human benchmark report per --bench-note block; exploiter per era.</div></div>
+    </div>`;
+  renderExploit();
+}
+
+function renderExploit() {
+  const el = $("exploit"); if (!el) return;
+  const ex = S.exploit;
+  if (!ex.found) { el.innerHTML = `<div class="muted">no exploit_curve.json yet — the 4a run
+    writes it under artifacts/logs/exploit_&lt;ckpt&gt;/.</div>`; return; }
+  let pts = Array.isArray(ex.curve) ? ex.curve : (ex.curve && (ex.curve.points || ex.curve.curve)) || null;
+  const gx = p => p.games_trained ?? p.games ?? p.g ?? p.x;
+  const gy = p => p.exploiter_winrate ?? p.win_rate ?? p.wr ?? p.y;
+  if (pts && pts.length && gx(pts[0]) !== undefined && gy(pts[0]) !== undefined) {
+    const xs = pts.map(gx), ys = pts.map(gy);
+    const xmax = Math.max(...xs, 1), W = 300, H = 110;
+    const X = v => 34 + (v / xmax) * (W - 44), Y = v => H - 16 - v * (H - 30);
+    const path = pts.map((p, i) => (i ? "L" : "M") + X(gx(p)).toFixed(1) + "," + Y(gy(p)).toFixed(1)).join(" ");
+    el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" style="width:100%">
+      <line x1="34" y1="${Y(0.5)}" x2="${W - 8}" y2="${Y(0.5)}" stroke="#46627e" stroke-dasharray="3 3"/>
+      <text x="4" y="${Y(0.5) + 3}">0.50</text><text x="4" y="${Y(1) + 6}">1.00</text>
+      <text x="${W - 60}" y="${H - 2}">${xmax} games</text>
+      <path d="${path}" fill="none" stroke="#7fb5e6" stroke-width="2"/>
+      ${pts.map(p => `<circle cx="${X(gx(p)).toFixed(1)}" cy="${Y(gy(p)).toFixed(1)}" r="2.4" fill="#a9d4f5"/>`).join("")}
+    </svg>
+    <div class="muted">latest WR vs frozen net: <b class="${ys[ys.length-1] > 0.55 ? "bad" : "ok"}">
+    ${(ys[ys.length - 1] ?? 0).toFixed(3)}</b> · ${esc(ex.path)} · ${esc(ex.updated || "")}</div>`;
+  } else {
+    el.innerHTML = `<div class="muted">${esc(ex.path)} (${esc(ex.updated || "")})</div>
+      <div class="cmdline">${esc(JSON.stringify(ex.curve ?? ex.error, null, 1)).slice(0, 1200)}</div>`;
+  }
+}
+
+function renderDeploy() {
+  const inv = [...S.ckpts.battle.map(r => ({...r, kind: "battle"})),
+               ...S.ckpts.tp.map(r => ({...r, kind: "TP"}))];
+  const envRow = (key, kind) => {
+    let opts;
+    if (kind === "battle") opts = S.ckpts.battle.map(r => r.path);
+    else if (kind === "tp") opts = S.ckpts.tp.map(r => r.path);
+    else if (kind === "team") opts = S.teams;
+    else if (kind === "format") opts = S.formats;
+    else opts = ["0", "1"];
+    const cur = S.env[key] || "";
+    const sel = `<select id="env-${key}">` + (opts.includes(cur) ? "" :
+        `<option value="${esc(cur)}" selected>${esc(cur || "—")}</option>`) +
+      opts.map(o => `<option ${o === cur ? "selected" : ""}>${esc(o)}</option>`).join("") + `</select>`;
+    return `<label class="fld">${key}</label><div class="row" style="margin-top:2px">
+      <div style="flex:1">${sel}</div>
+      <button class="btn" onclick="saveEnv('${key}')">Save</button></div>`;
+  };
+  $("page-deploy").innerHTML = `
+    <h2 class="sec">Deploy — .env (applies on the NEXT harness launch)</h2>
+    <div class="cards">
+      <div class="card"><h3>Serving defaults</h3>
+        ${envRow("VD_BATTLE_CKPT", "battle")}
+        ${envRow("VD_TP_CKPT", "tp")}
+        ${envRow("VD_DEFAULT_TEAM", "team")}
+        ${envRow("VDANCE_BATTLE_FORMAT", "format")}
+        ${envRow("VD_AUTO_CLOSE_ROOMS", "bool")}
+        <div class="note">⚠ Keep .env == model_io defaults (D6 parity — the Overview card must show
+        ✓✓). Bo3 venues override TP per-run with --tp-ckpt checkpoints_setctx instead of editing
+        this. Rollback paths are documented in the model_io.py header.</div></div>
+      <div class="card"><h3>Anchors & rules</h3><div class="desc">
+        · BC anchor (never overwrite): checkpoints_attn_pre_gen141/battle_base.pt (val 0.5853).<br>
+        · Era-chain: era N+1 warm-start/value base = the GATED era-N net.<br>
+        · Belief parity: data/pikalytics_regmb.json must equal the deployed blend; a belief change
+        ⇒ re-export.<br>
+        · Env pins (PINS.md): poke-env @a6e4f67 · Showdown @ecf39eef1.<br>
+        · model_io rejects non-attn battle ckpts by design.</div></div>
+    </div>
+    <h2 class="sec">Checkpoint inventory</h2>
+    <table><tr><th>kind</th><th>path</th><th>modified</th><th>MB</th></tr>` +
+    inv.map(r => `<tr><td>${r.kind}</td><td>${esc(r.path)}</td><td>${r.mtime}</td><td>${r.mb}</td></tr>`).join("") +
+    `</table>`;
+}
+
+async function saveEnv(key) {
+  const v = $(`env-${key}`).value;
+  await api("/api/env", { key, value: v });
+  toast(`${key} saved — applies on the next launch`);
+  refresh();
+}
+
+function fmtElapsed(s) {
+  s = s || 0; const h = (s / 3600) | 0, m = ((s % 3600) / 60) | 0, sec = s % 60;
+  return h ? `${h}h${m}m` : (m ? `${m}m${sec}s` : `${sec}s`);
+}
+
+function jobProgressHTML(j) {
+  const p = j.progress;
+  if (!p) return j.alive ? '<span class="muted">running… (no structured progress for this command)</span>' : '';
+  const bar = (p.pct != null)
+    ? `<div class="pbar"><div class="pfill" style="width:${Math.max(2, p.pct)}%"></div>
+         <span class="ptext">${esc(p.label)} ${esc(p.value)} · ${p.pct}%</span></div>`
+    : `<div class="muted" style="margin:4px 0">${esc(p.label)}: <b>${esc(p.value)}</b></div>`;
+  const chips = Object.entries(p.metrics || {}).map(([k, v]) =>
+    `<span class="mchip">${esc(k)} <b>${esc(v)}</b></span>`).join("");
+  return bar + (chips ? `<div class="chips">${chips}</div>` : "");
+}
+
+function renderJobs() {
+  const alive = S.jobs.filter(j => j.alive).reverse();
+  const running = alive.length ? alive.map(j => `<div class="card">
+      <h3>${esc(j.id)} <span class="pill light">running · ${fmtElapsed(j.elapsed_s)}</span>
+        ${j.heavy ? '<span class="pill heavy">heavy</span>' : ''}
+        <button class="btn red" style="margin-left:auto;padding:3px 10px"
+          onclick="stopJob('${j.job}')">Stop</button></h3>
+      ${jobProgressHTML(j)}
+      <div class="muted" style="margin-top:6px"><a href="#"
+        onclick="openLog('${esc(j.log)}');return false">${esc(j.log)}</a></div></div>`).join("")
+    : `<div class="muted">Nothing running. Launch from Play / Train / Data / Eval — training and the
+       exploiter now run here (one heavy job at a time) with live progress.</div>`;
+  const rows = S.jobs.slice().reverse().map(j => `<tr>
+      <td>${j.job}</td><td>${esc(j.id)}</td><td>${j.started}</td>
+      <td class="${j.alive ? "ok" : (j.returncode === 0 ? "ok" : "bad")}">
+        ${j.alive ? "running" : "exit " + j.returncode}</td>
+      <td>${j.progress ? esc(j.progress.label + " " + j.progress.value) : "—"}</td>
+      <td><a href="#" onclick="openLog('${esc(j.log)}');return false">${esc(j.log)}</a></td>
+      <td>${j.alive ? `<button class="btn red" style="padding:2px 8px;font-size:8pt"
+           onclick="stopJob('${j.job}')">stop</button>` : ""}</td></tr>`).join("");
+  const logs = S.logs.map(l =>
+    `<a href="#" onclick="openLog('${esc(l.name)}');return false">${esc(l.name)}</a>
+     <span class="muted">(${l.mtime}, ${l.kb} KB)</span>`).join("<br>");
+  $("page-jobs").innerHTML = `
+    <h2 class="sec">Running now</h2>
+    <div class="cards">${running}</div>
+    <h2 class="sec">All jobs (this Mission Control session)</h2>
+    <table><tr><th>#</th><th>command</th><th>started</th><th>state</th><th>progress</th><th>log</th><th></th></tr>
+    ${rows || `<tr><td colspan="7" class="muted">none yet — launch something from Play/Train/Eval/Data.</td></tr>`}</table>
+    <h2 class="sec">Log viewer <span class="muted" id="logTitle"></span></h2>
+    <div id="log">(pick a job or a recent log)</div>
+    <h2 class="sec">Recent artifacts/logs</h2>
+    <div class="muted" style="line-height:1.8">${logs}</div>`;
+  if (logName) $("logTitle").textContent = "— " + logName;
+}
+
+async function openLog(name) {
+  logName = name; logOffset = 0;
+  showTab("jobs");
+  if ($("logTitle")) $("logTitle").textContent = "— " + name;
+  if ($("log")) $("log").textContent = "";
+  pollLog(true);
+  if (logTimer) clearInterval(logTimer);
+  logTimer = setInterval(pollLog, 2500);
+}
+
+async function pollLog(first) {
+  if (!logName || curTab !== "jobs") return;
+  try {
+    const r = await (await fetch(`/api/log?name=${encodeURIComponent(logName)}&offset=${logOffset}`)).json();
+    if (!r.ok) return;
+    const el = $("log"); if (!el) return;
+    if (first) el.textContent = "";
+    if (r.offset > logOffset) {
+      const atEnd = el.scrollTop + el.clientHeight >= el.scrollHeight - 10;
+      el.textContent += r.data;
+      logOffset = r.offset;
+      if (atEnd || first) el.scrollTop = el.scrollHeight;
+    }
+  } catch {}
+}
+
+async function startSvc(id) {
+  await api("/api/job/start", { id, options: {}, env: {} });
+  toast("service starting…"); setTimeout(refresh, 1200);
+}
+async function stopJob(j) { await api("/api/job/stop", { job: j }); toast("stop sent"); setTimeout(refresh, 800); }
+
+/* ── Online bot: live control, proxied from the :8777 panel ── */
+async function onlineAction(path, body) {
+  try {
+    const r = await fetch("/api/online" + path, { method: "POST",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+    const js = await r.json();
+    if (!js.ok) toast(js.error || "online action failed", true);
+    else if (js.panel && js.panel.ok === false) toast(js.panel.error || "panel rejected the action", true);
+    else if (js.panel && js.panel.note) toast(js.panel.note);
+  } catch (e) { toast("online action failed", true); }
+  refreshOnline();
+}
+
+function renderOnline() {
+  const p = $("page-online");
+  if (!OB.up) {
+    p.innerHTML = `
+      <h2 class="sec">Online bot — not running</h2>
+      <div class="muted" style="max-width:760px;line-height:1.6">Launch the online bot to get live
+        <b>ladder runs (set how many rated games)</b>, <b>auto-accept challenges</b>, and
+        <b>private challenges</b> right here — proxied from the bot's own control panel, so you never
+        open :8777 separately. Adjust ckpt / team / dossier options on the
+        <a href="#" onclick="showTab('play')">Play</a> tab first if you want; the button launches
+        with the current .env defaults.</div>
+      <div class="row"><button class="battlebtn" style="max-width:280px"
+          onclick="launch('play_online')">▶ Launch online bot</button></div>
+      <div class="muted" style="margin-top:10px">Once it logs in, its control panel comes up and the
+        live controls appear here automatically (polling…).</div>`;
+    return;
+  }
+  const run = OB.run || {}, teams = OB.teams || [], tally = OB.tally || {};
+  const tOpts = `<option value="">— Teambuilder / default —</option>` +
+    teams.map(t => `<option ${t === OB.team_pin ? "selected" : ""}>${esc(t)}</option>`).join("");
+  p.innerHTML = `
+    <h2 class="sec">Online bot — live control
+      <span class="muted">(${esc(OB.username || "")} · ${esc(OB.format || "")} · panel :${OB.port})</span></h2>
+    <div class="cards">
+      <div class="card"><h3>Ladder run</h3>
+        <label class="fld">Team</label><select id="ob-team">${tOpts}</select>
+        <label class="fld">Rated games to play</label>
+        <input type="number" id="ob-games" min="1" max="500" value="${run.target || 10}">
+        <button class="battlebtn" id="ob-battle" ${run.active ? "disabled" : ""}>Battle!</button>
+        <div class="row"><button class="btn" id="ob-stop">Stop run</button>
+          <button class="btn" id="ob-cancel">Cancel search</button></div>
+        <div style="margin-top:9px;font:bold 10pt Verdana;color:#7fb5e6">${
+          run.active ? `Run: ${run.done}/${run.target} played` + (OB.searching ? " — searching…" : "")
+            : (OB.searching ? "Searching…" : "idle")}</div>
+      </div>
+      <div class="card"><h3>Challenge &amp; options</h3>
+        <label class="fld">Opponent username</label>
+        <input type="text" id="ob-user" placeholder="exact Showdown username">
+        <div class="row"><button class="btn" style="flex:1" id="ob-chal">Challenge</button>
+          <button class="btn" id="ob-chal-x">Cancel</button></div>
+        <div class="chk" style="margin-top:10px"><input type="checkbox" id="ob-aa" ${OB.auto_accept ? "checked" : ""}>
+          <label for="ob-aa">Auto-accept incoming challenges</label></div>
+        <div class="chk"><input type="checkbox" id="ob-ac" ${OB.auto_close ? "checked" : ""}>
+          <label for="ob-ac">Auto-close finished battle tabs</label></div>
+        <div class="stat" style="margin-top:10px"><span>Rating <b>${OB.rating ?? "—"}</b></span>
+          <span>Session <b>${(tally.ai || 0)}W-${(tally.you || 0)}L${tally.draw ? "-" + tally.draw + "D" : ""}</b></span>
+          <span>Live <b>${(OB.live || []).length}</b></span></div>
+        ${OB.challenge_out ? `<div class="muted" style="margin-top:5px">outgoing challenge: ${esc(OB.challenge_out)}</div>` : ""}
+      </div>
+    </div>
+    <h2 class="sec">Activity</h2>
+    <div id="oblog">${esc((OB.events || []).join("\\n"))}</div>`;
+  $("ob-battle").onclick = () => onlineAction("/ladder/start",
+    { games: +$("ob-games").value || 1, team: $("ob-team").value });
+  $("ob-stop").onclick = () => onlineAction("/ladder/stop");
+  $("ob-cancel").onclick = () => onlineAction("/ladder/stop");
+  $("ob-chal").onclick = () => onlineAction("/challenge",
+    { user: $("ob-user").value, team: $("ob-team").value });
+  $("ob-chal-x").onclick = () => onlineAction("/challenge/cancel");
+  $("ob-aa").onchange = () => onlineAction("/options", { auto_accept: $("ob-aa").checked });
+  $("ob-ac").onchange = () => onlineAction("/options", { auto_close: $("ob-ac").checked });
+  const lg = $("oblog"); if (lg) lg.scrollTop = lg.scrollHeight;
+}
+
+/* ── embedded UIs (team builder :5174, self-play dashboard :5175) ── */
+function embedTab(pageId, svcKey, port, jobId, title, blurb) {
+  const up = S && S.services[svcKey] && S.services[svcKey].up;
+  $(pageId).innerHTML = up
+    ? `<div class="muted" style="margin:2px 0 8px">${title} —
+        <a href="http://127.0.0.1:${port}/" target="_blank">open in a new browser tab ↗</a></div>
+       <iframe class="embed" src="http://127.0.0.1:${port}/"></iframe>`
+    : `<div class="card"><h3>${title} — not running</h3>
+        <div class="desc">${blurb}</div>
+        <button class="btn" onclick="startSvc('${jobId}')">▶ Start ${title} (:${port})</button></div>`;
+}
+function renderTeams() {
+  embedTab("page-teams", "team_builder", 5174, "svc_team_builder", "Replay parser & team builder",
+    "The :5174 page is BOTH tools in one: (1) the VOD replay parser/annotator — upload a Showdown " +
+    "replay, review the parsed teams + belief fill, and export JSONL training transitions; and " +
+    "(2) the team builder — generate AI teams from a seed core, validate them with Showdown's own " +
+    "validator, and score them (archetype · TP confidence · matchup prior). Embedded here once running.");
+}
+function renderMonitor() {
+  embedTab("page-monitor", "dashboard", 5175, "svc_dashboard", "Self-play dashboard",
+    "Live self-play generations, eval feeds, a run launcher, and the console. Embedded here once running.");
+}
+
+/* ── boot + poll ── */
+async function refreshOnline() {
+  try { OB = await (await fetch("/api/online/status")).json(); }
+  catch { OB = { up: false }; }
+  if (curTab === "online") renderOnline();
+}
+
+async function refresh() {
+  try {
+    S = await (await fetch("/api/status")).json();
+    $("hdrDeploy").textContent =
+      `${S.format} · battle=${(S.env.VD_BATTLE_CKPT || "").split("/").slice(-2, -1)[0] || "?"}` +
+      ` · tp=${(S.env.VD_TP_CKPT || "").split("/").slice(-2, -1)[0] || "?"}`;
+    if (curTab === "overview") renderOverview();
+    if (curTab === "deploy") renderDeploy();
+    if (curTab === "jobs") renderJobs();
+    if (curTab === "teams") renderTeams();
+    if (curTab === "monitor") renderMonitor();
+    fillSelects();
+  } catch { $("hdrDeploy").textContent = "server unreachable?"; }
+  if (curTab === "online") refreshOnline();
+}
+
+(async function boot() {
+  CMDS = (await (await fetch("/api/commands")).json()).commands;
+  renderCommandPages();
+  await refresh();
+  renderOverview(); renderDeploy(); renderJobs();
+  showTab("overview");
+  setInterval(refresh, 3000);
+})();
+</script></body></html>

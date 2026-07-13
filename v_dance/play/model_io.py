@@ -27,20 +27,21 @@ import numpy as np
 # ── Canonical PRODUCTION checkpoints — the single source of truth so every caller
 #    (harnesses / gauntlet / run_local_battle) never drifts. ``<type>_<variant>[_genN].pt``
 #    naming scheme (2026-06-25).
-#    ⚠ STATE (M1 comment refresh, 2026-07-11): these DEFAULTS are the *fallback* when no
-#    override is given — the LIVE deploy rides ``.env`` (VD_BATTLE_CKPT / VD_TP_CKPT, currently
-#    ``checkpoints_attn_adv`` + v6 TP; era-2 pending its gate). DEFAULT_BC below is still the
-#    v19 BC anchor ``checkpoints_attn_pre_gen141/battle_base.pt`` (val 0.5853) — promoting the
-#    era winner onto this line is playbook decision D6 (USER call, one line + suite). The old
-#    v17 self-play champion ``checkpoints_attn/battle_selfplay_gen141.pt`` stays unloadable on
-#    v19 (stale-layout guard) and is history, not a restore target.
+#    ⚠ STATE (D6 promotion, 2026-07-12 — USER call on the era-2/set-head evidence): the
+#    defaults now POINT AT the measured winners, so a flag-less/env-less caller serves the
+#    same stack as the ``.env`` deploy.
+#    * BC = ``checkpoints_attn_era2`` (ep5 val 0.592; step-4 gates green; online block
+#      performance rating 1271 vs era-1's 1212 at equal opposition).
+#    * TP = ``checkpoints_set/teampreview_sbda.pt`` (contrastive set head; --set-ab gate
+#      +3.8pp bring-set exact over v6 serve-faithful; online block performance 1425 at
+#      mean-1393 opposition — artifacts/logs/tp_set_ab_gate.log).
 #    Era-chain rule: warm-start + adv-value base for era N+1 = the gated era-N net; the
-#    pre_gen141 anchor FILE stays untouched as the fixed historical reference.
-#    Team-preview default: ``checkpoints/teampreview_sbda.pt`` (SBDA tpfeat-v6, feat_dim 253,
-#    D4 verdict winner). Legacy 46-dim variant kept at ``checkpoints_pre_sbda/``.
+#    pre_gen141 anchor FILE (val 0.5853) stays untouched as the fixed historical reference.
+#    Prior defaults (rollback): ``checkpoints_attn_pre_gen141/battle_base.pt`` ·
+#    ``checkpoints/teampreview_sbda.pt`` (v6). Legacy 46-dim TP at ``checkpoints_pre_sbda/``.
 _AI_TRAIN = Path(__file__).resolve().parents[2] / "ai_train_scripts"
-DEFAULT_BC_CHECKPOINT = _AI_TRAIN / "BC_model" / "checkpoints_attn_pre_gen141" / "battle_base.pt"
-DEFAULT_TP_CHECKPOINT = _AI_TRAIN / "teamPreview_model" / "checkpoints" / "teampreview_sbda.pt"
+DEFAULT_BC_CHECKPOINT = _AI_TRAIN / "BC_model" / "checkpoints_attn_era2" / "battle_base.pt"
+DEFAULT_TP_CHECKPOINT = _AI_TRAIN / "teamPreview_model" / "checkpoints_set" / "teampreview_sbda.pt"
 
 try:
     import torch
@@ -418,6 +419,8 @@ def load_team_chooser(path, device: str = "cpu"):
         use_teammate_bias=cfg.get("use_teammate_bias", False),
         # 2026-07-11: contrastive set head — absent in older configs -> False -> byte-identical.
         use_set_head=cfg.get("use_set_head", False),
+        # DS-4c stage 3: Bo3 set-context input — same absent-defaults-False compat rule.
+        use_set_ctx=cfg.get("use_set_ctx", False),
     )
     model.load_state_dict(ckpt["model_state"])
     model.to(device).eval()
@@ -536,7 +539,7 @@ TP_SET_HEAD = True
 
 
 def _set_head_order(model, oi, of, pi, pf, aff_t, valid: int, bring_k: int, lead_k: int,
-                    n: int, device: str):
+                    n: int, device: str, ctx_kw: Optional[dict] = None):
     """(order, True) via the contrastive set head, or (None, False) when not applicable
     (model has no set head / nothing to choose)."""
     from itertools import combinations
@@ -552,7 +555,7 @@ def _set_head_order(model, oi, of, pi, pf, aff_t, valid: int, bring_k: int, lead
             torch.as_tensor([list(pi)], device=device),
             torch.as_tensor(of[None], device=device),
             torch.as_tensor(pf[None], device=device),
-            aff_t, subsets=subsets)
+            aff_t, subsets=subsets, **(ctx_kw or {}))
     scores = np.asarray(scores[0].detach().cpu())
     ll = np.asarray(ll[0].detach().cpu())
     brought = list(subsets[int(np.argmax(scores))])
@@ -602,6 +605,8 @@ def team_order(
     belief=None, own_known: Optional[dict] = None,
     opp_known: Optional[dict] = None,
     joint_bring: Optional[bool] = None,
+    our_set_ctx: Optional[np.ndarray] = None,
+    opp_set_ctx: Optional[np.ndarray] = None,
 ) -> List[int]:
     """Return roster indices to bring, LEADS FIRST (matching how the trainer
     labels — the first two brought are the leads), capped at ``n``.
@@ -641,11 +646,24 @@ def team_order(
         aff = teammate_affinity_matrix(our_species, belief, n=6)
         aff_t = torch.as_tensor(aff[None], device=device)
 
+    # DS-4c stage 3: Bo3 previous-game context (None off-set / for non-ctx ckpts —
+    # zeros or absence are the zero-init identity either way).
+    ctx_kw = {}
+    if getattr(model, "use_set_ctx", False) and our_set_ctx is not None:
+        ctx_kw = {
+            "our_set_ctx": torch.as_tensor(np.asarray(our_set_ctx, dtype=np.float32)[None],
+                                           device=device),
+            "opp_set_ctx": torch.as_tensor(
+                np.asarray(opp_set_ctx if opp_set_ctx is not None
+                           else np.zeros_like(our_set_ctx), dtype=np.float32)[None],
+                device=device),
+        }
+
     # Contrastive set-head decode (2026-07-11): a --set-head checkpoint scores bring-SETS
     # with a head TRAINED on exactly that question — dispatched by its config stamp.
     if TP_SET_HEAD and getattr(model, "use_set_head", False):
         order, ok = _set_head_order(model, oi, of, pi, pf, aff_t,
-                                    valid, bring_k, lead_k, n, device)
+                                    valid, bring_k, lead_k, n, device, ctx_kw=ctx_kw)
         if ok:
             return order
 
@@ -664,7 +682,7 @@ def team_order(
             torch.as_tensor([pi], device=device),
             torch.as_tensor(of[None], device=device),
             torch.as_tensor(pf[None], device=device),
-            aff_t,
+            aff_t, **ctx_kw,
         )
     bring = np.asarray(bring_logits[0].detach().cpu()).ravel()
     lead = np.asarray(lead_logits[0].detach().cpu()).ravel()

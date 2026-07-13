@@ -332,6 +332,51 @@ def fill_beliefs():
     return jsonify(result)
 
 
+# ── M4 team-builder AI (DS-M4 B5): generate + score endpoints ─────────────────
+@app.post("/api/teams/generate")
+def api_teams_generate():
+    """{core: [species], n: int} -> {teams: [{roster, paste, scores}], dropped_illegal}."""
+    body = request.get_json(silent=True) or {}
+    core = [s for s in (body.get("core") or []) if isinstance(s, str) and s.strip()]
+    n = max(1, min(int(body.get("n") or 5), 20))
+    belief = _get_belief()
+    if belief is None:
+        return jsonify({"error": "belief data unavailable on the server"}), 503
+    if not core:
+        return jsonify({"error": "core: at least one seed species required"}), 400
+    try:
+        from v_dance.datatools.team_generator import generate_teams
+        result = generate_teams(core, n, belief,
+                                validate=bool(body.get("validate", True)),
+                                score=bool(body.get("score", True)))
+    except ValueError as exc:                          # unknown seed species etc.
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:                           # noqa: BLE001
+        return jsonify({"error": str(exc)}), 500
+    return jsonify(result)
+
+
+@app.post("/api/teams/score")
+def api_teams_score():
+    """{paste: str} -> {scores} for an arbitrary Showdown-export paste."""
+    body = request.get_json(silent=True) or {}
+    paste = body.get("paste") or ""
+    belief = _get_belief()
+    if belief is None:
+        return jsonify({"error": "belief data unavailable on the server"}), 503
+    if not paste.strip():
+        return jsonify({"error": "paste required"}), 400
+    try:
+        from v_dance.parser.vod_parser.team_sheet import parse_showdown_team
+        from v_dance.datatools.team_generator import score_team
+        mons = parse_showdown_team(paste)
+        if not mons:
+            return jsonify({"error": "no Pokémon parsed from the paste"}), 400
+        return jsonify({"scores": score_team(mons, belief)})
+    except Exception as exc:                           # noqa: BLE001
+        return jsonify({"error": str(exc)}), 500
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     print(f"[server] Project root   : {_PROJECT_ROOT}")

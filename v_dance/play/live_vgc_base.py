@@ -146,8 +146,12 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
         # Phase-3 B-L1 (adapt-rules): serve-time pattern tilt (Wide-Guard streak → spread-move
         # logit bias). OFF by default → prod byte-identical. See v_dance/play/adapt_rules.py.
         adapt_rules = kwargs.pop("adapt_rules", False)
+        # S1 L2b (dossier warm-start, 2026-07-12): fill unknown opp item/ability/moves from the
+        # per-opponent dossier BEFORE belief enrichment. OFF by default → prod byte-identical.
+        use_dossier = kwargs.pop("use_dossier", False)
         super().__init__(*args, **kwargs)
         self._adapt_rules = bool(adapt_rules)
+        self._use_dossier = bool(use_dossier)
         # raw protocol lines accumulated per battle tag (real-time)
         self._proto_log: Dict[str, List[str]] = {}
         # Level C / A3: per-battle within-game opponent belief, keyed by battle tag like _proto_log (the
@@ -298,6 +302,12 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
         # previous turn (the A3 belief feed), so a normal turn parses the prefix once.
         opp_snapshot, prev_turn = self._reconstruct_decision(battle)
         self._feed_match_belief(battle, prev_turn)                      # A3: feed prev-turn damage+speed (no-op unless on)
+        # S1 L2b: cross-game dossier warm-start FIRST (weakest evidence tier), then the
+        # within-game match belief refines on top; the encoder's belief narrowers run last.
+        # getattr: test stubs drive choose_move without running __init__ (adapt_rules pattern).
+        if getattr(self, "_use_dossier", False):
+            from v_dance.play.opponent_dossier import apply_dossier
+            opp_snapshot = apply_dossier(opp_snapshot, battle)
         opp_snapshot = self._apply_match_belief(opp_snapshot, battle)   # A3: within-game belief (no-op unless on)
         state_vec = self._encoder.encode(battle, opp_snapshot=opp_snapshot)
         # Phase-3 memory carry: decisions run on the frame-stack for a memory model
@@ -391,6 +401,23 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
                 battle.turn, battle.battle_tag,
                 self._last_error.get(battle.battle_tag, "?"),
             )
+            # Rejection diagnostic (2026-07-12, Imprison/Protect incident): dump the
+            # request-derived usable lists + our masks so the NEXT desync is root-causable
+            # from the log alone (requests aren't otherwise recorded). Serve-only, no
+            # behavior change; guarded — diagnostics must never break the retry path.
+            try:
+                av = battle.available_moves
+                usable = [[m.id for m in (av[s] if s < len(av) else [])] for s in (0, 1)]
+                masks = [build_legal_action_mask(battle, s) for s in (0, 1)]
+                log.warning(
+                    "  rejection diagnostic [%s]: rejected=(%s,%s) usable_moves=%s "
+                    "mask_legal=%s tried=%s",
+                    battle.battle_tag, action_s0, action_s1, usable,
+                    [[i for i, ok in enumerate(mk) if ok] for mk in masks],
+                    {0: sorted(tried[0]), 1: sorted(tried[1])},
+                )
+            except Exception:                              # noqa: BLE001
+                log.debug("rejection diagnostic failed (non-fatal)", exc_info=True)
             # The model's pick was rejected; a random perturbation will execute instead
             # — drop the rejected step so the trajectory holds only executed decisions.
             self._discard_rl_decision(battle, "turn")
@@ -867,6 +894,9 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
         opp_snapshot = None
         try:
             opp_snapshot = self._build_opp_snapshot_current(battle)
+            if getattr(self, "_use_dossier", False):        # S1 L2b: same tier order as choose_move
+                from v_dance.play.opponent_dossier import apply_dossier
+                opp_snapshot = apply_dossier(opp_snapshot, battle)
             opp_snapshot = self._apply_match_belief(opp_snapshot, battle)   # A3: within-game belief (no-op unless on)
             state_vec = self._encoder.encode(battle, opp_snapshot=opp_snapshot)
         except Exception:

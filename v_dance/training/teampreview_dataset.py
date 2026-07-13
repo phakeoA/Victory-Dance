@@ -220,6 +220,53 @@ def _ots_sheet_map(firsts: Dict[str, dict]) -> Dict[str, "object"]:
     return out
 
 
+def _rid_order(rid: str):
+    """Sort key for games within a Bo3 set: numeric room suffix when present."""
+    tail = str(rid).rsplit("-", 1)[-1]
+    return (0, int(tail)) if tail.isdigit() else (1, str(rid))
+
+
+def build_set_prev_map(files: Sequence[str]) -> Dict[str, dict]:
+    """DS-4c stage 3: {rid: {"p1": (brought, leads), "p2": (...)}} — each Bo3 game's
+    PREVIOUS game's brought/leads per side, from a cheap first-line pre-pass over the
+    corpus (``bo3_set_id`` groups games; room-number order = play order; leads = the
+    first LEAD_K brought, the always-reliable part of the label). Games without a set
+    (or game 1 of a set) simply don't appear."""
+    by_set: Dict[str, List[Tuple[str, dict]]] = {}
+    for fp in files:
+        try:
+            t = _first_transition(fp)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not t or not t.get("bo3_set_id"):
+            continue
+        by_set.setdefault(str(t["bo3_set_id"]), []).append((str(t.get("replay_id")), t))
+    out: Dict[str, dict] = {}
+    for games in by_set.values():
+        games.sort(key=lambda g: _rid_order(g[0]))
+        for (rid, _t), (_prid, pt) in zip(games[1:], games[:-1]):
+            prev = {}
+            for pid in ("p1", "p2"):
+                brought = list(((pt.get("players") or {}).get(pid) or {}).get("brought") or [])
+                prev[pid] = (brought, brought[:LEAD_K])
+            out[rid] = prev
+    return out
+
+
+def _set_ctx_vec(roster_norm: List[str], brought: Sequence[str],
+                 leads: Sequence[str]) -> np.ndarray:
+    """(TEAM_SIZE, 2) [brought_last, led_last] aligned to the roster by norm species."""
+    b = {norm_species(s) for s in brought if s}
+    ld = {norm_species(s) for s in leads if s}
+    v = np.zeros((TEAM_SIZE, 2), dtype=np.float32)
+    for i, ns in enumerate(roster_norm[:TEAM_SIZE]):
+        if ns in b:
+            v[i, 0] = 1.0
+        if ns in ld:
+            v[i, 1] = 1.0
+    return v
+
+
 def _label_indices(roster_norm: List[str], picks: Sequence[str]) -> Tuple[List[int], int]:
     """Map brought species to their roster positions (by normalised species).
 
@@ -245,7 +292,8 @@ def _label_indices(roster_norm: List[str], picks: Sequence[str]) -> Tuple[List[i
 def _example_for_side(t: dict, side: str, opp: str,
                       stats: Optional[Counter],
                       feat_fn: Callable = mon_dex_features,
-                      sheet_map: Optional[dict] = None) -> Optional[dict]:
+                      sheet_map: Optional[dict] = None,
+                      set_prev: Optional[dict] = None) -> Optional[dict]:
     players = t.get("players") or {}
     me = players.get(side) or {}
     them = players.get(opp) or {}
@@ -295,7 +343,7 @@ def _example_for_side(t: dict, side: str, opp: str,
         stats["ots_opp_overlay_mons"] += sum(
             1 for s in opp_roster if sheet_map.get(norm_species(s)) is not None)
 
-    return {
+    ex = {
         "our_species": roster_norm,
         "opp_species": [norm_species(s) for s in opp_roster],
         "our_feat": np.stack([feat_fn(s) for s in roster]),
@@ -307,6 +355,16 @@ def _example_for_side(t: dict, side: str, opp: str,
         "replay_id": t.get("replay_id"),
         "side": side,
     }
+    # DS-4c stage 3: Bo3 previous-game context (this game = game 2/3 of a set).
+    # Keys only present on set games — off-set examples stay byte-identical dicts.
+    if set_prev:
+        ob, ol = set_prev.get(side) or ([], [])
+        pb, pl = set_prev.get(opp) or ([], [])
+        ex["our_set_ctx"] = _set_ctx_vec(roster_norm, ob, ol)
+        ex["opp_set_ctx"] = _set_ctx_vec(ex["opp_species"], pb, pl)
+        if stats is not None:
+            stats["set_ctx_examples"] += 1
+    return ex
 
 
 def build_examples(
@@ -321,6 +379,7 @@ def build_examples(
     examples: List[dict] = []
     if limit_files is not None:
         files = list(files)[:limit_files]
+    set_prev_map = build_set_prev_map(files)     # DS-4c: {rid: prev-game brought/leads}
     for fp in files:
         stats["files"] += 1
         try:
@@ -339,10 +398,12 @@ def build_examples(
             sheet_map = _ots_sheet_map(firsts)
             if sheet_map:
                 stats["ots_sheet_replays"] += 1
+        set_prev = set_prev_map.get(str(t.get("replay_id")))
         for side, opp in (("p1", "p2"), ("p2", "p1")):
             if side not in sides:
                 continue
-            ex = _example_for_side(t, side, opp, stats, feat_fn, sheet_map=sheet_map)
+            ex = _example_for_side(t, side, opp, stats, feat_fn, sheet_map=sheet_map,
+                                   set_prev=set_prev)
             if ex is not None:
                 examples.append(ex)
     stats["replays"] = len({e["replay_id"] for e in examples})
@@ -406,7 +467,8 @@ class TeamPreviewDataset(Dataset):
     def __init__(self, examples: Sequence[dict], vocab: Dict[str, int],
                  feat_dim: Optional[int] = None,
                  affinity_fn: Optional[Callable] = None,
-                 subset_mask_p: float = 0.0, subset_mask_k: int = 0, aug_seed: int = 0):
+                 subset_mask_p: float = 0.0, subset_mask_k: int = 0, aug_seed: int = 0,
+                 with_set_ctx: bool = False):
         if not _HAS_TORCH:  # pragma: no cover
             raise RuntimeError("torch is required for TeamPreviewDataset")
         # Subset-mask augmentation (2026-07-10, TP tier-2 — docs/teampreview_bring_lead_design.md
@@ -446,6 +508,13 @@ class TeamPreviewDataset(Dataset):
         self.lead = np.zeros((n, TEAM_SIZE), dtype=np.float32)
         self.valid_bring = np.zeros((n,), dtype=np.float32)
         self.valid_lead = np.zeros((n,), dtype=np.float32)     # audit: mask a species-match-shifted lead
+        # DS-4c stage 3: Bo3 previous-game context tensors — emitted ONLY when the
+        # consumer opts in (with_set_ctx), so every existing batch stays byte-identical.
+        # Off-set examples carry zeros (== "no context", the zero-init identity).
+        self.with_set_ctx = bool(with_set_ctx)
+        if self.with_set_ctx:
+            self.our_set_ctx = np.zeros((n, TEAM_SIZE, 2), dtype=np.float32)
+            self.opp_set_ctx = np.zeros((n, TEAM_SIZE, 2), dtype=np.float32)
         self.replay_ids: List[str] = []
 
         for i, ex in enumerate(examples):
@@ -460,6 +529,11 @@ class TeamPreviewDataset(Dataset):
             self.replay_ids.append(ex["replay_id"])
             if self.use_affinity:
                 self.our_affinity[i] = affinity_fn(ex["our_species"])
+            if self.with_set_ctx:
+                if ex.get("our_set_ctx") is not None:
+                    self.our_set_ctx[i] = ex["our_set_ctx"]
+                if ex.get("opp_set_ctx") is not None:
+                    self.opp_set_ctx[i] = ex["opp_set_ctx"]
 
         self.t_our_idx = torch.from_numpy(self.our_idx)
         self.t_opp_idx = torch.from_numpy(self.opp_idx)
@@ -471,6 +545,9 @@ class TeamPreviewDataset(Dataset):
         self.t_valid_lead = torch.from_numpy(self.valid_lead)
         if self.use_affinity:
             self.t_our_affinity = torch.from_numpy(self.our_affinity)
+        if self.with_set_ctx:
+            self.t_our_set_ctx = torch.from_numpy(self.our_set_ctx)
+            self.t_opp_set_ctx = torch.from_numpy(self.opp_set_ctx)
 
     def __len__(self) -> int:
         return self.t_our_idx.shape[0]
@@ -489,6 +566,9 @@ class TeamPreviewDataset(Dataset):
         }
         if self.use_affinity:
             item["our_affinity"] = self.t_our_affinity[idx]
+        if self.with_set_ctx:
+            item["our_set_ctx"] = self.t_our_set_ctx[idx]
+            item["opp_set_ctx"] = self.t_opp_set_ctx[idx]
         # Subset-mask augmentation (train-only; see __init__). Fresh draw per access → different
         # masks per epoch. Only full 6-mon rosters are touched; the model's own pad handling
         # (feat-zero test → attention-key + context-mean exclusion) does the rest in forward.

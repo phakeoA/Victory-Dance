@@ -58,6 +58,7 @@ class TeamPreviewModel(nn.Module):
         attn_heads: int = 4,
         use_teammate_bias: bool = False,
         use_set_head: bool = False,
+        use_set_ctx: bool = False,
     ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -66,6 +67,7 @@ class TeamPreviewModel(nn.Module):
         self.use_cross_attn = use_cross_attn
         self.use_teammate_bias = use_teammate_bias
         self.use_set_head = use_set_head
+        self.use_set_ctx = use_set_ctx
         self.emb = nn.Embedding(vocab_size, emb_dim, padding_idx=0)
         self.mon_mlp = _mlp([emb_dim + feat_dim, hidden, hidden], dropout)
         # 15b-arch.1: positionless self-attention over OUR 6 mons makes the synergy TAGS interact
@@ -91,7 +93,18 @@ class TeamPreviewModel(nn.Module):
         if use_set_head:
             self.set_pair_mlp = _mlp([hidden * 2, 64, 1], dropout)
             self.set_global_mlp = _mlp([hidden * 3, hidden, 1], dropout)
+        # DS-4c stage 3 (Bo3 set-context, 2026-07-12): per-mon [brought_last, led_last]
+        # from the previous game of a Bo3 set rides a SEPARATE input (touching the
+        # tp_features schema would change FEAT_DIM and brick every deployed ckpt via the
+        # lockstep guard). Zero-init ⇒ absent/zero context is byte-identical; the shared
+        # projection feeds BOTH sides' mon vectors before attention.
+        if use_set_ctx:
+            self.set_ctx_proj = nn.Linear(2, hidden)
         self._init_weights()
+        if use_set_ctx:
+            with torch.no_grad():
+                self.set_ctx_proj.weight.zero_()
+                self.set_ctx_proj.bias.zero_()
         if use_set_head:
             # Zero-init the two final linears -> score(S) == Σ bring_logit_i at initialization,
             # i.e. the set decode is EXACTLY the greedy top-k decode until training earns a
@@ -114,11 +127,20 @@ class TeamPreviewModel(nn.Module):
         our_feat: torch.Tensor,
         opp_feat: torch.Tensor,
         our_affinity: Optional[torch.Tensor] = None,
+        our_set_ctx: Optional[torch.Tensor] = None,
+        opp_set_ctx: Optional[torch.Tensor] = None,
     ):
         """Shared trunk: (bring_logits, lead_logits, our_h, our_ctx, opp_ctx) — identical ops
-        to the historical forward(); the extra returns feed the set head only."""
+        to the historical forward(); the extra returns feed the set head only.
+        ``*_set_ctx`` (B, 6, 2) = Bo3 previous-game [brought, led] per mon (stage 3);
+        added to the mon vectors BEFORE attention so set context propagates."""
         our_h = self.encode_team(our_idx, our_feat)   # (B, 6, H)
         opp_h = self.encode_team(opp_idx, opp_feat)   # (B, 6, H)
+        if self.use_set_ctx:
+            if our_set_ctx is not None:
+                our_h = our_h + self.set_ctx_proj(our_set_ctx)
+            if opp_set_ctx is not None:
+                opp_h = opp_h + self.set_ctx_proj(opp_set_ctx)
         if self.use_self_attn or self.use_cross_attn:
             # Pad-safe attention (15b-arch.1 review): a PAD slot is an ALL-ZERO FEATURE row (what
             # _pack_side writes) — which, unlike idx==0, does NOT collide with OOV mons (those still
@@ -165,9 +187,12 @@ class TeamPreviewModel(nn.Module):
         our_feat: torch.Tensor,
         opp_feat: torch.Tensor,
         our_affinity: Optional[torch.Tensor] = None,
+        our_set_ctx: Optional[torch.Tensor] = None,
+        opp_set_ctx: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         bring_logits, lead_logits, *_ = self._forward_internals(
-            our_idx, opp_idx, our_feat, opp_feat, our_affinity)
+            our_idx, opp_idx, our_feat, opp_feat, our_affinity,
+            our_set_ctx=our_set_ctx, opp_set_ctx=opp_set_ctx)
         return bring_logits, lead_logits               # bring_logits, lead_logits
 
     def score_subsets(
@@ -178,6 +203,8 @@ class TeamPreviewModel(nn.Module):
         opp_feat: torch.Tensor,
         our_affinity: Optional[torch.Tensor] = None,
         subsets: Optional[Sequence[Sequence[int]]] = None,
+        our_set_ctx: Optional[torch.Tensor] = None,
+        opp_set_ctx: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Score candidate bring-subsets AS UNITS (the contrastive set head).
 
@@ -192,7 +219,8 @@ class TeamPreviewModel(nn.Module):
         if not self.use_set_head:
             raise RuntimeError("score_subsets requires a model built with use_set_head=True")
         bring_logits, lead_logits, our_h, our_ctx, opp_ctx = self._forward_internals(
-            our_idx, opp_idx, our_feat, opp_feat, our_affinity)
+            our_idx, opp_idx, our_feat, opp_feat, our_affinity,
+            our_set_ctx=our_set_ctx, opp_set_ctx=opp_set_ctx)
         n = our_h.shape[1]
         if subsets is None:
             subsets = tuple(combinations(range(n), 4))
@@ -249,15 +277,16 @@ def build_model(
     attn_heads: int = 4,
     use_teammate_bias: bool = False,
     use_set_head: bool = False,
+    use_set_ctx: bool = False,
 ) -> TeamPreviewModel:
     model = TeamPreviewModel(vocab_size, feat_dim, emb_dim, hidden, dropout,
                              use_self_attn=use_self_attn, use_cross_attn=use_cross_attn,
                              attn_heads=attn_heads, use_teammate_bias=use_teammate_bias,
-                             use_set_head=use_set_head).to(device)
+                             use_set_head=use_set_head, use_set_ctx=use_set_ctx).to(device)
     print(
         f"[TeamPreviewModel] {model.count_parameters():,} params | "
         f"vocab={vocab_size} feat_dim={feat_dim} emb={emb_dim} hidden={hidden} "
         f"self_attn={use_self_attn} cross_attn={use_cross_attn} set_head={use_set_head} "
-        f"device={device}"
+        f"set_ctx={use_set_ctx} device={device}"
     )
     return model

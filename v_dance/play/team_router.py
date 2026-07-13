@@ -73,7 +73,13 @@ def route(opponent: str, pool: List[str],
         if last.get("result") != "human":            # bench convention: "human" = we LOST
             return None, "won/drew last game — keep course"
         lost_team = last.get("our_team")
-        zid = _assign_archetype(list((d.get("mons") or {}).values()))
+        # Assign the archetype from the LAST game's revealed team when the dossier records it
+        # (new format) — falls back to the all-time union for pre-2026-07-13 dossiers.
+        all_mons = d.get("mons") or {}
+        last_revealed = set(last.get("revealed") or [])
+        mons = ([all_mons[k] for k in last_revealed if k in all_mons] if last_revealed
+                else list(all_mons.values()))
+        zid = _assign_archetype(mons)
         if zid is None:
             return None, "no revealed mons to assign an archetype"
         entry = _priors(priors_path).get(str(zid)) or {}

@@ -93,7 +93,8 @@ def main(argv=None) -> int:
             from v_dance.training.teampreview_dataset import TEAM_SIZE
             affinity_fn = lambda sp: teammate_affinity_matrix(sp, belief, n=TEAM_SIZE)  # noqa: E731
         loader = DataLoader(TeamPreviewDataset(val_ex, vocab, feat_dim=feat_dim,
-                                               affinity_fn=affinity_fn),
+                                               affinity_fn=affinity_fn,
+                                               with_set_ctx=cfg.get("use_set_ctx", False)),
                             batch_size=args.batch_size, shuffle=False)
         t1 = time.time()
         m = run_epoch(model, loader, args.device, optimizer=None)
@@ -146,7 +147,9 @@ def _set_ab(ckpt_path: str, val_ex, belief, feat_dim: int, args) -> None:
     if cfg.get("use_teammate_bias"):
         from v_dance.training.teampreview_dataset import TEAM_SIZE
         affinity_fn = lambda sp: teammate_affinity_matrix(sp, belief, n=TEAM_SIZE)  # noqa: E731
-    loader = _DL(TeamPreviewDataset(val_ex, vocab, feat_dim=feat_dim, affinity_fn=affinity_fn),
+    use_ctx = bool(cfg.get("use_set_ctx", False))
+    loader = _DL(TeamPreviewDataset(val_ex, vocab, feat_dim=feat_dim, affinity_fn=affinity_fn,
+                                    with_set_ctx=use_ctx),
                  batch_size=args.batch_size, shuffle=False)
 
     stats = {"greedy": [0, 0.0, 0], "set": [0, 0.0, 0]}   # [bring_exact, bring_overlap, lead_exact]
@@ -154,10 +157,14 @@ def _set_ab(ckpt_path: str, val_ex, belief, feat_dim: int, args) -> None:
     t0 = time.time()
     with torch.no_grad():
         for batch in loader:
+            bctx = {}
+            if use_ctx and batch.get("our_set_ctx") is not None:
+                bctx = {"our_set_ctx": batch["our_set_ctx"].to(args.device),
+                        "opp_set_ctx": batch["opp_set_ctx"].to(args.device)}
             bl_g, ll_g = model(batch["our_idx"].to(args.device), batch["opp_idx"].to(args.device),
                                batch["our_feat"].to(args.device), batch["opp_feat"].to(args.device),
                                batch.get("our_affinity").to(args.device)
-                               if batch.get("our_affinity") is not None else None)
+                               if batch.get("our_affinity") is not None else None, **bctx)
             bl_g, ll_g = np.asarray(bl_g.cpu()), np.asarray(ll_g.cpu())
             for r in range(bl_g.shape[0]):
                 bring_lab = set(np.flatnonzero(np.asarray(batch["bring"][r]) > 0.5).tolist())
@@ -177,10 +184,12 @@ def _set_ab(ckpt_path: str, val_ex, belief, feat_dim: int, args) -> None:
                 if has_set:
                     aff_r = (batch["our_affinity"][r][None].to(args.device)
                              if batch.get("our_affinity") is not None else None)
+                    rctx = ({k: v[r][None].to(args.device) for k, v in bctx.items()}
+                            if bctx else None)
                     order, ok = _set_head_order(
                         model, np.asarray(batch["our_idx"][r]), of_r,
                         np.asarray(batch["opp_idx"][r]), np.asarray(batch["opp_feat"][r]),
-                        aff_r, valid_n, BRING_K, LEAD_K, BRING_K, args.device)
+                        aff_r, valid_n, BRING_K, LEAD_K, BRING_K, args.device, ctx_kw=rctx)
                     if not ok:
                         n_skipped += 1
                         continue

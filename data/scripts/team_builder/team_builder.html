@@ -47,6 +47,54 @@
     <div id="main"></div>
   </div>
 
+  <!-- ── M4 Team-builder AI panel (DS-M4 B6): self-contained — inline JS, own endpoints ── -->
+  <details id="tg-panel" style="margin:10px 12px;border:1px solid var(--text3,#666);border-radius:6px;padding:8px 12px">
+    <summary style="cursor:pointer;font-weight:bold">🧪 Generate teams (AI)</summary>
+    <div style="display:flex;gap:6px;align-items:center;margin:8px 0;flex-wrap:wrap">
+      <input id="tg-core" placeholder="seed species, e.g. Mawile, Charizard" style="flex:1;min-width:220px;padding:4px 6px" />
+      <label style="font-size:12px">N <input id="tg-n" type="number" value="5" min="1" max="20" style="width:52px" /></label>
+      <button class="btn" id="tg-go">Generate</button>
+      <span id="tg-status" style="font-size:11px;color:var(--text3,#999)"></span>
+    </div>
+    <div id="tg-out" style="font-size:12px"></div>
+  </details>
+  <script>
+  (function () {
+    const $ = (id) => document.getElementById(id);
+    $("tg-go").addEventListener("click", async () => {
+      const core = $("tg-core").value.split(",").map(s => s.trim()).filter(Boolean);
+      const n = parseInt($("tg-n").value || "5", 10);
+      $("tg-status").textContent = "generating + validating (node) — can take a minute…";
+      $("tg-out").innerHTML = "";
+      try {
+        const r = await fetch("/api/teams/generate", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ core, n }),
+        });
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.error || r.statusText);
+        $("tg-status").textContent = `${j.teams.length} legal team(s), ${j.dropped_illegal} dropped illegal`;
+        for (const t of j.teams) {
+          const s = t.scores || {};
+          const row = document.createElement("div");
+          row.style.cssText = "border-top:1px solid var(--text3,#444);padding:6px 0";
+          row.innerHTML =
+            `<b>${t.roster.join(" · ")}</b><br>` +
+            `<span style="color:var(--text3,#999)">archetype z${s.archetype ? s.archetype.z : "?"} ` +
+            `(dist ${s.archetype ? s.archetype.dist : "?"}) · TP margin ${s.tp_confidence ?? "n/a"} · ` +
+            `matchup prior ${s.matchup_prior ?? "n/a"}</span> ` +
+            `<button class="btn" style="margin-left:8px">copy paste</button>`;
+          row.querySelector("button").addEventListener("click", () =>
+            navigator.clipboard.writeText(t.paste));
+          $("tg-out").appendChild(row);
+        }
+      } catch (e) {
+        $("tg-status").textContent = "error: " + e.message;
+      }
+    });
+  })();
+  </script>
+
   <!-- ── Picker modal (unused currently but kept for future Pokémon picker) ── -->
   <div id="moverlay">
     <div id="modal">

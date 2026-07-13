@@ -77,6 +77,7 @@ class BattleHost:
         accept_open_team_sheet: bool = False,
         max_concurrent_battles: int = 100000,
         adapt_rules: bool = False,
+        use_dossier: bool = False,   # S1 L2b: dossier→snapshot warm-start (default OFF)
         # HTML-replay recording (the same #18 contract as play_vs_human / play_ladder): with
         # live_dir + save_replays set, every finished battle writes a playable Showdown replay to
         # <replay_dir>/<label>_<tag>.html from battle._replay_data — which poke-env accumulates
@@ -117,6 +118,7 @@ class BattleHost:
             accept_open_team_sheet=accept_open_team_sheet,
             max_concurrent_battles=max_concurrent_battles,
             adapt_rules=adapt_rules,
+            use_dossier=use_dossier,
             live_dir=live_dir, save_replays=save_replays,
             replay_dir=replay_dir, replay_label=replay_label,
             replay_copy_dir=replay_copy_dir,
