@@ -29,7 +29,7 @@
   .pill { font:bold 7.5pt Verdana; padding:2px 7px; border-radius:9px; }
   .pill.heavy { background:#5a3324; color:#ffb08a; border:1px solid #8a4a2e; }
   .pill.light { background:#24503a; color:#8ae0ae; border:1px solid #2e7a4e; }
-  label.fld { display:block; font:bold 8pt Verdana; color:#8fa0b0; color:#8aa0b4; margin:7px 0 2px; }
+  label.fld { display:block; font:bold 8pt Verdana; color:#8aa0b4; margin:7px 0 2px; }
   select, input[type=text], input[type=number] { width:100%; padding:4px 7px; font:9.5pt Verdana;
       border:1px solid #46627e; border-radius:4px; background:#17222c; color:#dde8f1; }
   .chk { display:flex; align-items:center; gap:7px; margin:5px 0; font:9pt Verdana; color:#c4d3e0; }
@@ -57,7 +57,7 @@
   .stage b { display:block; font-size:9.5pt; color:#e8f1f8; }
   .stage span { font-size:7.8pt; color:#93a9bc; }
   .stage:hover { background:#31485e; }
-  .arrow { color:#5c7democracy; color:#5c7d9d; font-size:13pt; }
+  .arrow { color:#5c7d9d; font-size:13pt; }
   .stat { display:flex; justify-content:space-between; gap:8px; padding:3px 0;
           border-bottom:1px dashed #2c3f52; font-size:9pt; }
   .stat b { color:#e8f1f8; text-align:right; word-break:break-all; }
@@ -95,6 +95,18 @@
   #oblog { height:180px; overflow-y:auto; background:#141d25; border:1px solid #2c3f52;
            border-radius:6px; padding:8px 10px; font:8.5pt Consolas,monospace; white-space:pre-wrap;
            color:#b9cfe2; margin-top:6px; }
+  .suggest { position:absolute; z-index:20; left:0; right:0; top:100%; background:#17222c;
+             border:1px solid #46627e; border-top:none; border-radius:0 0 5px 5px; max-height:250px;
+             overflow-y:auto; display:none; box-shadow:0 6px 14px rgba(0,0,0,.4); }
+  .suggest.on { display:block; }
+  .suggest .sitem { padding:5px 10px; cursor:pointer; font:9.5pt Verdana; color:#dde8f1; }
+  .suggest .sitem:hover { background:#2c5a8c; }
+  .corechip { display:inline-flex; align-items:center; gap:7px; background:#26384a;
+              border:1px solid #46627e; border-radius:12px; padding:3px 6px 3px 11px; margin:0 6px 6px 0;
+              font:9pt Verdana; color:#dde8f1; }
+  .corechip button { border:none; background:#3a516a; color:#cfe0ee; border-radius:50%; width:17px;
+                     height:17px; cursor:pointer; font:9pt Verdana; line-height:1; padding:0; }
+  .corechip button:hover { background:#4f6d8c; }
 </style></head><body>
 
 <div class="header"><b>🕺 Victory Dance</b><span class="sub">Mission Control</span>
@@ -106,20 +118,23 @@
 <div class="page" id="page-online"></div>
 <div class="page" id="page-play"></div>
 <div class="page" id="page-train"></div>
-<div class="page" id="page-teams"></div>
+<div class="page" id="page-generate"></div>
+<div class="page" id="page-parser"></div>
 <div class="page" id="page-data"></div>
 <div class="page" id="page-eval"></div>
 <div class="page" id="page-deploy"></div>
 <div class="page" id="page-monitor"></div>
 <div class="page" id="page-jobs"></div>
 <div class="toast" id="toast"></div>
+<datalist id="fmtlist"></datalist>
 
 <script>
 const $ = (id) => document.getElementById(id);
 const TABS = [["overview","Overview"],["online","Online bot"],["play","Play"],["train","Train"],
-              ["teams","Parser / Teams"],["data","Data"],["eval","Eval"],["deploy","Deploy"],
-              ["monitor","Monitor"],["jobs","Jobs"]];
-let S = null, CMDS = null, OB = {up:false}, curTab = "overview", logName = null, logOffset = 0, logTimer = null;
+              ["generate","Generate"],["parser","Parser"],["data","Data"],["eval","Eval"],
+              ["deploy","Deploy"],["monitor","Monitor"],["jobs","Jobs"]];
+let S = null, CMDS = null, OB = {up:false}, SPECIES = null, GEN_CORE = [], GEN_TEAMS = [],
+    curTab = "overview", logName = null, logOffset = 0, logTimer = null;
 
 function toast(msg, err) {
   const t = $("toast");
@@ -145,7 +160,8 @@ function showTab(k) {
   TABS.forEach(([t]) => { $("tab-" + t).classList.toggle("on", t === k);
                           $("page-" + t).classList.toggle("on", t === k); });
   if (k === "online") refreshOnline();
-  if (k === "teams" && S) renderTeams();
+  if (k === "generate") renderGenerate();
+  if (k === "parser" && S) renderParser();
   if (k === "monitor" && S) renderMonitor();
   if (k === "jobs" && S) renderJobs();
   if (k === "overview" && S) renderOverview();
@@ -169,6 +185,10 @@ function optField(e, o) {
     return `<label class="fld">${esc(o.label)}</label><select id="${id}"
              class="ckptsel-${o.type}" data-def="${esc(def)}">
              <option value="">— default (deployed) —</option></select>`;
+  if (o.type === "format")
+    return `<label class="fld">${esc(o.label)}</label>
+            <input list="fmtlist" id="${id}" value="" autocomplete="off"
+             placeholder="deployed default — or pick / type a format id">`;
   const t = (o.type === "int" || o.type === "float") ? "number" : "text";
   return `<label class="fld">${esc(o.label)}</label>
           <input type="${t}" id="${id}" value="${esc(def)}" ${o.type==="float"?'step="any"':""}>`;
@@ -203,6 +223,7 @@ function buildArgs(e) {
     const el = $(`opt-${e.id}-${o.name}`);
     if (!el) continue;
     if (o.type === "flag") { if (el.checked) args.push("--" + o.name); continue; }
+    if (o.type === "format") continue;            // goes in the env prefix, not argv
     const v = (el.value || "").trim();
     if (v) args.push("--" + o.name, v);
   }
@@ -212,6 +233,9 @@ function buildArgs(e) {
 function cmdLine(e) {
   const envs = (e.envopts || []).filter(o => $(`env-${e.id}-${o.key}`)?.checked)
                                 .map(o => o.key + "=1 ").join("");
+  const fo = (e.opts || []).find(o => o.type === "format");
+  const fv = fo ? (($(`opt-${e.id}-${fo.name}`) || {}).value || "").trim() : "";
+  const fmtEnv = fv ? `VDANCE_BATTLE_FORMAT=${fv} ` : "";
   let core;
   if (e.module) core = "-m " + e.module;
   else if (e.script) core = e.script;
@@ -219,7 +243,7 @@ function cmdLine(e) {
   const fixed = (e.fixed || []).map(q).join(" ");
   const args = buildArgs(e).map(q).join(" ");
   const tee = e.id === "pytest" ? "" : ` 2>&1 | tee artifacts/logs/${e.id}.log`;
-  return `PYTHONUTF8=1 ${envs}.venv/Scripts/python.exe -X utf8 -u ${core}` +
+  return `PYTHONUTF8=1 ${envs}${fmtEnv}.venv/Scripts/python.exe -X utf8 -u ${core}` +
          (fixed ? " " + fixed : "") + (args ? " " + args : "") + tee;
 }
 
@@ -288,24 +312,52 @@ function renderCommandPages() {
   }
 }
 
+let selSig = null;
 function fillSelects() {
-  document.querySelectorAll(".teamsel").forEach(sel => {
-    const cur = sel.value || sel.dataset.def || "";
-    sel.innerHTML = `<option value="">— default —</option>` +
-      S.teams.map(t => `<option ${t === cur ? "selected" : ""}>${esc(t)}</option>`).join("");
-  });
-  const fill = (cls, rows) => document.querySelectorAll(cls).forEach(sel => {
-    const cur = sel.value || sel.dataset.def || "";
-    sel.innerHTML = `<option value="">— default (deployed) —</option>` +
-      rows.map(r => `<option value="${esc(r.path)}" ${r.path === cur ? "selected" : ""}>
-                     ${esc(r.dir + "/" + r.file)}</option>`).join("");
-  });
-  fill(".ckptsel-ckpt", S.ckpts.battle);
-  fill(".ckptsel-tpckpt", S.ckpts.tp);
+  // Only rebuild the command-card option lists when the underlying inventory actually changed, and
+  // never touch a select the user is editing — otherwise the 3s poll slams shut any open dropdown
+  // (same poll-rebuild glitch class as the online/embed guards; 2026-07-14).
+  const sig = JSON.stringify([S.teams, S.ckpts.battle.map(r => r.path), S.ckpts.tp.map(r => r.path)]);
+  if (sig !== selSig) {
+    selSig = sig;
+    document.querySelectorAll(".teamsel").forEach(sel => {
+      if (document.activeElement === sel) return;
+      const cur = sel.value || sel.dataset.def || "";
+      sel.innerHTML = `<option value="">— default —</option>` +
+        S.teams.map(t => `<option ${t === cur ? "selected" : ""}>${esc(t)}</option>`).join("");
+    });
+    const fill = (cls, rows) => document.querySelectorAll(cls).forEach(sel => {
+      if (document.activeElement === sel) return;
+      const cur = sel.value || sel.dataset.def || "";
+      sel.innerHTML = `<option value="">— default (deployed) —</option>` +
+        rows.map(r => `<option value="${esc(r.path)}" ${r.path === cur ? "selected" : ""}>
+                       ${esc(r.dir + "/" + r.file)}</option>`).join("");
+    });
+    fill(".ckptsel-ckpt", S.ckpts.battle);
+    fill(".ckptsel-tpckpt", S.ckpts.tp);
+  }
+  const dl = $("fmtlist");
+  if (dl) {
+    const full = (S.formats_full && S.formats_full.length) ? S.formats_full
+                 : (S.formats || []).map(f => ({ id: f, name: f }));
+    const html = full.map(f => `<option value="${esc(f.id)}">${esc(f.name)}</option>`).join("");
+    if (dl.innerHTML !== html) dl.innerHTML = html;   // future-proof: whatever's in the registry
+  }
   CMDS.forEach(refreshCmd);
 }
 
 function renderOverview() {
+  // Signature guard: only re-render when something visible changed. The 3s poll otherwise rebuilds
+  // the whole page (SVG + service rows + Start buttons) every tick — cosmetic churn that can also
+  // eat a click on a service Start button (2026-07-14, same poll-rebuild class).
+  const oSig = JSON.stringify({
+    svc: Object.entries(S.services).map(([k, s]) => [k, s.up]),
+    par: [S.parity.battle.match, S.parity.tp.match],
+    fmt: S.format, team: S.env.VD_DEFAULT_TEAM, acct: S.env.PS_USERNAME,
+    jobs: S.jobs.filter(j => j.alive).map(j => [j.id, j.elapsed_s, j.progress && j.progress.value]),
+    exploit: [S.exploit.found, S.exploit.updated]});
+  if ($("page-overview").getAttribute("data-sig") === oSig) return;
+  $("page-overview").setAttribute("data-sig", oSig);
   const p = S.parity;
   const stages = [
     ["data", "1 · Data", "replays → JSONL"], ["data", "2 · Belief", "scrape + blend"],
@@ -397,6 +449,15 @@ function renderExploit() {
 }
 
 function renderDeploy() {
+  // Never rebuild while the user is editing an .env <select>, and skip when nothing changed — the
+  // 3s poll used to snap shut / reset a half-made deploy edit every tick (2026-07-14).
+  const pg = $("page-deploy");
+  if (document.activeElement && pg.contains(document.activeElement)
+      && /^(SELECT|INPUT)$/.test(document.activeElement.tagName)) return;
+  const dSig = JSON.stringify([S.env, S.ckpts.battle.map(r => [r.path, r.mtime]),
+                               S.ckpts.tp.map(r => [r.path, r.mtime]), S.teams, S.formats]);
+  if (pg.getAttribute("data-sig") === dSig) return;
+  pg.setAttribute("data-sig", dSig);
   const inv = [...S.ckpts.battle.map(r => ({...r, kind: "battle"})),
                ...S.ckpts.tp.map(r => ({...r, kind: "TP"}))];
   const envRow = (key, kind) => {
@@ -465,8 +526,24 @@ function jobProgressHTML(j) {
 }
 
 function renderJobs() {
+  const pg = $("page-jobs");
+  // Build the STRUCTURE once — the 3s poll must NOT re-create #log (that would wipe the streamed
+  // log text + scroll every tick). Only the status regions below are updated in place (2026-07-14).
+  if (pg.getAttribute("data-built") !== "1") {
+    pg.setAttribute("data-built", "1");
+    pg.innerHTML = `
+      <h2 class="sec">Running now</h2>
+      <div class="cards" id="jobs-running"></div>
+      <h2 class="sec">All jobs (this Mission Control session)</h2>
+      <table><thead><tr><th>#</th><th>command</th><th>started</th><th>state</th><th>progress</th>
+        <th>log</th><th></th></tr></thead><tbody id="jobs-rows"></tbody></table>
+      <h2 class="sec">Log viewer <span class="muted" id="logTitle"></span></h2>
+      <div id="log">(pick a job or a recent log)</div>
+      <h2 class="sec">Recent artifacts/logs</h2>
+      <div class="muted" id="jobs-loglist" style="line-height:1.8"></div>`;
+  }
   const alive = S.jobs.filter(j => j.alive).reverse();
-  const running = alive.length ? alive.map(j => `<div class="card">
+  $("jobs-running").innerHTML = alive.length ? alive.map(j => `<div class="card">
       <h3>${esc(j.id)} <span class="pill light">running · ${fmtElapsed(j.elapsed_s)}</span>
         ${j.heavy ? '<span class="pill heavy">heavy</span>' : ''}
         <button class="btn red" style="margin-left:auto;padding:3px 10px"
@@ -476,28 +553,19 @@ function renderJobs() {
         onclick="openLog('${esc(j.log)}');return false">${esc(j.log)}</a></div></div>`).join("")
     : `<div class="muted">Nothing running. Launch from Play / Train / Data / Eval — training and the
        exploiter now run here (one heavy job at a time) with live progress.</div>`;
-  const rows = S.jobs.slice().reverse().map(j => `<tr>
+  $("jobs-rows").innerHTML = S.jobs.slice().reverse().map(j => `<tr>
       <td>${j.job}</td><td>${esc(j.id)}</td><td>${j.started}</td>
       <td class="${j.alive ? "ok" : (j.returncode === 0 ? "ok" : "bad")}">
         ${j.alive ? "running" : "exit " + j.returncode}</td>
       <td>${j.progress ? esc(j.progress.label + " " + j.progress.value) : "—"}</td>
       <td><a href="#" onclick="openLog('${esc(j.log)}');return false">${esc(j.log)}</a></td>
       <td>${j.alive ? `<button class="btn red" style="padding:2px 8px;font-size:8pt"
-           onclick="stopJob('${j.job}')">stop</button>` : ""}</td></tr>`).join("");
-  const logs = S.logs.map(l =>
+           onclick="stopJob('${j.job}')">stop</button>` : ""}</td></tr>`).join("")
+    || `<tr><td colspan="7" class="muted">none yet — launch something from Play/Train/Eval/Data.</td></tr>`;
+  $("jobs-loglist").innerHTML = S.logs.map(l =>
     `<a href="#" onclick="openLog('${esc(l.name)}');return false">${esc(l.name)}</a>
      <span class="muted">(${l.mtime}, ${l.kb} KB)</span>`).join("<br>");
-  $("page-jobs").innerHTML = `
-    <h2 class="sec">Running now</h2>
-    <div class="cards">${running}</div>
-    <h2 class="sec">All jobs (this Mission Control session)</h2>
-    <table><tr><th>#</th><th>command</th><th>started</th><th>state</th><th>progress</th><th>log</th><th></th></tr>
-    ${rows || `<tr><td colspan="7" class="muted">none yet — launch something from Play/Train/Eval/Data.</td></tr>`}</table>
-    <h2 class="sec">Log viewer <span class="muted" id="logTitle"></span></h2>
-    <div id="log">(pick a job or a recent log)</div>
-    <h2 class="sec">Recent artifacts/logs</h2>
-    <div class="muted" style="line-height:1.8">${logs}</div>`;
-  if (logName) $("logTitle").textContent = "— " + logName;
+  if (logName && $("logTitle")) $("logTitle").textContent = "— " + logName;
 }
 
 async function openLog(name) {
@@ -545,87 +613,282 @@ async function onlineAction(path, body) {
   refreshOnline();
 }
 
+/* The online bot's format lives HERE (not on the Play card): picking one writes VDANCE_BATTLE_FORMAT
+   to .env, which play_online_browser binds at import — so launching next uses it. (2026-07-14) */
+async function onLaunchFmtChange() {
+  const sel = $("ob-launch-fmt"); if (!sel) return;
+  const fmt = sel.value, note = $("ob-launch-fmt-note");
+  if (!fmt || (S && fmt === S.format)) { if (note) note.textContent = ""; return; }
+  try {
+    await api("/api/env", { key: "VDANCE_BATTLE_FORMAT", value: fmt });
+    if (note) note.textContent = fmt + " saved to .env — the bot will launch with this format.";
+    refresh();
+  } catch (e) { /* api() already surfaced the error */ }
+}
+
+async function launchOnline() {
+  try {
+    const fmt = ($("ob-launch-fmt") || {}).value || "";
+    if (fmt && S && fmt !== S.format) await api("/api/env", { key: "VDANCE_BATTLE_FORMAT", value: fmt });
+    const options = { "ai-team": ($("ob-launch-team") || {}).value || "",
+                      dossier: !!($("ob-launch-dossier") || {}).checked,
+                      "adapt-rules": !!($("ob-launch-adapt") || {}).checked };
+    const js = await api("/api/job/start", { id: "play_online", options, env: {} });
+    toast(`started ${js.job.job} — the bot is logging in…`);
+    showTab("jobs"); openLog(js.job.log); refresh();
+  } catch (e) { /* api() already surfaced the error */ }
+}
+
 function renderOnline() {
-  const p = $("page-online");
-  if (!OB.up) {
+  const p = $("page-online"), state = OB.up ? "up" : "down";
+  // Build the STRUCTURE only on an up<->down transition. The 3s poll must NOT rebuild it, or every
+  // input (rated-games count, team, format, username) resets to its default each tick (bug: 2026-07-13).
+  if (p.getAttribute("data-online") !== state) {
+    p.setAttribute("data-online", state);
+    if (!OB.up) {
+      const curFmt = (S && S.format) || "";
+      const fmtSrc = (S && S.formats_full && S.formats_full.length) ? S.formats_full
+                     : ((S && S.formats) || []).map(f => ({ id: f, name: f }));
+      const fmtOpts = fmtSrc.map(f =>
+        `<option value="${esc(f.id)}" ${f.id === curFmt ? "selected" : ""}>${esc(f.name)}</option>`).join("");
+      const teamOpts = `<option value="">— Teambuilder / default —</option>` +
+        ((S && S.teams) || []).map(t => `<option>${esc(t)}</option>`).join("");
+      p.innerHTML = `
+        <h2 class="sec">Online bot — not running</h2>
+        <div class="muted" style="max-width:820px;line-height:1.6">Set the launch options here, then
+          launch — the live controls (<b>ladder runs</b>, <b>auto-accept</b>, <b>challenges</b>)
+          appear in this tab once the bot logs in. The control panel is embedded here, no separate
+          window.</div>
+        <div class="cards"><div class="card"><h3>Launch config</h3>
+          <label class="fld">Format <span class="muted">(saved to .env — applies on launch)</span></label>
+          <select id="ob-launch-fmt">${fmtOpts}</select>
+          <div class="note" id="ob-launch-fmt-note"></div>
+          <label class="fld">Team pin (optional)</label>
+          <select id="ob-launch-team">${teamOpts}</select>
+          <div class="chk"><input type="checkbox" id="ob-launch-dossier" checked>
+            <label for="ob-launch-dossier">--dossier (S1 belief warm-start)</label></div>
+          <div class="chk"><input type="checkbox" id="ob-launch-adapt" checked>
+            <label for="ob-launch-adapt">--adapt-rules (serve-time pattern tilt)</label></div>
+          <button class="battlebtn" id="ob-launch-btn">▶ Launch online bot</button>
+          <div class="muted" style="margin-top:8px">Battle / TP checkpoints use the deployed .env —
+            override per-run from the <a href="#" onclick="showTab('play')">Play</a> tab if needed.</div>
+        </div></div>
+        <div class="muted" style="margin-top:10px">Once it logs in, the live controls appear here
+          automatically (polling…).</div>`;
+      $("ob-launch-fmt").onchange = onLaunchFmtChange;
+      $("ob-launch-btn").onclick = launchOnline;
+      return;
+    }
+    const tOpts = `<option value="">— Teambuilder / default —</option>` +
+      (OB.teams || []).map(t => `<option ${t === OB.team_pin ? "selected" : ""}>${esc(t)}</option>`).join("");
+    const fmts = (OB.formats && OB.formats.length) ? OB.formats : (OB.format ? [OB.format] : []);
+    const fOpts = fmts.map(f => `<option ${f === OB.format ? "selected" : ""}>${esc(f)}</option>`).join("");
     p.innerHTML = `
-      <h2 class="sec">Online bot — not running</h2>
-      <div class="muted" style="max-width:760px;line-height:1.6">Launch the online bot to get live
-        <b>ladder runs (set how many rated games)</b>, <b>auto-accept challenges</b>, and
-        <b>private challenges</b> right here — proxied from the bot's own control panel, so you never
-        open :8777 separately. Adjust ckpt / team / dossier options on the
-        <a href="#" onclick="showTab('play')">Play</a> tab first if you want; the button launches
-        with the current .env defaults.</div>
-      <div class="row"><button class="battlebtn" style="max-width:280px"
-          onclick="launch('play_online')">▶ Launch online bot</button></div>
-      <div class="muted" style="margin-top:10px">Once it logs in, its control panel comes up and the
-        live controls appear here automatically (polling…).</div>`;
-    return;
+      <h2 class="sec">Online bot — live control <span class="muted" id="ob-hdr"></span></h2>
+      <div class="cards">
+        <div class="card"><h3>Ladder run</h3>
+          <label class="fld">Team</label><select id="ob-team">${tOpts}</select>
+          <label class="fld">Format <span class="muted">(saved to .env — applies on the NEXT launch)</span></label>
+          <select id="ob-fmt">${fOpts}</select>
+          <div class="note" id="ob-fmt-note"></div>
+          <label class="fld">Rated games to play</label>
+          <input type="number" id="ob-games" min="1" max="500" value="${(OB.run && OB.run.target) || 10}">
+          <button class="battlebtn" id="ob-battle">Battle!</button>
+          <div class="row"><button class="btn" id="ob-stop">Stop run</button>
+            <button class="btn" id="ob-cancel">Cancel search</button></div>
+          <div id="ob-prog" style="margin-top:9px;font:bold 10pt Verdana;color:#7fb5e6"></div>
+        </div>
+        <div class="card"><h3>Challenge &amp; options</h3>
+          <label class="fld">Opponent username</label>
+          <input type="text" id="ob-user" placeholder="exact Showdown username">
+          <div class="row"><button class="btn" style="flex:1" id="ob-chal">Challenge</button>
+            <button class="btn" id="ob-chal-x">Cancel</button></div>
+          <div class="chk" style="margin-top:10px"><input type="checkbox" id="ob-aa">
+            <label for="ob-aa">Auto-accept incoming challenges</label></div>
+          <div class="chk"><input type="checkbox" id="ob-ac">
+            <label for="ob-ac">Auto-close finished battle tabs</label></div>
+          <div class="stat" style="margin-top:10px"><span>Rating <b id="ob-rating">—</b></span>
+            <span>Session <b id="ob-tally">0W-0L</b></span>
+            <span>Live <b id="ob-live">0</b></span></div>
+          <div class="muted" id="ob-chalout" style="margin-top:5px"></div>
+        </div>
+      </div>
+      <h2 class="sec">Activity</h2>
+      <div id="oblog"></div>`;
+    $("ob-battle").onclick = () => onlineAction("/ladder/start",
+      { games: +$("ob-games").value || 1, team: $("ob-team").value });
+    $("ob-stop").onclick = () => onlineAction("/ladder/stop");
+    $("ob-cancel").onclick = () => onlineAction("/ladder/stop");
+    $("ob-chal").onclick = () => onlineAction("/challenge",
+      { user: $("ob-user").value, team: $("ob-team").value });
+    $("ob-chal-x").onclick = () => onlineAction("/challenge/cancel");
+    $("ob-aa").onchange = () => onlineAction("/options", { auto_accept: $("ob-aa").checked });
+    $("ob-ac").onchange = () => onlineAction("/options", { auto_close: $("ob-ac").checked });
+    $("ob-team").onchange = () => onlineAction("/team", { team: $("ob-team").value });
+    $("ob-fmt").onchange = () => onlineAction("/format", { format: $("ob-fmt").value });
   }
-  const run = OB.run || {}, teams = OB.teams || [], tally = OB.tally || {};
-  const tOpts = `<option value="">— Teambuilder / default —</option>` +
-    teams.map(t => `<option ${t === OB.team_pin ? "selected" : ""}>${esc(t)}</option>`).join("");
-  p.innerHTML = `
-    <h2 class="sec">Online bot — live control
-      <span class="muted">(${esc(OB.username || "")} · ${esc(OB.format || "")} · panel :${OB.port})</span></h2>
-    <div class="cards">
-      <div class="card"><h3>Ladder run</h3>
-        <label class="fld">Team</label><select id="ob-team">${tOpts}</select>
-        <label class="fld">Rated games to play</label>
-        <input type="number" id="ob-games" min="1" max="500" value="${run.target || 10}">
-        <button class="battlebtn" id="ob-battle" ${run.active ? "disabled" : ""}>Battle!</button>
-        <div class="row"><button class="btn" id="ob-stop">Stop run</button>
-          <button class="btn" id="ob-cancel">Cancel search</button></div>
-        <div style="margin-top:9px;font:bold 10pt Verdana;color:#7fb5e6">${
-          run.active ? `Run: ${run.done}/${run.target} played` + (OB.searching ? " — searching…" : "")
-            : (OB.searching ? "Searching…" : "idle")}</div>
-      </div>
-      <div class="card"><h3>Challenge &amp; options</h3>
-        <label class="fld">Opponent username</label>
-        <input type="text" id="ob-user" placeholder="exact Showdown username">
-        <div class="row"><button class="btn" style="flex:1" id="ob-chal">Challenge</button>
-          <button class="btn" id="ob-chal-x">Cancel</button></div>
-        <div class="chk" style="margin-top:10px"><input type="checkbox" id="ob-aa" ${OB.auto_accept ? "checked" : ""}>
-          <label for="ob-aa">Auto-accept incoming challenges</label></div>
-        <div class="chk"><input type="checkbox" id="ob-ac" ${OB.auto_close ? "checked" : ""}>
-          <label for="ob-ac">Auto-close finished battle tabs</label></div>
-        <div class="stat" style="margin-top:10px"><span>Rating <b>${OB.rating ?? "—"}</b></span>
-          <span>Session <b>${(tally.ai || 0)}W-${(tally.you || 0)}L${tally.draw ? "-" + tally.draw + "D" : ""}</b></span>
-          <span>Live <b>${(OB.live || []).length}</b></span></div>
-        ${OB.challenge_out ? `<div class="muted" style="margin-top:5px">outgoing challenge: ${esc(OB.challenge_out)}</div>` : ""}
-      </div>
-    </div>
-    <h2 class="sec">Activity</h2>
-    <div id="oblog">${esc((OB.events || []).join("\\n"))}</div>`;
-  $("ob-battle").onclick = () => onlineAction("/ladder/start",
-    { games: +$("ob-games").value || 1, team: $("ob-team").value });
-  $("ob-stop").onclick = () => onlineAction("/ladder/stop");
-  $("ob-cancel").onclick = () => onlineAction("/ladder/stop");
-  $("ob-chal").onclick = () => onlineAction("/challenge",
-    { user: $("ob-user").value, team: $("ob-team").value });
-  $("ob-chal-x").onclick = () => onlineAction("/challenge/cancel");
-  $("ob-aa").onchange = () => onlineAction("/options", { auto_accept: $("ob-aa").checked });
-  $("ob-ac").onchange = () => onlineAction("/options", { auto_close: $("ob-ac").checked });
-  const lg = $("oblog"); if (lg) lg.scrollTop = lg.scrollHeight;
+  if (OB.up) updateOnlineLive();
+}
+
+function updateOnlineLive() {
+  if (!$("ob-battle")) return;                       // structure not built yet
+  const run = OB.run || {}, tally = OB.tally || {};
+  const set = (id, v) => { const el = $(id); if (el) el.textContent = v; };
+  set("ob-hdr", `(${OB.username || ""} · ${OB.format || ""} · panel :${OB.port})`);
+  set("ob-rating", OB.rating ?? "—");
+  set("ob-tally", `${(tally.ai || 0)}W-${(tally.you || 0)}L${tally.draw ? "-" + tally.draw + "D" : ""}`);
+  set("ob-live", (OB.live || []).length);
+  set("ob-prog", run.active ? `Run: ${run.done}/${run.target} played` + (OB.searching ? " — searching…" : "")
+                            : (OB.searching ? "Searching…" : "idle"));
+  set("ob-chalout", OB.challenge_out ? "outgoing challenge: " + OB.challenge_out : "");
+  set("ob-fmt-note", OB.env_fmt_saved ? OB.env_fmt_saved + " saved — restart the bot to play it." : "");
+  $("ob-battle").disabled = !!run.active;
+  // reflect server toggle state, but never fight a control the user is actively editing
+  const ae = document.activeElement, aa = $("ob-aa"), ac = $("ob-ac");
+  if (aa && ae !== aa) aa.checked = !!OB.auto_accept;
+  if (ac && ae !== ac) ac.checked = !!OB.auto_close;
+  const lg = $("oblog");
+  if (lg) {
+    const atEnd = lg.scrollTop + lg.clientHeight >= lg.scrollHeight - 8;
+    const txt = (OB.events || []).join("\\n");
+    if (lg.textContent !== txt) { lg.textContent = txt; if (atEnd) lg.scrollTop = lg.scrollHeight; }
+  }
 }
 
 /* ── embedded UIs (team builder :5174, self-play dashboard :5175) ── */
 function embedTab(pageId, svcKey, port, jobId, title, blurb) {
-  const up = S && S.services[svcKey] && S.services[svcKey].up;
-  $(pageId).innerHTML = up
+  const up = !!(S && S.services[svcKey] && S.services[svcKey].up);
+  const el = $(pageId), want = up ? "up" : "down";
+  // Only (re)build on an up<->down TRANSITION. The 3s status poll must NOT rebuild the <iframe>
+  // every tick, or the embedded page reloads and flashes white each time (bug: 2026-07-13).
+  if (el.getAttribute("data-embed") === want) return;
+  el.setAttribute("data-embed", want);
+  el.innerHTML = up
     ? `<div class="muted" style="margin:2px 0 8px">${title} —
         <a href="http://127.0.0.1:${port}/" target="_blank">open in a new browser tab ↗</a></div>
-       <iframe class="embed" src="http://127.0.0.1:${port}/"></iframe>`
+       <iframe class="embed" src="http://127.0.0.1:${port}/" allow="clipboard-write"></iframe>`
     : `<div class="card"><h3>${title} — not running</h3>
         <div class="desc">${blurb}</div>
         <button class="btn" onclick="startSvc('${jobId}')">▶ Start ${title} (:${port})</button></div>`;
 }
-function renderTeams() {
-  embedTab("page-teams", "team_builder", 5174, "svc_team_builder", "Replay parser & team builder",
-    "The :5174 page is BOTH tools in one: (1) the VOD replay parser/annotator — upload a Showdown " +
-    "replay, review the parsed teams + belief fill, and export JSONL training transitions; and " +
-    "(2) the team builder — generate AI teams from a seed core, validate them with Showdown's own " +
-    "validator, and score them (archetype · TP confidence · matchup prior). Embedded here once running.");
+function renderParser() {
+  embedTab("page-parser", "team_builder", 5174, "svc_team_builder", "Replay parser",
+    "The VOD replay parser/annotator (:5174): upload a Showdown replay, review the parsed teams + " +
+    "belief fill, and export JSONL training transitions. (Team generation is now its own Generate tab.)");
+}
+
+/* ── Generate tab: native UI with a Showdown-style fuzzy species typeahead ── */
+function _normFlat(s){ return (s||"").toLowerCase().replace(/[^a-z0-9]/g,""); }
+function _gtoks(s){ return (s||"").toLowerCase().split(/[^a-z0-9]+/).filter(Boolean); }
+function speciesScore(q, cand){
+  const qf=_normFlat(q), cf=_normFlat(cand);
+  if(!qf) return 0;
+  if(cf===qf) return 1000;                       // exact (ditto -> Ditto, zoroark-hisui -> Zoroark-Hisui)
+  if(cf.startsWith(qf)) return 700;
+  if(cf.includes(qf)) return 400;
+  const qt=_gtoks(q), ct=_gtoks(cand);            // token-subset, order-free (hisuian zoroark -> Zoroark-Hisui)
+  if(qt.length && qt.every(t=>ct.some(c=>c.startsWith(t)||t.startsWith(c)||c.includes(t))))
+    return 250 - Math.abs(cf.length-qf.length);
+  return 0;
+}
+async function ensureSpecies(){
+  if(SPECIES) return SPECIES;
+  try{ SPECIES=(await (await fetch("/api/species")).json()).species||[]; } catch{ SPECIES=[]; }
+  return SPECIES;
+}
+function renderGenCore(){
+  $("gen-core").innerHTML = GEN_CORE.length
+    ? GEN_CORE.map((s,i)=>`<span class="corechip">${esc(s)}<button onclick="genRemove(${i})">×</button></span>`).join("")
+    : '<span class="muted">no seed species yet — type above and pick from the list (1–2 recommended)</span>';
+}
+function genRemove(i){ GEN_CORE.splice(i,1); renderGenCore(); }
+function genAdd(name){
+  if(!GEN_CORE.includes(name) && GEN_CORE.length<6) GEN_CORE.push(name);
+  $("gen-search").value=""; $("gen-suggest").classList.remove("on"); renderGenCore(); $("gen-search").focus();
+}
+function genSuggest(){
+  const q=$("gen-search").value.trim(), box=$("gen-suggest");
+  if(!q || !SPECIES){ box.classList.remove("on"); return; }
+  const ranked=SPECIES.map(s=>[speciesScore(q,s),s]).filter(x=>x[0]>0).sort((a,b)=>b[0]-a[0]).slice(0,8);
+  if(!ranked.length){ box.innerHTML='<div class="sitem muted">no match — check spelling</div>'; box.classList.add("on"); return; }
+  box.innerHTML=ranked.map(([sc,s])=>`<div class="sitem" data-sp="${esc(s)}">${esc(s)}</div>`).join("");
+  box.querySelectorAll(".sitem[data-sp]").forEach(el=>el.onclick=()=>genAdd(el.getAttribute("data-sp")));
+  box.classList.add("on");
+}
+function updateGenAvailability(){
+  const up=S && S.services.team_builder && S.services.team_builder.up, el=$("gen-avail");
+  if(!el) return;
+  el.innerHTML = up ? '<span class="ok">team builder :5174 connected — ready to generate.</span>'
+    : '<span class="bad">⚠ the team builder (:5174) is not running — <a href="#" onclick="startSvc(\'svc_team_builder\');return false">start it</a> (needed for the belief + validator). Autocomplete still works.</span>';
+}
+function renderGenerate(){
+  if($("gen-search")){ updateGenAvailability(); return; }   // already built — don't nuke typed input
+  $("page-generate").innerHTML = `
+    <h2 class="sec">Generate a team (AI)</h2>
+    <div class="muted" style="max-width:840px;line-height:1.55">Seed 1–2 species; a beam search grows
+      the rest from real teammate co-occurrence × usage, sets fill from the belief's most-common builds,
+      and Showdown's own validator drops anything illegal. The species box autocorrects
+      spelling / case / forme order — <i>ditto</i> → Ditto, <i>hisuian zoroark</i> → Zoroark-Hisui.</div>
+    <div id="gen-avail" style="margin:6px 0;font-size:8.5pt"></div>
+    <div class="cards"><div class="card">
+      <h3>Seed core</h3>
+      <label class="fld">Add species (type to search legal Champions names)</label>
+      <div style="position:relative">
+        <input type="text" id="gen-search" autocomplete="off" placeholder="e.g. ditto, zoroark-hisui, incineroar">
+        <div id="gen-suggest" class="suggest"></div>
+      </div>
+      <div id="gen-core" class="chips" style="margin-top:9px"></div>
+      <label class="fld">How many teams to generate (N)</label>
+      <input type="number" id="gen-n" min="1" max="20" value="5" style="max-width:110px">
+      <button class="battlebtn" id="gen-go">Generate teams</button>
+      <div class="muted" id="gen-status" style="margin-top:6px"></div>
+    </div></div>
+    <div id="gen-out" style="margin-top:4px"></div>`;
+  renderGenCore(); updateGenAvailability(); ensureSpecies();
+  const inp=$("gen-search");
+  inp.oninput=genSuggest;
+  inp.onkeydown=e=>{
+    if(e.key==="Enter"){ e.preventDefault(); const f=$("gen-suggest").querySelector(".sitem[data-sp]"); if(f) f.click(); }
+    if(e.key==="Escape") $("gen-suggest").classList.remove("on");
+  };
+  document.addEventListener("click",e=>{ if(!e.target.closest("#gen-search,#gen-suggest")) $("gen-suggest").classList.remove("on"); });
+  $("gen-go").onclick=genGenerate;
+}
+async function genGenerate(){
+  if(!GEN_CORE.length){ toast("add at least one seed species", true); return; }
+  const n=Math.max(1,Math.min(+$("gen-n").value||5,20));
+  $("gen-status").textContent="generating + validating (node) — can take up to a minute…";
+  $("gen-out").innerHTML=""; GEN_TEAMS=[];
+  try{
+    const r=await fetch("/api/tb/generate",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({core:GEN_CORE,n})});
+    const j=await r.json();
+    if(!r.ok||j.error) throw new Error(j.error||"generate failed");
+    GEN_TEAMS=j.teams||[];
+    $("gen-status").textContent=`${GEN_TEAMS.length} legal team(s), ${j.dropped_illegal||0} dropped illegal`;
+    $("gen-out").innerHTML='<div class="cards">'+GEN_TEAMS.map((t,i)=>{
+      const s=t.scores||{}, a=s.archetype||{};
+      return `<div class="card"><h3>Team ${i+1}
+          <span class="muted" style="font-weight:normal">z${a.z??"?"} · dist ${a.dist??"?"} · TP ${s.tp_confidence??"n/a"} · matchup ${s.matchup_prior??"n/a"}</span></h3>
+        <div class="desc">${t.roster.map(esc).join(" · ")}</div>
+        <div class="row"><button class="btn gray" onclick="genCopy(${i})">Copy paste</button></div>
+        <div class="row"><input type="text" id="gen-save-${i}" placeholder="save as (e.g. my_team_v1)" style="flex:1">
+          <button class="btn" onclick="genSave(${i})">Save to teams/</button></div>
+        <div class="cmdline" style="max-height:160px;overflow:auto">${esc(t.paste)}</div></div>`;
+    }).join("")+"</div>";
+  }catch(e){ $("gen-status").innerHTML='<span class="bad">error: '+esc(e.message)+"</span>"; }
+}
+async function genCopy(i){ try{ await navigator.clipboard.writeText(GEN_TEAMS[i].paste); toast("paste copied"); }catch{ toast("copy failed — select the text below",true); } }
+async function genSave(i){
+  const name=($("gen-save-"+i)||{}).value||"";
+  if(!name.trim()){ toast("enter a name to save", true); return; }
+  try{
+    const r=await fetch("/api/teams/save",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({name,paste:GEN_TEAMS[i].paste})});
+    const j=await r.json();
+    if(!j.ok) throw new Error(j.error||"save failed");
+    toast("saved → "+j.path+"  (use --ai-team "+name.trim()+")");
+  }catch(e){ toast("save failed: "+e.message, true); }
 }
 function renderMonitor() {
   embedTab("page-monitor", "dashboard", 5175, "svc_dashboard", "Self-play dashboard",
@@ -648,7 +911,8 @@ async function refresh() {
     if (curTab === "overview") renderOverview();
     if (curTab === "deploy") renderDeploy();
     if (curTab === "jobs") renderJobs();
-    if (curTab === "teams") renderTeams();
+    if (curTab === "parser") renderParser();
+    if (curTab === "generate") updateGenAvailability();
     if (curTab === "monitor") renderMonitor();
     fillSelects();
   } catch { $("hdrDeploy").textContent = "server unreachable?"; }

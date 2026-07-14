@@ -1,12 +1,12 @@
 {
  "format": "gen9championsvgc2026regmb",
- "scraped_at": "2026-07-13T20:39:23.780875+00:00",
+ "scraped_at": "2026-07-14T05:10:12.733833+00:00",
  "source": "observed_dossiers",
- "n_games": 300,
- "n_opponents": 268,
+ "n_games": 304,
+ "n_opponents": 271,
  "pokemon": {
   "Incineroar": {
-   "usage_pct": 23.3,
+   "usage_pct": 23.0,
    "moves": [
     {
      "name": "flareblitz",
@@ -70,7 +70,7 @@
    "teammates": [
     {
      "name": "Garchomp",
-     "pct": 18.8
+     "pct": 20.3
     },
     {
      "name": "Charizard",
@@ -79,6 +79,10 @@
     {
      "name": "Kingambit",
      "pct": 14.5
+    },
+    {
+     "name": "Whimsicott",
+     "pct": 11.6
     },
     {
      "name": "Aerodactyl",
@@ -101,63 +105,59 @@
      "pct": 10.1
     },
     {
-     "name": "Whimsicott",
-     "pct": 10.1
-    },
-    {
      "name": "Floette-Eternal",
      "pct": 10.1
     }
    ]
   },
   "Garchomp": {
-   "usage_pct": 29.7,
+   "usage_pct": 29.6,
    "moves": [
     {
      "name": "earthquake",
-     "pct": 60.3
+     "pct": 59.4
     },
     {
      "name": "protect",
-     "pct": 41.2
+     "pct": 40.6
     },
     {
      "name": "rockslide",
-     "pct": 26.5
+     "pct": 26.1
     },
     {
      "name": "stompingtantrum",
-     "pct": 17.6
+     "pct": 18.8
     },
     {
      "name": "dragonclaw",
-     "pct": 11.8
+     "pct": 11.6
     },
     {
      "name": "swordsdance",
-     "pct": 4.4
+     "pct": 5.8
     },
     {
      "name": "rocktomb",
-     "pct": 1.5
+     "pct": 1.4
     },
     {
      "name": "breakingswipe",
-     "pct": 1.5
+     "pct": 1.4
     },
     {
      "name": "earthpower",
-     "pct": 1.5
+     "pct": 1.4
     }
    ],
    "items": [
     {
      "name": "lifeorb",
-     "pct": 97.3
+     "pct": 97.4
     },
     {
      "name": "leftovers",
-     "pct": 2.7
+     "pct": 2.6
     }
    ],
    "abilities": [
@@ -175,72 +175,72 @@
    "teammates": [
     {
      "name": "Kingambit",
-     "pct": 32.4
+     "pct": 31.9
     },
     {
      "name": "Charizard",
-     "pct": 27.9
+     "pct": 27.5
     },
     {
      "name": "Aerodactyl",
-     "pct": 20.6
-    },
-    {
-     "name": "Basculegion",
-     "pct": 19.1
+     "pct": 20.3
     },
     {
      "name": "Incineroar",
-     "pct": 19.1
+     "pct": 20.3
+    },
+    {
+     "name": "Basculegion",
+     "pct": 18.8
     },
     {
      "name": "Whimsicott",
-     "pct": 14.7
+     "pct": 15.9
     },
     {
      "name": "Sylveon",
-     "pct": 10.3
+     "pct": 10.1
     },
     {
      "name": "Tyranitar",
-     "pct": 10.3
-    },
-    {
-     "name": "Sinistcha",
-     "pct": 8.8
+     "pct": 10.1
     },
     {
      "name": "Farigiraf",
-     "pct": 8.8
+     "pct": 10.1
+    },
+    {
+     "name": "Sinistcha",
+     "pct": 8.7
     }
    ]
   },
   "Kingambit": {
-   "usage_pct": 13.7,
+   "usage_pct": 13.8,
    "moves": [
     {
      "name": "kowtowcleave",
-     "pct": 66.7
+     "pct": 67.5
     },
     {
      "name": "suckerpunch",
-     "pct": 43.6
+     "pct": 42.5
     },
     {
      "name": "protect",
-     "pct": 38.5
+     "pct": 40.0
     },
     {
      "name": "lowkick",
-     "pct": 12.8
+     "pct": 15.0
     },
     {
      "name": "ironhead",
-     "pct": 7.7
+     "pct": 10.0
     },
     {
      "name": "swordsdance",
-     "pct": 2.6
+     "pct": 2.5
     }
    ],
    "items": [
@@ -260,72 +260,72 @@
    "teammates": [
     {
      "name": "Garchomp",
-     "pct": 56.4
+     "pct": 55.0
     },
     {
      "name": "Charizard",
-     "pct": 33.3
+     "pct": 32.5
     },
     {
      "name": "Incineroar",
-     "pct": 25.6
+     "pct": 25.0
     },
     {
      "name": "Basculegion",
-     "pct": 20.5
+     "pct": 22.5
     },
     {
      "name": "Sneasler",
-     "pct": 17.9
+     "pct": 17.5
     },
     {
      "name": "Aerodactyl",
-     "pct": 17.9
+     "pct": 17.5
     },
     {
      "name": "Sylveon",
-     "pct": 10.3
+     "pct": 10.0
     },
     {
      "name": "Farigiraf",
-     "pct": 10.3
+     "pct": 10.0
     },
     {
      "name": "Staraptor",
-     "pct": 7.7
+     "pct": 7.5
     },
     {
      "name": "Ninetales-Alola",
-     "pct": 7.7
+     "pct": 7.5
     }
    ]
   },
   "Basculegion": {
-   "usage_pct": 17.3,
+   "usage_pct": 17.4,
    "moves": [
     {
      "name": "wavecrash",
-     "pct": 34.2
+     "pct": 35.9
     },
     {
      "name": "lastrespects",
-     "pct": 23.7
+     "pct": 23.1
     },
     {
      "name": "protect",
-     "pct": 18.4
+     "pct": 17.9
     },
     {
      "name": "flipturn",
-     "pct": 18.4
+     "pct": 17.9
     },
     {
      "name": "aquajet",
-     "pct": 15.8
+     "pct": 15.4
     },
     {
      "name": "liquidation",
-     "pct": 7.9
+     "pct": 7.7
     },
     {
      "name": "headsmash",
@@ -344,100 +344,104 @@
    "teammates": [
     {
      "name": "Garchomp",
-     "pct": 34.2
+     "pct": 33.3
     },
     {
      "name": "Pelipper",
-     "pct": 23.7
-    },
-    {
-     "name": "Charizard",
-     "pct": 21.1
+     "pct": 23.1
     },
     {
      "name": "Kingambit",
-     "pct": 21.1
+     "pct": 23.1
+    },
+    {
+     "name": "Charizard",
+     "pct": 20.5
     },
     {
      "name": "Incineroar",
-     "pct": 18.4
+     "pct": 17.9
     },
     {
      "name": "Swampert",
-     "pct": 15.8
+     "pct": 15.4
     },
     {
      "name": "Archaludon",
-     "pct": 15.8
+     "pct": 15.4
     },
     {
      "name": "Sylveon",
-     "pct": 13.2
+     "pct": 12.8
     },
     {
      "name": "Whimsicott",
-     "pct": 10.5
+     "pct": 10.3
     },
     {
      "name": "Blaziken",
-     "pct": 10.5
+     "pct": 10.3
     }
    ]
   },
   "Whimsicott": {
-   "usage_pct": 12.0,
+   "usage_pct": 12.2,
    "moves": [
     {
      "name": "tailwind",
-     "pct": 27.8
+     "pct": 27.0
     },
     {
      "name": "moonblast",
-     "pct": 25.0
+     "pct": 24.3
     },
     {
      "name": "protect",
-     "pct": 25.0
+     "pct": 24.3
     },
     {
      "name": "encore",
-     "pct": 16.7
+     "pct": 16.2
     },
     {
      "name": "sunnyday",
-     "pct": 8.3
+     "pct": 8.1
     },
     {
      "name": "memento",
-     "pct": 2.8
+     "pct": 2.7
     },
     {
      "name": "tickle",
-     "pct": 2.8
+     "pct": 2.7
+    },
+    {
+     "name": "dazzlinggleam",
+     "pct": 2.7
     },
     {
      "name": "worryseed",
-     "pct": 2.8
+     "pct": 2.7
     },
     {
      "name": "energyball",
-     "pct": 2.8
+     "pct": 2.7
     },
     {
      "name": "endeavor",
-     "pct": 2.8
+     "pct": 2.7
     },
     {
      "name": "charm",
-     "pct": 2.8
+     "pct": 2.7
     },
     {
      "name": "faketears",
-     "pct": 2.8
+     "pct": 2.7
     },
     {
      "name": "trickroom",
-     "pct": 2.8
+     "pct": 2.7
     }
    ],
    "items": [],
@@ -446,49 +450,49 @@
    "natures": [],
    "teammates": [
     {
-     "name": "Staraptor",
-     "pct": 30.6
+     "name": "Garchomp",
+     "pct": 29.7
     },
     {
-     "name": "Garchomp",
-     "pct": 27.8
+     "name": "Staraptor",
+     "pct": 29.7
     },
     {
      "name": "Incineroar",
-     "pct": 19.4
+     "pct": 21.6
     },
     {
      "name": "Farigiraf",
-     "pct": 13.9
+     "pct": 16.2
     },
     {
      "name": "Grimmsnarl",
-     "pct": 13.9
+     "pct": 13.5
     },
     {
      "name": "Gholdengo",
-     "pct": 13.9
+     "pct": 13.5
     },
     {
      "name": "Charizard",
-     "pct": 11.1
+     "pct": 10.8
     },
     {
      "name": "Basculegion",
-     "pct": 11.1
+     "pct": 10.8
     },
     {
      "name": "Ceruledge",
-     "pct": 11.1
+     "pct": 10.8
     },
     {
      "name": "Milotic",
-     "pct": 8.3
+     "pct": 8.1
     }
    ]
   },
   "Pelipper": {
-   "usage_pct": 12.3,
+   "usage_pct": 12.2,
    "moves": [
     {
      "name": "weatherball",
@@ -571,8 +575,120 @@
     }
    ]
   },
+  "Farigiraf": {
+   "usage_pct": 10.9,
+   "moves": [
+    {
+     "name": "trickroom",
+     "pct": 33.3
+    },
+    {
+     "name": "thunderbolt",
+     "pct": 27.3
+    },
+    {
+     "name": "hypervoice",
+     "pct": 21.2
+    },
+    {
+     "name": "protect",
+     "pct": 18.2
+    },
+    {
+     "name": "twinbeam",
+     "pct": 15.2
+    },
+    {
+     "name": "psychic",
+     "pct": 12.1
+    },
+    {
+     "name": "helpinghand",
+     "pct": 9.1
+    },
+    {
+     "name": "imprison",
+     "pct": 9.1
+    },
+    {
+     "name": "psychicnoise",
+     "pct": 6.1
+    },
+    {
+     "name": "foulplay",
+     "pct": 3.0
+    },
+    {
+     "name": "raindance",
+     "pct": 3.0
+    },
+    {
+     "name": "shadowball",
+     "pct": 3.0
+    },
+    {
+     "name": "nastyplot",
+     "pct": 3.0
+    }
+   ],
+   "items": [
+    {
+     "name": "leftovers",
+     "pct": 75.0
+    },
+    {
+     "name": "lifeorb",
+     "pct": 25.0
+    }
+   ],
+   "abilities": [],
+   "spreads": [],
+   "natures": [],
+   "teammates": [
+    {
+     "name": "Incineroar",
+     "pct": 21.2
+    },
+    {
+     "name": "Garchomp",
+     "pct": 21.2
+    },
+    {
+     "name": "Whimsicott",
+     "pct": 18.2
+    },
+    {
+     "name": "Staraptor",
+     "pct": 18.2
+    },
+    {
+     "name": "Tyranitar",
+     "pct": 12.1
+    },
+    {
+     "name": "Kingambit",
+     "pct": 12.1
+    },
+    {
+     "name": "Blastoise",
+     "pct": 9.1
+    },
+    {
+     "name": "Basculegion",
+     "pct": 9.1
+    },
+    {
+     "name": "Torkoal",
+     "pct": 9.1
+    },
+    {
+     "name": "Aerodactyl",
+     "pct": 9.1
+    }
+   ]
+  },
   "Charizard": {
-   "usage_pct": 14.0,
+   "usage_pct": 13.8,
    "moves": [
     {
      "name": "heatwave",
@@ -671,120 +787,8 @@
     }
    ]
   },
-  "Farigiraf": {
-   "usage_pct": 10.3,
-   "moves": [
-    {
-     "name": "trickroom",
-     "pct": 29.0
-    },
-    {
-     "name": "thunderbolt",
-     "pct": 22.6
-    },
-    {
-     "name": "hypervoice",
-     "pct": 22.6
-    },
-    {
-     "name": "protect",
-     "pct": 19.4
-    },
-    {
-     "name": "twinbeam",
-     "pct": 16.1
-    },
-    {
-     "name": "helpinghand",
-     "pct": 9.7
-    },
-    {
-     "name": "psychic",
-     "pct": 9.7
-    },
-    {
-     "name": "imprison",
-     "pct": 9.7
-    },
-    {
-     "name": "psychicnoise",
-     "pct": 6.5
-    },
-    {
-     "name": "foulplay",
-     "pct": 3.2
-    },
-    {
-     "name": "raindance",
-     "pct": 3.2
-    },
-    {
-     "name": "shadowball",
-     "pct": 3.2
-    },
-    {
-     "name": "nastyplot",
-     "pct": 3.2
-    }
-   ],
-   "items": [
-    {
-     "name": "leftovers",
-     "pct": 75.0
-    },
-    {
-     "name": "lifeorb",
-     "pct": 25.0
-    }
-   ],
-   "abilities": [],
-   "spreads": [],
-   "natures": [],
-   "teammates": [
-    {
-     "name": "Incineroar",
-     "pct": 22.6
-    },
-    {
-     "name": "Staraptor",
-     "pct": 19.4
-    },
-    {
-     "name": "Garchomp",
-     "pct": 19.4
-    },
-    {
-     "name": "Whimsicott",
-     "pct": 16.1
-    },
-    {
-     "name": "Kingambit",
-     "pct": 12.9
-    },
-    {
-     "name": "Blastoise",
-     "pct": 9.7
-    },
-    {
-     "name": "Basculegion",
-     "pct": 9.7
-    },
-    {
-     "name": "Torkoal",
-     "pct": 9.7
-    },
-    {
-     "name": "Aerodactyl",
-     "pct": 9.7
-    },
-    {
-     "name": "Tyranitar",
-     "pct": 9.7
-    }
-   ]
-  },
   "Sneasler": {
-   "usage_pct": 9.7,
+   "usage_pct": 9.5,
    "moves": [
     {
      "name": "fakeout",
@@ -867,7 +871,7 @@
    ]
   },
   "Aerodactyl": {
-   "usage_pct": 9.7,
+   "usage_pct": 9.5,
    "moves": [
     {
      "name": "rockslide",
@@ -963,7 +967,7 @@
    ]
   },
   "Archaludon": {
-   "usage_pct": 10.3,
+   "usage_pct": 10.2,
    "moves": [
     {
      "name": "electroshot",
@@ -1052,7 +1056,7 @@
    ]
   },
   "Grimmsnarl": {
-   "usage_pct": 10.3,
+   "usage_pct": 10.2,
    "moves": [
     {
      "name": "lightscreen",
@@ -1144,7 +1148,7 @@
    ]
   },
   "Staraptor": {
-   "usage_pct": 9.7,
+   "usage_pct": 9.5,
    "moves": [
     {
      "name": "closecombat",
@@ -1227,8 +1231,105 @@
     }
    ]
   },
+  "Tyranitar": {
+   "usage_pct": 7.2,
+   "moves": [
+    {
+     "name": "protect",
+     "pct": 61.9
+    },
+    {
+     "name": "rockslide",
+     "pct": 57.1
+    },
+    {
+     "name": "knockoff",
+     "pct": 47.6
+    },
+    {
+     "name": "dragondance",
+     "pct": 14.3
+    },
+    {
+     "name": "crunch",
+     "pct": 9.5
+    },
+    {
+     "name": "lashout",
+     "pct": 4.8
+    },
+    {
+     "name": "earthquake",
+     "pct": 4.8
+    },
+    {
+     "name": "icepunch",
+     "pct": 4.8
+    },
+    {
+     "name": "lowkick",
+     "pct": 4.8
+    }
+   ],
+   "items": [
+    {
+     "name": "lifeorb",
+     "pct": 100.0
+    }
+   ],
+   "abilities": [
+    {
+     "name": "sandstream",
+     "pct": 100.0
+    }
+   ],
+   "spreads": [],
+   "natures": [],
+   "teammates": [
+    {
+     "name": "Garchomp",
+     "pct": 33.3
+    },
+    {
+     "name": "Excadrill",
+     "pct": 23.8
+    },
+    {
+     "name": "Sinistcha",
+     "pct": 19.0
+    },
+    {
+     "name": "Sneasler",
+     "pct": 19.0
+    },
+    {
+     "name": "Farigiraf",
+     "pct": 19.0
+    },
+    {
+     "name": "Incineroar",
+     "pct": 14.3
+    },
+    {
+     "name": "Gyarados",
+     "pct": 9.5
+    },
+    {
+     "name": "Raichu",
+     "pct": 9.5
+    },
+    {
+     "name": "sinistchamasterpiece",
+     "pct": 9.5
+    },
+    {
+     "name": "Aerodactyl",
+     "pct": 9.5
+    }
+   ]
+  },
   "Sableye": {
-   "usage_pct": 7.7,
+   "usage_pct": 7.6,
    "moves": [
     {
      "name": "raindance",
@@ -1326,100 +1427,8 @@
     }
    ]
   },
-  "Tyranitar": {
-   "usage_pct": 7.0,
-   "moves": [
-    {
-     "name": "protect",
-     "pct": 65.0
-    },
-    {
-     "name": "rockslide",
-     "pct": 60.0
-    },
-    {
-     "name": "knockoff",
-     "pct": 50.0
-    },
-    {
-     "name": "dragondance",
-     "pct": 15.0
-    },
-    {
-     "name": "lashout",
-     "pct": 5.0
-    },
-    {
-     "name": "crunch",
-     "pct": 5.0
-    },
-    {
-     "name": "earthquake",
-     "pct": 5.0
-    },
-    {
-     "name": "icepunch",
-     "pct": 5.0
-    },
-    {
-     "name": "lowkick",
-     "pct": 5.0
-    }
-   ],
-   "items": [],
-   "abilities": [
-    {
-     "name": "sandstream",
-     "pct": 100.0
-    }
-   ],
-   "spreads": [],
-   "natures": [],
-   "teammates": [
-    {
-     "name": "Garchomp",
-     "pct": 35.0
-    },
-    {
-     "name": "Excadrill",
-     "pct": 25.0
-    },
-    {
-     "name": "Sinistcha",
-     "pct": 20.0
-    },
-    {
-     "name": "Sneasler",
-     "pct": 20.0
-    },
-    {
-     "name": "Incineroar",
-     "pct": 15.0
-    },
-    {
-     "name": "Farigiraf",
-     "pct": 15.0
-    },
-    {
-     "name": "Gyarados",
-     "pct": 10.0
-    },
-    {
-     "name": "Raichu",
-     "pct": 10.0
-    },
-    {
-     "name": "sinistchamasterpiece",
-     "pct": 10.0
-    },
-    {
-     "name": "Aerodactyl",
-     "pct": 10.0
-    }
-   ]
-  },
   "Swampert": {
-   "usage_pct": 7.0,
+   "usage_pct": 6.9,
    "moves": [
     {
      "name": "protect",
@@ -1499,7 +1508,7 @@
    ]
   },
   "Sinistcha": {
-   "usage_pct": 6.7,
+   "usage_pct": 6.6,
    "moves": [
     {
      "name": "ragepowder",
@@ -1580,7 +1589,7 @@
    ]
   },
   "Raichu": {
-   "usage_pct": 6.0,
+   "usage_pct": 5.9,
    "moves": [
     {
      "name": "zapcannon",
@@ -1785,7 +1794,7 @@
    ]
   },
   "Sylveon": {
-   "usage_pct": 8.3,
+   "usage_pct": 8.2,
    "moves": [
     {
      "name": "hypervoice",
@@ -1869,7 +1878,7 @@
    ]
   },
   "sinistchamasterpiece": {
-   "usage_pct": 4.7,
+   "usage_pct": 4.6,
    "moves": [
     {
      "name": "ragepowder",
@@ -2032,7 +2041,7 @@
    ]
   },
   "Blastoise": {
-   "usage_pct": 4.0,
+   "usage_pct": 3.9,
    "moves": [
     {
      "name": "waterspout",
@@ -2112,7 +2121,7 @@
    ]
   },
   "mausholdfour": {
-   "usage_pct": 4.0,
+   "usage_pct": 3.9,
    "moves": [
     {
      "name": "protect",
@@ -2195,7 +2204,7 @@
    ]
   },
   "Gholdengo": {
-   "usage_pct": 3.7,
+   "usage_pct": 3.6,
    "moves": [
     {
      "name": "protect",
@@ -2292,7 +2301,7 @@
    ]
   },
   "Torkoal": {
-   "usage_pct": 3.7,
+   "usage_pct": 3.6,
    "moves": [
     {
      "name": "eruption",
@@ -2376,7 +2385,7 @@
    ]
   },
   "Annihilape": {
-   "usage_pct": 3.7,
+   "usage_pct": 3.6,
    "moves": [
     {
      "name": "bulkup",
@@ -2481,7 +2490,7 @@
    ]
   },
   "Floette-Eternal": {
-   "usage_pct": 3.7,
+   "usage_pct": 3.6,
    "moves": [
     {
      "name": "calmmind",
@@ -2561,7 +2570,7 @@
    ]
   },
   "Ceruledge": {
-   "usage_pct": 3.7,
+   "usage_pct": 3.6,
    "moves": [
     {
      "name": "bitterblade",
@@ -3130,7 +3139,7 @@
    ]
   },
   "Gengar": {
-   "usage_pct": 2.7,
+   "usage_pct": 2.6,
    "moves": [
     {
      "name": "protect",
@@ -3318,7 +3327,7 @@
    ]
   },
   "Politoed": {
-   "usage_pct": 2.7,
+   "usage_pct": 2.6,
    "moves": [
     {
      "name": "protect",
@@ -3394,7 +3403,7 @@
    ]
   },
   "Rotom-Wash": {
-   "usage_pct": 2.7,
+   "usage_pct": 2.6,
    "moves": [
     {
      "name": "thunderbolt",
@@ -3567,6 +3576,78 @@
     }
    ]
   },
+  "Glimmora": {
+   "usage_pct": 2.3,
+   "moves": [
+    {
+     "name": "spikyshield",
+     "pct": 71.4
+    },
+    {
+     "name": "powergem",
+     "pct": 71.4
+    },
+    {
+     "name": "earthpower",
+     "pct": 42.9
+    },
+    {
+     "name": "sludgebomb",
+     "pct": 14.3
+    }
+   ],
+   "items": [],
+   "abilities": [
+    {
+     "name": "adaptability",
+     "pct": 100.0
+    }
+   ],
+   "spreads": [],
+   "natures": [],
+   "teammates": [
+    {
+     "name": "Incineroar",
+     "pct": 42.9
+    },
+    {
+     "name": "Farigiraf",
+     "pct": 28.6
+    },
+    {
+     "name": "Garchomp",
+     "pct": 28.6
+    },
+    {
+     "name": "Basculegion",
+     "pct": 14.3
+    },
+    {
+     "name": "Floette-Eternal",
+     "pct": 14.3
+    },
+    {
+     "name": "Milotic",
+     "pct": 14.3
+    },
+    {
+     "name": "Spiritomb",
+     "pct": 14.3
+    },
+    {
+     "name": "Volcarona",
+     "pct": 14.3
+    },
+    {
+     "name": "Chandelure",
+     "pct": 14.3
+    },
+    {
+     "name": "Hydreigon",
+     "pct": 14.3
+    }
+   ]
+  },
   "Chandelure": {
    "usage_pct": 2.3,
    "moves": [
@@ -3635,30 +3716,38 @@
     }
    ]
   },
-  "Glimmora": {
+  "Kangaskhan": {
    "usage_pct": 2.0,
    "moves": [
     {
-     "name": "spikyshield",
-     "pct": 66.7
-    },
-    {
-     "name": "powergem",
-     "pct": 66.7
-    },
-    {
-     "name": "earthpower",
+     "name": "doubleedge",
      "pct": 50.0
     },
     {
-     "name": "sludgebomb",
+     "name": "fakeout",
+     "pct": 50.0
+    },
+    {
+     "name": "protect",
+     "pct": 33.3
+    },
+    {
+     "name": "lastresort",
+     "pct": 33.3
+    },
+    {
+     "name": "suckerpunch",
+     "pct": 16.7
+    },
+    {
+     "name": "thunderpunch",
      "pct": 16.7
     }
    ],
    "items": [],
    "abilities": [
     {
-     "name": "adaptability",
+     "name": "parentalbond",
      "pct": 100.0
     }
    ],
@@ -3670,27 +3759,31 @@
      "pct": 33.3
     },
     {
-     "name": "Basculegion",
-     "pct": 16.7
-    },
-    {
      "name": "Farigiraf",
+     "pct": 33.3
+    },
+    {
+     "name": "Torkoal",
+     "pct": 33.3
+    },
+    {
+     "name": "Grimmsnarl",
      "pct": 16.7
     },
     {
-     "name": "Floette-Eternal",
+     "name": "Zoroark-Hisui",
      "pct": 16.7
     },
     {
-     "name": "Milotic",
+     "name": "Decidueye-Hisui",
      "pct": 16.7
     },
     {
-     "name": "Spiritomb",
+     "name": "Mawile",
      "pct": 16.7
     },
     {
-     "name": "Volcarona",
+     "name": "Basculegion",
      "pct": 16.7
     },
     {
@@ -3698,11 +3791,7 @@
      "pct": 16.7
     },
     {
-     "name": "Hydreigon",
-     "pct": 16.7
-    },
-    {
-     "name": "Tinkaton",
+     "name": "Gallade",
      "pct": 16.7
     }
    ]
@@ -3782,8 +3871,88 @@
     }
    ]
   },
+  "Tinkaton": {
+   "usage_pct": 2.0,
+   "moves": [
+    {
+     "name": "fakeout",
+     "pct": 100.0
+    },
+    {
+     "name": "gigatonhammer",
+     "pct": 50.0
+    },
+    {
+     "name": "playrough",
+     "pct": 16.7
+    },
+    {
+     "name": "quash",
+     "pct": 16.7
+    },
+    {
+     "name": "fling",
+     "pct": 16.7
+    },
+    {
+     "name": "rockslide",
+     "pct": 16.7
+    }
+   ],
+   "items": [],
+   "abilities": [
+    {
+     "name": "moldbreaker",
+     "pct": 100.0
+    }
+   ],
+   "spreads": [],
+   "natures": [],
+   "teammates": [
+    {
+     "name": "Hydreigon",
+     "pct": 33.3
+    },
+    {
+     "name": "Farigiraf",
+     "pct": 33.3
+    },
+    {
+     "name": "Chandelure",
+     "pct": 16.7
+    },
+    {
+     "name": "Glimmora",
+     "pct": 16.7
+    },
+    {
+     "name": "Tyranitar",
+     "pct": 16.7
+    },
+    {
+     "name": "Aegislash",
+     "pct": 16.7
+    },
+    {
+     "name": "mausholdfour",
+     "pct": 16.7
+    },
+    {
+     "name": "Scovillain",
+     "pct": 16.7
+    },
+    {
+     "name": "Ceruledge",
+     "pct": 16.7
+    },
+    {
+     "name": "Decidueye-Hisui",
+     "pct": 16.7
+    }
+   ]
+  },
   "Scrafty": {
-   "usage_pct": 1.7,
+   "usage_pct": 1.6,
    "moves": [
     {
      "name": "drainpunch",
@@ -3829,6 +3998,10 @@
      "pct": 40.0
     },
     {
+     "name": "Garchomp",
+     "pct": 40.0
+    },
+    {
      "name": "Incineroar",
      "pct": 40.0
     },
@@ -3853,21 +4026,17 @@
      "pct": 20.0
     },
     {
+     "name": "Glimmora",
+     "pct": 20.0
+    },
+    {
      "name": "Primarina",
-     "pct": 20.0
-    },
-    {
-     "name": "Garchomp",
-     "pct": 20.0
-    },
-    {
-     "name": "Sinistcha",
      "pct": 20.0
     }
    ]
   },
   "Malamar": {
-   "usage_pct": 1.7,
+   "usage_pct": 1.6,
    "moves": [
     {
      "name": "superpower",
@@ -3947,7 +4116,7 @@
    ]
   },
   "Dragalge": {
-   "usage_pct": 1.7,
+   "usage_pct": 1.6,
    "moves": [
     {
      "name": "dracometeor",
@@ -4026,88 +4195,8 @@
     }
    ]
   },
-  "Kangaskhan": {
-   "usage_pct": 1.7,
-   "moves": [
-    {
-     "name": "doubleedge",
-     "pct": 60.0
-    },
-    {
-     "name": "protect",
-     "pct": 40.0
-    },
-    {
-     "name": "fakeout",
-     "pct": 40.0
-    },
-    {
-     "name": "suckerpunch",
-     "pct": 20.0
-    },
-    {
-     "name": "thunderpunch",
-     "pct": 20.0
-    },
-    {
-     "name": "lastresort",
-     "pct": 20.0
-    }
-   ],
-   "items": [],
-   "abilities": [
-    {
-     "name": "parentalbond",
-     "pct": 100.0
-    }
-   ],
-   "spreads": [],
-   "natures": [],
-   "teammates": [
-    {
-     "name": "Incineroar",
-     "pct": 40.0
-    },
-    {
-     "name": "Torkoal",
-     "pct": 40.0
-    },
-    {
-     "name": "Grimmsnarl",
-     "pct": 20.0
-    },
-    {
-     "name": "Zoroark-Hisui",
-     "pct": 20.0
-    },
-    {
-     "name": "Basculegion",
-     "pct": 20.0
-    },
-    {
-     "name": "Chandelure",
-     "pct": 20.0
-    },
-    {
-     "name": "Gallade",
-     "pct": 20.0
-    },
-    {
-     "name": "Araquanid",
-     "pct": 20.0
-    },
-    {
-     "name": "Drampa",
-     "pct": 20.0
-    },
-    {
-     "name": "Slowbro-Galar",
-     "pct": 20.0
-    }
-   ]
-  },
   "Venusaur": {
-   "usage_pct": 1.7,
+   "usage_pct": 1.6,
    "moves": [
     {
      "name": "earthpower",
@@ -4179,7 +4268,7 @@
    ]
   },
   "Drampa": {
-   "usage_pct": 1.7,
+   "usage_pct": 1.6,
    "moves": [
     {
      "name": "protect",
@@ -4258,30 +4347,26 @@
     }
    ]
   },
-  "Tinkaton": {
-   "usage_pct": 1.7,
+  "Greninja": {
+   "usage_pct": 1.6,
    "moves": [
     {
-     "name": "fakeout",
-     "pct": 100.0
-    },
-    {
-     "name": "gigatonhammer",
-     "pct": 40.0
-    },
-    {
-     "name": "fling",
+     "name": "darkpulse",
      "pct": 20.0
     },
     {
-     "name": "rockslide",
+     "name": "protect",
+     "pct": 20.0
+    },
+    {
+     "name": "liquidation",
      "pct": 20.0
     }
    ],
    "items": [],
    "abilities": [
     {
-     "name": "moldbreaker",
+     "name": "protean",
      "pct": 100.0
     }
    ],
@@ -4289,31 +4374,19 @@
    "natures": [],
    "teammates": [
     {
-     "name": "Hydreigon",
-     "pct": 40.0
-    },
-    {
-     "name": "Chandelure",
+     "name": "Corviknight",
      "pct": 20.0
     },
     {
-     "name": "Glimmora",
+     "name": "Garchomp",
      "pct": 20.0
     },
     {
-     "name": "Aegislash",
+     "name": "Ninetales-Alola",
      "pct": 20.0
     },
     {
-     "name": "mausholdfour",
-     "pct": 20.0
-    },
-    {
-     "name": "Scovillain",
-     "pct": 20.0
-    },
-    {
-     "name": "Ceruledge",
+     "name": "Basculegion",
      "pct": 20.0
     },
     {
@@ -4321,17 +4394,29 @@
      "pct": 20.0
     },
     {
-     "name": "Farigiraf",
+     "name": "Kingambit",
      "pct": 20.0
     },
     {
-     "name": "Incineroar",
+     "name": "Gliscor",
+     "pct": 20.0
+    },
+    {
+     "name": "Klefki",
+     "pct": 20.0
+    },
+    {
+     "name": "Mimikyu",
+     "pct": 20.0
+    },
+    {
+     "name": "Hawlucha",
      "pct": 20.0
     }
    ]
   },
   "Primarina": {
-   "usage_pct": 1.7,
+   "usage_pct": 1.6,
    "moves": [
     {
      "name": "protect",
@@ -4357,6 +4442,10 @@
    "natures": [],
    "teammates": [
     {
+     "name": "Garchomp",
+     "pct": 40.0
+    },
+    {
      "name": "Ceruledge",
      "pct": 20.0
     },
@@ -4373,10 +4462,6 @@
      "pct": 20.0
     },
     {
-     "name": "Garchomp",
-     "pct": 20.0
-    },
-    {
      "name": "Sinistcha",
      "pct": 20.0
     },
@@ -4385,21 +4470,21 @@
      "pct": 20.0
     },
     {
+     "name": "Glimmora",
+     "pct": 20.0
+    },
+    {
      "name": "Incineroar",
      "pct": 20.0
     },
     {
-     "name": "Scrafty",
-     "pct": 20.0
-    },
-    {
-     "name": "Archaludon",
+     "name": "Samurott-Hisui",
      "pct": 20.0
     }
    ]
   },
   "Gallade": {
-   "usage_pct": 1.7,
+   "usage_pct": 1.6,
    "moves": [
     {
      "name": "trickroom",
@@ -4462,7 +4547,7 @@
    ]
   },
   "Excadrill": {
-   "usage_pct": 1.7,
+   "usage_pct": 1.6,
    "moves": [
     {
      "name": "earthquake",
@@ -4609,6 +4694,78 @@
     }
    ]
   },
+  "Mawile": {
+   "usage_pct": 1.3,
+   "moves": [
+    {
+     "name": "rockslide",
+     "pct": 75.0
+    },
+    {
+     "name": "playrough",
+     "pct": 50.0
+    },
+    {
+     "name": "swordsdance",
+     "pct": 25.0
+    },
+    {
+     "name": "suckerpunch",
+     "pct": 25.0
+    }
+   ],
+   "items": [],
+   "abilities": [
+    {
+     "name": "hugepower",
+     "pct": 100.0
+    }
+   ],
+   "spreads": [],
+   "natures": [],
+   "teammates": [
+    {
+     "name": "Torkoal",
+     "pct": 50.0
+    },
+    {
+     "name": "Gholdengo",
+     "pct": 25.0
+    },
+    {
+     "name": "Grimmsnarl",
+     "pct": 25.0
+    },
+    {
+     "name": "Incineroar",
+     "pct": 25.0
+    },
+    {
+     "name": "Kommo-o",
+     "pct": 25.0
+    },
+    {
+     "name": "Medicham",
+     "pct": 25.0
+    },
+    {
+     "name": "sinistchamasterpiece",
+     "pct": 25.0
+    },
+    {
+     "name": "Decidueye-Hisui",
+     "pct": 25.0
+    },
+    {
+     "name": "Farigiraf",
+     "pct": 25.0
+    },
+    {
+     "name": "Kangaskhan",
+     "pct": 25.0
+    }
+   ]
+  },
   "Kleavor": {
    "usage_pct": 1.3,
    "moves": [
@@ -4672,74 +4829,6 @@
     },
     {
      "name": "Gardevoir",
-     "pct": 25.0
-    }
-   ]
-  },
-  "Greninja": {
-   "usage_pct": 1.3,
-   "moves": [
-    {
-     "name": "darkpulse",
-     "pct": 25.0
-    },
-    {
-     "name": "protect",
-     "pct": 25.0
-    },
-    {
-     "name": "liquidation",
-     "pct": 25.0
-    }
-   ],
-   "items": [],
-   "abilities": [
-    {
-     "name": "protean",
-     "pct": 100.0
-    }
-   ],
-   "spreads": [],
-   "natures": [],
-   "teammates": [
-    {
-     "name": "Corviknight",
-     "pct": 25.0
-    },
-    {
-     "name": "Garchomp",
-     "pct": 25.0
-    },
-    {
-     "name": "Ninetales-Alola",
-     "pct": 25.0
-    },
-    {
-     "name": "Gliscor",
-     "pct": 25.0
-    },
-    {
-     "name": "Klefki",
-     "pct": 25.0
-    },
-    {
-     "name": "Mimikyu",
-     "pct": 25.0
-    },
-    {
-     "name": "Hawlucha",
-     "pct": 25.0
-    },
-    {
-     "name": "Sableye",
-     "pct": 25.0
-    },
-    {
-     "name": "Sinistcha",
-     "pct": 25.0
-    },
-    {
-     "name": "Abomasnow",
      "pct": 25.0
     }
    ]
@@ -5609,74 +5698,6 @@
     }
    ]
   },
-  "Mawile": {
-   "usage_pct": 1.0,
-   "moves": [
-    {
-     "name": "rockslide",
-     "pct": 66.7
-    },
-    {
-     "name": "playrough",
-     "pct": 33.3
-    },
-    {
-     "name": "suckerpunch",
-     "pct": 33.3
-    }
-   ],
-   "items": [],
-   "abilities": [
-    {
-     "name": "hugepower",
-     "pct": 100.0
-    }
-   ],
-   "spreads": [],
-   "natures": [],
-   "teammates": [
-    {
-     "name": "Torkoal",
-     "pct": 66.7
-    },
-    {
-     "name": "Gholdengo",
-     "pct": 33.3
-    },
-    {
-     "name": "Grimmsnarl",
-     "pct": 33.3
-    },
-    {
-     "name": "Incineroar",
-     "pct": 33.3
-    },
-    {
-     "name": "Kommo-o",
-     "pct": 33.3
-    },
-    {
-     "name": "Medicham",
-     "pct": 33.3
-    },
-    {
-     "name": "sinistchamasterpiece",
-     "pct": 33.3
-    },
-    {
-     "name": "Gallade",
-     "pct": 33.3
-    },
-    {
-     "name": "vivillonmonsoon",
-     "pct": 33.3
-    },
-    {
-     "name": "Malamar",
-     "pct": 33.3
-    }
-   ]
-  },
   "Meowscarada": {
    "usage_pct": 1.0,
    "moves": [
@@ -5949,6 +5970,78 @@
     },
     {
      "name": "Ceruledge",
+     "pct": 33.3
+    }
+   ]
+  },
+  "Decidueye-Hisui": {
+   "usage_pct": 1.0,
+   "moves": [
+    {
+     "name": "closecombat",
+     "pct": 33.3
+    },
+    {
+     "name": "leafblade",
+     "pct": 33.3
+    },
+    {
+     "name": "protect",
+     "pct": 33.3
+    },
+    {
+     "name": "suckerpunch",
+     "pct": 33.3
+    },
+    {
+     "name": "triplearrows",
+     "pct": 33.3
+    }
+   ],
+   "items": [
+    {
+     "name": "lifeorb",
+     "pct": 100.0
+    }
+   ],
+   "abilities": [],
+   "spreads": [],
+   "natures": [],
+   "teammates": [
+    {
+     "name": "Farigiraf",
+     "pct": 33.3
+    },
+    {
+     "name": "Kangaskhan",
+     "pct": 33.3
+    },
+    {
+     "name": "Mawile",
+     "pct": 33.3
+    },
+    {
+     "name": "Basculegion",
+     "pct": 33.3
+    },
+    {
+     "name": "Greninja",
+     "pct": 33.3
+    },
+    {
+     "name": "Kingambit",
+     "pct": 33.3
+    },
+    {
+     "name": "Ceruledge",
+     "pct": 33.3
+    },
+    {
+     "name": "Hydreigon",
+     "pct": 33.3
+    },
+    {
+     "name": "Tinkaton",
      "pct": 33.3
     }
    ]
@@ -6331,6 +6424,70 @@
     },
     {
      "name": "Staraptor",
+     "pct": 33.3
+    }
+   ]
+  },
+  "Samurott-Hisui": {
+   "usage_pct": 1.0,
+   "moves": [
+    {
+     "name": "ceaselessedge",
+     "pct": 66.7
+    },
+    {
+     "name": "suckerpunch",
+     "pct": 33.3
+    }
+   ],
+   "items": [
+    {
+     "name": "lifeorb",
+     "pct": 100.0
+    }
+   ],
+   "abilities": [],
+   "spreads": [],
+   "natures": [],
+   "teammates": [
+    {
+     "name": "Whimsicott",
+     "pct": 66.7
+    },
+    {
+     "name": "Farigiraf",
+     "pct": 33.3
+    },
+    {
+     "name": "Garchomp",
+     "pct": 33.3
+    },
+    {
+     "name": "Glimmora",
+     "pct": 33.3
+    },
+    {
+     "name": "Incineroar",
+     "pct": 33.3
+    },
+    {
+     "name": "Primarina",
+     "pct": 33.3
+    },
+    {
+     "name": "Scrafty",
+     "pct": 33.3
+    },
+    {
+     "name": "Alakazam",
+     "pct": 33.3
+    },
+    {
+     "name": "Meowstic",
+     "pct": 33.3
+    },
+    {
+     "name": "Blaziken",
      "pct": 33.3
     }
    ]
@@ -7316,54 +7473,6 @@
     }
    ]
   },
-  "Samurott-Hisui": {
-   "usage_pct": 0.7,
-   "moves": [
-    {
-     "name": "suckerpunch",
-     "pct": 50.0
-    },
-    {
-     "name": "ceaselessedge",
-     "pct": 50.0
-    }
-   ],
-   "items": [
-    {
-     "name": "lifeorb",
-     "pct": 100.0
-    }
-   ],
-   "abilities": [],
-   "spreads": [],
-   "natures": [],
-   "teammates": [
-    {
-     "name": "Alakazam",
-     "pct": 50.0
-    },
-    {
-     "name": "Meowstic",
-     "pct": 50.0
-    },
-    {
-     "name": "Whimsicott",
-     "pct": 50.0
-    },
-    {
-     "name": "Blaziken",
-     "pct": 50.0
-    },
-    {
-     "name": "Metagross",
-     "pct": 50.0
-    },
-    {
-     "name": "Mr. Rime",
-     "pct": 50.0
-    }
-   ]
-  },
   "Glaceon": {
    "usage_pct": 0.7,
    "moves": [
@@ -8006,33 +8115,6 @@
     },
     {
      "name": "Rotom-Wash",
-     "pct": 100.0
-    }
-   ]
-  },
-  "Decidueye-Hisui": {
-   "usage_pct": 0.3,
-   "moves": [
-    {
-     "name": "triplearrows",
-     "pct": 100.0
-    }
-   ],
-   "items": [],
-   "abilities": [],
-   "spreads": [],
-   "natures": [],
-   "teammates": [
-    {
-     "name": "Ceruledge",
-     "pct": 100.0
-    },
-    {
-     "name": "Hydreigon",
-     "pct": 100.0
-    },
-    {
-     "name": "Tinkaton",
      "pct": 100.0
     }
    ]

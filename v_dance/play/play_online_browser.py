@@ -385,11 +385,12 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
                 print(f"[online] {len(teams) - len(failed)} pool teams available in the Teambuilder")
             await _default_format(page, "online")
 
-            # 2026-07-10 (USER): local control panel — ladder-run count / team+format dropdowns /
-            # private challenges / auto-accept toggle, all without touching the bot window. Own
-            # module by request; non-fatal: the manual window flow works unchanged without it.
-            # NOT in --dry-run: the consumer isn't serving there, so a panel-queued game would
-            # sit unplayed and time out.
+            # 2026-07-10 (USER): local control server — ladder-run count / team pin / private
+            # challenges / auto-accept, all without touching the bot window. Its HTTP API must keep
+            # running (Mission Control's 'Online bot' tab is now the UI — it PROXIES this server;
+            # it can't drive the Playwright page itself). 2026-07-13 (USER): the standalone panel
+            # WINDOW no longer auto-opens (redundant with Mission Control) — pass --panel-window to
+            # restore the popup. NOT in --dry-run: the consumer isn't serving there.
             if args.control_port and not args.dry_run:
                 try:
                     from v_dance.play.bot_control_ui import start_control_ui
@@ -397,10 +398,13 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
                         page=page, host=host, tally=tally, ai_pool=ai_pool,
                         fmt=BATTLE_FORMAT, username=username,
                         loop=asyncio.get_running_loop(), env_path=_REPO / ".env",
-                        port=args.control_port,
+                        port=args.control_port, open_browser=args.panel_window,
                         team_pin_default=args.ai_team or default_team,
                         auto_close_default=(_ENV.get("VD_AUTO_CLOSE_ROOMS", "0").strip() == "1"),
                         log_line=lambda t: _slog(session_log, t))
+                    _ctrl = ctrl_ref["c"]
+                    print(f"[online] control server on {_ctrl.url}  —  drive it from Mission Control's "
+                          f"'Online bot' tab (or open that URL for the standalone panel).")
                 except Exception as exc:
                     print(f"[online] control panel failed to start (non-fatal): {exc!r}")
 
@@ -467,6 +471,10 @@ def main() -> None:
                          "dossier (cross-game; in-battle evidence always wins). Default OFF.")
     ap.add_argument("--control-port", type=int, default=8777,
                     help="local control-panel port (ladder runs / challenges / auto-accept); 0 = off.")
+    ap.add_argument("--panel-window", action="store_true",
+                    help="also POP OPEN the standalone control-panel page in a browser. Default OFF: "
+                         "Mission Control's 'Online bot' tab is the control UI (it proxies this "
+                         "server), so the panel window is redundant. The panel URL is still logged.")
     args = ap.parse_args()
 
     username = _ENV.get("PS_USERNAME")

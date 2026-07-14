@@ -108,6 +108,17 @@ def _known_formats() -> list:
         return []
 
 
+def _known_formats_full() -> list:
+    """[{id, name}] from the registry — for a readable format picker (future-proof: add a format to
+    data/regulations/vod_parser_format_names.json and it appears automatically)."""
+    try:
+        js = json.loads(_FORMATS_REGISTRY.read_text(encoding="utf-8"))
+        return [{"id": f["id"], "name": f.get("name") or f["id"]}
+                for f in js.get("formats", []) if f.get("id")]
+    except Exception:
+        return []
+
+
 def _active_format(env: dict) -> str:
     return env.get("VDANCE_BATTLE_FORMAT") or (_known_formats() or ["gen9championsvgc2026regmb"])[0]
 
@@ -219,6 +230,68 @@ def _panel_post(path: str, body: dict) -> dict:
         return json.loads(r.read().decode("utf-8"))
 
 
+# ── team-builder (:5174) bridge: species list (for autocomplete), generate proxy, save ─────
+_TB_PORT = 5174
+_species_cache = {"names": None, "mtime": None}
+
+
+def _species_list() -> list:
+    """Canonical belief species (display names) for the active reg — the exact set the generator
+    accepts. Read straight from the belief JSON (torch-free), mtime-cached."""
+    env = _env_read()
+    m = re.search(r"reg([a-z]+)$", _active_format(env).lower())
+    path = _REPO / "data" / f"pikalytics_reg{m.group(1)}.json" if m else None
+    if path is None or not path.is_file():
+        path = _REPO / "data" / "pikalytics_regmb.json"
+    try:
+        mt = path.stat().st_mtime
+    except OSError:
+        return []
+    if _species_cache["names"] is None or _species_cache["mtime"] != mt:
+        try:
+            pk = (json.loads(path.read_text(encoding="utf-8")) or {}).get("pokemon") or {}
+            _species_cache["names"] = sorted(pk.keys()) if isinstance(pk, dict) else []
+            _species_cache["mtime"] = mt
+        except Exception:
+            _species_cache["names"] = []
+    return _species_cache["names"] or []
+
+
+def _tb_post(path: str, body: dict) -> dict:
+    """Proxy a POST to the team-builder server (:5174), which owns the belief + validator + TP model."""
+    if not _port_open(_TB_PORT):
+        raise ValueError("the team builder (:5174) is not running — start it from the Parser tab")
+    data = json.dumps(body or {}).encode("utf-8")
+    req = urllib.request.Request(f"http://127.0.0.1:{_TB_PORT}{path}", data=data,
+                                 headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=300) as r:   # generate validates each team via node
+        return json.loads(r.read().decode("utf-8"))
+
+
+def _save_team(name: str, paste: str) -> str:
+    """Write a paste to teams/Champions/<active-reg>/<name> (name sanitized, no traversal)."""
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", (name or "").strip())
+    if not safe:
+        raise ValueError("team name required")
+    if not (paste or "").strip():
+        raise ValueError("paste required")
+    champ = _REPO / "teams" / "Champions"
+    m = re.search(r"reg([a-z]+)$", _active_format(_env_read()).lower())
+    want = m.group(1) if m else None
+    subdir = champ
+    if want and champ.is_dir():
+        for dd in champ.iterdir():
+            if dd.is_dir() and re.sub(r"[^a-z]", "", dd.name.lower()) == want:
+                subdir = dd
+                break
+    target = (subdir / safe).resolve()
+    if not str(target).startswith(str(champ.resolve())):
+        raise ValueError("bad team name")
+    subdir.mkdir(parents=True, exist_ok=True)
+    target.write_text(paste, encoding="utf-8")
+    return target.relative_to(_REPO).as_posix()
+
+
 def _exploit_summary() -> dict:
     """Newest exploit_curve.json under artifacts/logs/exploit_*/ (the 4a G3 meter)."""
     best, best_mtime = None, -1.0
@@ -253,11 +326,13 @@ REGISTRY = [
     # ---- PLAY ----
     dict(id="play_online", cat="play", heavy=False, title="Online bot (browser)",
          module="v_dance.play.play_online_browser",
-         desc="Logs into play.pokemonshowdown.com and opens the bot control panel (:8777) for "
-              "ladder runs + private challenges. Bo3 venues: set TP ckpt to checkpoints_setctx.",
+         desc="Logs into play.pokemonshowdown.com. Drive it live from the Online bot tab — set the "
+              "format + launch there (format writes .env), then ladder runs, auto-accept, private "
+              "challenges — the control panel is embedded there (no separate window). Bo3 venues: "
+              "set TP ckpt to checkpoints_setctx.",
          opts=[dict(name="ai-team", type="team", label="Team pin (optional)"),
-               dict(name="dossier", type="flag", label="--dossier (S1 belief warm-start)"),
-               dict(name="adapt-rules", type="flag", label="--adapt-rules"),
+               dict(name="dossier", type="flag", label="--dossier (S1 belief warm-start)", default=True),
+               dict(name="adapt-rules", type="flag", label="--adapt-rules", default=True),
                dict(name="dry-run", type="flag", label="--dry-run (login + teams, no battles)"),
                dict(name="bench-note", type="text", label="--bench-note", default="online"),
                dict(name="ckpt", type="ckpt", label="Battle ckpt override (optional)"),
@@ -439,6 +514,17 @@ REGISTRY = [
     dict(id="svc_dashboard", cat="svc", heavy=False, title="Self-play dashboard (:5175)",
          module="v_dance.datatools.dashboard_server", opts=[]),
 ]
+# Every PLAY command gets a Format picker (blank = the deployed .env default). Done in one place so
+# a new play command inherits it. type="format" is injected as the VDANCE_BATTLE_FORMAT env var at
+# launch (spawn-safe — every harness reads it at import), NOT as an argv flag.
+# EXCEPT play_online: its format is chosen in the Online-bot tab, which writes VDANCE_BATTLE_FORMAT
+# to .env (play_online_browser binds the format from .env at import) — so no per-launch format field
+# on its Play card (2026-07-14).
+for _e in REGISTRY:
+    if _e.get("cat") == "play" and _e["id"] != "play_online":
+        _e.setdefault("opts", []).insert(0, dict(
+            name="format", type="format", label="Format (blank = deployed default)"))
+
 _REG_BY_ID = {e["id"]: e for e in REGISTRY}
 
 # ── live progress parsers (per command, from the streamed log) ─────────────────
@@ -537,6 +623,8 @@ def _build_argv(entry: dict, options: dict, teams: list, ckpts: dict) -> list:
     tp_paths = {r["path"] for r in ckpts["tp"]}
     for opt in entry.get("opts", []):
         name, typ = opt["name"], opt["type"]
+        if typ == "format":
+            continue                                # handled as the VDANCE_BATTLE_FORMAT env var, not argv
         raw = options.get(name, None)
         if raw is None and "default" in opt:      # apply the registry default SERVER-SIDE so a
             raw = opt["default"]                    # launch is robust even if the client omits it
@@ -673,7 +761,7 @@ def _status() -> dict:
     return {"repo": str(_REPO), "env": env_pub, "format": fmt, "formats": _known_formats(),
             "teams": _discover_teams(fmt), "ckpts": inv, "parity": parity,
             "services": services, "exploit": _exploit_summary(), "logs": _recent_logs(),
-            "jobs": _JOBS.list(),
+            "jobs": _JOBS.list(), "formats_full": _known_formats_full(),
             "editable_env": list(_ENV_WRITE_KEYS)}
 
 
@@ -719,6 +807,8 @@ def _make_handler():
                     self._json(_exploit_summary())
                 elif u.path == "/api/online/status":
                     self._json(_panel_status())
+                elif u.path == "/api/species":
+                    self._json({"species": _species_list()})
                 elif u.path == "/api/log":
                     q = parse_qs(u.query)
                     name = (q.get("name") or [""])[0]
@@ -760,6 +850,15 @@ def _make_handler():
                     for eo in entry.get("envopts", []) or []:
                         if (body.get("env") or {}).get(eo["key"]):
                             env_extra[eo["key"]] = "1"
+                    # Format picker → VDANCE_BATTLE_FORMAT (spawn-safe; every harness reads it at
+                    # import). Blank = the deployed .env default. Validated to a Showdown format id.
+                    if any(o.get("type") == "format" for o in entry.get("opts", [])):
+                        fv = str((body.get("options") or {}).get("format") or "").strip()
+                        if fv:
+                            if not re.match(r"^[a-z0-9]+$", fv):
+                                raise ValueError("format must be a Showdown format id — lowercase "
+                                                 "letters/digits only, e.g. gen9championsvgc2026regmb")
+                            env_extra["VDANCE_BATTLE_FORMAT"] = fv
                     info = _JOBS.start(entry, body.get("options") or {}, env_extra)
                     self._json({"ok": True, "job": info})
                 elif self.path == "/api/job/stop":
@@ -768,6 +867,12 @@ def _make_handler():
                     # proxy to the live bot panel: /api/online/ladder/start -> panel /api/ladder/start
                     target = "/api" + self.path[len("/api/online"):]
                     self._json({"ok": True, "panel": _panel_post(target, body)})
+                elif self.path == "/api/tb/generate":
+                    self._json(_tb_post("/api/teams/generate", body))
+                elif self.path == "/api/tb/score":
+                    self._json(_tb_post("/api/teams/score", body))
+                elif self.path == "/api/teams/save":
+                    self._json({"ok": True, "path": _save_team(body.get("name"), body.get("paste"))})
                 else:
                     self._json({"ok": False, "error": "not found"}, 404)
             except ValueError as exc:
