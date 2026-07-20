@@ -52,9 +52,11 @@ _CHAMPIONS_DIR = _REPO / "teams" / "Champions"
 
 # .env keys the browser may SEE (never PS_PASSWORD) and the subset it may WRITE.
 _ENV_READ_KEYS = ("PS_USERNAME", "PS_AVATAR", "PS_CLIENT_URL", "VDANCE_BATTLE_FORMAT",
-                  "VD_BATTLE_CKPT", "VD_TP_CKPT", "VD_DEFAULT_TEAM", "VD_AUTO_CLOSE_ROOMS")
+                  "VD_BATTLE_CKPT", "VD_TP_CKPT", "VD_DEFAULT_TEAM", "VD_AUTO_CLOSE_ROOMS",
+                  "VD_SERVE_TAU", "VD_SERVE_TOP_P")
 _ENV_WRITE_KEYS = ("VDANCE_BATTLE_FORMAT", "VD_BATTLE_CKPT", "VD_TP_CKPT",
-                   "VD_DEFAULT_TEAM", "VD_AUTO_CLOSE_ROOMS")
+                   "VD_DEFAULT_TEAM", "VD_AUTO_CLOSE_ROOMS",
+                   "VD_SERVE_TAU", "VD_SERVE_TOP_P")
 
 # well-known local services (display + start/stop for the two datatools servers)
 _SERVICES = {

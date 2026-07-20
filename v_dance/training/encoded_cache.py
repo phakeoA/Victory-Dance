@@ -189,7 +189,8 @@ def build_cache_streaming(folder: str, chunk_files: Optional[int] = None) -> Tup
             n += nc
             del examples, Xc
             if n_chunks > 1:
-                print(f"[encoded-cache] build {folder}: chunk {ci + 1}/{n_chunks} — "
+                print(f"{time.strftime('%H:%M:%S')} [encoded-cache] build {folder}: "
+                      f"chunk {ci + 1}/{n_chunks} — "
                       f"{n} examples, X {n * dim * 4 / 2**30:.1f} GB on disk, "
                       f"{time.time() - t0:.0f}s", flush=True)
 
@@ -335,8 +336,8 @@ def cached_examples_from_folders(
         hit = load_cache(folder, with_opp=with_opp, mmap=mmap)
         if hit is not None:
             examples, stats = hit
-            print(f"[encoded-cache] HIT  {folder} — {len(examples)} examples "
-                  f"in {time.time()-t0:.1f}s")
+            print(f"{time.strftime('%H:%M:%S')} [encoded-cache] HIT  {folder} — "
+                  f"{len(examples)} examples in {time.time()-t0:.1f}s")
         else:
             # Streaming chunked build (WITH opp fields so one cache serves both
             # with_opp modes), then reconstruct from the fresh cache — the
@@ -351,14 +352,14 @@ def cached_examples_from_folders(
                       file=sys.stderr)
             if rebuilt is not None:
                 examples, stats = rebuilt
-                print(f"[encoded-cache] MISS {folder} — built + cached "
-                      f"{len(examples)} examples in {time.time()-t0:.1f}s")
+                print(f"{time.strftime('%H:%M:%S')} [encoded-cache] MISS {folder} — "
+                      f"built + cached {len(examples)} examples in {time.time()-t0:.1f}s")
             else:
                 # Fallback (cache unwritable / corpus changed mid-build):
                 # plain in-RAM build, nothing cached.
                 examples, stats = examples_from_folders([folder], with_opp=with_opp)
-                print(f"[encoded-cache] MISS {folder} — built {len(examples)} "
-                      f"examples UNCACHED in {time.time()-t0:.1f}s")
+                print(f"{time.strftime('%H:%M:%S')} [encoded-cache] MISS {folder} — "
+                      f"built {len(examples)} examples UNCACHED in {time.time()-t0:.1f}s")
         all_examples.extend(examples)
         total_stats.update(stats)
     total_stats["replays"] = len({e["replay_id"] for e in all_examples})

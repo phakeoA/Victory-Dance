@@ -220,6 +220,7 @@ def run_epoch(
     value_loss_weight: float = 1.0,
     progress_every: int = 0,
     progress_label: str = "",
+    progress_secs: float = 600.0,
 ) -> Dict[str, float]:
     """One pass over ``loader``.  Train if ``optimizer`` given, else eval.
 
@@ -246,13 +247,23 @@ def run_epoch(
     import time as _time
     _n_batches = len(loader)
     _t0 = _time.time()
+    _last_beat = _t0
     with ctx:
         for _bi, batch in enumerate(loader, 1):
-            if progress_every and train and (_bi % progress_every == 0 or _bi == _n_batches):
-                _dt = max(_time.time() - _t0, 1e-6)
+            # Intra-epoch heartbeat (2026-07-19, USER): TIME-based and ON BY DEFAULT
+            # (progress_secs, default 600s) so a long epoch is never a silent multi-hour
+            # wait — plus the original batch-count trigger (--progress-every). Print-only;
+            # training math is untouched.
+            _now = _time.time()
+            _count_due = progress_every and (_bi % progress_every == 0 or _bi == _n_batches)
+            _time_due = progress_secs and (_now - _last_beat) >= progress_secs
+            if train and (_count_due or _time_due):
+                _last_beat = _now
+                _dt = max(_now - _t0, 1e-6)
                 _eta = (_n_batches - _bi) / max(_bi / _dt, 1e-9) / 60.0
                 print(f"    {_time.strftime('%H:%M:%S')} [{progress_label} "
-                      f"batch {_bi}/{_n_batches}] {_bi/_dt:.1f} batch/s, ETA {_eta:.1f} min",
+                      f"batch {_bi}/{_n_batches} ({100.0 * _bi / _n_batches:.1f}%)] "
+                      f"{_bi/_dt:.1f} batch/s, epoch ETA {_eta:.1f} min",
                       flush=True)
             x = batch["x"].to(device)
             target = batch["target"].to(device)   # (B, 2)
@@ -399,6 +410,18 @@ def run_epoch(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Resumable training (2026-07-19, USER request — long era retrains must pause at the
+# USER's convenience). Shared machinery: v_dance/training/resumable.py (also used by
+# train_teampreview; the exploiter has its own iteration-style resume).
+from v_dance.training.resumable import (  # noqa: E402
+    RESUME_NAME,
+    config_fingerprint,
+    load_resume_state,
+    restore_rng,
+    save_resume_state,
+)
+
+
 def train(args: argparse.Namespace) -> dict:
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -764,7 +787,38 @@ def train(args: argparse.Namespace) -> dict:
     best_top1 = -1.0
     epochs_no_improve = 0
     history: List[dict] = []
-    for epoch in range(1, args.epochs + 1):
+    start_epoch = 1
+    resume_path = out_dir / RESUME_NAME
+    config_fp = config_fingerprint(config)
+    if getattr(args, "resume", False):
+        rs = load_resume_state(resume_path, config_fp, device=device, label="train_bc")
+        # Corpus-drift guard (2026-07-19): the config fingerprint covers the FOLDER LIST,
+        # not folder CONTENTS — if the corpus grew while paused (e.g. new Type_C games),
+        # the split/epoch semantics silently change. Refuse; the grown corpus is the NEXT
+        # era's warm-start run, not this run's resume.
+        _ex = rs.get("extra") or {}
+        _sizes = (len(train_loader.dataset), len(val_loader.dataset))
+        if _ex.get("dataset_sizes") is not None and tuple(_ex["dataset_sizes"]) != _sizes:
+            sys.exit(f"[train_bc] --resume REFUSED: dataset sizes changed "
+                     f"({tuple(_ex['dataset_sizes'])} -> {_sizes}) — the corpus changed "
+                     f"while paused. Start a fresh run (warm-start) on the new corpus.")
+        model.load_state_dict(rs["model_state"])
+        optimizer.load_state_dict(rs["optimizer_state"])
+        best_top1 = float(rs["best"])
+        epochs_no_improve = int(rs["epochs_no_improve"])
+        history = list(rs.get("history") or [])
+        restore_rng(rs["rng"])
+        start_epoch = int(rs["epoch"]) + 1
+        print(f"[train_bc] RESUMED from {resume_path.name}: completed epoch "
+              f"{rs['epoch']}, best val top1 {best_top1:.4f}, continuing at epoch "
+              f"{start_epoch}/{args.epochs} (RNG streams restored).")
+        if start_epoch > args.epochs:
+            print("[train_bc] resume: epoch budget already exhausted — raise --epochs "
+                  "to extend the run.")
+    print(f"[train_bc] resumable: state -> {resume_path.name} after every epoch "
+          f"(interrupt any time; continue with --resume)")
+    for epoch in range(start_epoch, args.epochs + 1):
+        _ep_t0 = time.time()
         tr = run_epoch(model, train_loader, device, optimizer, class_weight=class_weight,
                        gimmick_class_weight=gimmick_class_weight,
                        gimmick_loss_weight=args.gimmick_loss_weight,
@@ -772,12 +826,14 @@ def train(args: argparse.Namespace) -> dict:
                        sample_weighted=sample_weighted,
                        value_loss_weight=args.value_loss_weight,
                        progress_every=args.progress_every,
-                       progress_label=f"e{epoch}")
+                       progress_label=f"e{epoch}",
+                       progress_secs=args.progress_secs)
         va = run_epoch(model, val_loader, device, optimizer=None)
         history.append({"epoch": epoch, "train": tr, "val": va})
         opp_str = f" | opp top1 {va['opp_top1']:.3f}" if args.aux_opp_head else ""
         print(
-            f"epoch {epoch:3d} | "
+            f"{time.strftime('%H:%M:%S')} epoch {epoch:3d} "
+            f"[{(time.time() - _ep_t0) / 60.0:.1f} min] | "
             f"train loss {tr['loss']:.4f} top1 {tr['top1']:.3f} | "
             f"val loss {va['loss']:.4f} top1 {va['top1']:.3f} top3 {va['top3']:.3f} "
             f"(a {va['our_a_top1']:.3f} / b {va['our_b_top1']:.3f}) "
@@ -805,6 +861,14 @@ def train(args: argparse.Namespace) -> dict:
                 print(f"[train_bc] early stop at epoch {epoch} "
                       f"(no val top1 improvement for {args.patience} epochs)")
                 break
+        # Epoch-boundary resume state (atomic). Written AFTER the best-save/patience
+        # bookkeeping so the restored counters are exact. The early-stop ``break`` above
+        # skips this save deliberately — an early-stopped run is COMPLETE, not paused.
+        save_resume_state(resume_path, epoch=epoch, model=model, optimizer=optimizer,
+                          best=best_top1, epochs_no_improve=epochs_no_improve,
+                          history=history, config_fp=config_fp,
+                          extra={"dataset_sizes": [len(train_loader.dataset),
+                                                   len(val_loader.dataset)]})
 
     (out_dir / "history.json").write_text(json.dumps(history, indent=2), encoding="utf-8")
     print(f"[train_bc] done. best val top1 = {best_top1:.3f}. checkpoint: {ckpt_path}")
@@ -832,6 +896,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap.add_argument("--progress-every", type=int, default=0,
                     help="print an intra-epoch batch heartbeat every N TRAIN batches "
                          "(0 = off; e.g. 200 on a long run to confirm it's alive)")
+    ap.add_argument("--progress-secs", type=float, default=600.0,
+                    help="TIME-based intra-epoch heartbeat: print batch x/y (%%), rate and "
+                         "epoch ETA every N seconds of a TRAIN epoch (default 600 = 10 min; "
+                         "0 = off). ON by default so long epochs are never a silent wait.")
     ap.add_argument("--batch-size", type=int, default=256)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--weight-decay", type=float, default=1e-4)
@@ -970,6 +1038,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     # only consumer is the KL-to-BC anchor — so it must land where that anchor is read, else it is an orphan
     # (neither served nor anchored). Back up the current battle_base.pt first if you want to keep it (the
     # established checkpoints_attn_pre_* backup pattern).
+    ap.add_argument("--resume", action="store_true",
+                    help="continue an interrupted run from <out>/resume_state.pt "
+                         "(written after every completed epoch; model+optimizer+"
+                         "counters+RNG restored; refuses a config-fingerprint "
+                         "mismatch). Also extends a finished run when --epochs is "
+                         "raised. Pass the SAME flags as the original run.")
     ap.add_argument("--out",
                     default=str(_HERE.parents[1] / "ai_train_scripts" / "BC_model" / "checkpoints_attn_pre_gen141"),
                     help="checkpoint output dir (default: the BC-anchor home the self-play configs read)")

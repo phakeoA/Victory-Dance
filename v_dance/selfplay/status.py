@@ -331,8 +331,29 @@ class LiveBattles:
             if copy_dir is not None:
                 try:
                     cd = Path(copy_dir)
-                    cd.mkdir(parents=True, exist_ok=True)
+                    # Private-battle routing (2026-07-19, USER request): an UNRATED game (no
+                    # ``|rated`` protocol line — the exact signal bulk_parse --rated-only gates
+                    # on) must not land in the Type_C ladder staging folder. It routes to the
+                    # sibling ``<copy_dir>_private/`` instead; games worth learning from (e.g.
+                    # a strong player's private challenge) are hand-moved to
+                    # ``<copy_dir>_private/approved/`` and ingested by a second bulk_parse pass.
+                    # (?:^|>) — the first log line abuts the <script> tag with no newline,
+                    # so a pure line-start anchor misses a leading |rated (the |win| lesson).
+                    is_private = not re.search(r"(?:^|>)\|rated(?:\||\r?$)", html, re.M)
                     prefix = f"{d.name}_" if out_dir else ""
+                    if is_private:
+                        cd = cd.parent / (cd.name + "_private")
+                        # Private copies lead with the OPPONENT's name (USER 2026-07-19) so the
+                        # cherry-pick folder reads by who the bot played. The session+tag stem
+                        # stays — it is what keeps repeat opponents from overwriting each other.
+                        opp = getattr(battle, "opponent_username", None)
+                        if not opp:
+                            m = [n for s_, n in re.findall(r"\|player\|(p[12])\|([^|\r\n<]+)", html)
+                                 if n != getattr(battle, "player_username", None)]
+                            opp = m[-1] if m else None
+                        if opp:
+                            prefix = re.sub(r"[^A-Za-z0-9_-]", "", str(opp)) + "_" + prefix
+                    cd.mkdir(parents=True, exist_ok=True)
                     (cd / f"{prefix}{stem}.html").write_text(html, encoding="utf-8")
                 except Exception:
                     pass

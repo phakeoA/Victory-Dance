@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from itertools import combinations
@@ -46,6 +47,13 @@ from v_dance.training.teampreview_dataset import (  # noqa: E402
     split_by_replay,
 )
 from v_dance.models.teampreview_model import build_model  # noqa: E402
+from v_dance.training.resumable import (  # noqa: E402  (2026-07-19 shared resume machinery)
+    RESUME_NAME,
+    config_fingerprint,
+    load_resume_state,
+    restore_rng,
+    save_resume_state,
+)
 
 # Contrastive set head (2026-07-11, docs/tp_contrastive_set_head_design.md): the canonical
 # subset order shared by the loss, the metrics and model.score_subsets' default — all C(6,4)
@@ -110,7 +118,54 @@ def _topk_set_metrics(logits: torch.Tensor, target: torch.Tensor, k: int,
     return n_exact, sum_overlap, n
 
 
-def run_epoch(model, loader, device, optimizer=None, set_weight: float = 1.0) -> Dict[str, float]:
+def compute_tp_weights(examples: Sequence[dict],
+                       outcome_weight: bool = False, loss_weight: float = 0.5,
+                       own_folders: Optional[Sequence[str]] = None,
+                       own_boost: float = 15.0) -> Optional[np.ndarray]:
+    """TP-N3 per-example loss weights (docs/tp_n3_outcome_finetune_design.md).
+
+    Multiplicative: WON examples from an ``--own-folders`` folder ×``own_boost`` (lost/
+    unknown own rows stay unboosted — see the won-only comment below); with
+    ``outcome_weight``, lost games ×``loss_weight`` (won/unknown ×1.0). The vector is
+    MEAN-NORMALISED to 1.0 (bc_dataset.compute_sample_weights' invariant) so weights only
+    redistribute emphasis. Returns None when nothing is enabled — the dataset then emits
+    no "weight" key and run_epoch keeps the exact legacy loss path (byte-identical).
+    """
+    if not outcome_weight and not own_folders:
+        return None
+    own = tuple(os.path.normcase(os.path.abspath(f)) for f in (own_folders or ()))
+    w = np.ones(len(examples), dtype=np.float64)
+    n_own = n_boost = n_lost = 0
+    for i, ex in enumerate(examples):
+        src = os.path.normcase(os.path.abspath(str(ex.get("source_file") or "")))
+        is_own = bool(own) and src.startswith(own)
+        if is_own:
+            n_own += 1
+        # Won-ONLY boost (N3 iter-3): BC has no negative gradient — boosting a LOST own
+        # game amplifies the mistake (iter-2 probe: own losses at ×boost×loss_weight = 7.5×
+        # corpus tripled the 0W–5L Zard brings). Lost/unknown own rows stay unboosted.
+        if is_own and ex.get("won") is True:
+            w[i] *= float(own_boost)
+            n_boost += 1
+        if outcome_weight and ex.get("won") is False:
+            w[i] *= float(loss_weight)
+            n_lost += 1
+    if own and n_own == 0:
+        # A typo'd folder silently weighting nothing is exactly the failure mode we refuse
+        # to ship (a flag that LOOKS on but does nothing) — fail loud instead.
+        raise SystemExit(f"[train_teampreview] --own-folders matched 0 examples: {own_folders} "
+                         f"(is the folder also in --data?)")
+    mean = w.mean()
+    if mean > 0:
+        w = w / mean
+    print(f"[train_teampreview] TP-N3 weights: {n_own} own-folder examples "
+          f"({n_boost} WON → ×{own_boost:g}; lost/unknown unboosted), "
+          f"{n_lost} lost-game examples (×{loss_weight:g}), mean-normalised over {len(examples)}")
+    return w.astype(np.float32)
+
+
+def run_epoch(model, loader, device, optimizer=None, set_weight: float = 1.0,
+              progress_secs: float = 600.0, progress_label: str = "") -> Dict[str, float]:
     train = optimizer is not None
     model.train(train)
     use_set = bool(getattr(model, "use_set_head", False))
@@ -122,8 +177,21 @@ def run_epoch(model, loader, device, optimizer=None, set_weight: float = 1.0) ->
     set_exact = set_n = 0
 
     ctx = torch.enable_grad() if train else torch.no_grad()
+    _n_total = len(loader)
+    _t0 = _last_beat = time.time()
     with ctx:
-        for batch in loader:
+        for _bi, batch in enumerate(loader, 1):
+            # Intra-epoch heartbeat (2026-07-19, USER): time-based, ON by default —
+            # TP epochs are usually short so this rarely fires, but a future big-corpus
+            # TP run is never a silent wait. Print-only.
+            _now = time.time()
+            if train and progress_secs and (_now - _last_beat) >= progress_secs:
+                _last_beat = _now
+                _dt = max(_now - _t0, 1e-6)
+                _eta = (_n_total - _bi) / max(_bi / _dt, 1e-9) / 60.0
+                print(f"    {time.strftime('%H:%M:%S')} [{progress_label} batch "
+                      f"{_bi}/{_n_total} ({100.0 * _bi / _n_total:.1f}%)] "
+                      f"epoch ETA {_eta:.1f} min", flush=True)
             our_idx = batch["our_idx"].to(device)
             opp_idx = batch["opp_idx"].to(device)
             our_feat = batch["our_feat"].to(device)
@@ -165,15 +233,25 @@ def run_epoch(model, loader, device, optimizer=None, set_weight: float = 1.0) ->
                     return bce.mean(dim=1)
                 return (bce * slot_m).sum(dim=1) / slot_m.sum(dim=1).clamp_min(1.0)
 
+            # TP-N3: optional per-row loss weight (mean-normalised over the split; the count
+            # denominators below stay UNweighted, so weights only redistribute emphasis —
+            # bc_dataset.compute_sample_weights' invariant). Batches without the key run the
+            # exact legacy expressions — byte-identical by construction.
+            w = batch.get("weight")
+            if w is not None:
+                w = w.to(device)
+
             # lead head: only valid_lead rows (audit: a species-match-shifted lead is masked out, same as
             # valid_bring masks the bring head). On a clean corpus (all valid) this == the old plain mean.
             lead_bce = _slot_mean(F.binary_cross_entropy_with_logits(
                 lead_logits, lead, reduction="none"))                # (B,)
-            lead_loss = (lead_bce * valid_lead).sum() / valid_lead.sum().clamp_min(1.0)
+            lead_num = (lead_bce * valid_lead) if w is None else (lead_bce * valid_lead * w)
+            lead_loss = lead_num.sum() / valid_lead.sum().clamp_min(1.0)
             bring_bce = _slot_mean(F.binary_cross_entropy_with_logits(
                 bring_logits, bring, reduction="none"))              # (B,)
             denom = valid.sum().clamp_min(1.0)
-            bring_loss = (bring_bce * valid).sum() / denom
+            bring_num = (bring_bce * valid) if w is None else (bring_bce * valid * w)
+            bring_loss = bring_num.sum() / denom
             loss = lead_loss + bring_loss
 
             if use_set:
@@ -184,8 +262,15 @@ def run_epoch(model, loader, device, optimizer=None, set_weight: float = 1.0) ->
                 tgt = _set_targets(batch)
                 mask = tgt >= 0
                 if bool(mask.any()):
-                    set_loss = F.cross_entropy(set_scores[mask.to(device)],
-                                               tgt[mask].to(device))
+                    if w is None:
+                        set_loss = F.cross_entropy(set_scores[mask.to(device)],
+                                                   tgt[mask].to(device))
+                    else:
+                        # TP-N3 weighted rows; count denominator (weights are mean-normalised).
+                        md = mask.to(device)
+                        ce = F.cross_entropy(set_scores[md], tgt[mask].to(device),
+                                             reduction="none")
+                        set_loss = (ce * w[md]).sum() / md.sum().clamp_min(1).to(ce.dtype)
                     loss = loss + set_weight * set_loss
                     pred = set_scores.argmax(dim=1).cpu()
                     set_exact += int((pred[mask] == tgt[mask]).sum())
@@ -306,12 +391,19 @@ def train(args: argparse.Namespace) -> dict:
           f"({len({e['replay_id'] for e in train_ex})} / "
           f"{len({e['replay_id'] for e in val_ex})} replays)")
 
+    # TP-N3: outcome/own-folder weights on the TRAIN split only — val metrics stay
+    # unweighted (comparable across runs). None when the flags are off.
+    tp_weights = compute_tp_weights(
+        train_ex, outcome_weight=args.outcome_weight, loss_weight=args.loss_weight,
+        own_folders=args.own_folders, own_boost=args.own_boost)
+
     # Subset-mask aug is TRAIN-only — the val split stays clean (checkpoint selection + the
     # tp_val_report gates must measure the un-augmented task).
     train_loader = DataLoader(
         TeamPreviewDataset(train_ex, vocab, feat_dim=feat_dim, affinity_fn=affinity_fn,
                            subset_mask_p=args.subset_mask_aug, subset_mask_k=args.subset_mask_k,
-                           aug_seed=args.seed, with_set_ctx=args.set_ctx),
+                           aug_seed=args.seed, with_set_ctx=args.set_ctx,
+                           weights=tp_weights),
         batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(
         TeamPreviewDataset(val_ex, vocab, feat_dim=feat_dim, affinity_fn=affinity_fn,
@@ -375,6 +467,11 @@ def train(args: argparse.Namespace) -> dict:
         "set_weight": args.set_weight,
         "warm_start": str(args.warm_start) if args.warm_start else None,
         "features": args.features,
+        # TP-N3 provenance stamps (docs/tp_n3_outcome_finetune_design.md).
+        "outcome_weight": bool(args.outcome_weight),
+        "loss_weight": args.loss_weight,
+        "own_folders": list(args.own_folders) if args.own_folders else None,
+        "own_boost": args.own_boost,
     }
     if feature_schema:
         config["feature_schema"] = feature_schema
@@ -382,13 +479,49 @@ def train(args: argparse.Namespace) -> dict:
     best = -1.0
     epochs_no_improve = 0
     history: List[dict] = []
-    for epoch in range(1, args.epochs + 1):
-        tr = run_epoch(model, train_loader, device, optimizer, set_weight=args.set_weight)
+    start_epoch = 1
+    resume_path = out_dir / RESUME_NAME
+    config_fp = config_fingerprint(config)
+    if getattr(args, "resume", False):
+        rs = load_resume_state(resume_path, config_fp, device=device,
+                               label="train_teampreview")
+        # TP integrity guards beyond the config fingerprint: the model's embedding rows
+        # are keyed by the vocab, and both are derived from the CORPUS — if the data
+        # changed since the interrupted run, resuming would silently mis-index species.
+        ex_ = rs.get("extra") or {}
+        if ex_.get("vocab") != vocab:
+            raise SystemExit("[train_teampreview] --resume REFUSED: the rebuilt species "
+                             "vocab differs from the interrupted run's (the corpus "
+                             "changed). Start fresh without --resume.")
+        if ex_.get("n_examples") != len(examples):
+            raise SystemExit(f"[train_teampreview] --resume REFUSED: example count "
+                             f"changed ({ex_.get('n_examples')} -> {len(examples)}) — "
+                             f"the corpus changed. Start fresh without --resume.")
+        model.load_state_dict(rs["model_state"])
+        optimizer.load_state_dict(rs["optimizer_state"])
+        best = float(rs["best"])
+        epochs_no_improve = int(rs["epochs_no_improve"])
+        history = list(rs.get("history") or [])
+        restore_rng(rs["rng"])
+        start_epoch = int(rs["epoch"]) + 1
+        print(f"[train_teampreview] RESUMED from {resume_path.name}: completed epoch "
+              f"{rs['epoch']}, best mean-exact {best:.4f}, continuing at epoch "
+              f"{start_epoch}/{args.epochs} (RNG streams restored).")
+        if start_epoch > args.epochs:
+            print("[train_teampreview] resume: epoch budget already exhausted — raise "
+                  "--epochs to extend the run.")
+    print(f"[train_teampreview] resumable: state -> {resume_path.name} after every "
+          f"epoch (interrupt any time; continue with --resume)")
+    for epoch in range(start_epoch, args.epochs + 1):
+        _ep_t0 = time.time()
+        tr = run_epoch(model, train_loader, device, optimizer, set_weight=args.set_weight,
+                       progress_secs=args.progress_secs, progress_label=f"e{epoch}")
         va = run_epoch(model, val_loader, device, optimizer=None, set_weight=args.set_weight)
         history.append({"epoch": epoch, "train": tr, "val": va})
         set_col = f"set exact {va['set_exact']:.3f} | " if args.set_head else ""
         print(
-            f"epoch {epoch:3d} | train loss {tr['loss']:.4f} | "
+            f"{time.strftime('%H:%M:%S')} epoch {epoch:3d} "
+            f"[{(time.time() - _ep_t0) / 60.0:.1f} min] | train loss {tr['loss']:.4f} | "
             f"val loss {va['loss']:.4f} {set_col}"
             f"lead exact {va['lead_exact']:.3f} ovlp {va['lead_overlap']:.3f} | "
             f"bring exact {va['bring_exact']:.3f} ovlp {va['bring_overlap']:.3f}"
@@ -409,6 +542,19 @@ def train(args: argparse.Namespace) -> dict:
                 print(f"[train_teampreview] early stop at epoch {epoch} "
                       f"(no val mean-exact gain for {args.patience} epochs)")
                 break
+        # Epoch-boundary resume state (atomic; early-stop ``break`` above skips it — an
+        # early-stopped run is COMPLETE, not paused). extra = TP integrity guards.
+        save_resume_state(resume_path, epoch=epoch, model=model, optimizer=optimizer,
+                          best=best, epochs_no_improve=epochs_no_improve,
+                          history=history, config_fp=config_fp,
+                          extra={"vocab": vocab, "n_examples": len(examples)})
+
+    if args.save_last:
+        last_path = ckpt_path.with_name(ckpt_path.stem + "_last.pt")
+        torch.save({"model_state": model.state_dict(),
+                    "config": {**config, "saved_epoch": "last"},
+                    "vocab": vocab, "epoch": epoch, "val_metrics": va}, last_path)
+        print(f"[train_teampreview] --save-last: final-epoch (ep{epoch}) weights -> {last_path}")
 
     (out_dir / "history.json").write_text(json.dumps(history, indent=2), encoding="utf-8")
     print(f"[train_teampreview] done. best mean-exact = {best:.3f}. ckpt: {ckpt_path}")
@@ -473,6 +619,31 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                          "M5 serve guard (player.ots_opp_known) will feed VD_TP_OTS_OVERLAY input "
                          "to THIS ckpt only. Omit for closed-sheet data (e.g. Type A/B) — the "
                          "tpfeat-v7 schema alone does NOT certify overlay training.")
+    ap.add_argument("--progress-secs", type=float, default=600.0,
+                    help="TIME-based intra-epoch heartbeat every N seconds of a TRAIN "
+                         "epoch (default 600; 0 = off).")
+    ap.add_argument("--resume", action="store_true",
+                    help="continue an interrupted run from <out>/resume_state.pt "
+                         "(written after every completed epoch; model+optimizer+counters+"
+                         "RNG restored; refuses config-fingerprint / vocab / example-count "
+                         "mismatches). Also extends a finished run when --epochs is "
+                         "raised. Pass the SAME flags as the original run.")
+    ap.add_argument("--save-last", action="store_true",
+                    help="TP-N3: additionally save the FINAL-epoch weights to *_last.pt. "
+                         "Best-val selection fights a weighted objective (it saved epoch 1 "
+                         "in the first N3 run) — this exposes the trained-through model.")
+    ap.add_argument("--outcome-weight", action="store_true",
+                    help="TP-N3: weight each TRAIN example by game outcome — won ×1.0, "
+                         "lost ×--loss-weight, unknown ×1.0 (mean-normalised).")
+    ap.add_argument("--loss-weight", type=float, default=0.5,
+                    help="TP-N3: multiplier for lost-game examples under --outcome-weight.")
+    ap.add_argument("--own-folders", nargs="+", default=None,
+                    help="TP-N3: folders (e.g. Type_C own games) whose examples get "
+                         "×--own-boost weight. Must also appear in --data. Fails loud "
+                         "if it matches 0 examples.")
+    ap.add_argument("--own-boost", type=float, default=15.0,
+                    help="TP-N3: weight multiplier for WON --own-folders examples "
+                         "(lost/unknown own rows stay unboosted).")
     ap.add_argument("--patience", type=int, default=0,
                     help="early-stop after N epochs with no val mean-exact gain (0=off)")
     ap.add_argument("--val-frac", type=float, default=0.1)

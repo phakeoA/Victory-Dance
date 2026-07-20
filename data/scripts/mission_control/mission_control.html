@@ -750,7 +750,10 @@ function updateOnlineLive() {
   const lg = $("oblog");
   if (lg) {
     const atEnd = lg.scrollTop + lg.clientHeight >= lg.scrollHeight - 8;
-    const txt = (OB.events || []).join("\\n");
+    // Real newline. This block was ported from bot_control_ui.py where the JS lives inside a
+    // Python string ("\\n" → "\n"); in a plain .html file "\\n" is a LITERAL backslash-n,
+    // which rendered the whole feed as one line of "\n"-separated text (bug: 2026-07-19).
+    const txt = (OB.events || []).join("\n");
     if (lg.textContent !== txt) { lg.textContent = txt; if (atEnd) lg.scrollTop = lg.scrollHeight; }
   }
 }

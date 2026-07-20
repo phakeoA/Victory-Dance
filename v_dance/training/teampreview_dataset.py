@@ -305,6 +305,12 @@ def _example_for_side(t: dict, side: str, opp: str,
             stats["skipped_incomplete"] += 1
         return None
 
+    # TP-N3 (2026-07-19): outcome for THIS side — ``winner`` is a username, matched the
+    # same way as bc_dataset._our_player_meta. None = tie/unknown (weighting treats it 1.0).
+    winner = t.get("winner")
+    uname = me.get("username")
+    won = bool(winner == uname) if (winner is not None and uname is not None) else None
+
     roster_norm = [norm_species(s) for s in roster]
     brought_idx, unmatched = _label_indices(roster_norm, brought)
     if stats is not None and unmatched:
@@ -354,6 +360,7 @@ def _example_for_side(t: dict, side: str, opp: str,
         "valid_lead": valid_lead,
         "replay_id": t.get("replay_id"),
         "side": side,
+        "won": won,          # TP-N3: outcome weighting input (inert for other consumers)
     }
     # DS-4c stage 3: Bo3 previous-game context (this game = game 2/3 of a set).
     # Keys only present on set games — off-set examples stay byte-identical dicts.
@@ -405,6 +412,7 @@ def build_examples(
             ex = _example_for_side(t, side, opp, stats, feat_fn, sheet_map=sheet_map,
                                    set_prev=set_prev)
             if ex is not None:
+                ex["source_file"] = fp   # TP-N3: lets the trainer weight own-game folders
                 examples.append(ex)
     stats["replays"] = len({e["replay_id"] for e in examples})
     return examples, stats
@@ -468,7 +476,8 @@ class TeamPreviewDataset(Dataset):
                  feat_dim: Optional[int] = None,
                  affinity_fn: Optional[Callable] = None,
                  subset_mask_p: float = 0.0, subset_mask_k: int = 0, aug_seed: int = 0,
-                 with_set_ctx: bool = False):
+                 with_set_ctx: bool = False,
+                 weights: Optional[np.ndarray] = None):
         if not _HAS_TORCH:  # pragma: no cover
             raise RuntimeError("torch is required for TeamPreviewDataset")
         # Subset-mask augmentation (2026-07-10, TP tier-2 — docs/teampreview_bring_lead_design.md
@@ -515,6 +524,15 @@ class TeamPreviewDataset(Dataset):
         if self.with_set_ctx:
             self.our_set_ctx = np.zeros((n, TEAM_SIZE, 2), dtype=np.float32)
             self.opp_set_ctx = np.zeros((n, TEAM_SIZE, 2), dtype=np.float32)
+        # TP-N3: optional per-example loss weight, aligned with ``examples`` order. The
+        # "weight" batch key is emitted ONLY when weights were passed — every existing
+        # consumer's batches stay byte-identical.
+        self.use_weight = weights is not None
+        if self.use_weight:
+            wa = np.asarray(weights, dtype=np.float32)
+            if wa.shape != (n,):
+                raise ValueError(f"weights shape {wa.shape} != ({n},)")
+            self.t_weight = torch.from_numpy(wa)
         self.replay_ids: List[str] = []
 
         for i, ex in enumerate(examples):
@@ -569,6 +587,8 @@ class TeamPreviewDataset(Dataset):
         if self.with_set_ctx:
             item["our_set_ctx"] = self.t_our_set_ctx[idx]
             item["opp_set_ctx"] = self.t_opp_set_ctx[idx]
+        if self.use_weight:
+            item["weight"] = self.t_weight[idx]
         # Subset-mask augmentation (train-only; see __init__). Fresh draw per access → different
         # masks per epoch. Only full 6-mon rosters are touched; the model's own pad handling
         # (feat-zero test → attention-key + context-mean exclusion) does the rest in forward.

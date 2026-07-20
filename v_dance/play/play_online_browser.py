@@ -11,7 +11,8 @@ back into the tab). Closed team sheets; every finished game appends a bench-JSON
 
 .env keys: PS_USERNAME/PS_PASSWORD (login), PS_CLIENT_URL, PS_AVATAR, VDANCE_BATTLE_FORMAT
 (exported BEFORE v_dance imports so the whole stack runs that format), VD_BATTLE_CKPT/VD_TP_CKPT/
-VD_DEFAULT_TEAM (deploy defaults; --ckpt/--tp-ckpt/--ai-team override). Password never printed.
+VD_DEFAULT_TEAM (deploy defaults; --ckpt/--tp-ckpt/--ai-team override), VD_SERVE_TAU/VD_SERVE_TOP_P
+(N2b serve sampling; 0/unset = argmax, byte-identical). Password never printed.
 """
 from __future__ import annotations
 
@@ -39,6 +40,11 @@ _ENV = _load_env()
 # formats.py documents for mp workers).
 if _ENV.get("VDANCE_BATTLE_FORMAT"):
     os.environ.setdefault("VDANCE_BATTLE_FORMAT", _ENV["VDANCE_BATTLE_FORMAT"])
+# N2b serve sampling: BattleHost reads these from os.environ at construction, so a .env
+# entry must be exported too (setdefault → a real environment variable still wins).
+for _k in ("VD_SERVE_TAU", "VD_SERVE_TOP_P"):
+    if _ENV.get(_k):
+        os.environ.setdefault(_k, _ENV[_k])
 
 import argparse                                    # noqa: E402
 import asyncio                                     # noqa: E402
@@ -486,6 +492,10 @@ def main() -> None:
     for p in (ckpt, tp_ckpt):
         if not p.is_file():
             raise SystemExit(f"[online] checkpoint not found: {p}")
+    _tau = float(os.environ.get("VD_SERVE_TAU") or 0.0)
+    if _tau > 0.0:
+        print(f"[online] serve SAMPLING active: tau={_tau:g} "
+              f"top_p={float(os.environ.get('VD_SERVE_TOP_P') or 1.0):g} (argmax when unset/0)")
 
     _use_proactor_loop()
     tally = None

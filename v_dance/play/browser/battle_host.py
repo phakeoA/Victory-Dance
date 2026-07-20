@@ -29,6 +29,7 @@ sync ``feed`` from inside POKE_LOOP itself (it would deadlock) — use ``feed_as
 from __future__ import annotations
 
 import logging
+import os
 from collections import deque
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -107,10 +108,24 @@ class BattleHost:
         # init and a get() on its |win|/|tie|. A battle that ends ABNORMALLY (tab closed mid-game, room
         # deinit with no win reaching us) leaks one slot; a huge maxsize means feed() can never block on a
         # full queue over a long session. We serve one battle at a time, so this only guards that edge.
+        # N2b serve sampling (2026-07-19): VD_SERVE_TAU > 0 switches the hosted player from
+        # deterministic masked-argmax to temperature/top-p sampling (player.py TIER-4 machinery,
+        # already exercised by self-play). Argmax serving collapses the corpus's MIXED strategies —
+        # measured live: Protect 3% vs corpus 15%, Mawile Sucker Punch 13% vs 22% — while the N1
+        # probe showed the net itself ranks those moves correctly. Default 0 → byte-identical.
+        # Read HERE (browser-hosted serving only) so local eval/gate harnesses, which build
+        # VGCPlayer directly, stay deterministic regardless of a lingering .env entry.
+        serve_tau = float(os.environ.get("VD_SERVE_TAU") or 0.0)
+        serve_top_p = float(os.environ.get("VD_SERVE_TOP_P") or 1.0)
+        if serve_tau > 0.0:
+            log.warning("BattleHost: serve SAMPLING active — tau=%.2f top_p=%.2f "
+                        "(VD_SERVE_TAU/VD_SERVE_TOP_P; 0/unset = argmax)", serve_tau, serve_top_p)
         self.player = VGCPlayer(
             model_path=model_path,
             team_chooser_path=team_chooser_path,
             device=device,
+            temperature=serve_tau,
+            top_p=serve_top_p,
             account_configuration=AccountConfiguration(username, None),
             battle_format=battle_format,
             team=team,

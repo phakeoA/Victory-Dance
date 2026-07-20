@@ -345,6 +345,11 @@ def main() -> int:
                     help="Re-export replays whose .jsonl already exists.")
     ap.add_argument("--players", default=None,
                     help='Force perspectives, e.g. "p1" or "p1,p2".')
+    ap.add_argument("--rated-only", action="store_true",
+                    help="skip replays without a |rated battle-log line (private/challenge "
+                         "games; their stale exports are removed). Type_C ingest guard — "
+                         "auto-accepted friend challenges (djmed90, 2026-07-19) are NOT "
+                         "ladder-quality demonstrations.")
     ap.add_argument("--keep-junk", action="store_true",
                     help="disable the junk gate (turn-1 forfeit/timeout/disconnect games are "
                          "SKIPPED by default and their stale exports removed — USER 2026-07-10; "
@@ -469,7 +474,7 @@ def main() -> int:
     print(f"[plan] in : {input_dir}")
     print(f"[plan] out: {output_dir}\n")
 
-    n_written = n_skipped = n_empty = n_no_side = n_junk = n_no_winner = 0
+    n_written = n_skipped = n_empty = n_no_side = n_junk = n_no_winner = n_unrated = 0
     total_transitions = 0
     errors: list[tuple[str, str]] = []
     t0 = time.time()
@@ -504,6 +509,16 @@ def main() -> int:
                       + (f", {_purged} stale export(s) removed" if _purged else "")
                       + f"  {html.name}")
                 continue
+        # Rated gate (2026-07-19, same purge semantics as the junk gate): an unrated
+        # private/challenge game must not survive via an older export either.
+        # (?:^|>) — a leading |rated can abut the <script> tag with no newline (the |win| lesson).
+        if args.rated_only and not re.search(r"(?:^|>)\|rated(?:\||\r?$)", html_text, re.M):
+            n_unrated += 1
+            _purged = _purge_stale_exports(out_path, legacy_path)
+            print(f"[{idx}/{len(replays)}] unrated (private/challenge) — skipped"
+                  + (f", {_purged} stale export(s) removed" if _purged else "")
+                  + f"  {html.name}")
+            continue
         if not args.overwrite and (out_path.exists() or legacy_path.exists()):
             n_skipped += 1
             print(f"[{idx}/{len(replays)}] skip (exists)  {rid}")
@@ -577,8 +592,10 @@ def main() -> int:
            if args.winner_only else "")
         + f"  junk      : {n_junk} (turn-≤{args.junk_max_turn} forfeit/timeout/disconnect — "
           f"never exported; --keep-junk to disable)\n"
-        f"  empty     : {n_empty} (0 turns)\n"
-        f"  errored   : {len(errors)}"
+        + (f"  unrated   : {n_unrated} (private/challenge — skipped, stale exports removed; "
+           f"--rated-only gate)\n" if args.rated_only else "")
+        + f"  empty     : {n_empty} (0 turns)\n"
+          f"  errored   : {len(errors)}"
     )
     print("\n" + "─" * 60)
     print(summary)
