@@ -40,9 +40,11 @@ _ENV = _load_env()
 # formats.py documents for mp workers).
 if _ENV.get("VDANCE_BATTLE_FORMAT"):
     os.environ.setdefault("VDANCE_BATTLE_FORMAT", _ENV["VDANCE_BATTLE_FORMAT"])
-# N2b serve sampling: BattleHost reads these from os.environ at construction, so a .env
-# entry must be exported too (setdefault → a real environment variable still wins).
-for _k in ("VD_SERVE_TAU", "VD_SERVE_TOP_P"):
+# N2b serve sampling + era-4 TP near-tie + 2b pair-decode kill switch: model_io/BattleHost
+# read these from os.environ, so a .env entry must be exported too (setdefault → a real
+# environment variable still wins).
+for _k in ("VD_SERVE_TAU", "VD_SERVE_TOP_P", "VD_TP_TIE_EPS", "VD_PAIR_DECODE",
+           "VD_FUTILITY_MASK"):
     if _ENV.get(_k):
         os.environ.setdefault(_k, _ENV[_k])
 

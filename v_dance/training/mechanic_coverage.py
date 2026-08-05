@@ -106,7 +106,11 @@ def curated_names() -> set:
              | set(TF.TERRAIN_SETTER_ABILITY) | set(TF.TERRAIN_ABUSER_ABILITY)
              | set(TF.TERRAIN_SETTER_MOVE) | set(TF.TERRAIN_ABUSER_MOVE)
              | set(TF.SPREAD_MOVE) | set(TF.IMMUNITY_ABILITY)
-             | set(TF.STAT_REVERSER_ABILITY) | set(TF.ALLY_DEBUFF_MOVE) | set(TF.ORDER_ABILITY))
+             | set(TF.STAT_REVERSER_ABILITY) | set(TF.ALLY_DEBUFF_MOVE) | set(TF.ORDER_ABILITY)
+             # v8 (2026-07-23) families
+             | set(TF.INTIM_PUNISH_ABILITY) | set(TF.INTIM_IMMUNE_ABILITY)
+             | set(TF.PRIO_BLOCK_ABILITY) | set(TF.WEATHER_NEGATE_ABILITY)
+             | set(TF.SLEEP_MOVE))
     for s in TF.ROLE_MOVE.values():
         names |= set(s)
     for s in TF.ROLE_ABILITY.values():

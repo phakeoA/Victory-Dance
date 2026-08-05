@@ -281,6 +281,143 @@ def _move_usable_predicate(battle: DoubleBattle, slot: int):
     return _pred, True
 
 
+# ── Futility mask, serve adapter (2026-07-24 batch) ───────────────────────────
+# Mirrors the offline rules in action_codec.futile_target_buckets from live
+# poke-env state. VD_FUTILITY_MASK=0 = kill switch (mask reverts to pure
+# legality). Echo prints once per process (standing verify-uptake rule).
+_FUTILITY_ECHOED = False
+
+
+def _futility_enabled() -> bool:
+    import os
+    global _FUTILITY_ECHOED
+    on = os.environ.get("VD_FUTILITY_MASK", "1").strip().lower() not in ("0", "false", "off")
+    if not _FUTILITY_ECHOED:
+        _FUTILITY_ECHOED = True
+        print(f"[battle] futility mask {'ACTIVE' if on else 'DISABLED by VD_FUTILITY_MASK'} "
+              f"(rules-exact always-fail buckets)")
+    return on
+
+
+def _has_effect(effects, *tokens) -> bool:
+    return any(any(tok in str(e).upper() for tok in tokens) for e in (effects or {}))
+
+
+def _futile_buckets_serve(battle, mon, move) -> set:
+    """Extract the futility context from live poke-env objects and delegate to the
+    shared rule core. Every unknown fact degrades to fail-open inside the core."""
+    from v_dance.encoders.action_codec import (
+        futile_target_buckets, _species_can_have_levitate)
+    effects = getattr(mon, "effects", {}) or {}
+    ability = getattr(mon, "ability", None)
+    hpf = getattr(mon, "current_hp_fraction", None)
+
+    fields = getattr(battle, "fields", {}) or {}
+    terrain = None
+    gravity_on = False
+    for f in fields:
+        nm = str(f).split(".")[-1].upper()
+        if nm.endswith("_TERRAIN"):
+            terrain = nm[: -len("_TERRAIN")].lower()
+        elif nm == "GRAVITY":
+            gravity_on = True
+    weather = next((str(w).split(".")[-1].lower()
+                    for w in (getattr(battle, "weather", {}) or {})), None)
+    if weather in ("snow", "hail"):
+        weather = "snowscape"
+
+    our_conds = frozenset(str(c).split(".")[-1].lower()
+                          for c in (getattr(battle, "side_conditions", {}) or {}))
+    opp_safeguard = any(str(c).split(".")[-1].lower() == "safeguard"
+                        for c in (getattr(battle, "opponent_side_conditions", {}) or {}))
+
+    def _fctx(fmon):
+        if fmon is None or getattr(fmon, "fainted", False):
+            return None
+        try:
+            types = tuple(str(t).split(".")[-1].lower() for t in (fmon.types or ()) if t) or None
+        except Exception:
+            types = None
+        fe = getattr(fmon, "effects", {}) or {}
+        if _has_effect(fe, "SMACK_DOWN") or gravity_on:
+            grounded = True
+        elif types is not None and "flying" in types:
+            grounded = False
+        elif _has_effect(fe, "MAGNET_RISE", "TELEKINESIS"):
+            grounded = False
+        elif getattr(fmon, "item", None) == "airballoon":
+            grounded = False
+        else:
+            fab = getattr(fmon, "ability", None)
+            if fab:
+                grounded = str(fab).lower().replace(" ", "") != "levitate"
+            elif _species_can_have_levitate(getattr(fmon, "species", None)):
+                grounded = None                      # hidden Levitate possible → fail open
+            else:
+                grounded = types is not None
+        status = getattr(fmon, "status", None)
+        return {"types": types,
+                "status": str(status).split(".")[-1].lower() if status else None,
+                "encored": _has_effect(fe, "ENCORE"),
+                "confused": _has_effect(fe, "CONFUSION"),
+                "grounded": grounded}
+
+    opp = battle.opponent_active_pokemon
+    foes = {0: _fctx(opp[0] if len(opp) > 0 else None),
+            1: _fctx(opp[1] if len(opp) > 1 else None)}
+    return futile_target_buckets(
+        move.id,
+        user_ability=(str(ability).lower().replace(" ", "").replace("-", "")
+                      if ability else None),
+        user_ability_active=not _has_effect(effects, "GASTRO_ACID"),
+        user_hp_full=(hpf >= 1.0) if isinstance(hpf, (int, float)) else None,
+        foes=foes, our_sideconds=our_conds, opp_safeguard=opp_safeguard,
+        weather=weather, terrain=terrain, gravity_on=gravity_on,
+    )
+
+
+def hh_pair_futility_hook(battle):
+    """Joint futility rule for the 2b sequential decode (T3 of the 2026-07-24 batch):
+    drop the second slot's Helping Hand when the FIRST-decoded partner chose a
+    status move or a switch — nothing boostable happens this turn, so HH is a
+    provably wasted click (sole rescue: a faster opposing Encore; documented ε).
+    Returns None when the futility family is disabled (VD_FUTILITY_MASK=0)."""
+    if not _futility_enabled():
+        return None
+    from v_dance.encoders.battle_mechanics import _gen9_moves
+
+    def hook(second_slot: int, first_slot: int, first_action: int):
+        drop: set = set()
+        try:
+            active = battle.active_pokemon
+            sec = active[second_slot] if second_slot < len(active) else None
+            if sec is None or sec.fainted:
+                return drop
+            sec_moves = own_active_move_list(battle, second_slot, sec)
+            hh = [i for i, mv in enumerate(sec_moves)
+                  if getattr(mv, "id", None) == "helpinghand"]
+            if not hh:
+                return drop
+            if first_action >= SWITCH_OFFSET:
+                partner_boostable = False            # ally switches: nothing to boost
+            else:
+                fm = active[first_slot] if first_slot < len(active) else None
+                fmoves = own_active_move_list(battle, first_slot, fm) if fm else []
+                ms = first_action // 3
+                if ms >= len(fmoves):
+                    return drop                      # unmappable → fail open
+                data = _gen9_moves().get(getattr(fmoves[ms], "id", "")) or {}
+                partner_boostable = (data.get("category") or "").lower() != "status"
+            if not partner_boostable:
+                for i in hh:
+                    drop.add(i * 3 + 2)              # HH lives in the ally bucket
+        except Exception:
+            return set()                             # fail open, never cost a turn
+        return drop
+
+    return hook
+
+
 def build_legal_action_mask(battle: DoubleBattle, slot: int) -> list[bool]:
     """
     Return a 16-element bool list marking which actions are legal for `slot`.
@@ -336,13 +473,15 @@ def build_legal_action_mask(battle: DoubleBattle, slot: int) -> list[bool]:
     # request-less harness / non-move request) so the move mask never goes empty
     # spuriously; matched by Move.id (poke-env may hold distinct Move instances).
     _usable, _ = _move_usable_predicate(battle, slot)
+    futility_on = _futility_enabled()                # 2026-07-24 batch; VD_FUTILITY_MASK=0 off
 
     for m_idx, move in enumerate(available_moves):
         if not _usable(move):           # Showdown-authoritative (id / norm-id / identity); 0-PP
             continue                    # only when Showdown exposes no list (see predicate)
         kind = _move_target_kind(move.id)
+        futile = _futile_buckets_serve(battle, mon, move) if futility_on else set()
         if kind in _ALLY_KINDS:
-            if kind == "adjacentAllyOrSelf" or ally_alive:
+            if (kind == "adjacentAllyOrSelf" or ally_alive) and _TARGET_ALLY not in futile:
                 mask[m_idx * 3 + _TARGET_ALLY] = True
         elif kind in _CHOOSABLE_SINGLE:
             buckets = [b for b, alive in ((_TARGET_OPP0, opp0_alive),
@@ -358,12 +497,15 @@ def build_legal_action_mask(battle: DoubleBattle, slot: int) -> list[bool]:
             # by training/data — not by removing a legal action.
             if kind != "adjacentFoe" and ally_alive:
                 buckets.append(_TARGET_ALLY)
-            for b in (buckets or [_TARGET_OPP0]):   # no foe present → bucket 0
+            buckets = [b for b in buckets if b not in futile]
+            no_foe = not (opp0_alive or opp1_alive)
+            for b in (buckets or ([_TARGET_OPP0] if no_foe else [])):
                 mask[m_idx * 3 + b] = True
         else:
-            # self / spread / field / unknown → canonical bucket 0 only,
-            # unconditionally (these moves are always usable).
-            mask[m_idx * 3 + _TARGET_OPP0] = True
+            # self / spread / field / unknown → canonical bucket 0 only
+            # (futility can drop it: duplicate side/field state re-clicks).
+            if _TARGET_OPP0 not in futile:
+                mask[m_idx * 3 + _TARGET_OPP0] = True
 
     # ── Switch actions (12–15) ────────────────────────────────────────────────
     # own_bench_mons is the SAME brought-only bench the live encoder writes into

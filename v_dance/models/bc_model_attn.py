@@ -135,6 +135,7 @@ class AttnBCPolicy(nn.Module):
         max_mem_len: int = 64,
         n_archetypes: int = 0,
         z_dim: int = 0,
+        pair_cond: bool = False,
     ):
         super().__init__()
         self.state_dim = state_dim
@@ -282,9 +283,18 @@ class AttnBCPolicy(nn.Module):
         if self.opp_cond and not self._opp_head_names:
             raise ValueError("opp_cond=True requires aux opp heads (e.g. opp_a/opp_b) in `heads`; none present")
         opp_feat_dim = len(self._opp_head_names) * action_dim if self.opp_cond else 0
+        # Era-4 2b (pair_cond): each OUR action head ALSO reads the PARTNER slot's action as an
+        # action_dim one-hot (teacher-forced at train, sequentially decoded at serve), turning the
+        # joint policy p(a)·p(b) into p(a)·p(b|a) — the structure the N1 serve-tau refutation
+        # blames for wasted Helping Hand / uncoordinated TR turns. Appended LAST (after mem/z), so
+        # an armB checkpoint warm-starts via init_extended_model_from_ckpt with ZEROED pair columns
+        # and reproduces its logits bit-exactly when the cond input is zeros — the kill switch.
+        self.pair_cond = bool(pair_cond)
+        pair_dim = action_dim if self.pair_cond else 0
         self.heads = nn.ModuleDict(
             {name: nn.Linear(head_in + (opp_feat_dim if name in DEFAULT_HEADS else 0)
-                             + self.memory_dim + self.z_dim, action_dim)
+                             + self.memory_dim + self.z_dim
+                             + (pair_dim if name in DEFAULT_HEADS else 0), action_dim)
              for name in self.head_names}
         )
         self.gimmick_heads = nn.ModuleDict(
@@ -401,9 +411,15 @@ class AttnBCPolicy(nn.Module):
         return self.z_emb(ids)                                          # (B, z_dim)
 
     def forward(
-        self, x: torch.Tensor, archetype_id=None
+        self, x: torch.Tensor, archetype_id=None,
+        partner_actions: Optional[Dict[str, torch.Tensor]] = None,
     ) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor], torch.Tensor]:
         """x: (B, state_dim) -> (actions, gimmicks, value).
+
+        ``partner_actions`` (pair_cond only): {our_head_name: (B, action_dim)} — the
+        PARTNER slot's action as a one-hot/distribution (for our_a, the vector is
+        our_b's action, and vice versa). None / missing head -> zeros -> with the
+        zero-padded warm start the logits equal the unconditioned model's exactly.
 
         Accepts an unbatched (state_dim,) input too — the serve helpers
         (model_io.value_logit / head_logits / bc_action_indices) pass one state
@@ -422,11 +438,13 @@ class AttnBCPolicy(nn.Module):
         mem = (enc.new_zeros(enc.shape[0], self.memory_dim)
                if self.memory_dim else None)
         z = self._resolve_z(enc.shape[0], enc.device, archetype_id)
-        return self._heads_from(enc, present, g, mem, single, z=z)
+        return self._heads_from(enc, present, g, mem, single, z=z,
+                                partner_actions=partner_actions)
 
     def forward_with_memory(
         self, x_seq: torch.Tensor, frame_padding_mask: Optional[torch.Tensor] = None,
         archetype_id=None,
+        partner_actions: Optional[Dict[str, torch.Tensor]] = None,
     ) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor], torch.Tensor]:
         """Frame-stacked sequence forward: heads answer for the LAST frame,
         conditioned on a causal memory over the whole (in-window) match so far.
@@ -495,7 +513,8 @@ class AttnBCPolicy(nn.Module):
         present_last = present.reshape(B, T, self.n_mon_slots)[:, -1]
         g_last = g.reshape(B, T, self.d_model)[:, -1]
         z = self._resolve_z(B, enc_last.device, archetype_id)
-        return self._heads_from(enc_last, present_last, g_last, mem, single, z=z)
+        return self._heads_from(enc_last, present_last, g_last, mem, single, z=z,
+                                partner_actions=partner_actions)
 
     def _heads_from(
         self,
@@ -505,11 +524,12 @@ class AttnBCPolicy(nn.Module):
         mem: Optional[torch.Tensor],
         single: bool,
         z: Optional[torch.Tensor] = None,
+        partner_actions: Optional[Dict[str, torch.Tensor]] = None,
     ) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor], torch.Tensor]:
         """Shared head stack over one turn's tokens (+ optional match memory
         and archetype embedding).
 
-        Feature order per head is [mon || global || (opp_feat) || mem || z] —
+        Feature order per head is [mon || global || (opp_feat) || mem || z || pair] —
         the widening features LAST so a narrower checkpoint's weights occupy
         the leading columns verbatim under the zero-pad warm-start."""
         actions: Dict[str, torch.Tensor] = {}
@@ -537,6 +557,15 @@ class AttnBCPolicy(nn.Module):
                 parts.append(mem)
             if z is not None:
                 parts.append(z)
+            if self.pair_cond and name in DEFAULT_HEADS:    # 2b: partner action, appended LAST
+                pa = None if partner_actions is None else partner_actions.get(name)
+                if pa is None:
+                    pa = enc.new_zeros(enc.shape[0], self.action_dim)
+                else:
+                    if pa.dim() == 1:
+                        pa = pa.unsqueeze(0)
+                    pa = pa.to(dtype=enc.dtype, device=enc.device)
+                parts.append(pa)
             actions[name] = self.heads[name](torch.cat(parts, dim=-1))
 
         gimmicks: Dict[str, torch.Tensor] = {}
@@ -697,6 +726,20 @@ def init_memory_model_from_stateless(
         mem_model, ckpt_state, extra_cols=mem_model.memory_dim + mem_model.z_dim)
 
 
+def init_pair_model_from_ckpt(
+    pair_model: AttnBCPolicy, ckpt_state: Dict[str, torch.Tensor]
+) -> AttnBCPolicy:
+    """Era-4 2b wrapper: warm-start a pair_cond model from a same-arch
+    UNCONDITIONED checkpoint (armB). Only the two OUR action heads grew (by
+    action_dim trailing pair columns); every other tensor is shape-equal and
+    copies verbatim, so zero-cond forwards reproduce the donor bit-exactly —
+    the built-in kill switch."""
+    if not pair_model.pair_cond:
+        raise ValueError("init_pair_model_from_ckpt: model has pair_cond=False")
+    return init_extended_model_from_ckpt(
+        pair_model, ckpt_state, extra_cols=pair_model.action_dim)
+
+
 def build_attn_model(
     d_model: int = 128,
     n_heads: int = 4,
@@ -714,6 +757,7 @@ def build_attn_model(
     max_mem_len: int = 64,
     n_archetypes: int = 0,
     z_dim: int = 0,
+    pair_cond: bool = False,
 ) -> AttnBCPolicy:
     """Build an AttnBCPolicy on ``device`` and print a one-line summary.
 
@@ -740,6 +784,7 @@ def build_attn_model(
         max_mem_len=max_mem_len,
         n_archetypes=n_archetypes,
         z_dim=z_dim,
+        pair_cond=pair_cond,
     ).to(device)
     print(
         f"[AttnBCPolicy] {model.count_parameters():,} params | "
@@ -747,6 +792,6 @@ def build_attn_model(
         f"gimmick_dim={model.gimmick_dim} d_model={d_model} n_layers={n_layers} "
         f"ff_mult={ff_mult} value_readout={value_readout} heads={model.head_names} "
         f"gimmick_heads={model.gimmick_head_names} memory_dim={memory_dim} "
-        f"n_archetypes={n_archetypes} z_dim={z_dim} device={device}"
+        f"n_archetypes={n_archetypes} z_dim={z_dim} pair_cond={pair_cond} device={device}"
     )
     return model

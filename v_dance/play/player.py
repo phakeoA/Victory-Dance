@@ -263,10 +263,15 @@ class VGCPlayer(VGCPlayerBase):
                     bias0, bias1 = action_biases(self, battle)
                 except Exception:
                     log.debug("adapt-rules bias failed (non-fatal)", exc_info=True)
+            # T3 joint futility (2026-07-24): game-knowledge rule for the sequential
+            # pair decode (HH-when-partner-chose-status). None for non-pair models
+            # or when VD_FUTILITY_MASK=0 — bc_action_indices ignores it then.
+            from v_dance.play.vgc_base import hh_pair_futility_hook
+            pair_hook = hh_pair_futility_hook(battle)
             a0, a1 = _M.bc_action_indices(
                 self._model, self._model_heads, state_vec, mask0, mask1, self._device,
                 temperature=self._temperature, top_p=self._top_p, rng=self._rng,
-                bias0=bias0, bias1=bias1,
+                bias0=bias0, bias1=bias1, pair_futility=pair_hook,
             )
             # ── Cross-slot SWITCH dedup (doubles "can only switch in once") ──────
             # The two heads pick independently, so both active slots can choose the
@@ -280,7 +285,7 @@ class VGCPlayer(VGCPlayerBase):
                 _, a1 = _M.bc_action_indices(
                     self._model, self._model_heads, state_vec, mask0, mask1, self._device,
                     temperature=self._temperature, top_p=self._top_p, rng=self._rng,
-                    bias0=bias0, bias1=bias1,
+                    bias0=bias0, bias1=bias1, pair_futility=pair_hook,
                 )
             # #10: stash the masks the model was sampled under (mask1 carries the cross-slot switch dedup)
             # so the recorded behaviour mask matches the sampling distribution.
@@ -460,10 +465,27 @@ class VGCPlayer(VGCPlayerBase):
             from v_dance.play import bo3_state
             _ctx = (bo3_state.set_ctx_for(self, battle, our_species, opp_species)
                     if getattr(self._team_chooser, "use_set_ctx", False) else None)
+            # v8 crisp own side: our true builds (ability/item/moves off the live team
+            # objects — id-form names are fine, tag matching is canonical) sharpen the
+            # own BASE channels. team_order ignores this for v6/v7 checkpoints.
+            own_build = None
+            if _M.uses_tp_features(self._tc_cfg):
+                from v_dance.parser.vod_parser.pokedex import norm_species
+                own_build = {}
+                for m in team:
+                    sp = getattr(m, "species", None)
+                    if not sp:
+                        continue
+                    own_build[norm_species(sp)] = {
+                        "ability": getattr(m, "ability", None),
+                        "item": getattr(m, "item", None),
+                        "moves": list(getattr(m, "moves", {}) or {}),
+                    }
             order = _M.team_order(
                 self._team_chooser, self._tc_vocab, self._tc_cfg,
                 our_species, opp_species, n, self._device, belief=belief,
                 opp_known=ots_opp_known(self, battle),
+                own_build=own_build,
                 our_set_ctx=_ctx[0] if _ctx else None,
                 opp_set_ctx=_ctx[1] if _ctx else None,
             )

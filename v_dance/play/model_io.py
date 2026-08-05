@@ -19,6 +19,7 @@ the logic is small, shared, and unit-testable in isolation (task #13).
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
@@ -37,10 +38,12 @@ import numpy as np
 #      mean-1393 opposition — artifacts/logs/tp_set_ab_gate.log).
 #    Era-chain rule: warm-start + adv-value base for era N+1 = the gated era-N net; the
 #    pre_gen141 anchor FILE (val 0.5853) stays untouched as the fixed historical reference.
-#    Prior defaults (rollback): ``checkpoints_attn_pre_gen141/battle_base.pt`` ·
+#    Era-3 promoted 2026-07-20; same-day upgraded to ARM B (M2 closed-strip: ruler sweep-win
+#    0.6111 pooled, t1 recovered + late-game kept; gates green). Rollback chain:
+#    ``checkpoints_attn_era3_cand`` (50g-laddered) → ``checkpoints_attn_era2/battle_base.pt`` ·
 #    ``checkpoints/teampreview_sbda.pt`` (v6). Legacy 46-dim TP at ``checkpoints_pre_sbda/``.
 _AI_TRAIN = Path(__file__).resolve().parents[2] / "ai_train_scripts"
-DEFAULT_BC_CHECKPOINT = _AI_TRAIN / "BC_model" / "checkpoints_attn_era2" / "battle_base.pt"
+DEFAULT_BC_CHECKPOINT = _AI_TRAIN / "BC_model" / "checkpoints_attn_era3_armB" / "battle_base.pt"
 DEFAULT_TP_CHECKPOINT = _AI_TRAIN / "teamPreview_model" / "checkpoints_set" / "teampreview_sbda.pt"
 
 try:
@@ -104,6 +107,9 @@ def masked_sample(
 
 
 # ── Battle policy (two-head BC) ───────────────────────────────────────────────
+_PAIR_ECHO_DONE = False    # 2b: the pair-decode load echo prints once per process
+
+
 def load_bc_policy(path, device: str = "cpu", _ckpt=None):
     """Rebuild the AttnBCPolicy from a dict checkpoint and load its weights.
 
@@ -179,6 +185,9 @@ def load_bc_policy(path, device: str = "cpu", _ckpt=None):
         # 0/off, rebuilding byte-identically.
         n_archetypes=cfg.get("n_archetypes", 0),
         z_dim=cfg.get("z_dim", 0),
+        # Era-4 2b — absent key (every pre-2b checkpoint) defaults to False,
+        # rebuilding byte-identically.
+        pair_cond=cfg.get("pair_cond", False),
     )
     # A PRE-gimmick checkpoint has no ``gimmick_heads.*`` weights.  The model now
     # always carries gimmick heads, so load non-strictly for those old checkpoints
@@ -206,6 +215,21 @@ def load_bc_policy(path, device: str = "cpu", _ckpt=None):
     # mon_feature_dim) so serve-time nearest-centroid assignment needs no
     # sidecar file — the checkpoint is self-contained. None for pre-z ckpts.
     model._z_artifact = ckpt.get("z_artifact")
+    # Era-4 2b: sequential pair decode rides the checkpoint stamp; VD_PAIR_DECODE=0
+    # is the serve kill switch (zero-cond forwards reproduce the unconditioned donor
+    # bit-exactly by the zero-pad warm-start construction). Echo per the standing
+    # verify-flag-uptake rule — ONCE per process (self-play meters reload the target
+    # every iteration; a per-load echo floods the log).
+    if cfg.get("pair_cond", False):
+        import os as _os
+        enabled = _os.environ.get("VD_PAIR_DECODE", "1").strip().lower() not in ("0", "false", "off")
+        model._pair_decode = enabled
+        global _PAIR_ECHO_DONE
+        if not _PAIR_ECHO_DONE:
+            _PAIR_ECHO_DONE = True
+            print(f"[battle] 2b pair decode "
+                  f"{'ACTIVE (sequential, confidence-first)' if enabled else 'DISABLED by VD_PAIR_DECODE'}"
+                  f" — pair_cond checkpoint")
     model.to(device).eval()
     return model, tuple(cfg.get("heads", ("our_a", "our_b")))
 
@@ -222,7 +246,7 @@ def _head_logits(out, head_names) -> Tuple[np.ndarray, np.ndarray]:
             np.asarray(l1.detach().cpu()).ravel())
 
 
-def _policy_forward(model, state_input, device: str = "cpu"):
+def _policy_forward(model, state_input, device: str = "cpu", partner_actions=None):
     """One policy forward for ONE decision, single-frame or frame-stacked.
 
     ``state_input``: a 1-D ``(STATE_DIM,)`` vector → the plain single-turn
@@ -230,21 +254,23 @@ def _policy_forward(model, state_input, device: str = "cpu"):
     → ``forward_with_memory`` on a memory model (Phase-3 serve-time memory
     carry; the outputs answer for the LAST frame).  A 2-D input handed to a
     STATELESS model degrades gracefully to the last frame alone, so callers may
-    stack unconditionally."""
+    stack unconditionally.  ``partner_actions`` (2b pair decode): only passed on
+    when set, so legacy pickled modules never see the kwarg."""
     t = torch.as_tensor(np.asarray(state_input, dtype=np.float32), device=device)
+    kw = {"partner_actions": partner_actions} if partner_actions is not None else {}
     with torch.no_grad():
         if t.dim() == 2:
             if int(getattr(model, "memory_dim", 0) or 0):
-                return model.forward_with_memory(t)
-            return model(t[-1])
-        return model(t)
+                return model.forward_with_memory(t, **kw)
+            return model(t[-1], **kw)
+        return model(t, **kw)
 
 
 def bc_action_indices(
     model, head_names, state_vec: np.ndarray,
     mask0: Sequence[bool], mask1: Sequence[bool], device: str = "cpu",
     temperature: float = 0.0, top_p: float = 1.0, rng=None,
-    bias0=None, bias1=None,
+    bias0=None, bias1=None, pair_futility=None,
 ) -> Tuple[Optional[int], Optional[int]]:
     """Run the policy on one state (vector OR frame-stack — see _policy_forward)
     and return a LEGAL action index for each active slot (None where no legal
@@ -254,7 +280,20 @@ def bc_action_indices(
     Pass ``temperature > 0`` (and optionally ``top_p`` < 1) for serve-side
     temperature / nucleus sampling (TIER-4). ``bias0``/``bias1`` (optional
     per-slot (ACTION_DIM,) arrays) are ADDED to the raw logits before the masked
-    pick — the B-L1 adapt-rules tilt; None (the default) is byte-identical."""
+    pick — the B-L1 adapt-rules tilt; None (the default) is byte-identical.
+
+    Era-4 2b: a pair_cond checkpoint (unless VD_PAIR_DECODE=0) decodes
+    SEQUENTIALLY — see _pair_decode_indices — turning the joint pick into
+    p(a)·p(b|a); non-pair checkpoints keep the original independent path.
+    ``pair_futility`` (optional, pair decode only): callable
+    ``(second_slot, first_slot, first_action) -> action indices to DROP`` from
+    the second slot's mask — the JOINT futility rules only a sequential decode
+    can express (e.g. Helping Hand when the partner already chose a status
+    move). Built by the caller from game knowledge; None = no joint rules."""
+    if getattr(model, "_pair_decode", False):
+        return _pair_decode_indices(model, head_names, state_vec, mask0, mask1,
+                                    device, temperature, top_p, rng, bias0, bias1,
+                                    pair_futility=pair_futility)
     l0, l1 = head_logits(model, head_names, state_vec, device)
     if bias0 is not None:
         l0 = l0 + np.asarray(bias0, dtype=l0.dtype)
@@ -262,6 +301,60 @@ def bc_action_indices(
         l1 = l1 + np.asarray(bias1, dtype=l1.dtype)
     return (masked_sample(l0, mask0, temperature, top_p, rng),
             masked_sample(l1, mask1, temperature, top_p, rng))
+
+
+def _pair_decode_indices(
+    model, head_names, state_vec: np.ndarray,
+    mask0: Sequence[bool], mask1: Sequence[bool], device: str = "cpu",
+    temperature: float = 0.0, top_p: float = 1.0, rng=None,
+    bias0=None, bias1=None, pair_futility=None,
+) -> Tuple[Optional[int], Optional[int]]:
+    """2b sequential decode: pick the HIGHER-CONFIDENCE slot first from the
+    zero-cond logits, then re-forward with that pick as the partner one-hot so
+    the second slot answers p(b|a).  Deterministic under argmax (ties → slot 0);
+    the temperature/top_p/bias knobs apply per slot exactly as in the
+    independent path.  A slot with no legal action conditions the other with
+    zeros — identical to the zero-cond path, which the cond-dropout trained."""
+    l0, l1 = head_logits(model, head_names, state_vec, device)
+    if bias0 is not None:
+        l0 = l0 + np.asarray(bias0, dtype=l0.dtype)
+    if bias1 is not None:
+        l1 = l1 + np.asarray(bias1, dtype=l1.dtype)
+    conf0 = float(_masked_softmax(l0, mask0).max())
+    conf1 = float(_masked_softmax(l1, mask1).max())
+    first = 0 if conf0 >= conf1 else 1
+    logits = (l0, l1)
+    masks = (mask0, mask1)
+    biases = (bias0, bias1)
+    a_first = masked_sample(logits[first], masks[first], temperature, top_p, rng)
+    second = 1 - first
+    if a_first is None:                       # nothing to condition on → zero-cond second
+        return ((None, masked_sample(l1, mask1, temperature, top_p, rng)) if first == 0
+                else (masked_sample(l0, mask0, temperature, top_p, rng), None))
+    onehot = torch.zeros(int(getattr(model, "action_dim")), dtype=torch.float32)
+    onehot[int(a_first)] = 1.0
+    out = _policy_forward(model, state_vec, device,
+                          partner_actions={head_names[second]: onehot})
+    actions = out[0] if isinstance(out, tuple) else out
+    l_pair = _head_logits(actions, head_names)[second]
+    if biases[second] is not None:
+        l_pair = l_pair + np.asarray(biases[second], dtype=l_pair.dtype)
+    mask_second = masks[second]
+    if pair_futility is not None:
+        # Joint futility (2026-07-24 batch): the caller's game-knowledge rule drops
+        # second-slot actions PROVABLY wasted given the first slot's pick (e.g.
+        # Helping Hand when the partner chose a status move). Never empties the
+        # mask — if every action would drop, keep the original (fail open).
+        try:
+            dropped = set(pair_futility(second, first, int(a_first)) or ())
+        except Exception:
+            dropped = set()
+        if dropped:
+            trimmed = [bool(ok) and (i not in dropped) for i, ok in enumerate(mask_second)]
+            if any(trimmed):
+                mask_second = trimmed
+    a_second = masked_sample(l_pair, mask_second, temperature, top_p, rng)
+    return (a_first, a_second) if first == 0 else (a_second, a_first)
 
 
 def head_logits(
@@ -394,16 +487,22 @@ def load_team_chooser(path, device: str = "cpu"):
     if uses_tp_features(cfg):
         from v_dance.training.tp_features import FEAT_DIM, FEATURE_SCHEMA_VERSION
         schema = cfg.get("feature_schema")
-        # v7 = v6 + the OTS opp-side overlay; dims and channel offsets are
-        # IDENTICAL, so a v6 checkpoint stays loadable (it just never trained on
-        # non-zero opp overlays — closed-sheet serving is byte-identical for it).
-        compat = {FEATURE_SCHEMA_VERSION, "tpfeat-v6"}
-        if int(cfg.get("feat_dim", 0)) != FEAT_DIM or schema not in compat:
+        # v8 changed DIMS AND OFFSETS. v6/v7 checkpoints stay servable through the FROZEN
+        # v7 extractor (tp_features_v7 — the exact code they trained on, dead tags and all;
+        # serving them through the fixed v8 channels would be train/serve drift, not a fix).
+        # _pack_side dispatches on the checkpoint schema.
+        if schema in _TP_LEGACY_SCHEMAS:
+            from v_dance.training.tp_features_v7 import FEAT_DIM as expected_dim
+        elif schema == FEATURE_SCHEMA_VERSION:
+            expected_dim = FEAT_DIM
+        else:
+            expected_dim = None
+        if expected_dim is None or int(cfg.get("feat_dim", 0)) != expected_dim:
             raise ValueError(
                 f"team-chooser checkpoint feature_schema={schema} (feat_dim={cfg.get('feat_dim')}) "
                 f"is out of lockstep with the current tp_features {FEATURE_SCHEMA_VERSION} "
-                f"(FEAT_DIM={FEAT_DIM}, compatible: {sorted(compat)}) at {path} — re-export + "
-                f"retrain the SBDA TP net on the current schema."
+                f"(FEAT_DIM={FEAT_DIM}, legacy-servable: {sorted(_TP_LEGACY_SCHEMAS)}) at {path} — "
+                f"re-export + retrain the SBDA TP net on the current schema."
             )
     from v_dance.models.teampreview_model import TeamPreviewModel
     model = TeamPreviewModel(
@@ -425,6 +524,10 @@ def load_team_chooser(path, device: str = "cpu"):
     model.load_state_dict(ckpt["model_state"])
     model.to(device).eval()
     return model, vocab, cfg
+
+
+# tpfeat schemas served through the FROZEN v7 extractor (v7 = v6 + opp overlay, same dims).
+_TP_LEGACY_SCHEMAS = frozenset({"tpfeat-v6", "tpfeat-v7"})
 
 
 # ── Team-preview feature recipe: legacy dex-only vs SBDA tp_features (15b-io.1) ─
@@ -466,9 +569,64 @@ class _NullBelief:
 _NULL_BELIEF = _NullBelief()
 
 
+class OwnBuildBelief:
+    """A belief view whose marginals are CRISP (p=1.0) for OUR OWN mons' true builds,
+    delegating everything else to the wrapped real belief.
+
+    v8 serve-side own-knowledge fix (2026-07-23): the own-OVERLAY pathway has almost no
+    training data (27 OTS files in ~5.6k), so serving overlay-on would feed untrained
+    weights. Instead the own side's BASE channels — the ones every training row exercises —
+    are computed from the true build: ability/moves/item at p=1.0. That is distribution
+    SHARPENING, not schema drift (the meta already trains crisp values: Ninetales Drought
+    0.96, Incineroar Intimidate 0.9997) and it fixes the two-mega smear for our own mon
+    (our Charizardite-Y holder reaches sun=1.0 via the stone augmentation instead of the
+    belief's X/Y-mixed marginal). Also covers OOV own mons (any USER team): a species the
+    belief has never seen still gets crisp mechanic tags from its actual build."""
+
+    def __init__(self, belief, builds: dict):
+        self._b = belief if belief is not None else _NULL_BELIEF
+        self._builds = builds or {}
+
+    def _bd(self, species):
+        return self._builds.get(species)
+
+    def known(self, species):
+        return True if self._bd(species) else self._b.known(species)
+
+    def ability_distribution(self, species, top_k: int = 4):
+        bd = self._bd(species)
+        if bd and bd.get("ability"):
+            return [{"name": bd["ability"], "p": 1.0}]
+        return self._b.ability_distribution(species, top_k=top_k)
+
+    def move_distribution(self, species, top_k: int = 8):
+        bd = self._bd(species)
+        if bd and bd.get("moves"):
+            return [{"name": m, "p": 1.0} for m in list(bd["moves"])[:top_k]]
+        return self._b.move_distribution(species, top_k=top_k)
+
+    def item_distribution(self, species, top_k: int = 5):
+        bd = self._bd(species)
+        if bd and bd.get("item"):
+            return [{"name": bd["item"], "p": 1.0}]
+        fn = getattr(self._b, "item_distribution", None)
+        return fn(species, top_k=top_k) if callable(fn) else []
+
+    def usage(self, species):
+        return self._b.usage(species)
+
+    def teammates(self, species, top_k: int = 16):
+        fn = getattr(self._b, "teammates", None)
+        return fn(species, top_k=top_k) if callable(fn) else []
+
+    def expected_stats_weighted(self, species, base_stats, **kw):
+        fn = getattr(self._b, "expected_stats_weighted", None)
+        return fn(species, base_stats, **kw) if callable(fn) else None
+
+
 def _pack_side(species: Sequence[str], vocab: dict, feat_dim: int, *,
                belief=None, own_known: Optional[dict] = None,
-               use_tp_features: bool = False):
+               use_tp_features: bool = False, tp_schema: Optional[str] = None):
     """6-slot (idx[6], feat[6,F]) tensors for one side's roster, padding to 6.
 
     Two feature recipes, selected by the loaded checkpoint's schema so train==serve:
@@ -483,17 +641,24 @@ def _pack_side(species: Sequence[str], vocab: dict, feat_dim: int, *,
     from v_dance.parser.vod_parser.pokedex import norm_species
     idx = [0] * 6
     if use_tp_features:
-        from v_dance.training.tp_features import (
-            FEAT_DIM, own_mon_features, opp_mon_features,
-        )
-        # LOCKSTEP guard (15b-io.1): the checkpoint's feat_dim MUST equal the current
-        # extractor's FEAT_DIM, else a schema drift would silently zero-pad the synergy
-        # channels (the exact failure the handoff warned about).  Fail loud instead.
+        # Schema dispatch (v8): a v6/v7 checkpoint is served through the FROZEN v7 extractor —
+        # the exact channels it trained on — while v8+ uses the current tp_features.
+        if tp_schema in _TP_LEGACY_SCHEMAS:
+            from v_dance.training.tp_features_v7 import (
+                FEAT_DIM, own_mon_features, opp_mon_features,
+            )
+        else:
+            from v_dance.training.tp_features import (
+                FEAT_DIM, own_mon_features, opp_mon_features,
+            )
+        # LOCKSTEP guard (15b-io.1): the checkpoint's feat_dim MUST equal its extractor's
+        # FEAT_DIM, else a schema drift would silently zero-pad the synergy channels (the
+        # exact failure the handoff warned about).  Fail loud instead.
         if int(feat_dim) != FEAT_DIM:
             raise ValueError(
-                f"team-chooser feat_dim={feat_dim} != tp_features.FEAT_DIM={FEAT_DIM} — the "
-                f"checkpoint's SBDA feature schema is out of lockstep with the code; re-export "
-                f"+ retrain the TP net on the current schema."
+                f"team-chooser feat_dim={feat_dim} != tp_features.FEAT_DIM={FEAT_DIM} "
+                f"(schema {tp_schema!r}) — the checkpoint's SBDA feature schema is out of "
+                f"lockstep with the code; re-export + retrain the TP net on the current schema."
             )
         b = belief if belief is not None else _NULL_BELIEF
         feat = np.zeros((6, FEAT_DIM), dtype=np.float32)
@@ -537,6 +702,41 @@ TP_JOINT_BRING = False     # serve default; flip only after the offline gate pas
 # Dispatch is BY CKPT STAMP; this constant is only the kill-switch (TP_JOINT_BRING pattern).
 TP_SET_HEAD = True
 
+# ── TP near-tie sampling (era-4 Phase 1a, 2026-07-20) ─────────────────────────
+# The preview is ONE joint decision, so sampling here cannot break pair coherence (the
+# N1 serve-tau refutation was about INDEPENDENT battle-slot heads). VD_TP_TIE_EPS > 0
+# samples among subset/lead candidates within eps LOGITS of the top score (prob-ratio
+# >= exp(-eps) of the best — checkpoint-scale-free), softmax-weighted. 0/unset = exact
+# argmax, original code path. Audited habit this attacks: one lead pair 41/50 games at
+# 19W-22L while the near-tie alternate went 6W-1L.
+_TP_TIE_ECHOED = False
+
+
+def _tp_tie_eps() -> float:
+    global _TP_TIE_ECHOED
+    try:
+        eps = float(os.environ.get("VD_TP_TIE_EPS", "0") or 0.0)
+    except ValueError:
+        eps = 0.0
+    if eps > 0 and not _TP_TIE_ECHOED:
+        print(f"[tp] near-tie sampling ACTIVE: eps={eps}")   # flag-uptake echo (session log)
+        _TP_TIE_ECHOED = True
+    return eps
+
+
+def _near_tie_sample(scores: np.ndarray, eps: float):
+    """(index, deviated): argmax when eps<=0 or no tie; else a softmax-weighted draw
+    among entries within eps logits of the max."""
+    best = int(np.argmax(scores))
+    if eps <= 0:
+        return best, False
+    cands = np.flatnonzero(scores >= scores[best] - eps)
+    if len(cands) <= 1:
+        return best, False
+    w = np.exp(scores[cands] - scores[best])
+    pick = int(np.random.choice(cands, p=w / w.sum()))
+    return pick, pick != best
+
 
 def _set_head_order(model, oi, of, pi, pf, aff_t, valid: int, bring_k: int, lead_k: int,
                     n: int, device: str, ctx_kw: Optional[dict] = None):
@@ -558,9 +758,21 @@ def _set_head_order(model, oi, of, pi, pf, aff_t, valid: int, bring_k: int, lead
             aff_t, subsets=subsets, **(ctx_kw or {}))
     scores = np.asarray(scores[0].detach().cpu())
     ll = np.asarray(ll[0].detach().cpu())
-    brought = list(subsets[int(np.argmax(scores))])
-    leads = sorted(brought, key=lambda i: -ll[i])[:lead_k]    # lead decode unchanged (within bring)
-    return (leads + [b for b in brought if b not in leads])[:n], True
+    eps = _tp_tie_eps()
+    if eps <= 0:                                   # default: exact argmax, original path
+        brought = list(subsets[int(np.argmax(scores))])
+        leads = sorted(brought, key=lambda i: -ll[i])[:lead_k]  # lead decode unchanged (within bring)
+        return (leads + [b for b in brought if b not in leads])[:n], True
+    si, dev_s = _near_tie_sample(scores, eps)
+    brought = list(subsets[si])
+    pairs = list(combinations(brought, min(lead_k, len(brought)))) or [tuple(brought)]
+    pair_scores = np.asarray([float(ll[list(p)].sum()) for p in pairs])
+    pj, dev_l = _near_tie_sample(pair_scores, eps)
+    leads = sorted(pairs[pj], key=lambda i: -ll[i])
+    if dev_s or dev_l:
+        print(f"[tp] near-tie deviation (eps={eps}): set={'+'.join(map(str, brought))} "
+              f"leads={'+'.join(map(str, leads))} (set_dev={dev_s} lead_dev={dev_l})")
+    return (list(leads) + [b for b in brought if b not in leads])[:n], True
 
 
 def _joint_bring_order(model, oi, of, pi, pf, aff_t, valid: int, bring_k: int, lead_k: int,
@@ -604,6 +816,7 @@ def team_order(
     n: int, device: str = "cpu", *,
     belief=None, own_known: Optional[dict] = None,
     opp_known: Optional[dict] = None,
+    own_build: Optional[dict] = None,
     joint_bring: Optional[bool] = None,
     our_set_ctx: Optional[np.ndarray] = None,
     opp_set_ctx: Optional[np.ndarray] = None,
@@ -622,6 +835,10 @@ def team_order(
     ``opp_known`` (``{norm_species: OwnKnown}``) is the tpfeat-v7 OTS pathway: in
     open-team-sheet play the opponent's revealed builds ride the opp overlay —
     pass it only when sheets are actually visible; ``None`` = closed regime.
+    ``own_build`` (``{norm_species: {"ability","item","moves"}}``) is the v8
+    crisp-own-side pathway: our own mons' BASE channels are computed from the true
+    build via ``OwnBuildBelief`` (p=1.0 marginals). IGNORED for v6/v7 checkpoints —
+    they serve byte-identically through the frozen extractor.
     """
     valid = min(len(our_species), 6)
     if valid == 0:
@@ -631,10 +848,17 @@ def team_order(
     lead_k = int(cfg.get("lead_k", 2))
     use_tp = uses_tp_features(cfg)
 
+    own_side_belief = belief
+    if (own_build and use_tp
+            and (cfg or {}).get("feature_schema") not in _TP_LEGACY_SCHEMAS):
+        own_side_belief = OwnBuildBelief(belief, own_build)
+
     oi, of = _pack_side(our_species, vocab, feat_dim,
-                        belief=belief, own_known=own_known, use_tp_features=use_tp)
+                        belief=own_side_belief, own_known=own_known, use_tp_features=use_tp,
+                        tp_schema=(cfg or {}).get("feature_schema"))
     pi, pf = _pack_side(opp_species, vocab, feat_dim,
-                        belief=belief, own_known=opp_known, use_tp_features=use_tp)
+                        belief=belief, own_known=opp_known, use_tp_features=use_tp,
+                        tp_schema=(cfg or {}).get("feature_schema"))
 
     # 15b-feat.1b: feed the Pikalytics co-occurrence prior as the self-attention
     # bias when the SBDA net was built with ``use_teammate_bias``.  Needs a belief;

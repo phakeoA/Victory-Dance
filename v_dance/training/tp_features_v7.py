@@ -25,19 +25,6 @@ DATA vs MECHANICS (robustness — see mechanic_coverage.py): the pikalytics USAG
 BeliefState and auto-updates on a swap. Only the ability/move -> mechanic-TAG tables are in code (reg-
 INDEPENDENT game facts). A dex-grounded guard fails loud if a NEW reg's mechanic-bearer is unmapped.
 Channel ORDER is asserted at import so a reorder can't silently corrupt a trained net.
-
-NAME MATCHING IS CANONICAL (2026-07-23 fix): belief data mixes display names ("Drought") with
-Showdown IDs ("drought" — the observed-meta rows), so every tag lookup canonicalises BOTH the
-table key and the incoming name (lowercase, strip non-alnum). Before this fix 9 ability tags +
-28 move tags were silently DEAD in the serving blend (Charizard's sun-setter among them — the
-"TP won't bring Zard into rain" bug). The literal tables below KEEP display-case keys (they are
-the human-audited registry mechanic_coverage.py checks); only the derived index maps are canon.
-
-MEGA-STONE -> ABILITY (2026-07-23 fix): a held mega stone implies the mega forme's ability
-(Charizardite Y => Drought), which the ability MARGINAL under-reports for two-mega species.
-_fill_base max-merges dex-resolved stone-implied abilities into the ability distribution before
-tagging, and writes the summed stone mass as the gimmick_kind mega prior (previously a constant
-"none"). ⚠ Both fixes change feature VALUES (not the schema): serve only behind a TP retrain.
 """
 from __future__ import annotations
 
@@ -52,24 +39,17 @@ from v_dance.training.teampreview_dataset import (
     mon_dex_features, MON_FEAT_DIM, NUM_TYPES, _TYPE_IDX, _canon_type,
 )
 
-FEATURE_SCHEMA_VERSION = "tpfeat-v8"   # v8 (2026-07-23): +12 base channels (+10 overlay twins) —
-                                       # intimidate punish/immune, priority-block, weather-negate,
-                                       # sleep, phys-share, expected-speed, 6 item tags — plus the
-                                       # canonical name matching + mega-stone ability fixes above.
-                                       # ⚠ DIMS AND OFFSETS CHANGED vs v6/v7: older checkpoints
-                                       # must serve through the frozen v7 extractor (model_io
-                                       # dispatches on the checkpoint's feature_schema).
+FEATURE_SCHEMA_VERSION = "tpfeat-v7"   # v7: OTS — the OPP side may carry the revealed-sheet
+                                       # overlay (open team sheets are preview-visible).  DIMS
+                                       # AND OFFSETS ARE UNCHANGED from v6 — v6 checkpoints stay
+                                       # loadable (model_io compat set); they simply never see a
+                                       # non-zero opp overlay, exactly like closed-sheet play.
 
 # ── mechanic axes (ORDER IS LOAD-BEARING — asserted at import) ─────────────────
 WEATHERS = ("sand", "rain", "sun", "snow")
 TERRAINS = ("electric", "grassy", "psychic", "misty")
 ROLE_TAGS = ("trick_room", "tailwind", "redirect", "fake_out", "screens",
-             "speed_control", "priority", "intimidate",
-             # v8: guard family (Wide Guard = the DEFENSIVE half of the spread synergy —
-             # Toxapex shielding Charizard from Rock Slide / itself from Earthquake;
-             # Quick Guard = the fake_out/priority counter) + trapping (Infestation
-             # pinning a weather setter so it can't re-set by switching).
-             "wide_guard", "quick_guard", "trapping")
+             "speed_control", "priority", "intimidate")
 GIMMICK_KINDS = ("none", "mega", "tera", "dynamax")
 ORDER_FLAGS = ("illusion", "imposter")   # abilities where the team-ORDER/slot choice matters specially
 
@@ -97,31 +77,8 @@ ROLE_MOVE = {
     "priority": {"Extreme Speed", "Aqua Jet", "Bullet Punch", "Sucker Punch", "Grassy Glide",
                  "Ice Shard", "Shadow Sneak", "Quick Attack", "Mach Punch", "Jet Punch",
                  "Thunderclap", "Vacuum Wave", "Water Shuriken", "Feint", "Accelerock"},
-    "wide_guard": {"Wide Guard"},
-    "quick_guard": {"Quick Guard"},
-    "trapping": {"Infestation", "Fire Spin", "Whirlpool", "Sand Tomb", "Magma Storm",
-                 "Thousand Waves", "Jaw Lock", "Anchor Shot", "Spirit Shackle",
-                 "Block", "Mean Look", "Bind", "Wrap"},
 }
-ROLE_ABILITY = {"intimidate": {"Intimidate"},
-                "trapping": {"Shadow Tag", "Arena Trap"}}
-
-# ── v8 (2026-07-23): preview-relevant mechanic families the score head could not see before ──
-# Intimidate interaction (the Incineroar-into-Kingambit bug): abilities that PUNISH an incoming
-# Intimidate (gain from the drop) vs abilities that BLOCK/ignore it (Intimidate value is wasted).
-INTIM_PUNISH_ABILITY = {"Defiant", "Competitive", "Guard Dog", "Mirror Armor", "Rattled"}
-INTIM_IMMUNE_ABILITY = {"Hyper Cutter", "Clear Body", "White Smoke", "Full Metal Body",
-                        "Inner Focus", "Own Tempo", "Oblivious", "Scrappy"}
-# Priority/Fake-Out blockers (devalue the opponent's fake_out / priority role tags).
-PRIO_BLOCK_ABILITY = {"Armor Tail", "Queenly Majesty", "Dazzling"}
-# Weather nullifiers (devalue BOTH sides' weather setter/abuser tags while on field).
-WEATHER_NEGATE_ABILITY = {"Cloud Nine", "Air Lock"}
-# Sleep-inflicting moves (a preview-level threat axis; pairs vs safety_goggles/Misty setters).
-SLEEP_MOVE = {"Spore", "Sleep Powder", "Hypnosis", "Yawn", "Dark Void", "Sing",
-              "Grass Whistle", "Lovely Kiss"}
-# Item tags — the first item channels in the TP schema. Order is load-bearing (channel axis).
-ITEM_TAGS = ("focus_sash", "choice_lock", "safety_goggles", "covert_cloak",
-             "booster_energy", "clear_amulet")
+ROLE_ABILITY = {"intimidate": {"Intimidate"}}
 
 # 15b-feat.spread: ally-hitting (allAdjacent) spread moves -> type (the ones where ally-immunity is a
 # synergy). Grounded in the dex `target: "allAdjacent"` set present in the M-A data; the guard catches new ones.
@@ -161,7 +118,6 @@ ORDER_ABILITY = {"Illusion": "illusion", "Imposter": "imposter"}
 
 _W, _TR, _R, _G, _T = len(WEATHERS), len(TERRAINS), len(ROLE_TAGS), len(GIMMICK_KINDS), NUM_TYPES
 _O = len(ORDER_FLAGS)
-_I = len(ITEM_TAGS)
 
 # ── fixed segment offsets ─────────────────────────────────────────────────────
 OFF_DEX = 0                                   # mon_dex_features: types + base stats (46)
@@ -175,20 +131,11 @@ OFF_IMMUNE = OFF_SPREAD + _T                  # immune_<type>: typing 0x + immun
 OFF_REVERSER = OFF_IMMUNE + _T                # stat_reverser: benefits from stat drops (Contrary) (1)
 OFF_DEBUFF = OFF_REVERSER + 1                 # ally_debuff: carries an ally-targetable stat-drop move (1)
 OFF_ORDER = OFF_DEBUFF + 1                    # order-sensitivity flags illusion/imposter (len ORDER_FLAGS)
-# ── v8 mechanic channels ──
-OFF_INTIMP = OFF_ORDER + _O                   # intim_punish: Defiant/Competitive/Guard Dog/... (1)
-OFF_INTIMI = OFF_INTIMP + 1                   # intim_immune: Hyper Cutter/Clear Body/Inner Focus/... (1)
-OFF_PRIOB = OFF_INTIMI + 1                    # prio_block: Armor Tail/Queenly Majesty/Dazzling (1)
-OFF_WNEG = OFF_PRIOB + 1                      # weather_negate: Cloud Nine/Air Lock (1)
-OFF_SLEEP = OFF_WNEG + 1                      # sleep_move: carries a sleep-inflicting move (1)
-OFF_PHYSSH = OFF_SLEEP + 1                    # phys_share: physical fraction of damaging moves (1)
-OFF_EXPSPE = OFF_PHYSSH + 1                   # exp_speed: spread-weighted expected speed /255 (1)
-OFF_ITEMS = OFF_EXPSPE + 1                    # item tags (len ITEM_TAGS)
-OFF_DEFEFF = OFF_ITEMS + _I                   # def_eff[NUM_TYPES]: signed typing defensive effectiveness
+OFF_DEFEFF = OFF_ORDER + _O                   # def_eff[NUM_TYPES]: signed typing defensive effectiveness
 OFF_HASDATA = OFF_DEFEFF + _T                 # belief.known(species) (1)
 OFF_USAGE = OFF_HASDATA + 1                   # usage_pct/100 (1)
 BASE_DIM = OFF_USAGE + 1                       # ── end of the SYMMETRIC base block
-OFF_GK = BASE_DIM                              # gimmick_kind one-hot (4) — mega prior since v8
+OFF_GK = BASE_DIM                              # gimmick_kind one-hot (4) — reserved, base prior
 OFF_TERA = OFF_GK + _G                        # tera_type one-hot (NUM_TYPES) — reserved, zero in M-A
 GIMMICK_END = OFF_TERA + _T
 OFF_OWNBIT = GIMMICK_END                       # has_own_detail (1) — OVERLAY starts (own only)
@@ -202,16 +149,7 @@ OFF_KIMMUNE = OFF_KSPREAD + _T                 # hard known ability-immunity (NU
 OFF_KREVERSER = OFF_KIMMUNE + _T               # hard known stat_reverser (1)
 OFF_KDEBUFF = OFF_KREVERSER + 1                # hard known ally_debuff (1)
 OFF_KORDER = OFF_KDEBUFF + 1                   # hard known order flags (len ORDER_FLAGS)
-# ── v8 hard-known twins (ability from the sheet incl. stone-implied mega ability) ──
-OFF_KINTIMP = OFF_KORDER + _O
-OFF_KINTIMI = OFF_KINTIMP + 1
-OFF_KPRIOB = OFF_KINTIMI + 1
-OFF_KWNEG = OFF_KPRIOB + 1
-OFF_KSLEEP = OFF_KWNEG + 1
-OFF_KPHYSSH = OFF_KSLEEP + 1
-OFF_KEXPSPE = OFF_KPHYSSH + 1                  # exact own speed /255 (OwnKnown.spe), 0 if unknown
-OFF_KITEMS = OFF_KEXPSPE + 1                   # hard known item tags (len ITEM_TAGS)
-OFF_KGK = OFF_KITEMS + _I
+OFF_KGK = OFF_KORDER + _O
 OFF_KTERA = OFF_KGK + _G
 FEAT_DIM = OFF_KTERA + _T
 
@@ -224,27 +162,11 @@ class OwnKnown:
     item: Optional[str] = None
     tera: Optional[str] = None
     will_mega: bool = False
-    spe: Optional[float] = None   # v8: exact in-battle speed stat (from the own team's EVs)
 
 
 # ── pure tag functions (no belief; unit-tested in isolation) ──────────────────────
-import re as _re
-
-_CANON_RE = _re.compile(r"[^a-z0-9]")
-
-
-def _canon_name(s) -> str:
-    """Canonical ability/move/item key: lowercase, strip non-alnum — collapses
-    display names ("Drought") and Showdown IDs ("drought") to one key."""
-    return _CANON_RE.sub("", str(s).lower()) if s else ""
-
-
 def _idx_map(name_to_axis, axes):
-    return {_canon_name(nm): axes.index(ax) for nm, ax in name_to_axis.items() if ax in axes}
-
-
-def _canon_set(names):
-    return {_canon_name(n) for n in names}
+    return {nm: axes.index(ax) for nm, ax in name_to_axis.items() if ax in axes}
 
 
 _WSET_A = _idx_map(SETTER_ABILITY, WEATHERS)
@@ -254,11 +176,9 @@ _TSET_A = _idx_map(TERRAIN_SETTER_ABILITY, TERRAINS)
 _TABU_A = _idx_map(TERRAIN_ABUSER_ABILITY, TERRAINS)
 _TSET_M = _idx_map(TERRAIN_SETTER_MOVE, TERRAINS)
 _TABU_M = _idx_map(TERRAIN_ABUSER_MOVE, TERRAINS)
-# spread move / immunity index maps (over the TYPE axis) — canon keys (see header)
-_SPREAD_I = {_canon_name(nm): _TYPE_IDX[_canon_type(t)] for nm, t in SPREAD_MOVE.items()
-             if _canon_type(t) in _TYPE_IDX}
-_IMMABIL_I = {_canon_name(nm): _TYPE_IDX[_canon_type(t)] for nm, t in IMMUNITY_ABILITY.items()
-              if _canon_type(t) in _TYPE_IDX}
+# spread move / immunity index maps (over the TYPE axis)
+_SPREAD_I = {nm: _TYPE_IDX[_canon_type(t)] for nm, t in SPREAD_MOVE.items() if _canon_type(t) in _TYPE_IDX}
+_IMMABIL_I = {nm: _TYPE_IDX[_canon_type(t)] for nm, t in IMMUNITY_ABILITY.items() if _canon_type(t) in _TYPE_IDX}
 _TYPE_IMMUNITY_C = {_canon_type(k): {_canon_type(a) for a in v} for k, v in TYPE_IMMUNITY.items()}
 
 
@@ -266,13 +186,13 @@ def _field_tags(ability_probs, move_probs, set_a, abu_a, set_m, abu_m, n):
     sets = np.zeros(n, np.float32)
     abuse = np.zeros(n, np.float32)
     for a in ability_probs:
-        nm, p = _canon_name(a["name"]), float(a["p"])
+        nm, p = a["name"], float(a["p"])
         if nm in set_a:
             sets[set_a[nm]] += p
         if nm in abu_a:
             abuse[abu_a[nm]] += p
     for m in move_probs:
-        nm, p = _canon_name(m["name"]), float(m["p"])
+        nm, p = m["name"], float(m["p"])
         if nm in set_m:
             sets[set_m[nm]] += p
         if nm in abu_m:
@@ -288,25 +208,15 @@ def terrain_tags(ability_probs, move_probs):
     return _field_tags(ability_probs, move_probs, _TSET_A, _TABU_A, _TSET_M, _TABU_M, _TR)
 
 
-_ROLE_MOVE_C = {tag: _canon_set(s) for tag, s in ROLE_MOVE.items()}
-_ROLE_ABILITY_C = {tag: _canon_set(s) for tag, s in ROLE_ABILITY.items()}
-
-
 def role_tags(ability_probs, move_probs):
     r = np.zeros(_R, np.float32)
-    mp = {}
-    for m in move_probs:                      # canon keys; keep MAX on collision (id + display dupes)
-        k = _canon_name(m["name"])
-        mp[k] = max(mp.get(k, 0.0), float(m["p"]))
-    ap = {}
-    for a in ability_probs:
-        k = _canon_name(a["name"])
-        ap[k] = max(ap.get(k, 0.0), float(a["p"]))
+    mp = {m["name"]: float(m["p"]) for m in move_probs}
+    ap = {a["name"]: float(a["p"]) for a in ability_probs}
     for i, tag in enumerate(ROLE_TAGS):
-        if tag in _ROLE_MOVE_C:
-            r[i] += sum(mp.get(mv, 0.0) for mv in _ROLE_MOVE_C[tag])
-        if tag in _ROLE_ABILITY_C:
-            r[i] += sum(ap.get(ab, 0.0) for ab in _ROLE_ABILITY_C[tag])
+        if tag in ROLE_MOVE:
+            r[i] += sum(mp.get(mv, 0.0) for mv in ROLE_MOVE[tag])
+        if tag in ROLE_ABILITY:
+            r[i] += sum(ap.get(ab, 0.0) for ab in ROLE_ABILITY[tag])
     return np.clip(r, 0.0, 1.0)
 
 
@@ -314,7 +224,7 @@ def spread_tags(move_probs):
     """spread[NUM_TYPES]: carries an ally-hitting (allAdjacent) spread move of this type."""
     v = np.zeros(_T, np.float32)
     for m in move_probs:
-        i = _SPREAD_I.get(_canon_name(m["name"]))
+        i = _SPREAD_I.get(m["name"])
         if i is not None:
             v[i] += float(m["p"])
     return np.clip(v, 0.0, 1.0)
@@ -339,7 +249,7 @@ def _typing_immune(species):
 def _ability_immune(ability_probs):
     v = np.zeros(_T, np.float32)
     for a in ability_probs:
-        i = _IMMABIL_I.get(_canon_name(a["name"]))
+        i = _IMMABIL_I.get(a["name"])
         if i is not None:
             v[i] = max(v[i], float(a["p"]))
     return v
@@ -383,122 +293,27 @@ def def_eff_profile(species):
     return v
 
 
-_REVERSER_C = _canon_set(STAT_REVERSER_ABILITY)
-_DEBUFF_C = _canon_set(ALLY_DEBUFF_MOVE)
-
-
 def reverser_tag(ability_probs):
     """stat_reverser scalar: benefits from stat drops (Contrary) — the beneficiary half."""
-    return float(min(1.0, sum(float(a["p"]) for a in ability_probs
-                              if _canon_name(a["name"]) in _REVERSER_C)))
+    return float(min(1.0, sum(float(a["p"]) for a in ability_probs if a["name"] in STAT_REVERSER_ABILITY)))
 
 
 def ally_debuff_tag(move_probs):
     """ally_debuff scalar: carries an ally-targetable stat-lowering move — the enabler half."""
-    return float(min(1.0, sum(float(m["p"]) for m in move_probs
-                              if _canon_name(m["name"]) in _DEBUFF_C)))
+    return float(min(1.0, sum(float(m["p"]) for m in move_probs if m["name"] in ALLY_DEBUFF_MOVE)))
 
 
-_ORDER_I = {_canon_name(nm): ORDER_FLAGS.index(f) for nm, f in ORDER_ABILITY.items()}
+_ORDER_I = {nm: ORDER_FLAGS.index(f) for nm, f in ORDER_ABILITY.items()}
 
 
 def order_tags(ability_probs):
     """order[len(ORDER_FLAGS)]: ability makes the slot/order choice high-stakes (Illusion / Imposter)."""
     v = np.zeros(_O, np.float32)
     for a in ability_probs:
-        i = _ORDER_I.get(_canon_name(a["name"]))
+        i = _ORDER_I.get(a["name"])
         if i is not None:
             v[i] += float(a["p"])
     return np.clip(v, 0.0, 1.0)
-
-
-# ── v8 tag functions ──────────────────────────────────────────────────────────
-_INTIM_PUNISH_C = _canon_set(INTIM_PUNISH_ABILITY)
-_INTIM_IMMUNE_C = _canon_set(INTIM_IMMUNE_ABILITY)
-_PRIO_BLOCK_C = _canon_set(PRIO_BLOCK_ABILITY)
-_WNEG_C = _canon_set(WEATHER_NEGATE_ABILITY)
-_SLEEP_C = _canon_set(SLEEP_MOVE)
-
-
-def ability_scalar_tag(ability_probs, canon_names) -> float:
-    """Summed probability mass of the abilities whose canon name is in ``canon_names``, clipped."""
-    return float(min(1.0, sum(float(a["p"]) for a in ability_probs
-                              if _canon_name(a["name"]) in canon_names)))
-
-
-def sleep_tag(move_probs) -> float:
-    """Probability mass of carrying a sleep-inflicting move, clipped."""
-    return float(min(1.0, sum(float(m["p"]) for m in move_probs
-                              if _canon_name(m["name"]) in _SLEEP_C)))
-
-
-def item_tags(item_probs) -> np.ndarray:
-    """item[len(ITEM_TAGS)]: per-tag MAX item probability (choice_lock = any Choice item)."""
-    v = np.zeros(_I, np.float32)
-    for it in item_probs:
-        ck, p = _canon_name(it["name"]), float(it["p"])
-        if ck.startswith("choice"):
-            v[ITEM_TAGS.index("choice_lock")] = max(v[ITEM_TAGS.index("choice_lock")], p)
-        elif ck == "focussash":
-            v[ITEM_TAGS.index("focus_sash")] = max(v[ITEM_TAGS.index("focus_sash")], p)
-        elif ck == "safetygoggles":
-            v[ITEM_TAGS.index("safety_goggles")] = max(v[ITEM_TAGS.index("safety_goggles")], p)
-        elif ck == "covertcloak":
-            v[ITEM_TAGS.index("covert_cloak")] = max(v[ITEM_TAGS.index("covert_cloak")], p)
-        elif ck == "boosterenergy":
-            v[ITEM_TAGS.index("booster_energy")] = max(v[ITEM_TAGS.index("booster_energy")], p)
-        elif ck == "clearamulet":
-            v[ITEM_TAGS.index("clear_amulet")] = max(v[ITEM_TAGS.index("clear_amulet")], p)
-    return v
-
-
-_MOVE_CATEGORY: Optional[dict] = None    # canon move name -> "physical" | "special" | "status"
-
-
-def _move_category_map() -> dict:
-    global _MOVE_CATEGORY
-    if _MOVE_CATEGORY is None:
-        import json
-        from pathlib import Path
-        path = Path(__file__).resolve().parents[2] / "data" / "moves.json"
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-            _MOVE_CATEGORY = {_canon_name(k): str(v.get("category", "")).lower()
-                              for k, v in raw.items()}
-        except Exception:
-            _MOVE_CATEGORY = {}    # missing data -> phys_share stays neutral
-    return _MOVE_CATEGORY
-
-
-def phys_share(move_probs) -> float:
-    """Physical fraction of the DAMAGING move mass (0.5 = neutral / no damaging info) —
-    the Intimidate/screens leverage axis."""
-    cats = _move_category_map()
-    phys = spec = 0.0
-    for m in move_probs:
-        c = cats.get(_canon_name(m["name"]))
-        if c == "physical":
-            phys += float(m["p"])
-        elif c == "special":
-            spec += float(m["p"])
-    total = phys + spec
-    return float(phys / total) if total > 0 else 0.5
-
-
-def expected_speed(species, belief) -> float:
-    """Spread-weighted expected in-battle speed /255 (base-stat fallback) — the
-    Trick-Room / tailwind decision axis (base speed alone hides EV investment)."""
-    from v_dance.parser.belief_state import dex_base_stats
-    base = dex_base_stats(species) or {}
-    fn = getattr(belief, "expected_stats_weighted", None)   # stub beliefs may omit it
-    if callable(fn):
-        try:
-            st = fn(species, base)
-            if st and st.get("spe"):
-                return float(np.clip(float(st["spe"]) / 255.0, 0.0, 1.0))
-        except Exception:
-            pass
-    return float(np.clip((base.get("spe", 0) or 0) / 255.0, 0.0, 1.0))
 
 
 def teammate_affinity_matrix(our_species, belief, n=6):
@@ -526,58 +341,13 @@ def _hard(names):
     return [{"name": n, "p": 1.0} for n in names if n]
 
 
-def _stone_augmented_abilities(species, ability_probs, item_probs):
-    """Max-merge mega-stone-implied abilities into the ability marginal.
-
-    A held mega stone fixes the mega forme's ability (Charizardite Y => Drought) — information
-    the raw ability marginal under-reports for two-mega species (Pikalytics lists only BASE
-    abilities; observed data smears X/Y). Dex-driven (requiredItem + the forme's single ability),
-    no curated table. MAX-merge, not replace: when the observed marginal already carries the mega
-    ability harder than the stone share (Zard `drought` 0.68 vs stone 0.24), the stronger signal
-    wins. Returns ``(ab_aug, p_mega)`` — ``p_mega`` = summed stone mass (the gimmick prior)."""
-    if not item_probs:
-        return ability_probs, 0.0
-    dex = get_pokedex()
-    formes = dex.mega_formes_for(species) if dex else []
-    if not formes:
-        return ability_probs, 0.0
-    ip = {}
-    for i in item_probs:
-        k = _canon_name(i["name"])
-        ip[k] = max(ip.get(k, 0.0), float(i["p"]))
-    ab_aug = list(ability_probs)
-    p_mega = 0.0
-    for fm in formes:
-        fe = dex.entry(fm["forme"]) or {}
-        req, mega_ab = _canon_name(fe.get("requiredItem")), fm.get("ability")
-        p = ip.get(req, 0.0)
-        if not req or not mega_ab or p <= 0.0:
-            continue
-        p_mega += p
-        ck, merged, out = _canon_name(mega_ab), False, []
-        for e in ab_aug:
-            if _canon_name(e["name"]) == ck:
-                out.append({"name": e["name"], "p": max(float(e["p"]), p)})
-                merged = True
-            else:
-                out.append(e)
-        if not merged:
-            out.append({"name": mega_ab, "p": p})
-        ab_aug = out
-    return ab_aug, float(min(p_mega, 1.0))
-
-
 # ── the two public extractors (single source of truth for train + serve) ─────────
 def _fill_base(f, species, belief):
     f[OFF_DEX:OFF_DEX + MON_FEAT_DIM] = mon_dex_features(species)
     has = bool(belief.known(species))
     ab = belief.ability_distribution(species, top_k=4) if has else []
     mv = belief.move_distribution(species, top_k=12) if has else []
-    p_mega = 0.0
     if has:
-        item_fn = getattr(belief, "item_distribution", None)   # stub beliefs may omit it
-        items = item_fn(species, top_k=6) if callable(item_fn) else []
-        ab, p_mega = _stone_augmented_abilities(species, ab, items)
         ws, wa = weather_tags(ab, mv)
         ts, ta = terrain_tags(ab, mv)
         f[OFF_WSETS:OFF_WSETS + _W] = ws
@@ -589,43 +359,16 @@ def _fill_base(f, species, belief):
         f[OFF_REVERSER] = reverser_tag(ab)
         f[OFF_DEBUFF] = ally_debuff_tag(mv)
         f[OFF_ORDER:OFF_ORDER + _O] = order_tags(ab)
-        # v8 mechanic channels (belief-prior side)
-        f[OFF_INTIMP] = ability_scalar_tag(ab, _INTIM_PUNISH_C)
-        f[OFF_INTIMI] = ability_scalar_tag(ab, _INTIM_IMMUNE_C)
-        f[OFF_PRIOB] = ability_scalar_tag(ab, _PRIO_BLOCK_C)
-        f[OFF_WNEG] = ability_scalar_tag(ab, _WNEG_C)
-        f[OFF_SLEEP] = sleep_tag(mv)
-        f[OFF_PHYSSH] = phys_share(mv)
-        f[OFF_ITEMS:OFF_ITEMS + _I] = item_tags(items)
         f[OFF_USAGE] = min(belief.usage(species), 100.0) / 100.0
-    f[OFF_EXPSPE] = expected_speed(species, belief)            # spread-weighted; base-stat fallback
     f[OFF_IMMUNE:OFF_IMMUNE + _T] = immune_tags(species, ab)   # typing always; ability prior if has
     f[OFF_DEFEFF:OFF_DEFEFF + _T] = def_eff_profile(species)   # typing matchup (public, both sides)
     f[OFF_HASDATA] = 1.0 if has else 0.0
-    # gimmick prior: mega mass = summed mega-stone item share (0 when no stones / no data)
-    f[OFF_GK + GIMMICK_KINDS.index("none")] = 1.0 - p_mega
-    f[OFF_GK + GIMMICK_KINDS.index("mega")] = p_mega
+    f[OFF_GK + GIMMICK_KINDS.index("none")] = 1.0
 
 
-def _stone_ability_for(species, item) -> Optional[str]:
-    """The mega ability a KNOWN held stone locks in for ``species`` (None if not its stone)."""
-    dex = get_pokedex()
-    if not dex or not item:
-        return None
-    for fm in dex.mega_formes_for(species):
-        fe = dex.entry(fm["forme"]) or {}
-        if _canon_name(fe.get("requiredItem")) == _canon_name(item) and fm.get("ability"):
-            return fm["ability"]
-    return None
-
-
-def _fill_overlay(f, species, known: OwnKnown):
+def _fill_overlay(f, known: OwnKnown):
     f[OFF_OWNBIT] = 1.0
-    # v8: a known mega stone locks in the mega forme's ability (Charizardite Y => Drought = 1.0).
-    # UNION with the sheet/base ability: entry-triggered base abilities (Intimidate) still fire
-    # pre-mega, and the mega ability governs from the mega turn on — both are real this game.
-    stone_ab = _stone_ability_for(species, known.item)
-    ab = _hard([known.ability] + ([stone_ab] if stone_ab else []))
+    ab = _hard([known.ability])
     mv = _hard(known.moves)
     ws, wa = weather_tags(ab, mv)
     ts, ta = terrain_tags(ab, mv)
@@ -639,19 +382,7 @@ def _fill_overlay(f, species, known: OwnKnown):
     f[OFF_KREVERSER] = reverser_tag(ab)
     f[OFF_KDEBUFF] = ally_debuff_tag(mv)
     f[OFF_KORDER:OFF_KORDER + _O] = order_tags(ab)
-    # v8 hard-known twins
-    f[OFF_KINTIMP] = ability_scalar_tag(ab, _INTIM_PUNISH_C)
-    f[OFF_KINTIMI] = ability_scalar_tag(ab, _INTIM_IMMUNE_C)
-    f[OFF_KPRIOB] = ability_scalar_tag(ab, _PRIO_BLOCK_C)
-    f[OFF_KWNEG] = ability_scalar_tag(ab, _WNEG_C)
-    f[OFF_KSLEEP] = sleep_tag(mv)
-    f[OFF_KPHYSSH] = phys_share(mv)
-    if known.spe is not None:
-        f[OFF_KEXPSPE] = float(np.clip(float(known.spe) / 255.0, 0.0, 1.0))
-    if known.item:
-        f[OFF_KITEMS:OFF_KITEMS + _I] = item_tags([{"name": known.item, "p": 1.0}])
-    will_mega = bool(known.will_mega or stone_ab)              # a held stone implies the mega
-    f[OFF_KGK + GIMMICK_KINDS.index("mega" if will_mega else "none")] = 1.0
+    f[OFF_KGK + GIMMICK_KINDS.index("mega" if known.will_mega else "none")] = 1.0
     if known.tera:
         ti = _TYPE_IDX.get(_canon_type(known.tera))
         if ti is not None:
@@ -664,7 +395,7 @@ def own_mon_features(species: str, belief, known: Optional[OwnKnown] = None) -> 
     f = np.zeros(FEAT_DIM, dtype=np.float32)
     _fill_base(f, species, belief)
     if known is not None:
-        _fill_overlay(f, species, known)
+        _fill_overlay(f, known)
     return f
 
 
@@ -679,7 +410,7 @@ def opp_mon_features(species: str, belief,
     f = np.zeros(FEAT_DIM, dtype=np.float32)
     _fill_base(f, species, belief)
     if revealed is not None:
-        _fill_overlay(f, species, revealed)
+        _fill_overlay(f, revealed)
     return f
 
 
@@ -688,12 +419,9 @@ _EXPECTED = {
     "WEATHERS": ("sand", "rain", "sun", "snow"),
     "TERRAINS": ("electric", "grassy", "psychic", "misty"),
     "ROLE_TAGS": ("trick_room", "tailwind", "redirect", "fake_out", "screens",
-                  "speed_control", "priority", "intimidate",
-                  "wide_guard", "quick_guard", "trapping"),          # extended in v8
+                  "speed_control", "priority", "intimidate"),
     "GIMMICK_KINDS": ("none", "mega", "tera", "dynamax"),
     "ORDER_FLAGS": ("illusion", "imposter"),
-    "ITEM_TAGS": ("focus_sash", "choice_lock", "safety_goggles", "covert_cloak",
-                  "booster_energy", "clear_amulet"),                  # new in v8
 }
 
 

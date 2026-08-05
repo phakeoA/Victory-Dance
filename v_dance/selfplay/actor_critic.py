@@ -236,6 +236,17 @@ class ActorCritic(nn.Module):
         cfg["dropout"] = p.dropout
         cfg["value_readout"] = p.value_readout
         cfg["opp_cond"] = bool(getattr(p, "opp_cond", False))   # Level-B opp-conditioned our heads
+        # Widening cores (era-4 2b caught this class: an exploiter warm-started from a
+        # pair_cond target saved 528-wide our-heads with a config that rebuilt 512 —
+        # the verify reload failed). Stamp EVERY head-widening flag from the live policy.
+        cfg["pair_cond"] = bool(getattr(p, "pair_cond", False))
+        cfg["memory_dim"] = int(getattr(p, "memory_dim", 0) or 0)
+        if cfg["memory_dim"]:
+            cfg["mem_layers"] = int(getattr(p, "mem_layers", 2))
+            cfg["mem_heads"] = int(getattr(p, "mem_heads", 4))
+            cfg["max_mem_len"] = int(getattr(p, "max_mem_len", 64))
+        cfg["n_archetypes"] = int(getattr(p, "n_archetypes", 0) or 0)
+        cfg["z_dim"] = int(getattr(p, "z_dim", 0) or 0)
         # C51: stamp the distributional value config so a COLD load (mp worker / resume / gauntlet)
         # rebuilds the matching critic via from_bc_checkpoint. Absent => scalar critic (back-compat).
         if getattr(self.critic, "support", None) is not None:

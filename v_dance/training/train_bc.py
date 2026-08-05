@@ -44,7 +44,9 @@ from v_dance.training.bc_dataset import (  # noqa: E402
     HEADS,
     bc_worker_init,
     build_examples,
+    canonical_rid,
     compute_advantage_weights,
+    compute_closed_copy_weights,
     compute_sample_weights,
     examples_from_folders,
     filter_by_rating,
@@ -221,6 +223,7 @@ def run_epoch(
     progress_every: int = 0,
     progress_label: str = "",
     progress_secs: float = 600.0,
+    pair_dropout: float = 0.25,
 ) -> Dict[str, float]:
     """One pass over ``loader``.  Train if ``optimizer`` given, else eval.
 
@@ -283,6 +286,25 @@ def run_epoch(
             if aid is not None:
                 aid = aid.to(device)
 
+            # Era-4 2b: teacher-forced partner conditioning (TRAIN only; eval stays
+            # zero-cond so the printed val metric remains armB-comparable — the
+            # teacher-forced val gap is bc_val_report's go/no-go, not this one).
+            # Per sample: a random decode order; the FIRST head in order trains
+            # unconditioned, the SECOND sees the partner's HUMAN action one-hot,
+            # dropped to zeros with prob ``pair_dropout`` so zero-cond serving
+            # stays in-distribution (the kill-switch path keeps training too).
+            partner_actions = None
+            if train and getattr(model, "pair_cond", False):
+                bsz = x.shape[0]
+                a_dim = int(getattr(model, "action_dim"))
+                b_first = torch.rand(bsz, device=device) < 0.5   # True -> our_b decodes first
+                keep = torch.rand(bsz, device=device) >= pair_dropout
+                oh = F.one_hot(target.clamp(min=0).long(), a_dim).to(x.dtype)  # (B, 2, A)
+                gate_a = (b_first & keep & (valid[:, 1] > 0.5)).to(x.dtype).unsqueeze(1)
+                gate_b = (~b_first & keep & (valid[:, 0] > 0.5)).to(x.dtype).unsqueeze(1)
+                partner_actions = {"our_a": oh[:, 1] * gate_a,   # our_a conditions on our_b's action
+                                   "our_b": oh[:, 0] * gate_b}   # our_b conditions on our_a's action
+
             # Phase 1b: sequence batches carry x_seq (B, T, D) — feed the memory
             # path, supervising the LAST frame (targets are the item's own).
             if "x_seq" in batch:
@@ -290,9 +312,11 @@ def run_epoch(
                     batch["x_seq"].to(device),
                     frame_padding_mask=batch["frame_padding_mask"].to(device),
                     archetype_id=aid,
+                    partner_actions=partner_actions,
                 )
             else:
-                actions, gimmicks, value = model(x, archetype_id=aid)
+                actions, gimmicks, value = model(x, archetype_id=aid,
+                                                 partner_actions=partner_actions)
             v_target = batch["value_target"].to(device)    # (B,) win=1/loss=0
             v_valid = batch["value_valid"].to(device)      # (B,) 1 where known
 
@@ -520,6 +544,34 @@ def train(args: argparse.Namespace) -> dict:
               f"{n_won}/{len(train_ex)} won) -> weight min {train_weights.min():.3f} "
               f"max {train_weights.max():.3f} mean {train_weights.mean():.3f}")
 
+    # ── Era-4 arm 2a: closed-copy regime titration (TRAIN ONLY, default OFF) ───
+    # Splits each HF open/__closed twin pair to total ONE decision (closed gets
+    # lam, open 1−lam) — removes arm B's verified 2× tournament upweight while
+    # keeping the closed VIEW. Composes multiplicatively; val stays unweighted.
+    if args.closed_copy_weight is not None:
+        cc_w = compute_closed_copy_weights(train_ex, args.closed_copy_weight)
+        rids = [str(e["replay_id"]) for e in train_ex]
+        _open = {canonical_rid(r) for r in rids if not r.endswith("__closed")}
+        _closed = {canonical_rid(r) for r in rids if r.endswith("__closed")}
+        _paired = _open & _closed
+        n_open = sum(1 for r in rids
+                     if not r.endswith("__closed") and canonical_rid(r) in _paired)
+        n_closed = sum(1 for r in rids
+                       if r.endswith("__closed") and canonical_rid(r) in _paired)
+        n_paired = n_open + n_closed
+        if n_paired == 0:
+            sys.exit("[train_bc] --closed-copy-weight found ZERO open/__closed pairs "
+                     "in the train set — the HF_CLOSED folders are missing from "
+                     "--data (the flag would silently no-op; refusing to run)")
+        train_weights = cc_w if train_weights is None else train_weights * cc_w
+        m = float(train_weights.mean())
+        if m > 0:
+            train_weights = (train_weights / m).astype(np.float32)
+        print(f"[train_bc] closed-copy weighting: lam_closed={args.closed_copy_weight} "
+              f"({n_paired}/{len(train_ex)} paired examples: {n_closed} closed, "
+              f"{n_open} open) -> combined weight min {train_weights.min():.3f} "
+              f"max {train_weights.max():.3f} mean {train_weights.mean():.3f}")
+
     # ── Phase-2 offline advantage weighting (TRAIN ONLY, default OFF) ──────────
     # w = f(G − V(s)) from a trained value head: imitate what beat expectation.
     # Composes multiplicatively with the rating/outcome weights above; val stays
@@ -647,6 +699,7 @@ def train(args: argparse.Namespace) -> dict:
         max_mem_len=args.max_mem_len,
         n_archetypes=(int(z_art["k"]) if z_art else 0),
         z_dim=(args.z_dim if z_art else 0),
+        pair_cond=args.pair_cond,
         device=device,
     )
     # Warm start (Phase 1b memory / Phase 2 z): initialise from a NARROWER
@@ -655,19 +708,30 @@ def train(args: argparse.Namespace) -> dict:
     # forward(x) reproduces the checkpoint's logits exactly at epoch 0, so an
     # A/B isolates the new feature's value.  Same-width → plain strict load.
     if args.warm_start:
-        from v_dance.models.bc_model_attn import init_extended_model_from_ckpt
+        from v_dance.models.bc_model_attn import (
+            init_extended_model_from_ckpt, init_pair_model_from_ckpt)
         ck = torch.load(args.warm_start, map_location=device, weights_only=False)
         state = ck.get("model_state", ck)
         ck_cfg = (ck.get("config") or {}) if isinstance(ck, dict) else {}
         extra = ((model.memory_dim + model.z_dim)
                  - (int(ck_cfg.get("memory_dim", 0) or 0)
                     + int(ck_cfg.get("z_dim", 0) or 0)))
-        if extra > 0:
+        pair_extra = (model.pair_cond and not bool(ck_cfg.get("pair_cond", False)))
+        if pair_extra and extra > 0:
+            sys.exit("[train_bc] warm-starting pair_cond AND memory/z growth in one step is "
+                     "unsupported (the OUR heads would grow by a different width than the other "
+                     "heads — the uniform zero-pad surgery can't express that). Stage the "
+                     "widenings across two warm-starts.")
+        if pair_extra:
+            init_pair_model_from_ckpt(model, state)      # 2b: our heads +action_dim, zeroed
+        elif extra > 0:
             init_extended_model_from_ckpt(model, state, extra_cols=extra)
         else:
             model.load_state_dict(state, strict=True)
         print(f"[train_bc] warm-started from {args.warm_start}"
-              + (f" (zero-padded {extra} new trailing head columns)" if extra > 0 else ""))
+              + (f" (zero-padded {extra} new trailing head columns)" if extra > 0 else "")
+              + (" (pair_cond: our heads +action_dim zero-padded — zero-cond forwards "
+                 "reproduce the donor bit-exactly)" if pair_extra else ""))
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     # ── Class-imbalance weighting (optional) ──────────────────────────────────
@@ -730,6 +794,10 @@ def train(args: argparse.Namespace) -> dict:
         "aux_opp_head": bool(args.aux_opp_head),
         "aux_opp_weight": args.aux_opp_weight,
         "opp_cond": bool(args.opp_cond),               # Level B: our heads read the predicted opp action
+        # Era-4 2b: our heads read the PARTNER slot's action (teacher-forced at train,
+        # sequentially decoded at serve). model_io rebuilds + pair-decodes off this stamp.
+        "pair_cond": bool(args.pair_cond),
+        "pair_dropout": args.pair_dropout,
         "augment_move_order": bool(args.augment_move_order),
         "lr": args.lr,
         "weight_decay": args.weight_decay,
@@ -827,7 +895,8 @@ def train(args: argparse.Namespace) -> dict:
                        value_loss_weight=args.value_loss_weight,
                        progress_every=args.progress_every,
                        progress_label=f"e{epoch}",
-                       progress_secs=args.progress_secs)
+                       progress_secs=args.progress_secs,
+                       pair_dropout=args.pair_dropout)
         va = run_epoch(model, val_loader, device, optimizer=None)
         history.append({"epoch": epoch, "train": tr, "val": va})
         opp_str = f" | opp top1 {va['opp_top1']:.3f}" if args.aux_opp_head else ""
@@ -939,6 +1008,15 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                     help="Level B: feed the DETACHED predicted opp-action distribution into the OUR "
                          "action heads (best-response to anticipated opp). Requires --aux-opp-head. "
                          "Default OFF (the Level-A baseline).")
+    ap.add_argument("--pair-cond", action=argparse.BooleanOptionalAction, default=False,
+                    help="Era-4 2b: OUR heads read the PARTNER slot's action (trailing "
+                         "action_dim one-hot; teacher-forced at train with random decode "
+                         "order, sequentially decoded at serve). p(a)·p(b) -> p(a)·p(b|a). "
+                         "Warm-start from an unconditioned ckpt zero-pads the new columns "
+                         "(zero-cond = donor bit-exact, the kill switch). Default OFF.")
+    ap.add_argument("--pair-dropout", type=float, default=0.25,
+                    help="2b: probability the teacher-forced partner one-hot is dropped to "
+                         "zeros (keeps the zero-cond/kill-switch path trained; default 0.25).")
     # ── Demonstrator skill filtering / weighting (TIER-1 #1) ──────────────────
     ap.add_argument("--rating-min", type=float, default=None,
                     help="drop TRAIN examples whose our-side ladder rating_before "
@@ -955,6 +1033,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                     default=False,
                     help="weight the action loss by game outcome: won=1.0, "
                          "lost=--loss-weight, unknown=1.0; default off.")
+    ap.add_argument("--closed-copy-weight", type=float, default=None,
+                    metavar="LAM_CLOSED",
+                    help="Era-4 arm 2a regime titration: split each HF open/__closed "
+                         "twin pair to total ONE decision — closed copy gets LAM, open "
+                         "copy 1−LAM (1.0 = closed-only; unpaired replays untouched). "
+                         "Removes arm B's 2× tournament upweight while keeping the "
+                         "closed VIEW. Errors out if the train set has no pairs.")
     ap.add_argument("--adv-weight", choices=["off", "exp", "filter"], default="off",
                     help="Phase-2 offline advantage weighting (TRAIN only): weight each "
                          "decision by A = outcome − V(s) using --adv-value-ckpt's value "

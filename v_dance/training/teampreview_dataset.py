@@ -185,16 +185,17 @@ def _revealed_of(mon: dict):
     """A mon dict's OTS-revealed build as an ``OwnKnown`` (None when nothing is
     revealed — a closed-sheet stub contributes no overlay).  Turn-1 mons are
     never mega'd yet, so ``known_ability`` is the sheet's base ability; the item
-    has no channel in the TP feature schema and is skipped."""
+    rides too since tpfeat-v8 (item channels + the stone->mega-ability lock)."""
     if not isinstance(mon, dict):
         return None
     ab = mon.get("known_ability") or mon.get("pre_mega_ability")
     mv = [m for m in (mon.get("known_moves") or []) if m]
     tera = mon.get("known_tera_type")
-    if not ab and not mv and not tera:
+    item = mon.get("known_item")
+    if not ab and not mv and not tera and not item:
         return None
     from v_dance.training.tp_features import OwnKnown
-    return OwnKnown(ability=ab, moves=mv, tera=tera, will_mega=False)
+    return OwnKnown(ability=ab, moves=mv, item=item, tera=tera, will_mega=False)
 
 
 def _ots_sheet_map(firsts: Dict[str, dict]) -> Dict[str, "object"]:
@@ -336,11 +337,13 @@ def _example_for_side(t: dict, side: str, opp: str,
         stats["valid_lead"] += int(valid_lead)
 
     # tpfeat-v7 OTS: the OPPONENT's revealed sheets ride the overlay when open
-    # team sheets made them preview-visible.  OWN side stays symmetric base
-    # (overlay off) — parity with the prod serve path, whose own_known is None.
+    # team sheets made them preview-visible.  tpfeat-v8: the OWN side's sheet rides
+    # too — in an OTS game the deciding player SAW their own (and the opponent's)
+    # builds at preview, so the overlay is ground truth for the imitation label.
+    # Closed-sheet rows keep both overlays off, byte-identical.
     use_sheet = bool(sheet_map) and getattr(feat_fn, "supports_known", False)
 
-    def _opp_f(s):
+    def _sheet_f(s):
         if use_sheet:
             return feat_fn(s, sheet_map.get(norm_species(s)))
         return feat_fn(s)
@@ -348,12 +351,14 @@ def _example_for_side(t: dict, side: str, opp: str,
     if use_sheet and stats is not None:
         stats["ots_opp_overlay_mons"] += sum(
             1 for s in opp_roster if sheet_map.get(norm_species(s)) is not None)
+        stats["ots_own_overlay_mons"] += sum(
+            1 for s in roster if sheet_map.get(norm_species(s)) is not None)
 
     ex = {
         "our_species": roster_norm,
         "opp_species": [norm_species(s) for s in opp_roster],
-        "our_feat": np.stack([feat_fn(s) for s in roster]),
-        "opp_feat": np.stack([_opp_f(s) for s in opp_roster]),
+        "our_feat": np.stack([_sheet_f(s) for s in roster]),
+        "opp_feat": np.stack([_sheet_f(s) for s in opp_roster]),
         "bring": bring,
         "lead": lead,
         "valid_bring": valid_bring,
@@ -361,6 +366,9 @@ def _example_for_side(t: dict, side: str, opp: str,
         "replay_id": t.get("replay_id"),
         "side": side,
         "won": won,          # TP-N3: outcome weighting input (inert for other consumers)
+        # TP-N3 re-run (2026-07-21): the perspective's username — --own-username restricts the
+        # own-boost to BOT-perspective rows (opponent-perspective wins were imitated ×15 at n=171).
+        "username": uname,
     }
     # DS-4c stage 3: Bo3 previous-game context (this game = game 2/3 of a set).
     # Keys only present on set games — off-set examples stay byte-identical dicts.
@@ -609,7 +617,8 @@ class TeamPreviewDataset(Dataset):
 
 def print_stats(stats: Counter) -> None:
     order = ["files", "replays", "examples", "valid_bring", "valid_lead",
-             "skipped_incomplete", "unmatched_picks", "bad_files"]
+             "skipped_incomplete", "unmatched_picks", "bad_files",
+             "ots_sheet_replays", "ots_opp_overlay_mons", "ots_own_overlay_mons"]
     print("── Team-preview dataset stats ───────────────")
     for k in order:
         if k in stats:

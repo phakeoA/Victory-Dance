@@ -118,10 +118,16 @@ def _topk_set_metrics(logits: torch.Tensor, target: torch.Tensor, k: int,
     return n_exact, sum_overlap, n
 
 
+def _norm_uname(name) -> str:
+    """Showdown username normalization for matching (display names vary in case/spacing)."""
+    return "".join(ch for ch in str(name or "").lower() if ch.isalnum())
+
+
 def compute_tp_weights(examples: Sequence[dict],
                        outcome_weight: bool = False, loss_weight: float = 0.5,
                        own_folders: Optional[Sequence[str]] = None,
-                       own_boost: float = 15.0) -> Optional[np.ndarray]:
+                       own_boost: float = 15.0,
+                       own_username: Optional[str] = None) -> Optional[np.ndarray]:
     """TP-N3 per-example loss weights (docs/tp_n3_outcome_finetune_design.md).
 
     Multiplicative: WON examples from an ``--own-folders`` folder ×``own_boost`` (lost/
@@ -130,15 +136,24 @@ def compute_tp_weights(examples: Sequence[dict],
     MEAN-NORMALISED to 1.0 (bc_dataset.compute_sample_weights' invariant) so weights only
     redistribute emphasis. Returns None when nothing is enabled — the dataset then emits
     no "weight" key and run_epoch keeps the exact legacy loss path (byte-identical).
+
+    ``own_username`` (N3 re-run, 2026-07-21): the TP extractor mines BOTH perspectives of
+    every replay, so a bare folder match boosts OPPONENT-perspective wins too — opponents
+    beating us got imitated ×15 at n=171 (the parking root cause). When set, only rows
+    whose perspective username matches are ``own``.
     """
     if not outcome_weight and not own_folders:
         return None
     own = tuple(os.path.normcase(os.path.abspath(f)) for f in (own_folders or ()))
+    uname_want = _norm_uname(own_username) if own_username else None
     w = np.ones(len(examples), dtype=np.float64)
-    n_own = n_boost = n_lost = 0
+    n_own = n_boost = n_lost = n_opp_perspective = 0
     for i, ex in enumerate(examples):
         src = os.path.normcase(os.path.abspath(str(ex.get("source_file") or "")))
         is_own = bool(own) and src.startswith(own)
+        if is_own and uname_want is not None and _norm_uname(ex.get("username")) != uname_want:
+            n_opp_perspective += 1
+            is_own = False
         if is_own:
             n_own += 1
         # Won-ONLY boost (N3 iter-3): BC has no negative gradient — boosting a LOST own
@@ -154,12 +169,16 @@ def compute_tp_weights(examples: Sequence[dict],
         # A typo'd folder silently weighting nothing is exactly the failure mode we refuse
         # to ship (a flag that LOOKS on but does nothing) — fail loud instead.
         raise SystemExit(f"[train_teampreview] --own-folders matched 0 examples: {own_folders} "
-                         f"(is the folder also in --data?)")
+                         f"(folder in --data? --own-username '{own_username}' spelled like the "
+                         f"in-replay name? {n_opp_perspective} rows matched the folder but not "
+                         f"the username)")
     mean = w.mean()
     if mean > 0:
         w = w / mean
+    uname_note = (f", {n_opp_perspective} opp-perspective rows excluded by --own-username"
+                  if uname_want is not None else "")
     print(f"[train_teampreview] TP-N3 weights: {n_own} own-folder examples "
-          f"({n_boost} WON → ×{own_boost:g}; lost/unknown unboosted), "
+          f"({n_boost} WON → ×{own_boost:g}; lost/unknown unboosted){uname_note}, "
           f"{n_lost} lost-game examples (×{loss_weight:g}), mean-normalised over {len(examples)}")
     return w.astype(np.float32)
 
@@ -395,7 +414,33 @@ def train(args: argparse.Namespace) -> dict:
     # unweighted (comparable across runs). None when the flags are off.
     tp_weights = compute_tp_weights(
         train_ex, outcome_weight=args.outcome_weight, loss_weight=args.loss_weight,
-        own_folders=args.own_folders, own_boost=args.own_boost)
+        own_folders=args.own_folders, own_boost=args.own_boost,
+        own_username=args.own_username)
+
+    # TP-N3 re-run: checkpoint selection on an OWN-GAMES val slice (bot-perspective rows of
+    # the own folders inside the standard val split). Global val stays the printed no-forgetting
+    # metric; ONLY best-ckpt selection switches — iter-1's failure was corpus-val selection
+    # saving an epoch the treatment never shaped.
+    own_val_loader = None
+    if args.select_own_val:
+        if not args.own_folders:
+            raise SystemExit("[train_teampreview] --select-own-val requires --own-folders")
+        _own = tuple(os.path.normcase(os.path.abspath(f)) for f in args.own_folders)
+        _want = _norm_uname(args.own_username) if args.own_username else None
+        own_val_ex = [e for e in val_ex
+                      if os.path.normcase(os.path.abspath(str(e.get("source_file") or "")))
+                      .startswith(_own)
+                      and (_want is None or _norm_uname(e.get("username")) == _want)]
+        if len(own_val_ex) < 25:
+            raise SystemExit(f"[train_teampreview] --select-own-val: only {len(own_val_ex)} "
+                             f"own val examples (<25) — selection would be noise. Grow the "
+                             f"corpus or raise --val-frac.")
+        print(f"[train_teampreview] --select-own-val: best-ckpt selection on "
+              f"{len(own_val_ex)} own-games val examples (global val stays the printed metric)")
+        own_val_loader = DataLoader(
+            TeamPreviewDataset(own_val_ex, vocab, feat_dim=feat_dim, affinity_fn=affinity_fn,
+                               with_set_ctx=args.set_ctx),
+            batch_size=args.batch_size, shuffle=False)
 
     # Subset-mask aug is TRAIN-only — the val split stays clean (checkpoint selection + the
     # tp_val_report gates must measure the un-augmented task).
@@ -472,6 +517,10 @@ def train(args: argparse.Namespace) -> dict:
         "loss_weight": args.loss_weight,
         "own_folders": list(args.own_folders) if args.own_folders else None,
         "own_boost": args.own_boost,
+        # N3 re-run provenance (2026-07-21). New config keys shift the resume fingerprint —
+        # fine: no interrupted TP runs are pending, and era-chain runs start fresh anyway.
+        "own_username": args.own_username,
+        "select_own_val": bool(args.select_own_val),
     }
     if feature_schema:
         config["feature_schema"] = feature_schema
@@ -527,9 +576,17 @@ def train(args: argparse.Namespace) -> dict:
             f"bring exact {va['bring_exact']:.3f} ovlp {va['bring_overlap']:.3f}"
         )
         # Set-head runs are selected on the SERVE metric (the set decode picks the bring);
-        # marginal-only runs keep the historical bring_exact score.
-        score = 0.5 * (va["lead_exact"] + (va["set_exact"] if args.set_head
-                                           else va["bring_exact"]))
+        # marginal-only runs keep the historical bring_exact score. --select-own-val swaps
+        # the SELECTION basis to the own-games slice (global va stays printed + in history).
+        sel = va
+        if own_val_loader is not None:
+            sel = run_epoch(model, own_val_loader, device, optimizer=None,
+                            set_weight=args.set_weight)
+            print(f"           own-val: lead {sel['lead_exact']:.3f} "
+                  f"set {sel.get('set_exact', float('nan')):.3f} "
+                  f"bring {sel['bring_exact']:.3f}")
+        score = 0.5 * (sel["lead_exact"] + (sel["set_exact"] if args.set_head
+                                            else sel["bring_exact"]))
         if score > best:
             best = score
             epochs_no_improve = 0
@@ -644,6 +701,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap.add_argument("--own-boost", type=float, default=15.0,
                     help="TP-N3: weight multiplier for WON --own-folders examples "
                          "(lost/unknown own rows stay unboosted).")
+    ap.add_argument("--own-username", default=None,
+                    help="TP-N3 re-run: restrict the own-boost to rows whose PERSPECTIVE "
+                         "username matches (normalized). Without this, opponent-perspective "
+                         "wins in own folders get boosted too — the n=171 parking root cause.")
+    ap.add_argument("--select-own-val", action="store_true",
+                    help="TP-N3 re-run: best-checkpoint selection on the own-games val slice "
+                         "(requires --own-folders; composes with --own-username). Global val "
+                         "stays the printed/no-forgetting metric.")
     ap.add_argument("--patience", type=int, default=0,
                     help="early-stop after N epochs with no val mean-exact gain (0=off)")
     ap.add_argument("--val-frac", type=float, default=0.1)

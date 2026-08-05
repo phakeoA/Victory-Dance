@@ -147,6 +147,35 @@ def transition_to_example(
     """
     mask_all = t.get("action_mask") or {}
     gimmick_mask_all = t.get("gimmick_mask") or {}
+    # 2026-07-24 futility batch: stored rows were stamped at EXPORT time and predate the
+    # futility rules — subtract ONLY the futility bits (never a full mask recompute: the
+    # stored row is the export-era legality truth; re-deriving everything would also
+    # re-apply rules the snapshot can't always back). Training thus learns under the same
+    # sharpened mask serve uses WITHOUT a corpus re-export; results are baked into the
+    # encoded cache (encoded_cache._CACHE_SCHEMA bumped for exactly this). Any failure
+    # falls open to the stored row.
+    snap = t.get("state_before_actions")
+    if snap and mask_all:
+        try:
+            from v_dance.encoders.action_codec import (
+                _futile_buckets_offline, move_slots_for_mon)
+            our_active = snap.get("our_active") or {}
+            merged = {}
+            for h, row in mask_all.items():
+                mon = our_active.get(h)
+                if not mon or not row:
+                    merged[h] = row
+                    continue
+                row2 = list(row)
+                for m_idx, (name, _c) in enumerate(move_slots_for_mon(mon)):
+                    for b in _futile_buckets_offline(mon, snap, name):
+                        idx = m_idx * 3 + b
+                        if idx < len(row2):
+                            row2[idx] = 0
+                merged[h] = row2
+            mask_all = merged
+        except Exception:
+            mask_all = t.get("action_mask") or {}
     first = _first_action_per_slot(t.get("our_actions") or [])
 
     # Count the dropped same-slot (forced-replacement) entries for visibility.
@@ -181,7 +210,13 @@ def transition_to_example(
             continue
         if ai < 0 or ai >= len(row) or row[ai] != 1:
             if stats is not None:
-                stats["skipped_illegal_target"] += 1
+                orig = (t.get("action_mask") or {}).get(head) or []
+                if 0 <= ai < len(orig) and orig[ai] == 1:
+                    # LOUD (dont-defer-gaps): the futility refresh masked a HUMAN label —
+                    # deliberate (don't imitate provably-wasted clicks), but visible.
+                    stats["skipped_futile_target"] += 1
+                else:
+                    stats["skipped_illegal_target"] += 1
             continue
         targets[head] = int(ai)
         masks[head] = np.asarray(row, dtype=np.float32)
@@ -480,6 +515,50 @@ def compute_sample_weights(
             dtype=np.float64,
         )
         w *= ow
+
+    mean = w.mean()
+    if mean > 0:
+        w = w / mean
+    return w.astype(np.float32)
+
+
+def compute_closed_copy_weights(
+    examples: Sequence[dict],
+    lam_closed: float,
+) -> np.ndarray:
+    """Era-4 arm 2a (design §2a): per-decision normalization of the HF open/closed
+    twin ingest.
+
+    Arm-B-style corpora contain every HF tournament game TWICE — the open parse
+    (``rid``) and the closed-strip re-ingest (``rid__closed``) — both at full
+    weight, i.e. a verified 2× upweight of tournament modal lines.  This weight
+    splits each PAIR so it totals ONE decision: the closed member gets
+    ``lam_closed``, the open member ``1 − lam_closed`` (``lam_closed=1.0`` =
+    closed-only; ``0.5`` = equal halves).  Replays with no twin present in the
+    dataset keep raw weight 1.0 — the flag only touches actual pairs.
+
+    Pairing is REPLAY-level on :func:`canonical_rid` (robust to the ``battle-``
+    prefix and to small decision-count drift between the two parses).  Returns a
+    MEAN-NORMALISED vector (compute_sample_weights' invariant); compose with
+    other weight vectors by multiplying and re-normalising.
+    """
+    if not (0.0 <= lam_closed <= 1.0):
+        raise ValueError(f"lam_closed must be in [0, 1], got {lam_closed}")
+    n = len(examples)
+    w = np.ones(n, dtype=np.float64)
+    if n == 0:
+        return w.astype(np.float32)
+
+    open_ids, closed_ids = set(), set()
+    for e in examples:
+        rid = str(e["replay_id"])
+        (closed_ids if rid.endswith("__closed") else open_ids).add(canonical_rid(rid))
+    paired = open_ids & closed_ids
+
+    for i, e in enumerate(examples):
+        rid = str(e["replay_id"])
+        if canonical_rid(rid) in paired:
+            w[i] = lam_closed if rid.endswith("__closed") else 1.0 - lam_closed
 
     mean = w.mean()
     if mean > 0:

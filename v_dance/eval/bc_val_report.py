@@ -13,7 +13,12 @@ the reference corpus with the given seed/val-frac) and breaks accuracy down:
   * per TURN bucket (1, 2-3, 4-6, 7-10, 11+) — late buckets are where
     accumulated information (and therefore memory) should show up,
   * per decision type (turn vs post-faint replacement),
-  * value head: Brier score + outcome accuracy (where the outcome is known).
+  * value head: Brier score + outcome accuracy (where the outcome is known),
+  * sharpness panel (era-4 pillar 0b): legal-masked policy entropy, top1-top2
+    margin and determinism mass (pooled / per head / per turn bucket) + the
+    per-acting-species argmax-vs-human habit KL — the argmax-collapse
+    microscope; softer (less exploitable) = higher entropy, lower margin,
+    lower determinism mass, lower KL.
 
 Multiple --ckpt args print side by side with deltas vs the FIRST checkpoint.
 Memory checkpoints (config memory_dim>0) are automatically evaluated through
@@ -35,6 +40,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -98,6 +104,85 @@ class _Acc:
         return (self.top3 / self.n) if self.n else None
 
 
+class _Sharp:
+    """Sharpness accumulator (0b) over legal-masked softmax states: normalized
+    entropy H(p)/log(n_legal), top1-top2 probability margin, determinism mass
+    p(top1)>0.9.  Only states with n_legal>1 are fed (a forced action carries
+    no policy information and would dilute every stat identically)."""
+
+    __slots__ = ("n", "ent_sum", "det", "margins")
+
+    def __init__(self):
+        self.n = self.det = 0
+        self.ent_sum = 0.0
+        self.margins: List[float] = []
+
+    def add(self, ent_n: float, margin: float, p1: float) -> None:
+        self.n += 1
+        self.ent_sum += ent_n
+        self.margins.append(margin)
+        if p1 > 0.9:
+            self.det += 1
+
+    def ent(self) -> Optional[float]:
+        return (self.ent_sum / self.n) if self.n else None
+
+    def margin_med(self) -> Optional[float]:
+        return float(np.median(self.margins)) if self.margins else None
+
+    def margin_p10(self) -> Optional[float]:
+        return float(np.percentile(self.margins, 10)) if self.margins else None
+
+    def det_mass(self) -> Optional[float]:
+        return (self.det / self.n) if self.n else None
+
+
+# ── 0b habit KL: acting-species recovery ─────────────────────────────────────
+# Examples store no species field (the encoder is deliberately species-
+# identity-free), but the acting mon's block in x carries an EXACT dex
+# fingerprint: type one-hots + base_stats/255, written from the same pokedex
+# lookups inverted here.  Misses (runtime typechange, transformed copies, an
+# off-dex forme) return None and are excluded from the habit histograms.
+_SPECIES_FP: Optional[Dict] = None
+
+
+def _species_fp_map() -> Dict:
+    """(type1_idx, type2_idx, 6 base stats) → forme display name, built once."""
+    global _SPECIES_FP
+    if _SPECIES_FP is None:
+        from v_dance.encoders.encoder_layout import _TYPE_IDX
+        from v_dance.parser.belief_state import STAT_ORDER, dex_base_stats
+        from v_dance.parser.vod_parser.pokedex import get_pokedex
+        fp: Dict = {}
+        dex = get_pokedex()
+        for key, e in (dex._dex.items() if dex else ()):
+            bs = dex_base_stats(key)
+            types = [str(t).upper() for t in (e.get("types") or [])]
+            if not bs or not types or types[0] not in _TYPE_IDX:
+                continue
+            t2 = _TYPE_IDX.get(types[1], -1) if len(types) > 1 else -1
+            k = (_TYPE_IDX[types[0]], t2,
+                 tuple(int(bs[s]) for s in STAT_ORDER))
+            fp.setdefault(k, e.get("name") or key)   # dex order wins a clash
+        _SPECIES_FP = fp
+    return _SPECIES_FP
+
+
+def _acting_species(x_row, h_idx: int) -> Optional[str]:
+    """Species of the acting mon behind head ``h_idx`` (x block 0/1), or None."""
+    from v_dance.encoders.encoder_layout import NUM_TYPES, POKEMON_FEATURES
+    x = np.asarray(x_row)
+    b = h_idx * POKEMON_FEATURES
+    t1v = x[b + 1: b + 1 + NUM_TYPES]
+    if float(t1v.max()) < 0.5:
+        return None                                  # empty slot
+    t2v = x[b + 1 + NUM_TYPES: b + 1 + 2 * NUM_TYPES]
+    t2 = int(t2v.argmax()) if float(t2v.max()) > 0.5 else -1
+    bso = b + 1 + 2 * NUM_TYPES              # base_stats offset (cf. action_codec._WEIGHT_REL)
+    bs = tuple(int(round(float(v) * 255.0)) for v in x[bso: bso + 6])
+    return _species_fp_map().get((int(t1v.argmax()), t2, bs))
+
+
 def evaluate_checkpoint(
     ckpt_path: str,
     val_ex: List[dict],
@@ -111,7 +196,8 @@ def evaluate_checkpoint(
 
     Returns a dict of accumulators: pooled/head/turn-bucket/decision-type
     (+ per-ARCHETYPE when ids are supplied — the Phase-2 z success metric)
-    action accuracy + value Brier/accuracy + metadata.
+    action accuracy + value Brier/accuracy + the 0b sharpness/habit-KL
+    accumulators + metadata.
     """
     from v_dance.play.model_io import load_bc_policy
 
@@ -142,10 +228,22 @@ def evaluate_checkpoint(
 
     pooled = _Acc()
     by_head = {h: _Acc() for h in HEADS}
+    # Era-4 2b go/no-go: teacher-forced (true partner action) per-head accuracy —
+    # the gap over the zero-cond by_head rate is the conditioning's measured value.
+    pair_cond = bool(getattr(model, "pair_cond", False))
+    pair_tf_head = {h: _Acc() for h in HEADS} if pair_cond else None
     by_bucket = {label: _Acc() for label, _, _ in _TURN_BUCKETS}
     by_dtype: Dict[str, _Acc] = {}
     by_arch: Dict[str, _Acc] = {}
     by_slice: Dict[str, _Acc] = {}
+    # 0b sharpness + habit accumulators (same masked softmax as the accuracy rows).
+    sharp = _Sharp()
+    sharp_head = {h: _Sharp() for h in HEADS}
+    sharp_bucket = {label: _Sharp() for label, _, _ in _TURN_BUCKETS}
+    habit_model: Dict[str, Counter] = defaultdict(Counter)
+    habit_human: Dict[str, Counter] = defaultdict(Counter)
+    sp_total = sp_decoded = 0
+    act_dim = 0
     v_n = 0
     v_brier = 0.0
     v_correct = 0
@@ -169,6 +267,35 @@ def evaluate_checkpoint(
             target = batch["target"].to(device)          # (B, 2)
             mask = batch["mask"].to(device)              # (B, 2, A)
             valid = batch["valid"].to(device)            # (B, 2)
+            act_dim = int(mask.shape[-1])
+
+            # 2b: a SECOND forward with the TRUE partner action teacher-forced into
+            # each OUR head (invalid partner labels stay zeros = the zero-cond path).
+            if pair_cond:
+                oh = torch.nn.functional.one_hot(
+                    target.clamp(min=0), act_dim).float()            # (B, 2, A)
+                pa = {"our_a": oh[:, 1] * (valid[:, 1] > 0.5).float().unsqueeze(1),
+                      "our_b": oh[:, 0] * (valid[:, 0] > 0.5).float().unsqueeze(1)}
+                if "x_seq" in batch:
+                    actions_tf, _g_tf, _v_tf = model.forward_with_memory(
+                        batch["x_seq"].to(device),
+                        frame_padding_mask=batch["frame_padding_mask"].to(device),
+                        archetype_id=aid_b, partner_actions=pa)
+                else:
+                    actions_tf, _g_tf, _v_tf = model(batch["x"].to(device),
+                                                     archetype_id=aid_b,
+                                                     partner_actions=pa)
+                for h_idx, head in enumerate(HEADS):
+                    ml_tf = masked_logits(actions_tf[head], mask[:, h_idx])
+                    vb_tf = valid[:, h_idx] > 0.5
+                    if not bool(vb_tf.any()):
+                        continue
+                    tgt_tf = target[vb_tf, h_idx]
+                    ok1 = int((ml_tf[vb_tf].argmax(dim=-1) == tgt_tf).sum())
+                    k = min(3, ml_tf.shape[-1])
+                    ok3 = int((ml_tf[vb_tf].topk(k, dim=-1).indices
+                               == tgt_tf.unsqueeze(-1)).any(dim=-1).sum())
+                    pair_tf_head[head].add(ok1, ok3, int(vb_tf.sum()))
 
             for h_idx, head in enumerate(HEADS):
                 ml = masked_logits(actions[head], mask[:, h_idx])
@@ -182,15 +309,30 @@ def evaluate_checkpoint(
                 top3_pred = ml[vb].topk(k, dim=-1).indices
                 ok3_mask = (top3_pred == tgt.unsqueeze(-1)).any(dim=-1)
 
+                # 0b sharpness from the SAME masked softmax (entr(0)=0, so the
+                # fully-masked actions contribute nothing to the entropy).
+                p = torch.softmax(ml[vb], dim=-1)
+                n_legal = mask[vb, h_idx].sum(dim=-1)
+                ent_n = (torch.special.entr(p).sum(dim=-1)
+                         / torch.log(n_legal.clamp(min=2.0)))
+                k2 = min(2, p.shape[-1])
+                p2v = p.topk(k2, dim=-1).values
+                p1 = p2v[:, 0]
+                margin = p1 - (p2v[:, 1] if k2 > 1 else torch.zeros_like(p1))
+
                 rows = torch.nonzero(vb, as_tuple=False).squeeze(-1).tolist()
                 ok1_l = ok1_mask.tolist()
                 ok3_l = ok3_mask.tolist()
-                for row, o1, o3 in zip(rows, ok1_l, ok3_l):
+                ent_l, mar_l, p1_l = ent_n.tolist(), margin.tolist(), p1.tolist()
+                nl_l = n_legal.tolist()
+                pred_l, tgt_l = top1_pred.tolist(), tgt.tolist()
+                for j, (row, o1, o3) in enumerate(zip(rows, ok1_l, ok3_l)):
                     gi = idx0 + row                      # global example index
                     o1i, o3i = int(o1), int(o3)
+                    bl = _bucket_of(turns[gi])
                     pooled.add(o1i, o3i, 1)
                     by_head[head].add(o1i, o3i, 1)
-                    by_bucket[_bucket_of(turns[gi])].add(o1i, o3i, 1)
+                    by_bucket[bl].add(o1i, o3i, 1)
                     by_dtype.setdefault(dtypes[gi], _Acc()).add(o1i, o3i, 1)
                     if archetype_ids is not None:
                         by_arch.setdefault(f"z={archetype_ids[gi]}", _Acc()) \
@@ -198,6 +340,18 @@ def evaluate_checkpoint(
                     if slice_labels is not None:
                         by_slice.setdefault(slice_labels[gi], _Acc()) \
                             .add(o1i, o3i, 1)
+                    # 0b: n_legal<=1 states are excluded from BOTH the sharpness
+                    # stats and the habit histograms (forced action = no signal).
+                    if nl_l[j] > 1.5:
+                        sharp.add(ent_l[j], mar_l[j], p1_l[j])
+                        sharp_head[head].add(ent_l[j], mar_l[j], p1_l[j])
+                        sharp_bucket[bl].add(ent_l[j], mar_l[j], p1_l[j])
+                        sp_total += 1
+                        sp = _acting_species(val_ex[gi]["x"], h_idx)
+                        if sp is not None:
+                            sp_decoded += 1
+                            habit_model[sp][pred_l[j]] += 1
+                            habit_human[sp][tgt_l[j]] += 1
 
             # Value head: Brier + accuracy where the outcome label exists.
             v_valid = batch["value_valid"].to(device) > 0.5
@@ -210,16 +364,36 @@ def evaluate_checkpoint(
 
             idx0 += bsz
 
+    # Habit concentration: per acting species, KL(model argmax histogram ‖
+    # human label histogram) over the SAME states.  Laplace α=0.5 on both
+    # keeps the KL finite exactly where the collapse signal lives (actions
+    # humans pick that the argmax never emits, and vice versa).
+    species_kl: Dict[str, Dict] = {}
+    for sp, hc in habit_human.items():
+        mc = habit_model[sp]
+        q = np.array([hc.get(a, 0) for a in range(act_dim)], dtype=np.float64) + 0.5
+        pm = np.array([mc.get(a, 0) for a in range(act_dim)], dtype=np.float64) + 0.5
+        q /= q.sum()
+        pm /= pm.sum()
+        species_kl[sp] = {"n": int(sum(hc.values())),
+                          "kl": float(np.sum(pm * np.log(pm / q)))}
+
     return {
         "ckpt": str(ckpt_path),
         "memory_dim": memory_dim,
         "sequence_len": seq_len,
         "pooled": pooled,
         "by_head": by_head,
+        "pair_tf_head": pair_tf_head,
         "by_bucket": by_bucket,
         "by_dtype": by_dtype,
         "by_arch": by_arch,
         "by_slice": by_slice,
+        "sharp": sharp,
+        "sharp_head": sharp_head,
+        "sharp_bucket": sharp_bucket,
+        "species_kl": species_kl,
+        "species_cov": (sp_decoded, sp_total),
         "value": {"n": v_n, "brier": (v_brier / v_n) if v_n else None,
                   "acc": (v_correct / v_n) if v_n else None},
     }
@@ -264,6 +438,22 @@ def print_report(results: List[Dict]) -> None:
     print("  ── per head ──")
     for h in HEADS:
         _row(h, lambda r, h=h: r["by_head"][h])
+    # 2b go/no-go: the teacher-forced gap must be > 0 (esp. our_b) for the pair
+    # conditioning to have learned anything the independent heads didn't know.
+    if any(r.get("pair_tf_head") for r in results):
+        print("  ── 2b pair-cond: zero-cond -> teacher-forced top1 (go/no-go: gap > 0) ──")
+        for i, r in enumerate(results):
+            tf = r.get("pair_tf_head")
+            tag = "BASE" if i == 0 else f"CAND{i}"
+            if not tf:
+                print(f"    [{tag}] not a pair_cond checkpoint")
+                continue
+            cells = []
+            for h in HEADS:
+                zc, tfr = r["by_head"][h].rate(), tf[h].rate()
+                cells.append(f"{h} {zc:.4f}->{tfr:.4f} (gap {tfr - zc:+.4f})"
+                             if zc is not None and tfr is not None else f"{h} —")
+            print(f"    [{tag}] " + "  ".join(cells))
     print("  ── per turn bucket ──")
     for label, _, _ in _TURN_BUCKETS:
         _row(label, lambda r, label=label: r["by_bucket"][label])
@@ -296,6 +486,61 @@ def print_report(results: List[Dict]) -> None:
                  else f" ({v['brier'] - base['value']['brier']:+.4f})")
             vals.append(f"{v['brier']:7.4f}{d}")
     print(f"  {'brier (↓)':<14}" + "  ".join(vals) + f"   (n={base['value']['n']})")
+
+    # ── 0b sharpness panel: softer (less exploitable) = higher entropy, lower
+    # margin, lower determinism mass, lower habit KL.  n_legal>1 states only.
+    sharp_rows = ([("pooled", lambda r: r["sharp"])]
+                  + [(h, lambda r, h=h: r["sharp_head"][h]) for h in HEADS]
+                  + [(lb, lambda r, lb=lb: r["sharp_bucket"][lb])
+                     for lb, _, _ in _TURN_BUCKETS])
+
+    def _srow(label: str, acc_of, stat) -> None:
+        base_v = stat(acc_of(base))
+        cells = []
+        for i, r in enumerate(results):
+            v = stat(acc_of(r))
+            if v is None:
+                cells.append("    —   ")
+                continue
+            s = f"{v:7.3f}"
+            if i > 0 and base_v is not None:
+                s += f" ({v - base_v:+.3f})"
+            cells.append(s)
+        print(f"  {label:<14}" + "  ".join(cells) + f"   (n={acc_of(base).n})")
+
+    print("  ── sharpness: normalized entropy H/log(n_legal) (soft = high) ──")
+    for lb, g in sharp_rows:
+        _srow(lb, g, lambda a: a.ent())
+    print("  ── sharpness: top1-top2 margin, median (soft = low) ──")
+    for lb, g in sharp_rows:
+        _srow(lb, g, lambda a: a.margin_med())
+    _srow("pooled-p10", lambda r: r["sharp"], lambda a: a.margin_p10())
+    print("  ── sharpness: determinism mass p(top1)>0.9 (soft = low) ──")
+    for lb, g in sharp_rows:
+        _srow(lb, g, lambda a: a.det_mass())
+
+    if base.get("species_kl"):
+        dec, tot = base.get("species_cov") or (0, 0)
+        print(f"  ── habit KL per acting species: argmax vs human histogram, "
+              f"nats (soft = low; decoded {dec}/{tot} states; top 10 by n) ──")
+        top_sp = sorted(base["species_kl"],
+                        key=lambda s: -base["species_kl"][s]["n"])[:10]
+        for sp in top_sp:
+            base_v = base["species_kl"][sp]["kl"]
+            cells = []
+            for i, r in enumerate(results):
+                info = (r.get("species_kl") or {}).get(sp)
+                if info is None:
+                    cells.append("    —   ")
+                    continue
+                s = f"{info['kl']:7.3f}"
+                if i > 0:
+                    s += f" ({info['kl'] - base_v:+.3f})"
+                cells.append(s)
+            print(f"  {sp[:14]:<14}" + "  ".join(cells)
+                  + f"   (n={base['species_kl'][sp]['n']})")
+    else:
+        print("  ── habit KL: no acting species decodable from x — skipped ──")
     print("═" * 72)
 
 

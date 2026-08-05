@@ -307,6 +307,213 @@ def _certainly_illegal_move_slots(mon: dict, field: dict) -> set:
     return illegal
 
 
+# ══ Futility mask (2026-07-24 batch) ══════════════════════════════════════════
+# Rules-exact ALWAYS-FAIL target buckets — clicks Showdown accepts as legal but game
+# rules guarantee do nothing, decidable from PUBLIC state + our OWN build. Sourced
+# from the 3-agent wasted-click audit (400-replay evidence + rules enumeration).
+# CONTRACT: every rule FAILS OPEN — if a deciding fact is unknown (own ability None
+# on a Type-B row, foe typing unresolved, ability suppressed), the bucket stays
+# LEGAL. Per-bucket granularity: a Prankster status move stays legal toward a
+# non-Dark foe / the ally. Opponent-SIMULTANEOUS blocks (Protect, Quick Guard,
+# Sucker Punch reads) are prediction, not rules — deliberately NOT here.
+# Implemented classes:
+#   · Prankster-boosted status → Dark-type foe (gen7 immunity; no bypass)
+#   · pure status inflictor → type-immune foe (brn→Fire, par→Electric,
+#     psn/tox→Poison/Steel unless OUR Corrosion, Thunder Wave→Ground)
+#   · powder-flag move → Grass-type foe
+#   · pure major-status / confusion move → already-statused / already-confused foe
+#   · Encore → foe already Encore-locked
+#   · status inflictor → opposing Safeguard (unless OUR Infiltrator)
+#   · duplicate OWN side condition re-click (Tailwind/screens/Safeguard/Mist;
+#     Trick Room EXCLUDED — it is a legal toggle)
+#   · duplicate field state (same weather / same terrain / Gravity re-click)
+#   · Psychic Terrain: foe-targeted move with EFFECTIVE priority > 0 into a
+#     DEFINITELY-grounded foe (priority computed under the live field, so
+#     Grassy Glide is only priority under Grassy Terrain; grounding requires the
+#     species' dex ability pool to exclude Levitate — public info only)
+_STATUS_TYPE_IMMUNE = {"brn": ("fire",), "par": ("electric",),
+                       "psn": ("poison", "steel"), "tox": ("poison", "steel")}
+_WEATHER_MOVES = {"sandstorm": "sandstorm", "raindance": "raindance",
+                  "sunnyday": "sunnyday", "snowscape": "snowscape",
+                  "chillyreception": "snowscape"}
+_TERRAIN_MOVES = {"electricterrain": "electric", "grassyterrain": "grassy",
+                  "psychicterrain": "psychic", "mistyterrain": "misty"}
+_SIDECOND_MOVES = {"tailwind": "tailwind", "reflect": "reflect",
+                   "lightscreen": "light_screen", "auroraveil": "aurora_veil",
+                   "safeguard": "safeguard", "mist": "mist", "luckychant": "lucky_chant"}
+
+_STATUS_INFLICT: Optional[dict] = None     # move id -> major status it inflicts (pure status moves)
+_CONFUSE_MOVES: Optional[frozenset] = None
+
+
+def _status_inflict_map() -> dict:
+    global _STATUS_INFLICT, _CONFUSE_MOVES
+    if _STATUS_INFLICT is None:
+        inflict, confuse = {}, set()
+        for mid, data in _gen9_moves().items():
+            if (data.get("category") or "").lower() != "status":
+                continue
+            st = data.get("status")
+            if st:
+                inflict[mid] = st
+            if data.get("volatileStatus") == "confusion":
+                confuse.add(mid)
+        _STATUS_INFLICT, _CONFUSE_MOVES = inflict, frozenset(confuse)
+    return _STATUS_INFLICT
+
+
+def _species_can_have_levitate(species: Optional[str]) -> bool:
+    dex = get_pokedex()
+    if not dex or not species:
+        return True                                 # unknown → fail open (treat as maybe-floating)
+    return any(norm_species(a) == "levitate" for a in dex.abilities_for(species))
+
+
+def _foe_ctx(mon: Optional[dict], gravity_on: bool) -> Optional[dict]:
+    """Public facts about one opposing active needed by the futility rules.
+    types=None → unknown (rules using typing fail open); grounded: True/False/None."""
+    if not isinstance(mon, dict) or mon.get("is_fainted"):
+        return None
+    types = mon.get("runtime_types")
+    if not types:
+        dex = get_pokedex()
+        e = dex.entry(mon.get("species")) if dex else None
+        types = (e or {}).get("types")
+    types = tuple(str(t).lower() for t in types) if types else None
+    vol = mon.get("volatiles") or {}
+    if vol.get("force_grounded") or gravity_on:
+        grounded = True
+    elif types is not None and "flying" in types:
+        grounded = False
+    elif vol.get("levitating"):
+        grounded = False
+    elif norm_species(mon.get("known_item")) == "airballoon" and not mon.get("item_consumed"):
+        grounded = False
+    elif mon.get("known_ability") is None and _species_can_have_levitate(mon.get("species")):
+        grounded = None                             # hidden Levitate possible → fail open
+    elif norm_species(mon.get("known_ability")) == "levitate":
+        grounded = False
+    else:
+        grounded = types is not None                # typing known, no float source → grounded
+    return {"types": types, "status": mon.get("status"),
+            "encored": bool(vol.get("encore_move")), "confused": bool(vol.get("confused")),
+            "grounded": grounded}
+
+
+def futile_target_buckets(
+    move_name: str, *,
+    user_ability: Optional[str],       # canon id, None = unknown (ability rules fail open)
+    user_ability_active: bool = True,  # False when the user's ability is suppressed
+    user_hp_full: Optional[bool] = None,
+    foes: dict,                        # {0: foe_ctx|None, 1: foe_ctx|None} (None = empty slot)
+    our_sideconds: frozenset = frozenset(),
+    opp_safeguard: bool = False,
+    weather: Optional[str] = None, terrain: Optional[str] = None,
+    gravity_on: bool = False,
+) -> set:
+    """Buckets {0,1,2} PROVABLY futile for this move (see the class list above).
+    For self/side/field moves the canonical bucket is 0 — dropping 0 drops the move."""
+    mid = norm_species(move_name)
+    data = _gen9_moves().get(mid) or {}
+    category = (data.get("category") or "").lower()
+    ability = user_ability if user_ability_active else None
+    drop: set = set()
+
+    # ── whole-move classes (canonical bucket 0) ──
+    if mid in _SIDECOND_MOVES:
+        if _SIDECOND_MOVES[mid] in our_sideconds:   # duplicate side condition — always futile
+            drop.add(0)
+        return drop                                 # side moves have no per-foe buckets
+    if mid in _WEATHER_MOVES:
+        if weather and norm_species(weather) == _WEATHER_MOVES[mid]:
+            drop.add(0)
+        return drop
+    if mid in _TERRAIN_MOVES:
+        if terrain and str(terrain).lower() == _TERRAIN_MOVES[mid]:
+            drop.add(0)
+        return drop
+    if mid == "gravity":
+        if gravity_on:
+            drop.add(0)
+        return drop
+
+    # ── per-foe-bucket classes ──
+    inflict = _status_inflict_map().get(mid)        # major status this PURE status move inflicts
+    confuses = mid in (_CONFUSE_MOVES or frozenset())
+    powder = bool((data.get("flags") or {}).get("powder"))
+    for b in (0, 1):
+        foe = foes.get(b)
+        if foe is None:
+            continue
+        types = foe["types"]
+        if ability == "prankster" and category == "status" \
+                and types is not None and "dark" in types:
+            drop.add(b); continue
+        if inflict:
+            if foe["status"]:                        # major statuses never stack
+                drop.add(b); continue
+            if opp_safeguard and ability != "infiltrator":
+                drop.add(b); continue
+            if types is not None:
+                immune = _STATUS_TYPE_IMMUNE.get(inflict, ())
+                if any(t in types for t in immune) and not (
+                        inflict in ("psn", "tox") and ability == "corrosion"):
+                    drop.add(b); continue
+                if mid == "thunderwave" and "ground" in types:   # type-chart special case
+                    drop.add(b); continue
+        if powder and types is not None and "grass" in types:
+            drop.add(b); continue
+        if confuses and foe["confused"]:
+            drop.add(b); continue
+        if mid == "encore" and foe["encored"]:
+            drop.add(b); continue
+        # Psychic Terrain blocks foe-targeted EFFECTIVE-priority moves into grounded foes
+        if terrain and str(terrain).lower() == "psychic" and foe["grounded"] is True:
+            prio = int(data.get("priority") or 0)
+            if mid == "grassyglide":
+                prio = 0                             # only priority under GRASSY terrain
+            if ability == "prankster" and category == "status":
+                prio = max(prio, 0) + 1
+            if ability == "galewings" and str(data.get("type") or "").lower() == "flying" \
+                    and user_hp_full:
+                prio = max(prio, 0) + 1
+            if prio > 0:
+                drop.add(b)
+    return drop
+
+
+def _futile_buckets_offline(mon: dict, snap: dict, move_name: str) -> set:
+    """Offline adapter: extract the futility context from a snapshot. Own ability =
+    the CRISP known/injected ability (Type-B rows may be None → ability rules fail open)."""
+    field = snap.get("field") or {}
+    sides = snap.get("side_conditions") or {}
+    ours, theirs = sides.get("our_side") or {}, sides.get("opp_side") or {}
+    our_conds = set()
+    if (ours.get("tailwind_turns_remaining") or 0) > 0:
+        our_conds.add("tailwind")
+    our_conds.update((ours.get("screens") or {}).keys())
+    for k in ("safeguard", "mist", "lucky_chant"):
+        if ours.get(k):
+            our_conds.add(k)
+    gravity_on = (field.get("gravity_turns_remaining") or 0) > 0
+    opp_active = snap.get("opp_active") or {}
+    vol = mon.get("volatiles") or {}
+    ability = mon.get("known_ability") or mon.get("pre_mega_ability")
+    hp = mon.get("hp_pct")
+    return futile_target_buckets(
+        move_name,
+        user_ability=norm_species(ability) if ability else None,
+        user_ability_active=not vol.get("ability_suppressed"),
+        user_hp_full=(hp >= 1.0) if isinstance(hp, (int, float)) else None,
+        foes={0: _foe_ctx(opp_active.get("opp_a"), gravity_on),
+              1: _foe_ctx(opp_active.get("opp_b"), gravity_on)},
+        our_sideconds=frozenset(our_conds),
+        opp_safeguard=bool(theirs.get("safeguard")),
+        weather=field.get("weather"), terrain=field.get("terrain"),
+        gravity_on=gravity_on,
+    )
+
+
 def build_action_mask(snap: dict) -> dict[str, list[int]]:
     """
     Decision-time legality mask for one state_before_actions snapshot:
@@ -342,18 +549,21 @@ def build_action_mask(snap: dict) -> dict[str, list[int]]:
                 if m_idx in illegal:
                     continue                                       # certainly illegal → no target buckets
                 kind = _move_target_kind(name)
+                futile = _futile_buckets_offline(mon, snap, name)  # 2026-07-24 futility batch
                 if kind in _ALLY_KINDS:
-                    if kind == "adjacentAllyOrSelf" or ally_present:
+                    if (kind == "adjacentAllyOrSelf" or ally_present) and 2 not in futile:
                         row[m_idx * 3 + 2] = 1
                 elif kind in _CHOOSABLE_SINGLE:
                     buckets = [b for b in (0, 1) if opp_present[b]]
                     if kind != "adjacentFoe" and ally_present:
                         buckets.append(2)
-                    for b in (buckets or [0]):
+                    buckets = [b for b in buckets if b not in futile]
+                    for b in (buckets or ([0] if not opp_present[0] and not opp_present[1] else [])):
                         row[m_idx * 3 + b] = 1
                 else:
                     # self / spread / field / unknown → canonical bucket only
-                    row[m_idx * 3] = 1
+                    if 0 not in futile:
+                        row[m_idx * 3] = 1
             for i in range(n_bench):
                 row[SWITCH_OFFSET + i] = 1
         mask[slot] = row

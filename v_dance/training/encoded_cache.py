@@ -68,7 +68,9 @@ from v_dance.training.bc_dataset import (
 )
 
 _CACHE_DIRNAME = ".encoded_cache"
-_CACHE_SCHEMA = 3          # bump when the serialized schema OR encoder SEMANTICS change without
+_CACHE_SCHEMA = 4          # 4 (2026-07-24): futility-mask batch — transition_to_example now ANDs
+                           # the recomputed codec mask into the stored row, so baked masks change.
+                           # bump when the serialized schema OR encoder SEMANTICS change without
                            # a layout/dim bump (schema 2 = 2026-07-10 priority-block: blocked
                            # priority moves' damage bands now 0/0 — same dims, new values; the
                            # bump re-encodes stale caches while v19 checkpoints keep loading)
