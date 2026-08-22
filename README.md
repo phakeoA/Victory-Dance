@@ -1,5 +1,7 @@
 # Victory-Dance ![shiny Hisuian Zoroark](https://play.pokemonshowdown.com/sprites/ani-shiny/zoroark-hisui.gif)
 
+[![Tests](https://github.com/phakeoA/Victory-Dance/actions/workflows/tests.yml/badge.svg)](https://github.com/phakeoA/Victory-Dance/actions/workflows/tests.yml)
+
 **A deep-learning agent that plays competitive VGC doubles Pokémon on [Pokémon Showdown](https://pokemonshowdown.com/)** — trained by behavior cloning on ~86,000 human battles, improved with offline advantage-weighting and a contrastive team-preview set head, and served through a full deployment stack (local, browser-transport, and online) with a recorded human-benchmark protocol. In its first recorded benchmark set it beat its own creator 4–1; on the official ladder its elo-adjusted performance rating climbed from **1212 → 1271 → 1425** across three measured 50-game deployment blocks (peak rating 1499).
 
 Format: **Gen 9 "Pokémon Champions" VGC 2026** doubles (Regulations M-A / M-B). Mega Evolution is legal in this format; Terastallization is disabled by the mod.

@@ -1,0 +1,249 @@
+"""Task #5e: the live player threads the model's gimmick (mega) decision into the
+order.  Tests the base hook (never megas) and VGCPlayer._select_gimmicks (megas a
+capable MOVE slot when the trained gimmick head favours it; never on a switch or
+an untrained head).  Calls the methods unbound with a lightweight fake self so we
+don't open a Showdown connection."""
+
+from __future__ import annotations
+
+import pytest
+
+pytest.importorskip("torch")
+pytest.importorskip("poke_env")
+
+
+def _setup_path():
+    import sys
+    from pathlib import Path
+    return  # imports are absolute v_dance now; path bootstrap no longer needed
+class _DMon:
+    def __init__(self, species, fainted=False):
+        self.species = species
+        self.base_species = species
+        self.fainted = fainted
+
+
+class _DBattle:
+    def __init__(self, active, team=None):
+        self.active_pokemon = active
+        self.team = team or {}
+
+
+def _mega_favoring_model():
+    """A gimmick-trained attn policy whose gimmick heads always prefer mega (bias
+    [0, 10]) so masked-argmax picks mega wherever the mask allows it."""
+    import torch
+    from v_dance.models.bc_model_attn import AttnBCPolicy
+    m = AttnBCPolicy(d_model=16, n_layers=1, dropout=0.0)
+    with torch.no_grad():
+        for h in m.gimmick_heads:
+            m.gimmick_heads[h].weight.zero_()
+            m.gimmick_heads[h].bias.copy_(torch.tensor([0.0, 10.0, 0.0]))   # v11 Phase D: 3-wide (mega-favoring)
+    m._gimmick_trained = True
+    m.eval()
+    return m
+
+
+def test_base_select_gimmicks_never_megas():
+    _setup_path()
+    from v_dance.play.vgc_base import VGCPlayerBase, GIMMICK_NONE
+    # The base method ignores self/battle/state — it simply never gimmicks.
+    assert VGCPlayerBase._select_gimmicks(None, None, None, 0, 1) == (GIMMICK_NONE, GIMMICK_NONE)
+
+
+def test_select_actions_dedups_cross_slot_switch(monkeypatch):
+    """Both heads picking the SAME bench mon to switch into is rejected by Showdown
+    ('can only switch in once'); _select_actions must re-decode slot 1 with the
+    colliding switch masked → a non-colliding action (#8 follow-up bug)."""
+    _setup_path()
+    import types
+    import numpy as np
+    import v_dance.play.player as P
+    from v_dance.encoders.state_encoder import SWITCH_OFFSET
+
+    def fake_mask(battle, slot):
+        row = [False] * 16
+        row[SWITCH_OFFSET] = True            # bench-0 switch legal for both slots
+        if slot == 1:
+            row[0] = True                     # slot 1 also has move-0 available
+        return row
+
+    def fake_indices(model, heads, sv, m0, m1, device, **kwargs):
+        # both heads want the same switch; once it's masked for slot 1, slot 1
+        # falls to move 0.  (**kwargs absorbs temperature/top_p/rng — defaults.)
+        return (SWITCH_OFFSET, SWITCH_OFFSET) if m1[SWITCH_OFFSET] else (SWITCH_OFFSET, 0)
+
+    monkeypatch.setattr(P, "build_legal_action_mask", fake_mask)
+    monkeypatch.setattr(P._M, "bc_action_indices", fake_indices)
+
+    fake = types.SimpleNamespace(_model=object(), _model_heads=("our_a", "our_b"),
+                                 _device="cpu", _temperature=0.0, _top_p=1.0, _rng=None)
+    a0, a1, src = P.VGCPlayer._select_actions(fake, object(), np.zeros(4, np.float32))
+    assert a0 == SWITCH_OFFSET
+    assert a1 == 0 and a1 != a0               # deduped to a non-colliding action
+    assert src == "model"
+
+
+def test_select_actions_records_deduped_mask(monkeypatch):
+    """#10: when recording, _select_actions stashes the per-slot mask the model was SAMPLED under, so the
+    recorded behaviour mask matches — slot 1's stashed mask must have the colliding switch removed."""
+    _setup_path()
+    import types
+    import numpy as np
+    import v_dance.play.player as P
+    from v_dance.encoders.state_encoder import SWITCH_OFFSET
+
+    def fake_mask(battle, slot):
+        row = [False] * 16
+        row[SWITCH_OFFSET] = True
+        if slot == 1:
+            row[0] = True
+        return row
+
+    def fake_indices(model, heads, sv, m0, m1, device, **kwargs):
+        return (SWITCH_OFFSET, SWITCH_OFFSET) if m1[SWITCH_OFFSET] else (SWITCH_OFFSET, 0)
+
+    monkeypatch.setattr(P, "build_legal_action_mask", fake_mask)
+    monkeypatch.setattr(P._M, "bc_action_indices", fake_indices)
+
+    battle = types.SimpleNamespace(battle_tag="b-rec")
+    fake = types.SimpleNamespace(_model=object(), _model_heads=("our_a", "our_b"),
+                                 _device="cpu", _temperature=0.0, _top_p=1.0, _rng=None,
+                                 _record_masks=True, _sampling_masks={})
+    a0, a1, _ = P.VGCPlayer._select_actions(fake, battle, np.zeros(4, np.float32))
+    assert (a0, a1) == (SWITCH_OFFSET, 0)
+    m0, m1 = fake._sampling_masks[("b-rec", "turn")]
+    assert m1[SWITCH_OFFSET] is False         # colliding switch removed from slot 1's RECORDED mask
+    assert m0[SWITCH_OFFSET] is True          # slot 0's mask unchanged
+
+
+def test_select_actions_logs_value_when_trained(monkeypatch):
+    """The value-head readout (#2) records the per-turn win-prob when the model has
+    a TRAINED value head (and is skipped for a legacy/untrained one)."""
+    _setup_path()
+    import types
+    import numpy as np
+    import v_dance.play.player as P
+
+    monkeypatch.setattr(P, "build_legal_action_mask", lambda b, s: [i == 0 for i in range(16)])
+    monkeypatch.setattr(P._M, "bc_action_indices", lambda *a, **k: (0, 0))
+    monkeypatch.setattr(P._M, "value_trained", lambda m: True)
+    monkeypatch.setattr(P._M, "value_logit", lambda m, sv, dev: 0.73)
+
+    fake = types.SimpleNamespace(_model=object(), _model_heads=("our_a", "our_b"),
+                                 _device="cpu", _temperature=0.0, _top_p=1.0, _rng=None,
+                                 _last_value=None, _value_trace=[])
+    battle = types.SimpleNamespace(turn=5, battle_tag="b1")
+    a0, a1, src = P.VGCPlayer._select_actions(fake, battle, np.zeros(4, np.float32))
+    assert fake._last_value == 0.73
+    assert fake._value_trace == [(5, 0.73)]
+    assert src == "model"
+
+
+def test_model_select_gimmicks_megas_capable_move_slot_only():
+    _setup_path()
+    import types
+    import numpy as np
+    from v_dance.play.player import VGCPlayer
+    from v_dance.encoders.state_encoder import STATE_DIM, GIMMICK_MEGA, GIMMICK_NONE, SWITCH_OFFSET
+
+    fake = types.SimpleNamespace(_model=_mega_favoring_model(),
+                                 _model_heads=("our_a", "our_b"), _device="cpu")
+    battle = _DBattle([_DMon("charizard"), _DMon("incineroar")])
+    sv = np.zeros(STATE_DIM, np.float32)
+
+    # slot 0 move + capable Charizard → mega; slot 1 move but Incineroar not
+    # capable → gimmick mask [1,0] → none.
+    g0, g1 = VGCPlayer._select_gimmicks(fake, battle, sv, 0, 0)
+    assert g0 == GIMMICK_MEGA
+    assert g1 == GIMMICK_NONE
+
+    # a switch action never megas, even for the capable slot.
+    gsw, _ = VGCPlayer._select_gimmicks(fake, battle, sv, SWITCH_OFFSET, 0)
+    assert gsw == GIMMICK_NONE
+
+
+def test_select_gimmicks_dedups_double_mega(monkeypatch):
+    """Showdown allows only ONE Mega Evolution per battle; the two gimmick heads
+    decide independently, so both active slots can pick mega the SAME turn →
+    Showdown rejects 'can only Mega-Evolve once per battle'.  _select_gimmicks must
+    keep exactly ONE mega (cross-slot dedup) and drop the other to none."""
+    _setup_path()
+    import types
+    import numpy as np
+    import v_dance.play.player as P
+    from v_dance.encoders.state_encoder import STATE_DIM, GIMMICK_MEGA, GIMMICK_NONE
+
+    # both active slots mega-capable → both per-slot gimmick masks allow mega
+    monkeypatch.setattr(P, "build_gimmick_legal_mask", lambda b, s: [True, True, True])
+    fake = types.SimpleNamespace(_model=_mega_favoring_model(),
+                                 _model_heads=("our_a", "our_b"), _device="cpu")
+    battle = _DBattle([_DMon("charizard"), _DMon("venusaur")])
+    g0, g1 = P.VGCPlayer._select_gimmicks(fake, battle, np.zeros(STATE_DIM, np.float32), 0, 0)
+    assert [g0, g1].count(GIMMICK_MEGA) == 1, f"exactly one mega expected, got {(g0, g1)}"
+    assert (g0, g1) == (GIMMICK_MEGA, GIMMICK_NONE)   # tie on margin keeps slot 0
+
+
+def test_model_select_gimmicks_untrained_head_never_megas():
+    _setup_path()
+    import types
+    import numpy as np
+    from v_dance.play.player import VGCPlayer
+    from v_dance.encoders.state_encoder import STATE_DIM, GIMMICK_NONE
+
+    model = _mega_favoring_model()
+    model._gimmick_trained = False        # a pre-gimmick checkpoint
+    fake = types.SimpleNamespace(_model=model, _model_heads=("our_a", "our_b"),
+                                 _device="cpu")
+    battle = _DBattle([_DMon("charizard"), None])
+    g = VGCPlayer._select_gimmicks(fake, battle, np.zeros(STATE_DIM, np.float32), 0, 0)
+    assert g == (GIMMICK_NONE, GIMMICK_NONE)
+
+
+def test_end_to_end_gimmick_head_to_mega_order():
+    """Full serve chain: trained gimmick head → _select_gimmicks picks mega →
+    _safe_order(gimmick) → action_to_order emits a real mega order."""
+    _setup_path()
+    import types
+    import numpy as np
+    from poke_env.battle import Move
+    from v_dance.play.player import VGCPlayer
+    from v_dance.play.vgc_base import VGCPlayerBase
+    from v_dance.encoders.state_encoder import STATE_DIM, GIMMICK_MEGA
+
+    fth = Move("flamethrower", gen=9)
+
+    class _Mon:
+        def __init__(self, species, moves):
+            self.species = species
+            self.base_species = species
+            self.fainted = False
+            self._mv = moves
+        @property
+        def moves(self):
+            return self._mv
+
+    actor = _Mon("charizard", {"flamethrower": fth})
+    foe = _Mon("incineroar", {"flamethrower": fth})
+
+    class _Battle:
+        active_pokemon = [actor, None]
+        opponent_active_pokemon = [foe, None]
+        available_moves = [list(actor.moves.values()), []]
+        available_switches = [[], []]
+        team = {}
+        can_mega_evolve = [True, False]
+        def to_showdown_target(self, mv, tgt):
+            return 1
+
+    battle = _Battle()
+    sv = np.zeros(STATE_DIM, np.float32)
+    fake = types.SimpleNamespace(_model=_mega_favoring_model(),
+                                 _model_heads=("our_a", "our_b"), _device="cpu")
+
+    # 1) the gimmick head selects mega for the capable move slot…
+    g0, _g1 = VGCPlayer._select_gimmicks(fake, battle, sv, 0, 0)
+    assert g0 == GIMMICK_MEGA
+    # 2) …and _safe_order threads it into a real mega order.
+    order = VGCPlayerBase._safe_order(None, 0, battle, 0, g0)
+    assert "mega" in order.message, f"expected a mega order: {order.message!r}"

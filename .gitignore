@@ -16,6 +16,8 @@ teams/teams
 data/smogon_stats_cache
 data/pkmn_sets_cache
 data/local_data
+# vods stay local (USER ruling 2026-08-22: no replays in the public repo).
+# The vod-dependent tests skip-with-reason when the files are absent (CI).
 data/vods
 # VGC-Bench redistributable raw logs (601MB; the 525MB regmabo3 JSON exceeds GitHub's 100MB
 # per-file limit — this is the actual push blocker). Fetch from HF cameronangliss/vgc-battle-logs.
@@ -52,8 +54,7 @@ scratch/
 config/
 # fork leftovers staged for deletion
 Delete_When_Project_Done/
-# tests (run locally; not published)
-tests/
+# tests are PUBLISHED as of 2026-08-22 (CI runs them on every push — .github/workflows/tests.yml)
 data/scripts/tests/
 .pytest_cache/
 # design docs / notes
