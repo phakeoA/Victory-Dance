@@ -167,9 +167,12 @@ def test_z_surgery_reproduces_stateless_logits_for_any_id():
         a_ref, g_ref, v_ref = stateless(x)
         for aid in (None, 0, 3):
             a, g, v = zmodel(x, archetype_id=aid)
-            assert torch.equal(a["our_a"], a_ref["our_a"])
-            assert torch.equal(g["our_a"], g_ref["our_a"])
-            # value readout: bitwise on one backend, float-noise across BLAS backends (CI Linux)
+            # Float-noise across BLAS backends (CI Linux) hits the LOGITS too, not
+            # just the value readout -- the zero-column widening reorders the matmul
+            # reduction. Same atol; still catches a 1e-5 error on a single donor
+            # weight (mutation-checked 2026-09-01).
+            assert torch.allclose(a["our_a"], a_ref["our_a"], rtol=0, atol=1e-6)
+            assert torch.allclose(g["our_a"], g_ref["our_a"], rtol=0, atol=1e-6)
             assert torch.allclose(v, v_ref, rtol=0, atol=1e-6)
 
 
@@ -208,8 +211,11 @@ def test_z_composes_with_memory_surgery():
     with torch.no_grad():
         a_ref, _, v_ref = stateless(x)
         a, _, v = both(x, archetype_id=2)   # mem zeros + zeroed z cols → identical
-        # value readout allclose (not equal): reduction order differs across BLAS backends
-        assert torch.equal(a["our_a"], a_ref["our_a"]) and torch.allclose(v, v_ref, rtol=0, atol=1e-6)
+        # allclose, not equal, for BOTH: reduction order differs across BLAS
+        # backends and this surgery widens by 24 cols -- strictly more exposed
+        # than the 8-col case above, it just has not tripped a runner yet.
+        assert torch.allclose(a["our_a"], a_ref["our_a"], rtol=0, atol=1e-6)
+        assert torch.allclose(v, v_ref, rtol=0, atol=1e-6)
 
 
 def test_bcdataset_archetype_key():

@@ -3,7 +3,10 @@
 Stage-1 exit criteria (offline, no retrain):
   1. pair_cond=False (default) is UNCHANGED: identical key-set + shapes.
   2. Warm-start surgery (init_pair_model_from_ckpt): the widened model fed an
-     unconditioned checkpoint reproduces its logits BIT-EXACTLY when the pair
+     unconditioned checkpoint reproduces its logits to float tolerance (NOT
+     bitwise: widening the head matmul with zero columns is an exact-arithmetic
+     no-op that still reorders the reduction, and float32 is not associative,
+     so some BLAS backends -- CI Linux -- differ by ~1 ULP) when the pair
      cond is zeros / absent — the kill switch.
   3. A non-zero partner one-hot CHANGES the OUR-head logits once the pair
      columns are non-zero, and our_a/our_b condition INDEPENDENTLY.
@@ -71,15 +74,26 @@ def test_zero_cond_bit_exact_after_surgery():
     x = _rand_x(3)
     with torch.no_grad():
         a0, g0, v0 = donor(x)
-        # both "no cond" spellings must match the donor bit-exactly
+        # both "no cond" spellings must reproduce the donor
         a1, g1, v1 = pair(x)
         a2, g2, v2 = pair(x, partner_actions={"our_a": torch.zeros(3, A),
                                               "our_b": torch.zeros(3, A)})
+
+    # Float tolerance, NOT torch.equal: the zero-column widening is an exact-
+    # arithmetic no-op that still reorders the matmul reduction, so backends
+    # disagree by ~1e-7 (bitwise on this box, not on every CI runner). atol=1e-6
+    # matches what test_phase2_adv_archetypes already uses for the value readout,
+    # and it stays sharp -- mutation-checked 2026-09-01: a misaligned transplant
+    # reads 1.8e+00, one donor weight off by 1e-3 reads 9.5e-4, and even 1e-5 on
+    # a single weight reads 9.5e-6, all far above the bar.
+    def _same(p, q):
+        return torch.allclose(p, q, rtol=0, atol=1e-6)
+
     for k in a0:
-        assert torch.equal(a0[k], a1[k]) and torch.equal(a0[k], a2[k]), k
+        assert _same(a0[k], a1[k]) and _same(a0[k], a2[k]), k
     for k in g0:
-        assert torch.equal(g0[k], g1[k]) and torch.equal(g0[k], g2[k]), k
-    assert torch.equal(v0, v1) and torch.equal(v0, v2)
+        assert _same(g0[k], g1[k]) and _same(g0[k], g2[k]), k
+    assert _same(v0, v1) and _same(v0, v2)
 
 
 def test_partner_input_conditions_each_our_head_independently():
