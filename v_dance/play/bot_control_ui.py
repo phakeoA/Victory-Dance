@@ -46,6 +46,13 @@ _RESEARCH_DELAY_S = 4.0      # settle time between a CONFIRMED-done game and the
 _LIVE_RETRY_S = 5.0          # re-check cadence while a battle is still live / queue is busy
 _SEARCH_ACK_TIMEOUT_S = 30.0  # /search sent but no updatesearch ack → treat as lost, retry
 _LIVE_STALE_S = 300.0        # a 'live' battle with NO frames this long = ghost tracking → sweep
+# 2026-09-02 (USER): ladder LANES — several rated games at once. Showdown's own limits (pinned
+# server/monitor.ts): "limited to 5 games at the same time" per account, "12 battles and team
+# validations every 3 minutes" per IP, and ONE ladder search per format at a time.
+_MAX_LANES = 5
+_LANE_FILL_S = 3.0           # a found game frees the single search slot → fill the next lane soon
+_PREP_WINDOW_S = 180.0
+_PREP_MAX = 10               # our ceiling under the server's 12 (challenges share the budget)
 _CONFIRM_TIMEOUT_S = 60.0    # |win| seen but no rating exchange → unrated/missed, proceed anyway
 
 # Showdown roomid = battle-<formatid>-<battlenum>[-<private-access-suffix>]. The suffix appears on
@@ -153,7 +160,7 @@ class BotController:
                  log_line: Optional[Callable[[str], None]] = None,
                  auto_close_default: bool = False,
                  bench_path: Optional[Path] = None,
-                 bandit=None) -> None:
+                 bandit=None, lanes_default: int = 1) -> None:
         self.page, self.host, self.tally = page, host, tally
         self.ai_pool, self.fmt, self.username = list(ai_pool), fmt, username
         self.loop, self.env_path = loop, env_path
@@ -170,6 +177,10 @@ class BotController:
         self._official_at = -1e9
         self._site_poll_enabled = os.environ.get("VD_SITE_POLL", "1").strip() != "0"
         self.team_pin: Optional[str] = team_pin_default if team_pin_default in ai_pool else None
+        # 2026-09-02 (USER): lanes = rated games at once (1..5, Showdown's per-account cap)
+        self.lanes = max(1, min(int(lanes_default or 1), _MAX_LANES))
+        self._search_times: list = []    # loop.time() of every /search sent (prep-rate guard)
+        self._last_frame_at: dict = {}   # base tag -> loop.time() of ITS last frame (per-room sweep)
         # ladder-run state
         self.run_active = False
         self.run_target = 0
@@ -215,6 +226,7 @@ class BotController:
             if not tag:
                 return
             self._last_battle_frame_at = self.loop.time()
+            self._last_frame_at[_base_tag(tag)] = self._last_battle_frame_at
             self._battle_seen(tag)
             if "\n|win|" in payload or "\n|tie|" in payload:
                 self._battle_ended(tag, payload)
@@ -265,14 +277,18 @@ class BotController:
                 arm = self.bandit.bind(tag)
             except Exception:
                 arm = None
-        pinned = bool(arm) and self.bandit is not None and self.bandit.pinned == arm
+        pinned = bool(arm) and self.bandit is not None and self.bandit.pinned_for(tag)
+        self._last_frame_at.setdefault(tag, self.loop.time())
+        lane = f"  (lane {len(self._live)}/{self.lanes})" if self.lanes > 1 else ""
         self.log(f"battle started: {tag}"
-                 + (f"  [arm {arm}{' pinned' if pinned else ''}]" if arm else ""))
+                 + (f"  [arm {arm}{' pinned' if pinned else ''}]" if arm else "") + lane)
         # 2026-09-01: keep ONE tick pending while a battle is live. Before this, nothing was
         # scheduled between a resolved search and the battle's end, so when a dead link stopped
         # the frames the ghost-live sweep never ran and the run hung silently (09-01: 2.5 h).
+        # 2026-09-02 (lanes): a found game also frees the single search slot — fill the next lane.
         if self.run_active:
-            self._schedule_resume(_LIVE_RETRY_S)
+            self._schedule_resume(_LANE_FILL_S if (self.lanes > 1 and self._lane_free())
+                                  else _LIVE_RETRY_S)
 
     def _battle_ended(self, tag: str, payload: str) -> None:
         tag = _base_tag(tag)                       # |win| arrives on the SUFFIXED room id (stall #2)
@@ -280,6 +296,7 @@ class BotController:
             return                                 # |win| re-delivered on rejoin — already credited
         self._counted.add(tag)
         self._live.discard(tag)
+        self._last_frame_at.pop(tag, None)
         res = "draw"
         for line in payload.split("\n"):
             if line.startswith("|win|"):
@@ -330,11 +347,12 @@ class BotController:
     # ── 2026-09-01: serve-side bandit + the site's official rating ───────────
     def apply_next_arm(self, reason: str = "pre-game"):
         """Pick + apply the bandit arm for the NEXT battle (idempotent until that battle starts —
-        the search path and the challenge path both call this). Skipped while a battle is live:
-        a model swap mid-game would split one game across two arms."""
+        the search path and the challenge path both call this). Skipped while a battle is live
+        UNLESS the player resolves its arm per battle tag (lanes, 2026-09-02) — without that, a
+        model swap mid-game would split one game across two arms."""
         if self.bandit is None:
             return None
-        if self._live:
+        if self._live and getattr(self.host.player, "_arm_resolver", None) is None:
             return None
         try:
             before = self.bandit.pending
@@ -397,6 +415,7 @@ class BotController:
         base = _base_tag(tag)
         was_live = base in self._live
         self._live.discard(base)
+        self._last_frame_at.pop(base, None)
         self._full_tags.pop(base, None)
         self.log(f"room gone — {base} no longer exists (decided while the link was down); dropped as live")
         if was_live and base not in self._counted and self.run_active:
@@ -443,15 +462,48 @@ class BotController:
         # debris, not a game (defense-in-depth behind the _base_tag aliasing fix) — clear it so
         # the run resumes instead of deferring forever. A real battle always has frames flowing
         # well inside the window (turn timer alone forces action every ~2-3 min).
-        if self._live and self.loop.time() - self._last_battle_frame_at > _LIVE_STALE_S:
-            self.log(f"live-battle tracking looked stale — clearing {sorted(self._live)}.")
-            self._live.clear()
-        # _ended_unconfirmed: an ended game whose rating exchange isn't confirmed yet — its own
-        # _CONFIRM_TIMEOUT_S timer guarantees it always clears, so this defer is bounded.
-        if self.searching or self._search_outstanding or self._live or self._ended_unconfirmed:
-            self._schedule_resume(_LIVE_RETRY_S)   # queued / live / awaiting Δelo — keep watching
+        # 2026-09-02 (lanes): judged PER ROOM — one dead room must not hide behind the others'
+        # frames; global silence (no frames from any room) still sweeps every room.
+        now = self.loop.time()
+        silent_all = now - self._last_battle_frame_at > _LIVE_STALE_S
+        stale = [t for t in sorted(self._live)
+                 if silent_all or now - self._last_frame_at.get(t, self._last_battle_frame_at) > _LIVE_STALE_S]
+        if stale:
+            self.log(f"live-battle tracking looked stale — clearing {stale}.")
+            for t in stale:
+                self._live.discard(t)
+                self._last_frame_at.pop(t, None)
+        if self.searching or self._search_outstanding:
+            self._schedule_resume(_LIVE_RETRY_S)   # ONE ladder search per format at a time (server)
+            return
+        if self.lanes <= 1:
+            # One lane = the 2026-07-10 contract: the next search waits for the live game AND its
+            # rating exchange (_ended_unconfirmed clears by its own _CONFIRM_TIMEOUT_S timer, so
+            # this defer is bounded).
+            if self._live or self._ended_unconfirmed:
+                self._schedule_resume(_LIVE_RETRY_S)   # live / awaiting Δelo — keep watching
+                return
+        elif not self._lane_free():
+            self._schedule_resume(_LIVE_RETRY_S)   # lanes full / target covered — keep watching
+            return
+        elif not self._prep_budget_ok():
+            self.log(f"search deferred — {_PREP_MAX} searches in the last {_PREP_WINDOW_S:.0f}s "
+                     f"(the server caps battle preps at 12 per 3 min)")
+            self._schedule_resume(_LIVE_RETRY_S)
             return
         self.loop.create_task(self._guarded(self._do_search()))
+
+    def _lane_free(self) -> bool:
+        """Capacity for another rated game: a lane is open AND the run's target is not already
+        covered by finished + live games (lanes, 2026-09-02)."""
+        if len(self._live) >= self.lanes:
+            return False
+        return (self.run_done + len(self._live)) < self.run_target
+
+    def _prep_budget_ok(self) -> bool:
+        now = self.loop.time()
+        self._search_times = [t for t in self._search_times if now - t < _PREP_WINDOW_S]
+        return len(self._search_times) < _PREP_MAX
 
     async def _guarded(self, coro) -> None:
         try:
@@ -487,6 +539,7 @@ class BotController:
         await self.page.evaluate("(f) => app.socket.send('|/search ' + f)", self.fmt)
         self._search_outstanding = True
         self._search_sent_at = self.loop.time()
+        self._search_times.append(self._search_sent_at)   # prep-rate guard (lanes)
         self.log(f"searching ladder ({self.fmt}) with team {name!r} [{src}]")
         if self.run_active:                        # the tick-always-pending invariant (2026-09-01)
             self._schedule_resume(_LIVE_RETRY_S)
@@ -497,9 +550,11 @@ class BotController:
         self.run_done = 0
         self.run_active = True
         self.log(f"ladder run started — target {self.run_target} game(s), "
-                 f"team {self.team_pin or '(Teambuilder/default)'}")
-        if self._live:
-            self.log("a battle is live — the run queues after it ends.")
+                 f"team {self.team_pin or '(Teambuilder/default)'}"
+                 + (f", {self.lanes} games at once" if self.lanes > 1 else ""))
+        if not self._lane_free():
+            self.log("a battle is live — the run queues after it ends." if self.lanes <= 1 else
+                     f"lanes full ({len(self._live)}/{self.lanes}) — the run fills the next free lane.")
             self._schedule_resume(_LIVE_RETRY_S)
         else:
             await self._do_search()
@@ -557,7 +612,7 @@ class BotController:
             self.log(f"bandit: PINNED → {pinned} (frozen — every game until unpinned)")
         else:
             self.log(f"bandit: UNPINNED (was {before}) — exploring again")
-        if self._live:
+        if self._live and getattr(self.host.player, "_arm_resolver", None) is None:
             self.log("bandit: a battle is live — the pin applies from the next game")
         elif self.loop is not None:
             try:                                   # swap models on the bot loop, never from the HTTP thread
@@ -565,6 +620,17 @@ class BotController:
             except Exception:
                 pass
         return pinned
+
+    def set_lanes(self, n) -> int:
+        """USER 2026-09-02: rated games at once (1..5 — Showdown's per-account cap). Takes effect
+        at the next search; an active run fills newly opened lanes on its next tick."""
+        n = max(1, min(int(n or 1), _MAX_LANES))
+        if n != self.lanes:
+            self.lanes = n
+            self.log(f"lanes → {n} rated game(s) at once")
+            if self.run_active:
+                self._schedule_resume(_LANE_FILL_S)
+        return self.lanes
 
     def set_team(self, team: Optional[str]) -> None:
         team = (team or "").strip() or None
@@ -623,6 +689,10 @@ class BotController:
             # 2026-09-02: serve mode (frozen pin vs explore); bandit_on = the panel control is live
             "bandit_on": self.bandit is not None,
             "bandit_pin": (self.bandit.pinned if self.bandit is not None else None),
+            # 2026-09-02: lanes = rated games at once (server cap 5)
+            "lanes": self.lanes, "max_lanes": _MAX_LANES,
+            # 2026-09-02 W3b-0: the ladder trajectory recorder (None = off)
+            "recorder": (self.recorder.summary() if getattr(self, "recorder", None) is not None else None),
         }
 
     def stop(self) -> None:
@@ -691,6 +761,8 @@ def _make_handler(ctrl: BotController):
                         ctrl.set_auto_close(bool(body.get("auto_close")))
                     if "bandit_pin" in body:       # "" / null = unpin (explore)
                         ctrl.set_bandit_pin(body.get("bandit_pin"))
+                    if "lanes" in body:            # rated games at once (1..5)
+                        ctrl.set_lanes(body.get("lanes"))
                 elif p == "/api/team":
                     ctrl.set_team(body.get("team"))
                 elif p == "/api/format":
@@ -712,7 +784,7 @@ def start_control_ui(*, page, host, tally: dict, ai_pool: list, fmt: str, userna
                      auto_close_default: bool = False,
                      open_browser: bool = True,
                      bench_path: Optional[Path] = None,
-                     bandit=None) -> BotController:
+                     bandit=None, lanes_default: int = 1) -> BotController:
     """Build the controller + serve the panel on 127.0.0.1 (first free port in [port, port+9]).
     Also chains itself onto ``RATING_HOOK`` (the Δelo battle-done confirm) and
     ``RATING_CHANGE_HOOK`` (post-battle rating → display, peaks, bandit reward) — call AFTER the
@@ -721,7 +793,7 @@ def start_control_ui(*, page, host, tally: dict, ai_pool: list, fmt: str, userna
                          username=username, loop=loop, env_path=env_path,
                          team_pin_default=team_pin_default, log_line=log_line,
                          auto_close_default=auto_close_default, bench_path=bench_path,
-                         bandit=bandit)
+                         bandit=bandit, lanes_default=lanes_default)
     prev_hook = _pvhb.RATING_HOOK
 
     def _hook(tag, user, rating):                  # PRE-battle number (poke-env semantics)
@@ -868,6 +940,9 @@ _PANEL_HTML = """<!DOCTYPE html>
       <label class="fld" style="margin-top:8px">Serve mode</label>
       <select id="banditPin" disabled><option value="">Bandit — explore (per-game arm choice)</option></select>
       <div class="muted" id="banditPinNote"></div>
+      <label class="fld" style="margin-top:8px">Games at once <span class="muted">(lanes — Showdown allows 5 per account)</span></label>
+      <select id="lanes"><option value="1">1</option><option value="2">2</option><option value="3">3</option>
+        <option value="4">4</option><option value="5">5</option></select>
       <div class="muted">Games finished while a run is active count toward its target —
         turn auto-accept off for an exact rated-only count. Tabs close (and the next search
         starts) only after the rating exchange confirms the battle is done.</div>
@@ -881,6 +956,7 @@ _PANEL_HTML = """<!DOCTYPE html>
       <div class="muted" id="peaks" style="margin-top:6px"></div>
       <div class="muted" id="site" style="margin-top:4px"></div>
       <div class="muted" id="bandit" style="margin-top:4px;white-space:pre-line"></div>
+      <div class="muted" id="recorder" style="margin-top:4px"></div>
     </div></div>
   </div>
 
@@ -962,9 +1038,14 @@ function render(s) {
           ` Δ${a.mean_delta >= 0 ? '+' : ''}${a.mean_delta}${a.retired ? ' RETIRED' : ''}`).join(' · ')
       : '';
   $('challengeOut').textContent = s.challenge_out ? ('outgoing challenge: ' + s.challenge_out) : '';
+  const rc = s.recorder;
+  $('recorder').textContent = rc ? `RL recorder: ${rc.games} game(s) / ${rc.steps} decision(s) this session` +
+      (rc.failed ? ` · ${rc.failed} failed` : '') : '';
+  if (document.activeElement !== $('lanes')) $('lanes').value = String(s.lanes || 1);
   const wait = s.awaiting_confirm.length ? ' — confirming result…' : '';
+  const lanesTxt = (s.lanes || 1) > 1 ? ` · live ${s.live.length}/${s.lanes}` : '';
   $('prog').textContent = s.run.active
-      ? `Run: ${s.run.done}/${s.run.target} played` + (s.searching ? ' — searching…' : wait)
+      ? `Run: ${s.run.done}/${s.run.target} played${lanesTxt}` + (s.searching ? ' — searching…' : wait)
       : (s.searching ? 'Searching…' : '');
   $('startBtn').disabled = s.run.active;
   if (s.env_fmt_saved && !lastNote)
@@ -991,6 +1072,7 @@ $('cancelChallengeBtn').onclick = () => api('/api/challenge/cancel');
 $('autoAccept').onchange = () => api('/api/options', {auto_accept: $('autoAccept').checked});
 $('autoClose').onchange = () => api('/api/options', {auto_close: $('autoClose').checked});
 $('banditPin').onchange = () => api('/api/options', {bandit_pin: $('banditPin').value});
+$('lanes').onchange = () => api('/api/options', {lanes: +$('lanes').value});
 $('teamSel').onchange = () => api('/api/team', {team: $('teamSel').value});
 $('fmtSel').onchange = () => api('/api/format', {format: $('fmtSel').value});
 

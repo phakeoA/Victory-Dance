@@ -35,7 +35,8 @@ def _hermetic_serve_env(monkeypatch):
     via monkeypatch.setenv after this fixture clears it."""
     for k in ("VD_TP_TIE_EPS", "VD_SERVE_TAU", "VD_SERVE_TOP_P", "VD_PAIR_DECODE",
               "VD_FUTILITY_MASK", "VD_LINK_PROBE_S", "VD_LINK_DEAD_S", "VD_LINK_RECONNECT",
-              "VD_BANDIT", "VD_BANDIT_CONFIG", "VD_SITE_POLL", "VD_BANDIT_PIN"):
+              "VD_BANDIT", "VD_BANDIT_CONFIG", "VD_SITE_POLL", "VD_BANDIT_PIN",
+              "VD_LADDER_LANES", "VD_LADDER_RECORD"):
         monkeypatch.delenv(k, raising=False)
 
 

@@ -138,6 +138,9 @@ class VGCPlayer(VGCPlayerBase):
         self._team_chooser = None
         self._tc_vocab     = None
         self._tc_cfg       = None
+        # 2026-09-02 (ladder lanes): per-battle arm resolution — ``tag -> bundle`` installed by the
+        # online harness when the serve bandit is on (see serve_bandit.arm_scope). None = one stack.
+        self._arm_resolver = None
         # Team-preview decision tally: did the TP NET drive the bring-4/leads, or
         # did we fall back to the first-N heuristic?  Surfaced per run so the TP
         # net's live behaviour is measurable (#4 — it was never exercised before).
@@ -216,6 +219,17 @@ class VGCPlayer(VGCPlayerBase):
             if ok:
                 return i
         return 0
+
+    # ── 2026-09-02 (ladder lanes): decide each battle under ITS bound arm ──────
+    def choose_move(self, battle: DoubleBattle):
+        from v_dance.play.serve_bandit import arm_scope
+        with arm_scope(self, getattr(battle, "battle_tag", "")):
+            return super().choose_move(battle)
+
+    def teampreview(self, battle: DoubleBattle) -> str:
+        from v_dance.play.serve_bandit import arm_scope
+        with arm_scope(self, getattr(battle, "battle_tag", "")):
+            return super().teampreview(battle)
 
     def _select_actions(
         self,

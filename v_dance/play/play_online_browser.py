@@ -50,9 +50,20 @@ for _k in ("VD_SERVE_TAU", "VD_SERVE_TOP_P", "VD_TP_TIE_EPS", "VD_PAIR_DECODE",
            # 2026-09-01 serve-side bandit (era-5 W0) + the site's official-rating poll
            "VD_BANDIT", "VD_BANDIT_CONFIG", "VD_SITE_POLL",
            # 2026-09-02 serve-mode pin at launch (arm name = frozen; explore/0 = clear; unset = keep)
-           "VD_BANDIT_PIN"):
+           "VD_BANDIT_PIN",
+           # 2026-09-02 ladder lanes: rated games at once at launch (1..5)
+           "VD_LADDER_LANES",
+           # 2026-09-02 W3b-0: record ladder games as RL trajectories (default ON; 0 = off)
+           "VD_LADDER_RECORD"):
     if _ENV.get(_k):
         os.environ.setdefault(_k, _ENV[_k])
+
+
+def _int_env(key: str, default: int) -> int:
+    try:
+        return int(str(os.environ.get(key) or _ENV.get(key) or default).strip())
+    except (TypeError, ValueError):
+        return default
 
 import argparse                                    # noqa: E402
 import asyncio                                     # noqa: E402
@@ -444,7 +455,7 @@ def _write_session_summary(session_log: Path, note: str, tally: dict) -> None:
 
 
 def _wrap_bench_recording(host: BattleHost, session_id: str, note: str,
-                          ckpt: Path, tp_ckpt: Path) -> None:
+                          ckpt: Path, tp_ckpt: Path, arm_of=None, recorder=None) -> None:
     """Append a bench-JSONL row for every finished battle. Hook = host.end_battle (the consumer
     calls it exactly once per battle, while the battle object is still in host.player._battles),
     so recording needs zero changes to the reused consumer."""
@@ -457,6 +468,23 @@ def _wrap_bench_recording(host: BattleHost, session_id: str, note: str,
             if b is not None and getattr(b, "finished", False):
                 state["n"] += 1
                 won = getattr(b, "won", None)
+                if recorder is not None:           # W3b-0: seal this game's RL trajectory (±1 terminal)
+                    try:
+                        lost = getattr(b, "lost", None)
+                        recorder.finish(tag, b, won=(None if won is None else bool(won)),
+                                        lost=(None if lost is None else bool(lost)),
+                                        opponent=getattr(b, "opponent_username", None),
+                                        rating_before=getattr(b, "rating", None),
+                                        opp_rating_before=getattr(b, "opponent_rating", None),
+                                        turn=getattr(b, "turn", None))
+                    except Exception as exc:
+                        print(f"[online] ladder record finish failed (non-fatal): {exc!r}")
+                # 2026-09-02 (lanes): the arm BOUND to this tag, not whatever the player's default
+                # stack happens to be while several games run at once.
+                arm_name, arm_pinned = (arm_of(tag) if arm_of is not None else (None, False))
+                if arm_name is None:
+                    arm_name = getattr(host.player, "_arm_name", None)
+                    arm_pinned = bool(getattr(host.player, "_arm_pinned", False))
                 row = {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                        "session_id": session_id, "note": note, "game_idx": state["n"],
                        "battle_tag": getattr(b, "battle_tag", tag),
@@ -469,8 +497,8 @@ def _wrap_bench_recording(host: BattleHost, session_id: str, note: str,
                        "opponent_rating": getattr(b, "opponent_rating", None),
                        "ckpt": str(ckpt), "tp_ckpt": str(tp_ckpt),
                        # 2026-09-01 (era-5 W0): which bandit arm played this game (None = no bandit)
-                       "arm": getattr(host.player, "_arm_name", None)}
-                if getattr(host.player, "_arm_pinned", False):
+                       "arm": arm_name}
+                if arm_pinned:
                     row["pinned"] = True           # 2026-09-02 serve-mode pin: a frozen-block game
                 BENCH_DIR.mkdir(parents=True, exist_ok=True)
                 with BENCH_LOG.open("a", encoding="utf-8") as f:
@@ -515,7 +543,51 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
                       replay_dir=BENCH_DIR / "replays" / session_id, replay_label="online",
                       # Type_C training copy (2026-07-10, USER): real games → corpus folder
                       replay_copy_dir=_REPO / "data" / "vods" / "Type_C")
-    _wrap_bench_recording(host, session_id, args.bench_note, ckpt, tp_ckpt)
+    def _arm_of(tag):                              # lanes (2026-09-02): the arm BOUND to this tag
+        b = bandit                                 # assigned below, before any game can end
+        if b is None:
+            return None, False
+        return b.arm_for(tag), b.pinned_for(tag)
+
+    def _arm_info(tag):                            # W3b-0: what the recorder stamps per game
+        b = bandit
+        player = host.player
+        if b is None:
+            return {"arm": None, "pinned": False,
+                    "tau": float(getattr(player, "_temperature", 0.0) or 0.0),
+                    "top_p": float(getattr(player, "_top_p", 1.0) or 1.0),
+                    "pair_decode": bool(getattr(getattr(player, "_model", None), "_pair_decode", False))}
+        name = b.arm_for(tag)
+        arm = b.by_name.get(name) if name else None
+        model = None
+        try:                                       # the arm's own model (lanes: not the default stack)
+            model = (_bundles.get(name) or {}).get("model") if name else None
+        except Exception:
+            model = None
+        if model is None:
+            model = getattr(player, "_model", None)
+        return {"arm": name, "pinned": b.pinned_for(tag),
+                "tau": float(arm.tau) if arm else 0.0, "top_p": float(arm.top_p) if arm else 1.0,
+                "pair_decode": bool(getattr(model, "_pair_decode", False))}
+
+    # W3b-0 (2026-09-02): every ladder game as an RL trajectory (docs/w3b_ladder_ppo_design.md §4).
+    recorder = None
+    if os.environ.get("VD_LADDER_RECORD", "1").strip() != "0" and not args.dry_run:
+        try:
+            from v_dance.play.ladder_recorder import LADDER_RL_DIR, LadderRecorder
+            recorder = LadderRecorder(host.player, LADDER_RL_DIR / BATTLE_FORMAT / f"{session_id}.jsonl",
+                                      session_id=session_id, fmt=BATTLE_FORMAT, arm_info=_arm_info,
+                                      adapt_rules=bool(args.adapt_rules))
+            print(recorder.banner())
+            _slog(LOG_DIR / f"online_{session_id}.log", "    " + recorder.banner())
+        except Exception as exc:
+            print(f"[online] ladder recorder failed to start (non-fatal): {exc!r}")
+            recorder = None
+    else:
+        print("[online] ladder recorder OFF")
+
+    _wrap_bench_recording(host, session_id, args.bench_note, ckpt, tp_ckpt, arm_of=_arm_of,
+                          recorder=recorder)
     print(f"[online] replays -> {BENCH_DIR / 'replays' / session_id}")
 
     # Ladder-rating capture (2026-07-10): the post-battle |raw| rating lines arrive after the
@@ -528,11 +600,13 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
     def _rating_change_row(tag: str, user: str, old: int, new: int) -> None:
         us = _pvhb._toid(user) == _pvhb._toid(username)
         key = "rating" if us else "opponent_rating"
-        arm = getattr(host.player, "_arm_name", None) if us else None
+        arm = ((bandit.arm_for(tag) if bandit is not None else getattr(host.player, "_arm_name", None))
+               if us else None)                    # lanes (2026-09-02): the arm BOUND to this tag
         row = {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                "type": "rating_update", "session_id": session_id,
                "battle_tag": tag, key: old, key + "_after": new}
-        pinned = bool(arm) and bool(getattr(host.player, "_arm_pinned", False))
+        pinned = bool(arm) and (bandit.pinned_for(tag) if bandit is not None
+                                else bool(getattr(host.player, "_arm_pinned", False)))
         if arm:
             row["arm"] = arm
         if pinned:
@@ -575,11 +649,27 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
                 _arms = _SB.load_arms(_cfg)
                 if _arms:
                     _arm_cache: dict = {}
+                    _bundles: dict = {}
+
+                    def _bundle_for(arm):
+                        if arm.name not in _bundles:
+                            _bundles[arm.name] = _SB.load_bundle(
+                                arm, _arm_cache, default_battle=ckpt, default_tp=tp_ckpt)
+                        return _bundles[arm.name]
+
                     bandit = _SB.ServeBandit(
                         _arms, fmt=BATTLE_FORMAT,
-                        applier=lambda arm: _SB.apply_arm(host, arm, _arm_cache,
-                                                          default_battle=ckpt, default_tp=tp_ckpt),
+                        applier=lambda arm: _SB.apply_bundle(host.player, _bundle_for(arm)),
                         **_SB.config_params(_cfg))
+                    # 2026-09-02 (lanes): each battle decides under the arm BOUND to its tag, so
+                    # several games under different arms can run at once (serve_bandit.arm_scope).
+                    _b = bandit
+
+                    def _resolve_bundle(tag):
+                        name = _b.arm_for(tag)
+                        return _bundle_for(_b.by_name[name]) if name in _b.by_name else None
+
+                    host.player._arm_resolver = _resolve_bundle
                     _pin_note = _SB.apply_env_pin(bandit, os.environ.get("VD_BANDIT_PIN"))
                     print(bandit.banner())
                     _slog(session_log, "    " + bandit.banner())
@@ -696,8 +786,10 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
                         auto_close_default=(_ENV.get("VD_AUTO_CLOSE_ROOMS", "0").strip() == "1"),
                         log_line=lambda t: _slog(session_log, t),
                         bench_path=BENCH_LOG,          # all-time peak elo per regulation (2026-09-01)
-                        bandit=bandit)                 # era-5 W0 serve-side bandit (None = off)
+                        bandit=bandit,                 # era-5 W0 serve-side bandit (None = off)
+                        lanes_default=_int_env("VD_LADDER_LANES", 1))   # 2026-09-02 games at once
                     _ctrl = ctrl_ref["c"]
+                    _ctrl.recorder = recorder      # W3b-0: status shows games/steps recorded
                     _ctrl.link = link                  # link status in the panel / Mission Control
                     print(f"[online] control server on {_ctrl.url}  —  drive it from Mission Control's "
                           f"'Online bot' tab (or open that URL for the standalone panel).")

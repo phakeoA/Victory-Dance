@@ -24,6 +24,12 @@ Set from the panel at runtime (takes effect at the next battle) or at launch via
 (an arm name; ``explore`` / ``0`` / ``none`` / ``off`` clears; unset keeps the persisted pin).
 Pinned games still credit that arm's stats (they are real games of that arm) and carry ``pinned``
 in the bench rows so a clean block can be read on its own (e.g. pin ``era5a_big6`` for 50 games).
+
+Ladder LANES (2026-09-02, USER: "design for the 5-games-per-account limit so live sessions are
+quicker"): several rated games run at once, each under the arm BOUND to its tag — every decision
+swaps that arm's bundle in for its duration (``arm_scope``; the decision path is synchronous), the
+warm-up counts games IN FLIGHT so five simultaneous searches still interleave the arms, and rewards
+arrive per tag in any order.
 """
 from __future__ import annotations
 
@@ -31,6 +37,7 @@ import json
 import math
 import os
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
@@ -111,13 +118,14 @@ def _resolve(p) -> Path:
 
 
 # ── applying an arm to the served player ─────────────────────────────────────
-def apply_arm(host, arm: Arm, cache: dict, *, default_battle, default_tp, device: str = "cpu",
-              seed: int = 0, loader=None) -> None:
-    """Swap the served ``VGCPlayer``'s model handles + serve knobs to ``arm``. Models are loaded
-    ONCE per checkpoint path (``cache``). Must be called BETWEEN battles (the panel guarantees
-    that). ``loader`` is injectable: ``(kind, path) -> loaded tuple`` (tests)."""
+def load_bundle(arm: Arm, cache: dict, *, default_battle, default_tp, device: str = "cpu",
+                seed: int = 0, loader=None) -> dict:
+    """Everything an arm needs at decision time — the battle net + heads, the team chooser (+ vocab
+    / cfg) and the serve knobs — loaded ONCE per checkpoint path (``cache``). 2026-09-02 (lanes):
+    bundles are also resolved PER BATTLE TAG while several games run at once, so a bundle is
+    self-contained (its own sampling RNG included). ``loader`` is injectable: ``(kind, path) ->
+    loaded tuple`` (tests)."""
     import numpy as np
-    p = host.player
     if loader is None:
         from v_dance.play import model_io as _M
 
@@ -131,14 +139,73 @@ def apply_arm(host, arm: Arm, cache: dict, *, default_battle, default_tp, device
         cache[bkey] = loader("battle", bpath)
     if tkey not in cache:
         cache[tkey] = loader("tp", tpath)
-    p._model, p._model_heads = cache[bkey]
-    p._team_chooser, p._tc_vocab, p._tc_cfg = cache[tkey]
-    p._temperature = float(arm.tau)
-    p._top_p = float(arm.top_p)
-    p._rng = np.random.default_rng(seed) if arm.tau > 0.0 else None
-    if arm.tp_tie_eps is not None:                    # model_io reads it per decision
-        os.environ["VD_TP_TIE_EPS"] = str(arm.tp_tie_eps)
-    p._arm_name = arm.name
+    model, heads = cache[bkey]
+    chooser, vocab, cfg = cache[tkey]
+    return {"name": arm.name, "model": model, "heads": heads, "chooser": chooser, "vocab": vocab,
+            "cfg": cfg, "tau": float(arm.tau), "top_p": float(arm.top_p),
+            "tp_tie_eps": arm.tp_tie_eps,
+            "rng": (np.random.default_rng(seed) if arm.tau > 0.0 else None)}
+
+
+_PLAYER_FIELDS = ("_model", "_model_heads", "_team_chooser", "_tc_vocab", "_tc_cfg",
+                  "_temperature", "_top_p", "_rng", "_arm_name")
+
+
+def _bundle_values(b: dict) -> tuple:
+    return (b["model"], b["heads"], b["chooser"], b["vocab"], b["cfg"], b["tau"], b["top_p"],
+            b["rng"], b["name"])
+
+
+def apply_bundle(player, bundle: dict) -> None:
+    """Make ``bundle`` the player's DEFAULT serve stack (what a game without a per-tag resolution
+    plays, and what the player reports as its current arm)."""
+    for k, v in zip(_PLAYER_FIELDS, _bundle_values(bundle)):
+        setattr(player, k, v)
+    if bundle["tp_tie_eps"] is not None:              # model_io reads it per decision
+        os.environ["VD_TP_TIE_EPS"] = str(bundle["tp_tie_eps"])
+
+
+def apply_arm(host, arm: Arm, cache: dict, *, default_battle, default_tp, device: str = "cpu",
+              seed: int = 0, loader=None) -> None:
+    """Swap the served ``VGCPlayer``'s model handles + serve knobs to ``arm`` — the one-lane path,
+    and the DEFAULT stack under lanes (live games resolve their own arm via ``arm_scope``).
+    Models load ONCE per checkpoint path (``cache``)."""
+    apply_bundle(host.player, load_bundle(arm, cache, default_battle=default_battle,
+                                         default_tp=default_tp, device=device, seed=seed,
+                                         loader=loader))
+
+
+@contextmanager
+def arm_scope(player, tag: str):
+    """2026-09-02 (lanes): decide THIS battle under the arm bound to its tag. The online harness
+    installs ``player._arm_resolver`` (``tag -> bundle | None``) when the bandit is on; with
+    several games open at once the player's default stack may belong to another game, so each
+    decision swaps the bound bundle in for its duration and restores afterwards (the decision
+    path is synchronous — nothing interleaves inside the scope). No resolver / no bundle → no-op,
+    byte-identical to the one-lane serve."""
+    resolver = getattr(player, "_arm_resolver", None)
+    bundle = None
+    if resolver is not None:
+        try:
+            bundle = resolver(tag)
+        except Exception:
+            bundle = None
+    if not bundle:
+        yield None
+        return
+    saved = tuple(getattr(player, k, None) for k in _PLAYER_FIELDS)
+    saved_eps = os.environ.get("VD_TP_TIE_EPS")
+    apply_bundle(player, bundle)
+    try:
+        yield bundle
+    finally:
+        for k, v in zip(_PLAYER_FIELDS, saved):
+            setattr(player, k, v)
+        if bundle["tp_tie_eps"] is not None:
+            if saved_eps is None:
+                os.environ.pop("VD_TP_TIE_EPS", None)
+            else:
+                os.environ["VD_TP_TIE_EPS"] = saved_eps
 
 
 # ── the bandit ───────────────────────────────────────────────────────────────
@@ -169,6 +236,10 @@ class ServeBandit:
         self.by_tag: Dict[str, str] = {}            # base tag -> arm name
         self.current: Optional[str] = None          # arm currently applied to the player
         self.pinned: Optional[str] = None           # serve-mode pin: this arm plays EVERY game (frozen)
+        # 2026-09-02 (lanes): games bound but not yet rewarded, per arm — the warm-up counts them so
+        # five simultaneous searches still rotate the arms; the tags that were pinned when bound.
+        self.in_flight: Dict[str, int] = {a.name: 0 for a in self.arms}
+        self.pinned_tags: List[str] = []
         self.load()
 
     # -- persistence --
@@ -184,6 +255,7 @@ class ServeBandit:
         self.by_tag = dict(list((d.get("by_tag") or {}).items())[-200:])
         pin = d.get("pinned")                       # 2026-09-02: the frozen mode survives a restart
         self.pinned = pin if (isinstance(pin, str) and pin in self.by_name) else None
+        self.pinned_tags = [t for t in (d.get("pinned_tags") or []) if isinstance(t, str)][-200:]
 
     def save(self) -> None:
         try:
@@ -192,7 +264,8 @@ class ServeBandit:
             tmp.write_text(json.dumps({"fmt": self.fmt, "saved": self._now(),
                                        "stats": {k: asdict(v) for k, v in self.stats.items()},
                                        "by_tag": dict(list(self.by_tag.items())[-200:]),
-                                       "pinned": self.pinned},
+                                       "pinned": self.pinned,
+                                       "pinned_tags": self.pinned_tags[-200:]},
                                       indent=1), encoding="utf-8")
             os.replace(tmp, self.state_path)
         except Exception:
@@ -221,9 +294,12 @@ class ServeBandit:
         if self.pending and self.pending in self.by_name and not self.stats[self.pending].retired:
             return self.by_name[self.pending]
         active = self.active_arms() or [self.incumbent]
-        under = [a for a in active if self.stats[a.name].n < self.min_games]
+
+        def played(a):                              # rewarded + in flight (lanes, 2026-09-02)
+            return self.stats[a.name].n + self.in_flight.get(a.name, 0)
+        under = [a for a in active if played(a) < self.min_games]
         if under:                                   # warm-up: fewest games first, config order
-            arm = min(under, key=lambda a: (self.stats[a.name].n, self.arms.index(a)))
+            arm = min(under, key=lambda a: (played(a), self.arms.index(a)))
         else:                                       # Thompson over mean per-game rating delta
             best, best_s = None, -math.inf
             for a in active:
@@ -272,11 +348,20 @@ class ServeBandit:
             if len(self.by_tag) > 512:
                 for k in list(self.by_tag)[:-256]:
                     self.by_tag.pop(k, None)
+            self.in_flight[name] = self.in_flight.get(name, 0) + 1
+            if self.pinned == name:                 # remember: this game was a frozen-mode game
+                self.pinned_tags.append(base)
+                del self.pinned_tags[:-200]
+            self.save()                             # by_tag + pinned_tags survive a restart mid-game
         self.pending = None
         return self.by_tag[base]
 
     def arm_for(self, tag: str) -> Optional[str]:
         return self.by_tag.get(self.base_tag(tag))
+
+    def pinned_for(self, tag: str) -> bool:
+        """Was this battle bound while its arm was pinned (a frozen-mode game)?"""
+        return self.base_tag(tag) in self.pinned_tags
 
     # -- reward --
     def observe(self, tag: str, delta: float, won: Optional[bool] = None) -> Optional[str]:
@@ -286,6 +371,7 @@ class ServeBandit:
             return None
         s = self.stats[name]
         s.n += 1
+        self.in_flight[name] = max(0, self.in_flight.get(name, 0) - 1)
         s.sum_delta += float(delta)
         s.sumsq_delta += float(delta) ** 2
         if won is None:
@@ -332,6 +418,7 @@ class ServeBandit:
                         "retired": s.retired, "reason": s.retired_reason,
                         "pending": (self.pending == a.name), "current": (self.current == a.name),
                         "pinned": (self.pinned == a.name),
+                        "in_flight": self.in_flight.get(a.name, 0),
                         "tau": a.tau, "tp_tie_eps": a.tp_tie_eps, "note": a.note})
         return out
 
