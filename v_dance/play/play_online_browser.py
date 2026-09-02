@@ -568,7 +568,9 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
             model = getattr(player, "_model", None)
         return {"arm": name, "pinned": b.pinned_for(tag),
                 "tau": float(arm.tau) if arm else 0.0, "top_p": float(arm.top_p) if arm else 1.0,
-                "pair_decode": bool(getattr(model, "_pair_decode", False))}
+                "pair_decode": bool(getattr(model, "_pair_decode", False)),
+                "adapt_rules": (arm.adapt_rules_for(bool(args.adapt_rules)) if arm
+                                else bool(args.adapt_rules))}
 
     # W3b-0 (2026-09-02): every ladder game as an RL trajectory (docs/w3b_ladder_ppo_design.md §4).
     recorder = None
@@ -654,7 +656,8 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
                     def _bundle_for(arm):
                         if arm.name not in _bundles:
                             _bundles[arm.name] = _SB.load_bundle(
-                                arm, _arm_cache, default_battle=ckpt, default_tp=tp_ckpt)
+                                arm, _arm_cache, default_battle=ckpt, default_tp=tp_ckpt,
+                                adapt_rules_default=bool(args.adapt_rules))   # τ arms: forced OFF
                         return _bundles[arm.name]
 
                     bandit = _SB.ServeBandit(

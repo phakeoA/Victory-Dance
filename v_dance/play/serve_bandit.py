@@ -58,6 +58,15 @@ class Arm:
     tp_tie_eps: Optional[float] = None     # None = leave VD_TP_TIE_EPS as launched
     incumbent: bool = False
     note: str = ""
+    # 2026-09-02 W3b decision 1: adapt-rules (serve-time logit tilt) PER ARM. None = the launch
+    # default for argmax arms, but FORCED OFF for τ > 0 arms — the tilt is not recorded, so a
+    # sampled decision under it could never be recomputed for PPO (docs/w3b_ladder_ppo_design.md §3).
+    adapt_rules: Optional[bool] = None
+
+    def adapt_rules_for(self, launch_default: bool) -> bool:
+        if self.adapt_rules is not None:
+            return bool(self.adapt_rules)
+        return bool(launch_default) and not (self.tau > 0.0)
 
     def uses_default(self, which: str) -> bool:
         v = self.battle_ckpt if which == "battle" else self.tp_ckpt
@@ -94,7 +103,8 @@ def load_arms(path: Path, *, exists=None) -> List[Arm]:
         a = Arm(name=str(raw["name"]), battle_ckpt=raw.get("battle_ckpt"), tp_ckpt=raw.get("tp_ckpt"),
                 tau=float(raw.get("tau", 0.0) or 0.0), top_p=float(raw.get("top_p", 1.0) or 1.0),
                 tp_tie_eps=(None if raw.get("tp_tie_eps") is None else float(raw["tp_tie_eps"])),
-                incumbent=bool(raw.get("incumbent", False)), note=str(raw.get("note", "")))
+                incumbent=bool(raw.get("incumbent", False)), note=str(raw.get("note", "")),
+                adapt_rules=(None if raw.get("adapt_rules") is None else bool(raw["adapt_rules"])))
         missing = [w for w, v in (("battle", a.battle_ckpt), ("tp", a.tp_ckpt))
                    if not a.uses_default(w) and not exists(_resolve(v))]
         if missing:
@@ -119,7 +129,7 @@ def _resolve(p) -> Path:
 
 # ── applying an arm to the served player ─────────────────────────────────────
 def load_bundle(arm: Arm, cache: dict, *, default_battle, default_tp, device: str = "cpu",
-                seed: int = 0, loader=None) -> dict:
+                seed: int = 0, loader=None, adapt_rules_default: bool = False) -> dict:
     """Everything an arm needs at decision time — the battle net + heads, the team chooser (+ vocab
     / cfg) and the serve knobs — loaded ONCE per checkpoint path (``cache``). 2026-09-02 (lanes):
     bundles are also resolved PER BATTLE TAG while several games run at once, so a bundle is
@@ -144,16 +154,17 @@ def load_bundle(arm: Arm, cache: dict, *, default_battle, default_tp, device: st
     return {"name": arm.name, "model": model, "heads": heads, "chooser": chooser, "vocab": vocab,
             "cfg": cfg, "tau": float(arm.tau), "top_p": float(arm.top_p),
             "tp_tie_eps": arm.tp_tie_eps,
+            "adapt_rules": arm.adapt_rules_for(adapt_rules_default),
             "rng": (np.random.default_rng(seed) if arm.tau > 0.0 else None)}
 
 
 _PLAYER_FIELDS = ("_model", "_model_heads", "_team_chooser", "_tc_vocab", "_tc_cfg",
-                  "_temperature", "_top_p", "_rng", "_arm_name")
+                  "_temperature", "_top_p", "_rng", "_arm_name", "_adapt_rules")
 
 
 def _bundle_values(b: dict) -> tuple:
     return (b["model"], b["heads"], b["chooser"], b["vocab"], b["cfg"], b["tau"], b["top_p"],
-            b["rng"], b["name"])
+            b["rng"], b["name"], bool(b.get("adapt_rules", False)))
 
 
 def apply_bundle(player, bundle: dict) -> None:
@@ -166,13 +177,16 @@ def apply_bundle(player, bundle: dict) -> None:
 
 
 def apply_arm(host, arm: Arm, cache: dict, *, default_battle, default_tp, device: str = "cpu",
-              seed: int = 0, loader=None) -> None:
+              seed: int = 0, loader=None, adapt_rules_default: Optional[bool] = None) -> None:
     """Swap the served ``VGCPlayer``'s model handles + serve knobs to ``arm`` — the one-lane path,
     and the DEFAULT stack under lanes (live games resolve their own arm via ``arm_scope``).
-    Models load ONCE per checkpoint path (``cache``)."""
+    Models load ONCE per checkpoint path (``cache``). ``adapt_rules_default`` None = keep the
+    player's current flag as the launch default."""
+    if adapt_rules_default is None:
+        adapt_rules_default = bool(getattr(host.player, "_adapt_rules", False))
     apply_bundle(host.player, load_bundle(arm, cache, default_battle=default_battle,
                                          default_tp=default_tp, device=device, seed=seed,
-                                         loader=loader))
+                                         loader=loader, adapt_rules_default=adapt_rules_default))
 
 
 @contextmanager

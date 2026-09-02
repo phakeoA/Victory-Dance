@@ -342,3 +342,43 @@ def test_panel_applies_arms_and_pins_under_live_games_when_the_player_resolves_p
 def test_mission_control_exposes_the_lanes_env_key():
     from v_dance.datatools import mission_control as mc
     assert "VD_LADDER_LANES" in mc._ENV_WRITE_KEYS and "VD_LADDER_LANES" in mc._ENV_READ_KEYS
+
+
+# ── W3b decision 1 (2026-09-02): adapt-rules per arm, forced OFF for τ arms ──
+def test_adapt_rules_per_arm_defaults_off_for_tau_arms_and_rides_the_bundle(tmp_path: Path):
+    argmax = SB.Arm(name="inc", incumbent=True)
+    tau = SB.Arm(name="tau", tau=0.3)
+    forced_on = SB.Arm(name="tau_on", tau=0.3, adapt_rules=True)
+    assert argmax.adapt_rules_for(True) is True and argmax.adapt_rules_for(False) is False
+    assert tau.adapt_rules_for(True) is False                 # τ > 0 → clean unless the config says so
+    assert forced_on.adapt_rules_for(False) is True
+
+    def loader(kind, path):
+        return ("m", "h") if kind == "battle" else ("c", {}, {})
+    cache = {}
+    kw = dict(default_battle=tmp_path / "b.pt", default_tp=tmp_path / "t.pt", loader=loader)
+    assert SB.load_bundle(argmax, cache, adapt_rules_default=True, **kw)["adapt_rules"] is True
+    assert SB.load_bundle(tau, cache, adapt_rules_default=True, **kw)["adapt_rules"] is False
+    p = _player()
+    p._adapt_rules = True                                      # the launch flag on the player
+    with SB.arm_scope(p, _tag(1)) as b:                        # no resolver → untouched
+        assert b is None and p._adapt_rules is True
+    bundles = {_tag(1): dict(_bundle("tau", tau=0.3), adapt_rules=False)}
+    p._arm_resolver = lambda tag: bundles.get(SB.ServeBandit.base_tag(tag))
+    with SB.arm_scope(p, _tag(1)):
+        assert p._adapt_rules is False                         # the τ arm decides WITHOUT the tilt
+    assert p._adapt_rules is True                              # restored
+
+
+def test_load_arms_reads_adapt_rules_from_the_config(tmp_path: Path):
+    import json
+    cfg = tmp_path / "arms.json"
+    cfg.write_text(json.dumps({"arms": [
+        {"name": "inc", "incumbent": True},
+        {"name": "tau", "tau": 0.3, "top_p": 1.0, "adapt_rules": False},
+        {"name": "tau_on", "tau": 0.3, "adapt_rules": True},
+    ]}), encoding="utf-8")
+    arms = {a.name: a for a in SB.load_arms(cfg, exists=lambda p: True)}
+    assert arms["inc"].adapt_rules is None and arms["tau"].adapt_rules is False
+    assert arms["tau_on"].adapt_rules is True
+

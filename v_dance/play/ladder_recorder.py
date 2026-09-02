@@ -175,7 +175,7 @@ class LadderRecorder:
             "tau": float(info.get("tau", getattr(self.player, "_temperature", 0.0) or 0.0)),
             "top_p": float(info.get("top_p", getattr(self.player, "_top_p", 1.0) or 1.0)),
             "pair_decode": bool(info.get("pair_decode", getattr(model, "_pair_decode", False))),
-            "adapt_rules": self.adapt_rules,
+            "adapt_rules": bool(info.get("adapt_rules", self.adapt_rules)),
             "logprob_valid": False,                 # W3b-1a flips this when the sampler records it
             "value_source": "serve_value_head",
             "opponent": opponent, "rating_before": rating_before,
