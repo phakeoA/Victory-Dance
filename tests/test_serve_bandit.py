@@ -271,3 +271,30 @@ def test_panel_applies_an_arm_before_search_and_binds_it_on_battle_start(monkeyp
         return c
 
     asyncio.run(main())
+
+
+def test_fetch_official_ratings_default_opener_sends_a_real_user_agent(monkeypatch):
+    """2026-09-02 live check: pokemonshowdown.com answers 403 to the default Python-urllib
+    User-Agent and 200 to anything else — the default opener must send our own header."""
+    import io as _io
+    import urllib.request as _ur
+    seen = {}
+
+    class _Resp(_io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=None):
+        seen["ua"] = req.get_header("User-agent")
+        seen["url"] = req.full_url
+        return _Resp(b'{"ratings": {"gen9championsvgc2026regmb": {"elo": 1165.5, "gxe": 47.4, '
+                     b'"rpr": 1480.0, "rprd": 25, "w": 443, "l": 451}}}')
+
+    monkeypatch.setattr(_ur, "urlopen", fake_urlopen)
+    out = SB.fetch_official_ratings("victoriousdancing")
+    assert seen["url"].endswith("/users/victoriousdancing.json")
+    assert seen["ua"] and "python-urllib" not in seen["ua"].lower() and "Victory-Dance" in seen["ua"]
+    assert out["gen9championsvgc2026regmb"]["elo"] == 1166 and out["gen9championsvgc2026regmb"]["w"] == 443

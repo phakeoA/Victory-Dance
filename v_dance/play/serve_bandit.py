@@ -16,6 +16,14 @@ promotion). Promotion is a HUMAN decision informed by the report (≥ 200 games 
 
 Byte-identical serve when disabled: ``VD_BANDIT=0`` (or no config file) → no arm is ever applied.
 State persists in ``artifacts/bandit/<format>.json`` so a restart keeps the evidence.
+
+Serve-mode PIN (2026-09-02, USER: "a toggle in Mission Control / a separate mode to ladder with a
+frozen-weight version"): ``pinned`` names ONE arm that plays every game until unpinned — the frozen
+mode (nothing ever trains live; the bandit only swaps FIXED checkpoints / serve knobs between games).
+Set from the panel at runtime (takes effect at the next battle) or at launch via ``VD_BANDIT_PIN``
+(an arm name; ``explore`` / ``0`` / ``none`` / ``off`` clears; unset keeps the persisted pin).
+Pinned games still credit that arm's stats (they are real games of that arm) and carry ``pinned``
+in the bench rows so a clean block can be read on its own (e.g. pin ``era5a_big6`` for 50 games).
 """
 from __future__ import annotations
 
@@ -160,6 +168,7 @@ class ServeBandit:
         self.pending: Optional[str] = None          # arm applied for the NEXT battle
         self.by_tag: Dict[str, str] = {}            # base tag -> arm name
         self.current: Optional[str] = None          # arm currently applied to the player
+        self.pinned: Optional[str] = None           # serve-mode pin: this arm plays EVERY game (frozen)
         self.load()
 
     # -- persistence --
@@ -173,6 +182,8 @@ class ServeBandit:
                 self.stats[name] = ArmStats(**{k: s.get(k, getattr(ArmStats(), k))
                                                for k in ArmStats.__dataclass_fields__})
         self.by_tag = dict(list((d.get("by_tag") or {}).items())[-200:])
+        pin = d.get("pinned")                       # 2026-09-02: the frozen mode survives a restart
+        self.pinned = pin if (isinstance(pin, str) and pin in self.by_name) else None
 
     def save(self) -> None:
         try:
@@ -180,7 +191,8 @@ class ServeBandit:
             tmp = self.state_path.with_suffix(".tmp")
             tmp.write_text(json.dumps({"fmt": self.fmt, "saved": self._now(),
                                        "stats": {k: asdict(v) for k, v in self.stats.items()},
-                                       "by_tag": dict(list(self.by_tag.items())[-200:])},
+                                       "by_tag": dict(list(self.by_tag.items())[-200:]),
+                                       "pinned": self.pinned},
                                       indent=1), encoding="utf-8")
             os.replace(tmp, self.state_path)
         except Exception:
@@ -203,6 +215,9 @@ class ServeBandit:
     def choose(self) -> Arm:
         """The arm for the NEXT battle. Idempotent while that battle has not started (a second
         call before ``bind`` returns the same arm — the search and challenge paths both ask)."""
+        if self.pinned and self.pinned in self.by_name:   # FROZEN mode: the pin beats everything,
+            self.pending = self.pinned                     # a retired flag included (human choice)
+            return self.by_name[self.pinned]
         if self.pending and self.pending in self.by_name and not self.stats[self.pending].retired:
             return self.by_name[self.pending]
         active = self.active_arms() or [self.incumbent]
@@ -230,6 +245,21 @@ class ServeBandit:
             self.applier(arm)
         self.current = arm.name
         return arm
+
+    def pin(self, name: Optional[str]) -> Optional[str]:
+        """Serve-mode pin (2026-09-02). ``name`` = an arm → that arm plays every game from the NEXT
+        battle on (frozen mode); ``None`` / "" → unpin (Thompson explores again). Unknown names
+        raise — a typo must never silently become 'explore'. A change drops the pending choice so
+        the next ``apply_pending`` re-picks; persisted with the state."""
+        name = (name or "").strip() or None
+        if name is not None and name not in self.by_name:
+            raise ValueError(f"unknown arm {name!r} — arms: {', '.join(self.by_name)}")
+        if name == self.pinned:
+            return self.pinned
+        self.pinned = name
+        self.pending = None
+        self.save()
+        return self.pinned
 
     def bind(self, tag: str) -> Optional[str]:
         """A battle started: attribute it to the pending arm (else to the current one)."""
@@ -301,17 +331,46 @@ class ServeBandit:
                         "mean_delta": round(s.mean_delta(), 1), "win_rate": (None if wr is None else round(wr, 3)),
                         "retired": s.retired, "reason": s.retired_reason,
                         "pending": (self.pending == a.name), "current": (self.current == a.name),
+                        "pinned": (self.pinned == a.name),
                         "tau": a.tau, "tp_tie_eps": a.tp_tie_eps, "note": a.note})
         return out
 
     def banner(self) -> str:
         active = [a.name for a in self.active_arms()]
+        pin = f"; PINNED → {self.pinned} (frozen: every game until unpinned)" if self.pinned else ""
         return (f"[online] serve BANDIT ACTIVE — {len(active)} arm(s), incumbent {self.incumbent.name}: "
                 f"{', '.join(active)}; warm-up {self.min_games} g/arm, retire at ≥{self.retire_min_games} g "
-                f"if WR upper bound ≤ incumbent − {self.retire_margin:.2f}; state {self.state_path.name}")
+                f"if WR upper bound ≤ incumbent − {self.retire_margin:.2f}; state {self.state_path.name}{pin}")
+
+
+# ── launch-time pin from the environment (VD_BANDIT_PIN) ─────────────────────
+_ENV_PIN_CLEAR = {"0", "none", "off", "explore", "bandit", "unpin"}
+
+
+def apply_env_pin(bandit: "ServeBandit", raw: Optional[str]) -> str:
+    """``VD_BANDIT_PIN`` at launch: unset/blank → keep whatever the state file holds; ``explore`` /
+    ``0`` / ``none`` / ``off`` → clear the pin; an arm name → pin it. An unknown name is refused
+    LOUDLY and the persisted pin stays (a typo must not silently become 'explore'). Returns a
+    one-line note for the launch log ('' = nothing to say)."""
+    raw = (raw or "").strip()
+    if not raw:
+        return (f"[bandit] pin restored from state: {bandit.pinned} (frozen — every game)"
+                if bandit.pinned else "")
+    if raw.lower() in _ENV_PIN_CLEAR:
+        had = bandit.pinned
+        bandit.pin(None)
+        return f"[bandit] VD_BANDIT_PIN={raw}: pin cleared (was {had}) — exploring" if had else ""
+    try:
+        bandit.pin(raw)
+    except ValueError as exc:
+        return f"[bandit] VD_BANDIT_PIN={raw!r} IGNORED — {exc}"
+    return f"[bandit] VD_BANDIT_PIN={raw}: PINNED (frozen — every game until unpinned)"
 
 
 # ── the site's official numbers (the true "elo reflector") ───────────────────
+SITE_USER_AGENT = "Mozilla/5.0 (compatible; Victory-Dance/1.0; VGC ladder bot; profile-rating poll)"
+
+
 def fetch_official_ratings(userid: str, timeout: float = 6.0, opener=None) -> dict:
     """``https://pokemonshowdown.com/users/<userid>.json`` → {format_id: {elo, gxe, glicko,
     glicko_dev, w, l}}. The site's own numbers (Elo shown on the profile, GXE, Glicko-1 with its
@@ -320,7 +379,11 @@ def fetch_official_ratings(userid: str, timeout: float = 6.0, opener=None) -> di
     url = f"https://pokemonshowdown.com/users/{userid}.json"
     if opener is None:
         def opener(u):
-            with urllib.request.urlopen(u, timeout=timeout) as r:      # noqa: S310 (fixed host)
+            # 2026-09-02 live check: the site answers 403 to the default "Python-urllib/x.y"
+            # User-Agent (Cloudflare bot rule) and 200 to anything else — send our own.
+            req = urllib.request.Request(u, headers={"User-Agent": SITE_USER_AGENT,
+                                                     "Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=timeout) as r:    # noqa: S310 (fixed host)
                 return r.read().decode("utf-8")
     d = json.loads(opener(url))
     out = {}

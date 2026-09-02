@@ -48,7 +48,9 @@ for _k in ("VD_SERVE_TAU", "VD_SERVE_TOP_P", "VD_TP_TIE_EPS", "VD_PAIR_DECODE",
            # 2026-09-01 link watchdog knobs (LinkWatch): probe-after / dead-after seconds + kill switch
            "VD_LINK_PROBE_S", "VD_LINK_DEAD_S", "VD_LINK_RECONNECT",
            # 2026-09-01 serve-side bandit (era-5 W0) + the site's official-rating poll
-           "VD_BANDIT", "VD_BANDIT_CONFIG", "VD_SITE_POLL"):
+           "VD_BANDIT", "VD_BANDIT_CONFIG", "VD_SITE_POLL",
+           # 2026-09-02 serve-mode pin at launch (arm name = frozen; explore/0 = clear; unset = keep)
+           "VD_BANDIT_PIN"):
     if _ENV.get(_k):
         os.environ.setdefault(_k, _ENV[_k])
 
@@ -468,6 +470,8 @@ def _wrap_bench_recording(host: BattleHost, session_id: str, note: str,
                        "ckpt": str(ckpt), "tp_ckpt": str(tp_ckpt),
                        # 2026-09-01 (era-5 W0): which bandit arm played this game (None = no bandit)
                        "arm": getattr(host.player, "_arm_name", None)}
+                if getattr(host.player, "_arm_pinned", False):
+                    row["pinned"] = True           # 2026-09-02 serve-mode pin: a frozen-block game
                 BENCH_DIR.mkdir(parents=True, exist_ok=True)
                 with BENCH_LOG.open("a", encoding="utf-8") as f:
                     f.write(json.dumps(row) + "\n")
@@ -528,14 +532,17 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
         row = {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                "type": "rating_update", "session_id": session_id,
                "battle_tag": tag, key: old, key + "_after": new}
+        pinned = bool(arm) and bool(getattr(host.player, "_arm_pinned", False))
         if arm:
             row["arm"] = arm
+        if pinned:
+            row["pinned"] = True                   # 2026-09-02 serve-mode pin: a frozen-block game
         BENCH_DIR.mkdir(parents=True, exist_ok=True)
         with BENCH_LOG.open("a", encoding="utf-8") as f:
             f.write(json.dumps(row) + "\n")
         _slog(LOG_DIR / f"online_{session_id}.log",
               f"    rating: {user} {old} ({'us' if us else 'them'}) → {new}  {tag}"
-              + (f"  arm {arm}" if arm else ""))
+              + (f"  arm {arm}{' (pinned)' if pinned else ''}" if arm else ""))
 
     _pvhb.RATING_HOOK = None                        # the panel chains its confirm logic here
     _pvhb.RATING_CHANGE_HOOK = _rating_change_row
@@ -573,8 +580,12 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
                         applier=lambda arm: _SB.apply_arm(host, arm, _arm_cache,
                                                           default_battle=ckpt, default_tp=tp_ckpt),
                         **_SB.config_params(_cfg))
+                    _pin_note = _SB.apply_env_pin(bandit, os.environ.get("VD_BANDIT_PIN"))
                     print(bandit.banner())
                     _slog(session_log, "    " + bandit.banner())
+                    if _pin_note:                  # launch echo for the frozen mode
+                        print(_pin_note)
+                        _slog(session_log, "    " + _pin_note)
             else:
                 print(f"[online] serve bandit OFF (no config at {_cfg})")
         except Exception as exc:

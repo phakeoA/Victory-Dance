@@ -265,7 +265,9 @@ class BotController:
                 arm = self.bandit.bind(tag)
             except Exception:
                 arm = None
-        self.log(f"battle started: {tag}" + (f"  [arm {arm}]" if arm else ""))
+        pinned = bool(arm) and self.bandit is not None and self.bandit.pinned == arm
+        self.log(f"battle started: {tag}"
+                 + (f"  [arm {arm}{' pinned' if pinned else ''}]" if arm else ""))
         # 2026-09-01: keep ONE tick pending while a battle is live. Before this, nothing was
         # scheduled between a resolved search and the battle's end, so when a dead link stopped
         # the frames the ghost-live sweep never ran and the run hung silently (09-01: 2.5 h).
@@ -340,6 +342,11 @@ class BotController:
         except Exception as exc:
             self.log(f"bandit: apply failed ({exc!r}) — playing the current model")
             return None
+        if arm is not None:
+            try:                                   # bench rows read this: "pinned": True on frozen games
+                self.host.player._arm_pinned = bool(self.bandit.pinned) and self.bandit.pinned == arm.name
+            except Exception:
+                pass
         if arm is not None and before != arm.name:
             extra = f" τ={arm.tau:g}" if arm.tau else ""
             self.log(f"arm → {arm.name}{extra} ({reason})")
@@ -534,6 +541,31 @@ class BotController:
         self.auto_close = bool(on)
         self.log(f"auto-close finished battle tabs: {'ON' if on else 'OFF'}")
 
+    def set_bandit_pin(self, name: Optional[str]) -> Optional[str]:
+        """Serve mode from the panel (2026-09-02): pin one arm (FROZEN — it plays every game) or
+        unpin (explore). Takes effect at the NEXT battle: applied right away on the bot loop when
+        no battle is live, else deferred to the pre-search apply (a model swap mid-game would
+        split one game across two arms)."""
+        if self.bandit is None:
+            raise ValueError("serve bandit is OFF (VD_BANDIT=0 or no config) — the deployed .env "
+                             "stack already plays every game")
+        before = self.bandit.pinned
+        pinned = self.bandit.pin(name)
+        if pinned == before:
+            return pinned
+        if pinned:
+            self.log(f"bandit: PINNED → {pinned} (frozen — every game until unpinned)")
+        else:
+            self.log(f"bandit: UNPINNED (was {before}) — exploring again")
+        if self._live:
+            self.log("bandit: a battle is live — the pin applies from the next game")
+        elif self.loop is not None:
+            try:                                   # swap models on the bot loop, never from the HTTP thread
+                self.loop.call_soon_threadsafe(self.apply_next_arm, "pin")
+            except Exception:
+                pass
+        return pinned
+
     def set_team(self, team: Optional[str]) -> None:
         team = (team or "").strip() or None
         if team is not None and team not in self.ai_pool:
@@ -588,6 +620,9 @@ class BotController:
             # 2026-09-01: the site's official numbers + the serve-side bandit's evidence
             "official": self.official,
             "bandit": (self.bandit.summary() if self.bandit is not None else None),
+            # 2026-09-02: serve mode (frozen pin vs explore); bandit_on = the panel control is live
+            "bandit_on": self.bandit is not None,
+            "bandit_pin": (self.bandit.pinned if self.bandit is not None else None),
         }
 
     def stop(self) -> None:
@@ -654,6 +689,8 @@ def _make_handler(ctrl: BotController):
                         ctrl.set_auto_accept(bool(body.get("auto_accept")))
                     if "auto_close" in body:
                         ctrl.set_auto_close(bool(body.get("auto_close")))
+                    if "bandit_pin" in body:       # "" / null = unpin (explore)
+                        ctrl.set_bandit_pin(body.get("bandit_pin"))
                 elif p == "/api/team":
                     ctrl.set_team(body.get("team"))
                 elif p == "/api/format":
@@ -716,7 +753,8 @@ def start_control_ui(*, page, host, tally: dict, ai_pool: list, fmt: str, userna
                 ctrl.log(f"bandit: observe failed (non-fatal): {exc!r}")
             if name:
                 s = ctrl.bandit.stats[name]
-                line += f"  → arm {name}: {s.wins}W-{s.losses}L, mean Δ {s.mean_delta():+.1f} over {s.n}"
+                pin = " [pinned]" if ctrl.bandit.pinned == name else ""
+                line += f"  → arm {name}{pin}: {s.wins}W-{s.losses}L, mean Δ {s.mean_delta():+.1f} over {s.n}"
                 if s.retired:
                     line += "  ⛔ RETIRED"
         ctrl.log(line)
@@ -827,6 +865,9 @@ _PANEL_HTML = """<!DOCTYPE html>
         <label for="autoAccept">Auto-accept incoming challenges</label></div>
       <div class="toggle"><input type="checkbox" id="autoClose">
         <label for="autoClose">Auto-close finished battle tabs</label></div>
+      <label class="fld" style="margin-top:8px">Serve mode</label>
+      <select id="banditPin" disabled><option value="">Bandit — explore (per-game arm choice)</option></select>
+      <div class="muted" id="banditPinNote"></div>
       <div class="muted">Games finished while a run is active count toward its target —
         turn auto-accept off for an exact rated-only count. Tabs close (and the next search
         starts) only after the rating exchange confirms the battle is done.</div>
@@ -903,9 +944,21 @@ function render(s) {
         ` · ${of.w}W-${of.l}L lifetime (as of ${s.official.fetched})`
       : (s.official && s.official.error ? 'Site: rating poll failed' : '');
   const arms = s.bandit || [];
+  // 2026-09-02: serve-mode pin (frozen = one arm every game) — options come from the arm list
+  const pinSel = $('banditPin');
+  if (arms.length && pinSel.options.length < arms.length + 1) {
+    pinSel.innerHTML = '<option value="">Bandit — explore (per-game arm choice)</option>' +
+      arms.map(a => `<option value="${a.name}">Frozen: ${a.name}${a.incumbent ? ' (incumbent)' : ''}</option>`).join('');
+  }
+  pinSel.disabled = !s.bandit_on;
+  if (document.activeElement !== pinSel) pinSel.value = s.bandit_pin || '';
+  $('banditPinNote').textContent = !s.bandit_on
+      ? 'Bandit OFF (VD_BANDIT=0 / no config) — the deployed .env stack plays every game.'
+      : (s.bandit_pin ? `FROZEN: ${s.bandit_pin} plays every game from the next battle (still credited to its arm; bench rows carry pinned).`
+                      : 'Exploring: warm-up, then Thompson picks the arm per game.');
   $('bandit').textContent = arms.length
-      ? 'Bandit (◀ = playing, * = incumbent): ' + arms.map(a =>
-          `${a.name}${a.incumbent ? '*' : ''}${a.current ? ' ◀' : ''} ${a.wins}W-${a.losses}L` +
+      ? 'Bandit (◀ = playing, * = incumbent, 📌 = pinned): ' + arms.map(a =>
+          `${a.name}${a.incumbent ? '*' : ''}${a.pinned ? ' 📌' : ''}${a.current ? ' ◀' : ''} ${a.wins}W-${a.losses}L` +
           ` Δ${a.mean_delta >= 0 ? '+' : ''}${a.mean_delta}${a.retired ? ' RETIRED' : ''}`).join(' · ')
       : '';
   $('challengeOut').textContent = s.challenge_out ? ('outgoing challenge: ' + s.challenge_out) : '';
@@ -937,6 +990,7 @@ $('challengeBtn').onclick = () => api('/api/challenge',
 $('cancelChallengeBtn').onclick = () => api('/api/challenge/cancel');
 $('autoAccept').onchange = () => api('/api/options', {auto_accept: $('autoAccept').checked});
 $('autoClose').onchange = () => api('/api/options', {auto_close: $('autoClose').checked});
+$('banditPin').onchange = () => api('/api/options', {bandit_pin: $('banditPin').value});
 $('teamSel').onchange = () => api('/api/team', {team: $('teamSel').value});
 $('fmtSel').onchange = () => api('/api/format', {format: $('fmtSel').value});
 

@@ -53,10 +53,23 @@ _CHAMPIONS_DIR = _REPO / "teams" / "Champions"
 # .env keys the browser may SEE (never PS_PASSWORD) and the subset it may WRITE.
 _ENV_READ_KEYS = ("PS_USERNAME", "PS_AVATAR", "PS_CLIENT_URL", "VDANCE_BATTLE_FORMAT",
                   "VD_BATTLE_CKPT", "VD_TP_CKPT", "VD_DEFAULT_TEAM", "VD_AUTO_CLOSE_ROOMS",
-                  "VD_SERVE_TAU", "VD_SERVE_TOP_P")
+                  "VD_SERVE_TAU", "VD_SERVE_TOP_P",
+                  # 2026-09-02 serve mode: bandit on/off + the launch-time pin (frozen arm)
+                  "VD_BANDIT", "VD_BANDIT_PIN")
 _ENV_WRITE_KEYS = ("VDANCE_BATTLE_FORMAT", "VD_BATTLE_CKPT", "VD_TP_CKPT",
                    "VD_DEFAULT_TEAM", "VD_AUTO_CLOSE_ROOMS",
-                   "VD_SERVE_TAU", "VD_SERVE_TOP_P")
+                   "VD_SERVE_TAU", "VD_SERVE_TOP_P",
+                   "VD_BANDIT", "VD_BANDIT_PIN")
+
+def _bandit_arm_names() -> list:
+    """Arm names from config/serve_bandit.json (names only — the launch-default pin picker; the
+    bot validates checkpoints itself at launch). [] when the config is absent/unreadable."""
+    try:
+        cfg = json.loads((_REPO / "config" / "serve_bandit.json").read_text(encoding="utf-8"))
+        return [str(a["name"]) for a in (cfg.get("arms") or []) if a.get("name")]
+    except Exception:
+        return []
+
 
 # well-known local services (display + start/stop for the two datatools servers)
 _SERVICES = {
@@ -764,7 +777,8 @@ def _status() -> dict:
             "teams": _discover_teams(fmt), "ckpts": inv, "parity": parity,
             "services": services, "exploit": _exploit_summary(), "logs": _recent_logs(),
             "jobs": _JOBS.list(), "formats_full": _known_formats_full(),
-            "editable_env": list(_ENV_WRITE_KEYS)}
+            "editable_env": list(_ENV_WRITE_KEYS),
+            "bandit_arms": _bandit_arm_names()}
 
 
 def _registry_public() -> list:

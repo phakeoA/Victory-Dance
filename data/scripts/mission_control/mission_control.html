@@ -466,6 +466,7 @@ function renderDeploy() {
     else if (kind === "tp") opts = S.ckpts.tp.map(r => r.path);
     else if (kind === "team") opts = S.teams;
     else if (kind === "format") opts = S.formats;
+    else if (kind === "pin") opts = ["explore", ...(S.bandit_arms || [])];   // serve-mode pin at launch
     else opts = ["0", "1"];
     const cur = S.env[key] || "";
     const sel = `<select id="env-${key}">` + (opts.includes(cur) ? "" :
@@ -484,6 +485,12 @@ function renderDeploy() {
         ${envRow("VD_DEFAULT_TEAM", "team")}
         ${envRow("VDANCE_BATTLE_FORMAT", "format")}
         ${envRow("VD_AUTO_CLOSE_ROOMS", "bool")}
+        ${envRow("VD_BANDIT", "bool")}
+        ${envRow("VD_BANDIT_PIN", "pin")}
+        <div class="note">Serve mode at launch: VD_BANDIT=0 = bandit off (the .env stack plays every
+        game); VD_BANDIT_PIN = an arm name → FROZEN (that arm every game), "explore" → the bandit
+        picks per game, unset → the pin saved in artifacts/bandit/&lt;format&gt;.json. Runtime
+        switching lives in the Online-bot tab (next game, no restart).</div>
         <div class="note">⚠ Keep .env == model_io defaults (D6 parity — the Overview card must show
         ✓✓). Bo3 venues override TP per-run with --tp-ckpt checkpoints_setctx instead of editing
         this. Rollback paths are documented in the model_io.py header.</div></div>
@@ -653,6 +660,11 @@ function renderOnline() {
         `<option value="${esc(f.id)}" ${f.id === curFmt ? "selected" : ""}>${esc(f.name)}</option>`).join("");
       const teamOpts = `<option value="">— Teambuilder / default —</option>` +
         ((S && S.teams) || []).map(t => `<option>${esc(t)}</option>`).join("");
+      // 2026-09-02: serve mode at launch (VD_BANDIT_PIN) — explore, or one frozen arm every game
+      const pinCur = (S && S.env && S.env.VD_BANDIT_PIN) || "explore";
+      const pinOpts = ["explore", ...((S && S.bandit_arms) || [])].map(n =>
+        `<option value="${esc(n)}" ${n === pinCur ? "selected" : ""}>` +
+        `${n === "explore" ? "Bandit — explore (per-game arm choice)" : "Frozen: " + esc(n)}</option>`).join("");
       p.innerHTML = `
         <h2 class="sec">Online bot — not running</h2>
         <div class="muted" style="max-width:820px;line-height:1.6">Set the launch options here, then
@@ -665,6 +677,8 @@ function renderOnline() {
           <div class="note" id="ob-launch-fmt-note"></div>
           <label class="fld">Team pin (optional)</label>
           <select id="ob-launch-team">${teamOpts}</select>
+          <label class="fld">Serve mode at launch <span class="muted">(VD_BANDIT_PIN — saved to .env; unset keeps the last pin)</span></label>
+          <select id="ob-launch-pin">${pinOpts}</select>
           <div class="chk"><input type="checkbox" id="ob-launch-dossier" checked>
             <label for="ob-launch-dossier">--dossier (S1 belief warm-start)</label></div>
           <div class="chk"><input type="checkbox" id="ob-launch-adapt" checked>
@@ -677,12 +691,20 @@ function renderOnline() {
           automatically (polling…).</div>`;
       $("ob-launch-fmt").onchange = onLaunchFmtChange;
       $("ob-launch-btn").onclick = launchOnline;
+      $("ob-launch-pin").onchange = async () => {
+        await api("/api/env", { key: "VD_BANDIT_PIN", value: $("ob-launch-pin").value });
+        toast("VD_BANDIT_PIN saved — applies on launch (explore = the bandit picks per game)");
+      };
       return;
     }
     const tOpts = `<option value="">— Teambuilder / default —</option>` +
       (OB.teams || []).map(t => `<option ${t === OB.team_pin ? "selected" : ""}>${esc(t)}</option>`).join("");
     const fmts = (OB.formats && OB.formats.length) ? OB.formats : (OB.format ? [OB.format] : []);
     const fOpts = fmts.map(f => `<option ${f === OB.format ? "selected" : ""}>${esc(f)}</option>`).join("");
+    // 2026-09-02: serve mode (runtime) — explore, or one FROZEN arm every game from the next battle
+    const pinLive = `<option value="">Bandit — explore (per-game arm choice)</option>` +
+      (OB.bandit || []).map(a => `<option value="${esc(a.name)}" ${OB.bandit_pin === a.name ? "selected" : ""}>` +
+        `Frozen: ${esc(a.name)}${a.incumbent ? " (incumbent)" : ""}</option>`).join("");
     p.innerHTML = `
       <h2 class="sec">Online bot — live control <span class="muted" id="ob-hdr"></span></h2>
       <div class="cards">
@@ -707,6 +729,9 @@ function renderOnline() {
             <label for="ob-aa">Auto-accept incoming challenges</label></div>
           <div class="chk"><input type="checkbox" id="ob-ac">
             <label for="ob-ac">Auto-close finished battle tabs</label></div>
+          <label class="fld" style="margin-top:8px">Serve mode <span class="muted">(applies from the next game)</span></label>
+          <select id="ob-pin" ${OB.bandit_on ? "" : "disabled"}>${pinLive}</select>
+          <div class="muted" id="ob-pin-note"></div>
           <div class="stat" style="margin-top:10px"><span>Rating <b id="ob-rating">—</b></span>
             <span>Session peak <b id="ob-peak">—</b></span>
             <span>Session <b id="ob-tally">0W-0L</b></span>
@@ -729,6 +754,7 @@ function renderOnline() {
     $("ob-chal-x").onclick = () => onlineAction("/challenge/cancel");
     $("ob-aa").onchange = () => onlineAction("/options", { auto_accept: $("ob-aa").checked });
     $("ob-ac").onchange = () => onlineAction("/options", { auto_close: $("ob-ac").checked });
+    $("ob-pin").onchange = () => onlineAction("/options", { bandit_pin: $("ob-pin").value });
     $("ob-team").onchange = () => onlineAction("/team", { team: $("ob-team").value });
     $("ob-fmt").onchange = () => onlineAction("/format", { format: $("ob-fmt").value });
   }
@@ -756,8 +782,8 @@ function updateOnlineLive() {
       ` · ${of.w}W-${of.l}L lifetime (as of ${esc(OB.official.fetched || "")})`
       : (OB.official && OB.official.error ? "Site: rating poll failed" : ""));
   const arms = OB.bandit || [];
-  set("ob-bandit", arms.length ? "Bandit (◀ = playing, * = incumbent): " + arms.map(a =>
-      `${esc(a.name)}${a.incumbent ? "*" : ""}${a.current ? " ◀" : ""} ${a.wins}W-${a.losses}L` +
+  set("ob-bandit", arms.length ? "Bandit (◀ = playing, * = incumbent, 📌 = pinned): " + arms.map(a =>
+      `${esc(a.name)}${a.incumbent ? "*" : ""}${a.pinned ? " 📌" : ""}${a.current ? " ◀" : ""} ${a.wins}W-${a.losses}L` +
       ` Δ${a.mean_delta >= 0 ? "+" : ""}${a.mean_delta}${a.retired ? " RETIRED" : ""}`).join(" · ") : "");
   set("ob-prog", run.active ? `Run: ${run.done}/${run.target} played` + (OB.searching ? " — searching…" : "")
                             : (OB.searching ? "Searching…" : "idle"));
@@ -768,6 +794,15 @@ function updateOnlineLive() {
   const ae = document.activeElement, aa = $("ob-aa"), ac = $("ob-ac");
   if (aa && ae !== aa) aa.checked = !!OB.auto_accept;
   if (ac && ae !== ac) ac.checked = !!OB.auto_close;
+  const pin = $("ob-pin");                            // 2026-09-02 serve mode (frozen pin vs explore)
+  if (pin) {
+    pin.disabled = !OB.bandit_on;
+    if (ae !== pin) pin.value = OB.bandit_pin || "";
+    set("ob-pin-note", !OB.bandit_on
+      ? "Bandit OFF (VD_BANDIT=0 / no config) — the deployed .env stack plays every game."
+      : (OB.bandit_pin ? `FROZEN: ${OB.bandit_pin} plays every game from the next battle (still credited to its arm; bench rows carry pinned).`
+                       : "Exploring: warm-up, then Thompson picks the arm per game."));
+  }
   const lg = $("oblog");
   if (lg) {
     const atEnd = lg.scrollTop + lg.clientHeight >= lg.scrollHeight - 8;
