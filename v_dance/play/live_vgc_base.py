@@ -354,12 +354,20 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
                             "(forced-move + free-slot mask desync; model not driving).",
                             battle.turn, battle.battle_tag, fa_n)
                 self._source_counts["retry_default"] += 1
+                self._think_note(battle, f"⚠ forced-move turn rejected {fa_n}× → '/choose default' "
+                                         f"(the net is NOT driving this turn)")
                 return DefaultBattleOrder()
             g0, g1 = self._select_gimmicks(battle, state_in, action_s0, action_s1)
             order = self._forced_aware_double_order(battle, action_s0, action_s1, g0, g1,
                                                     opp_present_recon)
-            self._source_counts["forced_default" if isinstance(order, DefaultBattleOrder)
-                                else "forced_partial"] += 1
+            forced_kind = ("forced_default" if isinstance(order, DefaultBattleOrder)
+                           else "forced_partial")
+            self._source_counts[forced_kind] += 1
+            self._think_note(battle, "⚠ an active slot has no codec-expressible action (Struggle / "
+                                     "recharge / locked move) → "
+                             + ("'/choose default' for the whole turn (the net is NOT driving)"
+                                if forced_kind == "forced_default" else
+                                "that slot plays its forced move; the partner keeps the net's order"))
             return order
 
         # ── Retry exploration ───────────────────────────────────────────────
@@ -388,10 +396,17 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
                             self._last_error.get(battle.battle_tag, "?"))
                 self._source_counts["retry_default"] += 1
                 self._discard_rl_decision(battle, "turn")   # default executes, not the model
+                self._think_note(battle, f"⚠ Showdown rejected the net's order {tried['n']}× "
+                                         f"(reason={self._last_error.get(battle.battle_tag, '?')!r}) "
+                                         f"→ '/choose default' — the net is NOT driving this turn")
                 return DefaultBattleOrder()
             action_s0 = self._fresh_legal(battle, 0, tried[0], action_s0)
             action_s1 = self._fresh_legal(battle, 1, tried[1], action_s1)
             source = "retry"
+            self._think_note(battle, f"⚠ Showdown REJECTED the net's order "
+                                     f"(reason={self._last_error.get(battle.battle_tag, '?')!r}) → "
+                                     f"perturbed to fresh legal actions ({action_s0}, {action_s1}); "
+                                     f"src=retry — NOT the net's pick")
             # A retry means Showdown REJECTED the model's order — surface it loudly
             # (the bench/disabled-move mask fixes should make this ~never fire; if
             # it does it's an unmodelled lock to investigate, NOT normal play).
@@ -1021,6 +1036,19 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
             d.pop(t, None)                              # plain tag-keyed entries
             for k in [k for k in d if isinstance(k, tuple) and k and k[0] == t]:
                 d.pop(k, None)                          # (tag, turn, …)-keyed entries
+
+    # ── 2026-09-02 (USER): "what the nets are thinking" — one-line notes ──────
+    def _think_note(self, battle, text: str) -> None:
+        """A note for the thought feed (the Online tab's narration): why the net is NOT driving
+        this decision (a Showdown rejection, a forced move, a missing model). No-op without an
+        installed feed (``self._thoughts``); never raises into play."""
+        if getattr(self, "_thoughts", None) is None:
+            return
+        try:
+            from v_dance.play.thought_feed import note
+            note(self, battle, text)
+        except Exception:
+            pass
 
     def _record_rl_decision(self, battle, state_vec, action_s0, action_s1,
                             gimmick_s0, gimmick_s1, source, decision_type):

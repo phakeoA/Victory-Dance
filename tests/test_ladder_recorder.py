@@ -185,3 +185,16 @@ def test_banner_summary_and_terminal_helper(tmp_path: Path):
     assert terminal_type_for(True, False) == "win" and terminal_type_for(False, True) == "loss"
     assert terminal_type_for(None, None) == "draw"
     rec.close()
+
+
+def test_private_room_suffix_is_stripped_from_the_sealed_battle_id(tmp_path: Path):
+    """Live check 09-02: a private game's poke-env tag carries the room password suffix; the bench
+    rows and the bandit key by the BASE tag, so the trajectory must too."""
+    p = _player()
+    rec, _ = _recorder(tmp_path, p)
+    full = f"battle-{FMT}-4242-4mdjaya3vkjdrkm917wb3jfjbkg2q6qpw"
+    rec.record(_battle(full), _state(1), 0, 0, 0, 0, "model", "turn")
+    t = rec.finish(full, _battle(full, won=True), won=True)
+    assert t.meta.battle_id == f"battle-{FMT}-4242"
+    assert LadderRecorder.base_tag(">" + full) == f"battle-{FMT}-4242"
+

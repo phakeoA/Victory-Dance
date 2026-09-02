@@ -85,11 +85,19 @@ class LadderRecorder:
                                    build_gimmick_legal_mask)
         return self._mask_builders
 
+    @staticmethod
+    def base_tag(tag: str) -> str:
+        """``battle-<fmt>-<id>`` without a private-room password suffix — the id the bench rows and
+        the bandit use, so trajectories join on the same key (live check 09-02: one private game
+        sealed under its 33-char suffixed id)."""
+        parts = (tag or "").lstrip(">").split("-")
+        return "-".join(parts[:3]) if len(parts) >= 3 else (tag or "")
+
     def _collector_for(self, battle) -> TrajectoryCollector:
-        tag = battle.battle_tag
+        tag = battle.battle_tag                     # keyed by the tag the hooks see (suffix included)
         c = self._collectors.get(tag)
         if c is None:
-            c = TrajectoryCollector(tag, getattr(battle, "player_role", None) or "p?")
+            c = TrajectoryCollector(self.base_tag(tag), getattr(battle, "player_role", None) or "p?")
             self._collectors[tag] = c
         return c
 

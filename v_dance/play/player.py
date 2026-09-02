@@ -41,6 +41,11 @@ from v_dance.encoders.state_encoder import (
     ACTIONS_PER_SLOT, STATE_DIM, SWITCH_OFFSET, GIMMICK_NONE, GIMMICK_MEGA,
 )
 import v_dance.play.model_io as _M   # dict-checkpoint load + mask-aware logit decode (#13)
+# 2026-09-02 (USER): "what the nets are thinking" — module-level taps (torch-free); every one is
+# a no-op without an installed feed (``player._thoughts``), reads the decode stashes model_io
+# already filled (NO extra forward) and never raises into play. Module functions, not methods, so
+# the stub-``self`` tests of the decision functions stay byte-identical.
+import v_dance.play.thought_feed as _TF
 
 log = logging.getLogger(__name__)
 
@@ -248,9 +253,12 @@ class VGCPlayer(VGCPlayerBase):
         if self._model is None or not _TORCH_AVAILABLE:
             log.error("VGCPlayer has NO model loaded — cannot drive this turn "
                       "(NOT playing random; check the checkpoint path).")
+            _TF.note(self, battle, "⚠ NO MODEL loaded — deterministic first legal action "
+                                   "(src=no_model); the net is NOT driving")
             return self._first_legal(battle, 0), self._first_legal(battle, 1), "no_model"
 
         # ── Value-head readout (#2): log the win-probability for this board ──────
+        wp = None
         if _M.value_trained(self._model):
             try:
                 wp = _M.value_logit(self._model, state_vec, self._device)
@@ -301,6 +309,9 @@ class VGCPlayer(VGCPlayerBase):
                     temperature=self._temperature, top_p=self._top_p, rng=self._rng,
                     bias0=bias0, bias1=bias1, pair_futility=pair_hook,
                 )
+            # 2026-09-02 (USER): "what the nets are thinking" — narrate the decode just made
+            # (reads model_io.LAST_DECODE; no extra forward; no-op without an installed feed).
+            _TF.tap_turn(self, battle, a0, a1, wp, decode=_M.LAST_DECODE)
             # #10: stash the masks the model was sampled under (mask1 carries the cross-slot switch dedup)
             # so the recorded behaviour mask matches the sampling distribution.
             if getattr(self, "_record_masks", False):
@@ -316,6 +327,8 @@ class VGCPlayer(VGCPlayerBase):
             log.error("MODEL INFERENCE FAILED (%s) — using a deterministic legal "
                       "action (NOT random) so the failure stays visible.",
                       exc, exc_info=True)
+            _TF.note(self, battle, f"⚠ MODEL INFERENCE FAILED ({exc!r}) — deterministic first "
+                                   f"legal action (src=model_error); the net is NOT driving")
             return self._first_legal(battle, 0), self._first_legal(battle, 1), "model_error"
 
     def _select_gimmicks(self, battle, state_vec, a0, a1):
@@ -372,6 +385,8 @@ class VGCPlayer(VGCPlayerBase):
                 except Exception:
                     margin0, margin1 = 1.0, 0.0      # any error → keep slot 0's gimmick
                 out[1 if margin0 >= margin1 else 0] = GIMMICK_NONE
+            _TF.tap_gimmick(self, battle, out, glog, gmask_fn=build_gimmick_legal_mask,
+                            mega=GIMMICK_MEGA, none=GIMMICK_NONE)   # thought feed (no-op without it)
             return out[0], out[1]
         except Exception as exc:
             log.warning("gimmick selection failed (%s) — no gimmick.", exc)
@@ -434,9 +449,12 @@ class VGCPlayer(VGCPlayerBase):
                 return None         # nothing to replace → defer (defensive; caller gates on any(force))
             if getattr(self, "_record_masks", False):
                 self._sampling_masks[(battle.battle_tag, "replacement")] = (rep_masks[0], rep_masks[1])
+            _TF.tap_replacement(self, battle, logits, rep_masks, out, softmax=_M._masked_softmax)
             return out[0], out[1], "forced_switch_model"
         except Exception as exc:
             log.warning("Model replacement selection failed (%s) — using random.", exc)
+            _TF.note(self, battle, f"⚠ replacement: model selection FAILED ({exc!r}) → RANDOM "
+                                   f"replacement; the net is NOT driving")
             return None
 
     # ── Team chooser ──────────────────────────────────────────────────────────
@@ -453,6 +471,8 @@ class VGCPlayer(VGCPlayerBase):
             self._tp_source["heuristic"] += 1
             log.info("Team-preview [%s]: no chooser model — HEURISTIC (first-%d).",
                      battle.battle_tag, n)
+            _TF.note(self, battle, f"TEAM PREVIEW: no chooser model → HEURISTIC first-{n} "
+                                   f"(the TP net is NOT driving)")
             return _heuristic_team_order(battle)[:n]
 
         try:
@@ -522,12 +542,18 @@ class VGCPlayer(VGCPlayerBase):
                 log.info("Team-preview [%s] NET drove: bring=%s leads=%s (vs opp %s)",
                          battle.battle_tag, brought, brought[:lead_k],
                          [s for s in opp_species if s][:6])
+                _TF.tap_tp(self, battle, our_species, opp_species, picks, lead_k,
+                           stash=_M.LAST_TP)                            # thought feed
                 return picks
             log.warning("Team-preview [%s] NET produced invalid indices %s — "
                         "FALLING BACK to heuristic.", battle.battle_tag, order)
+            _TF.note(self, battle, f"⚠ TEAM PREVIEW: the TP net produced invalid indices "
+                                   f"{order} → HEURISTIC first-{n}")
         except Exception as exc:
             log.warning("Team-preview [%s] NET inference FAILED (%s) — FALLING BACK "
                         "to heuristic.", battle.battle_tag, exc)
+            _TF.note(self, battle, f"⚠ TEAM PREVIEW: TP net inference FAILED ({exc!r}) → "
+                                   f"HEURISTIC first-{n}")
 
         self._tp_source["heuristic"] += 1
         return _heuristic_team_order(battle)[:n]

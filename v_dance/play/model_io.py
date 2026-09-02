@@ -109,6 +109,23 @@ def masked_sample(
 # ── Battle policy (two-head BC) ───────────────────────────────────────────────
 _PAIR_ECHO_DONE = False    # 2b: the pair-decode load echo prints once per process
 
+# ── 2026-09-02 (USER, "what the nets are thinking" panel): last-decode stashes ─────────────
+# The numbers the decode ACTUALLY used (masked softmax of the logits each slot was sampled from,
+# the 2b decode order + confidence, the effective futility drops, τ / top-p) and the last
+# team-preview scoring, stashed for the thought-feed narration in VGCPlayer. Decisions are
+# synchronous on the bot loop (arm_scope), so one module slot suffices. Read-only for play:
+# nothing here feeds back into a decision, and a stash failure is swallowed.
+LAST_DECODE: dict = {}
+LAST_TP: dict = {}
+
+
+def _stash(target: dict, **kw) -> None:
+    try:
+        target.clear()
+        target.update(kw)
+    except Exception:
+        pass
+
 
 def load_bc_policy(path, device: str = "cpu", _ckpt=None):
     """Rebuild the AttnBCPolicy from a dict checkpoint and load its weights.
@@ -299,8 +316,13 @@ def bc_action_indices(
         l0 = l0 + np.asarray(bias0, dtype=l0.dtype)
     if bias1 is not None:
         l1 = l1 + np.asarray(bias1, dtype=l1.dtype)
-    return (masked_sample(l0, mask0, temperature, top_p, rng),
-            masked_sample(l1, mask1, temperature, top_p, rng))
+    a0 = masked_sample(l0, mask0, temperature, top_p, rng)
+    a1 = masked_sample(l1, mask1, temperature, top_p, rng)
+    _stash(LAST_DECODE, pair=False, first=None, conf=None, cond_on=None,
+           probs=(_masked_softmax(l0, mask0).tolist(), _masked_softmax(l1, mask1).tolist()),
+           masks=(list(mask0), list(mask1)), picks=(a0, a1),
+           tau=float(temperature or 0.0), top_p=float(top_p), dropped=())
+    return a0, a1
 
 
 def _pair_decode_indices(
@@ -329,8 +351,13 @@ def _pair_decode_indices(
     a_first = masked_sample(logits[first], masks[first], temperature, top_p, rng)
     second = 1 - first
     if a_first is None:                       # nothing to condition on → zero-cond second
-        return ((None, masked_sample(l1, mask1, temperature, top_p, rng)) if first == 0
-                else (masked_sample(l0, mask0, temperature, top_p, rng), None))
+        a_other = masked_sample(logits[second], masks[second], temperature, top_p, rng)
+        picks = (None, a_other) if first == 0 else (a_other, None)
+        _stash(LAST_DECODE, pair=True, first=first, conf=(conf0, conf1), cond_on=None,
+               probs=(_masked_softmax(l0, mask0).tolist(), _masked_softmax(l1, mask1).tolist()),
+               masks=(list(mask0), list(mask1)), picks=picks,
+               tau=float(temperature or 0.0), top_p=float(top_p), dropped=())
+        return picks
     onehot = torch.zeros(int(getattr(model, "action_dim")), dtype=torch.float32)
     onehot[int(a_first)] = 1.0
     out = _policy_forward(model, state_vec, device,
@@ -340,6 +367,7 @@ def _pair_decode_indices(
     if biases[second] is not None:
         l_pair = l_pair + np.asarray(biases[second], dtype=l_pair.dtype)
     mask_second = masks[second]
+    dropped: set = set()
     if pair_futility is not None:
         # Joint futility (2026-07-24 batch): the caller's game-knowledge rule drops
         # second-slot actions PROVABLY wasted given the first slot's pick (e.g.
@@ -353,8 +381,20 @@ def _pair_decode_indices(
             trimmed = [bool(ok) and (i not in dropped) for i, ok in enumerate(mask_second)]
             if any(trimmed):
                 mask_second = trimmed
+            else:
+                dropped = set()                   # fail-open: nothing was actually dropped
     a_second = masked_sample(l_pair, mask_second, temperature, top_p, rng)
-    return (a_first, a_second) if first == 0 else (a_second, a_first)
+    picks = (a_first, a_second) if first == 0 else (a_second, a_first)
+    probs, smasks = [None, None], [None, None]
+    probs[first] = _masked_softmax(logits[first], masks[first]).tolist()
+    probs[second] = _masked_softmax(l_pair, mask_second).tolist()
+    smasks[first], smasks[second] = list(masks[first]), list(mask_second)
+    _stash(LAST_DECODE, pair=True, first=first, conf=(conf0, conf1), cond_on=int(a_first),
+           probs=tuple(probs), masks=tuple(smasks), picks=picks,
+           tau=float(temperature or 0.0), top_p=float(top_p),
+           dropped=tuple(sorted(int(i) for i in dropped            # only drops that were legal
+                                if i < len(masks[second]) and masks[second][i])))
+    return picks
 
 
 def head_logits(
@@ -762,6 +802,9 @@ def _set_head_order(model, oi, of, pi, pf, aff_t, valid: int, bring_k: int, lead
     if eps <= 0:                                   # default: exact argmax, original path
         brought = list(subsets[int(np.argmax(scores))])
         leads = sorted(brought, key=lambda i: -ll[i])[:lead_k]  # lead decode unchanged (within bring)
+        _stash(LAST_TP, path="set_head", subsets=[list(s) for s in subsets],
+               scores=[float(x) for x in scores], lead_logits=[float(x) for x in ll],
+               set=list(brought), leads=list(leads), eps=0.0, set_dev=False, lead_dev=False)
         return (leads + [b for b in brought if b not in leads])[:n], True
     si, dev_s = _near_tie_sample(scores, eps)
     brought = list(subsets[si])
@@ -772,6 +815,10 @@ def _set_head_order(model, oi, of, pi, pf, aff_t, valid: int, bring_k: int, lead
     if dev_s or dev_l:
         print(f"[tp] near-tie deviation (eps={eps}): set={'+'.join(map(str, brought))} "
               f"leads={'+'.join(map(str, leads))} (set_dev={dev_s} lead_dev={dev_l})")
+    _stash(LAST_TP, path="set_head", subsets=[list(s) for s in subsets],
+           scores=[float(x) for x in scores], lead_logits=[float(x) for x in ll],
+           set=list(brought), leads=list(leads), eps=float(eps),
+           set_dev=bool(dev_s), lead_dev=bool(dev_l))
     return (list(leads) + [b for b in brought if b not in leads])[:n], True
 
 
@@ -807,6 +854,9 @@ def _joint_bring_order(model, oi, of, pi, pf, aff_t, valid: int, bring_k: int, l
     best = int(np.argmax(scores))
     brought = list(subsets[best])
     leads = sorted(brought, key=lambda i: -ll[best, i])[:lead_k]
+    _stash(LAST_TP, path="joint", subsets=[list(s) for s in subsets], scores=list(scores),
+           lead_logits=[float(x) for x in ll[best]], set=list(brought), leads=list(leads),
+           eps=0.0, set_dev=False, lead_dev=False)
     return (leads + [b for b in brought if b not in leads])[:n], True
 
 
@@ -840,6 +890,7 @@ def team_order(
     build via ``OwnBuildBelief`` (p=1.0 marginals). IGNORED for v6/v7 checkpoints —
     they serve byte-identically through the frozen extractor.
     """
+    _stash(LAST_TP)                               # a fresh preview: no stale narration
     valid = min(len(our_species), 6)
     if valid == 0:
         return list(range(n))
@@ -917,4 +968,6 @@ def team_order(
     brought = by_bring[: min(bring_k, valid, n)]
     leads = sorted(brought, key=lambda i: -lead[i])[:lead_k]
     order = leads + [b for b in brought if b not in leads]
+    _stash(LAST_TP, path="greedy", bring_logits=[float(x) for x in bring[:valid]],
+           lead_logits=[float(x) for x in lead[:valid]], set=list(brought), leads=list(leads))
     return order[:n]

@@ -248,6 +248,13 @@ REJOINING: set = set()
 RATING_CHANGE_HOOK = None
 _RATING_CHANGE_RE = re.compile(r"'s rating: (\d+)\D+?(\d+)")
 
+# 2026-09-02 (USER: matchup tables + "what the nets are thinking" in the Online tab):
+# GAME_DONE_HOOK(tag, battle, bench_row) fires once per FINISHED battle from the online harness's
+# bench recorder, AFTER the row + dossier are written, while the battle object is still in
+# ``host.player._battles`` (opponent mons seen / items / abilities / result). The control panel
+# chains onto it (prev-hook pattern). None = off; the local harness never sets it.
+GAME_DONE_HOOK = None
+
 
 def _parse_rating_changes(payload: str) -> list:
     """[(username, old, new)] for every ``|raw|…'s rating: OLD &rarr; <strong>NEW</strong>…``

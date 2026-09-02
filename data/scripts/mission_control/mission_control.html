@@ -61,6 +61,27 @@
   .stat { display:flex; justify-content:space-between; gap:8px; padding:3px 0;
           border-bottom:1px dashed #2c3f52; font-size:9pt; }
   .stat b { color:#e8f1f8; text-align:right; word-break:break-all; }
+  /* 2026-09-02 (USER): Online tab — cards fill the row (auto-FIT, no empty third track) and the
+     stat strip wraps BETWEEN items, never inside one ('18W-12L' used to split at the 1|8). */
+  .cards.fit { grid-template-columns:repeat(auto-fit,minmax(340px,1fr)); }
+  .obstat { display:flex; flex-wrap:wrap; gap:5px 18px; padding:3px 0; font-size:9pt; color:#c4d3e0; }
+  .obstat span { white-space:nowrap; }
+  .obstat b { color:#e8f1f8; white-space:nowrap; word-break:normal; }
+  /* 2026-09-02 (USER): matchup tables + the "what the nets are thinking" feed */
+  .muwrap { overflow-x:auto; }
+  table.mu { font-size:8.5pt; }
+  table.mu th, table.mu td { padding:3px 6px; white-space:nowrap; }
+  table.mu td.n { text-align:right; }
+  table.mu td:nth-child(5), table.mu td:nth-child(6) { white-space:normal; }   /* item / ability may wrap */
+  .mu .seen { color:#8ae0ae; }
+  .mu .belief { color:#9db0c0; font-style:italic; }
+  #ob-think { height:340px; overflow-y:auto; background:#141d25; border:1px solid #2c3f52;
+              border-radius:6px; padding:8px 10px; font:8.5pt Consolas,monospace; white-space:pre-wrap;
+              color:#b9cfe2; margin-top:6px; }
+  #ob-think .bh { color:#9fc3e3; font-weight:bold; margin-top:8px; }
+  #ob-think .te { margin-top:4px; }
+  #ob-think .ts { color:#7f93a5; }
+  #ob-think .warn { color:#ffb08a; }
   .dot { width:9px; height:9px; border-radius:50%; display:inline-block; margin-right:6px; }
   .dot.up { background:#5cab3c; box-shadow:0 0 4px #5cab3c; }
   .dot.dn { background:#7a8894; }
@@ -718,7 +739,7 @@ function renderOnline() {
         `Frozen: ${esc(a.name)}${a.incumbent ? " (incumbent)" : ""}</option>`).join("");
     p.innerHTML = `
       <h2 class="sec">Online bot — live control <span class="muted" id="ob-hdr"></span></h2>
-      <div class="cards">
+      <div class="cards fit">
         <div class="card"><h3>Ladder run</h3>
           <label class="fld">Team</label><select id="ob-team">${tOpts}</select>
           <label class="fld">Format <span class="muted">(saved to .env — applies on the NEXT launch)</span></label>
@@ -746,7 +767,7 @@ function renderOnline() {
           <label class="fld" style="margin-top:8px">Games at once <span class="muted">(lanes — Showdown allows 5 per account; next search)</span></label>
           <select id="ob-lanes">${["1", "2", "3", "4", "5"].map(n =>
             `<option value="${n}" ${String(OB.lanes || 1) === n ? "selected" : ""}>${n}</option>`).join("")}</select>
-          <div class="stat" style="margin-top:10px"><span>Rating <b id="ob-rating">—</b></span>
+          <div class="obstat" style="margin-top:10px"><span>Rating <b id="ob-rating">—</b></span>
             <span>Session peak <b id="ob-peak">—</b></span>
             <span>Session <b id="ob-tally">0W-0L</b></span>
             <span>Live <b id="ob-live">0</b></span>
@@ -758,8 +779,36 @@ function renderOnline() {
           <div class="muted" id="ob-chalout" style="margin-top:5px"></div>
         </div>
       </div>
+      <div class="cards fit" style="margin-top:12px">
+        <div class="card"><h3>Session matchups <span class="muted" id="ob-mu-s-hdr"></span></h3>
+          <div class="desc">Opponent Pokémon SEEN in this bot session (the brought four) · our W-L and win %
+            in the games they appeared in · item / ability = share over the opponents who used it: revealed
+            sightings (green, "n seen") blended with the belief for the unrevealed rest (italic).</div>
+          <div class="muwrap"><table class="mu" id="ob-mu-s"><thead><tr><th>Pokémon</th><th>games</th>
+            <th>W-L</th><th>win %</th><th>item</th><th>ability</th></tr></thead><tbody></tbody></table></div>
+          <div class="muted" id="ob-mu-s-foot" style="margin-top:5px"></div>
+        </div>
+        <div class="card"><h3>Regulation matchups <span class="muted" id="ob-mu-a-hdr"></span></h3>
+          <label class="fld">Team <span class="muted">(every recorded game of this regulation with THAT team —
+            M-B/The_Big_6, M-B/maw_zard and M-A/maw_zard are separate tables)</span></label>
+          <select id="ob-mu-team"></select>
+          <div class="muwrap" style="margin-top:6px"><table class="mu" id="ob-mu-a"><thead><tr><th>Pokémon</th>
+            <th>games</th><th>W-L</th><th>win %</th><th>item</th><th>ability</th></tr></thead><tbody></tbody></table></div>
+          <div class="muted" id="ob-mu-a-foot" style="margin-top:5px"></div>
+        </div>
+      </div>
+      <div class="card" style="margin-top:12px"><h3>What the nets are thinking
+          <span class="muted">(TP net · battle net · gimmick head · value head — newest first, per battle)</span></h3>
+        <div class="row" style="margin-top:4px;align-items:center">
+          <label class="fld" style="margin:0">Battle</label>
+          <select id="ob-think-tag" style="width:auto;min-width:280px"><option value="">all live battles</option></select>
+          <span class="muted" id="ob-think-stat"></span></div>
+        <div id="ob-think"></div>
+      </div>
       <h2 class="sec">Activity</h2>
       <div id="oblog"></div>`;
+    $("ob-mu-team").onchange = () => onlineAction("/options", { matchup_team: $("ob-mu-team").value });
+    $("ob-think-tag").onchange = () => renderThoughts(OB.thoughts, OB.live || []);
     $("ob-battle").onclick = () => onlineAction("/ladder/start",
       { games: +$("ob-games").value || 1, team: $("ob-team").value });
     $("ob-stop").onclick = () => onlineAction("/ladder/stop");
@@ -775,6 +824,85 @@ function renderOnline() {
     $("ob-fmt").onchange = () => onlineAction("/format", { format: $("ob-fmt").value });
   }
   if (OB.up) updateOnlineLive();
+}
+
+/* ── 2026-09-02 (USER): matchup tables + "what the nets are thinking" ── */
+function muRows(tbody, rows) {
+  if (!tbody) return;
+  if (!rows || !rows.length) { tbody.innerHTML = `<tr><td colspan="6" class="muted">no games yet</td></tr>`; return; }
+  // item / ability cells = the BLENDED distribution (USER 09-02): revealed sightings (green, "n seen")
+  // are hard evidence for the opponents who showed them; the belief fills the unrevealed rest (italic)
+  const dist = (list) => (list && list.length) ? list.map(e =>
+      `<span class="${e.seen ? "seen" : "belief"}">${e.name === "?" ? "unknown" : esc(e.name)}` +
+      `${e.mega ? " (mega)" : ""} ${e.p}%${e.seen ? ` (${e.seen} seen)` : ""}</span>`).join(" · ") : "—";
+  // a bot started before the blend shipped sends the single-value shape — render that until its restart
+  const legacy = (name, src, n, pct, mega) => src === "seen" ? `<span class="seen">${esc(name)}${mega ? " (mega)" : ""} ×${n} seen</span>`
+               : src === "belief" ? `<span class="belief">${esc(name)}${pct != null ? " " + pct + "%" : ""} (belief)</span>` : "—";
+  tbody.innerHTML = rows.map(r => {
+    const item = r.items ? dist(r.items) : legacy(r.item, r.item_src, r.item_n, r.item_pct, false);
+    const ab = r.abilities ? dist(r.abilities) : legacy(r.ability, r.ability_src, r.ability_n, null, r.ability_mega);
+    const wp = r.win_pct == null ? "—" : r.win_pct + "%";
+    return `<tr><td>${esc(r.display || r.species)}</td><td class="n">${r.games}</td>` +
+           `<td class="n">${r.wins}-${r.losses}${r.draws ? "-" + r.draws + "D" : ""}</td><td class="n">${wp}</td>` +
+           `<td>${item}</td><td>${ab}</td></tr>`;
+  }).join("");
+}
+let muTeamsKey = "";
+function renderMatchups(m, pin) {
+  const hdrS = $("ob-mu-s-hdr"); if (!hdrS) return;
+  const set = (id, v) => { const el = $(id); if (el) el.textContent = v; };
+  if (!m) { set("ob-mu-s-hdr", "(off — VD_MATCHUPS=0)"); set("ob-mu-a-hdr", "(off)"); return; }
+  if (m.error) { set("ob-mu-s-hdr", "error: " + m.error); return; }
+  set("ob-mu-s-hdr", `· ${m.reg} · this session`);
+  muRows($("ob-mu-s").querySelector("tbody"), (m.session || {}).rows);
+  const sf = (m.session || {}).footer || {};
+  set("ob-mu-s-foot", `${sf.games || 0} game(s) · ${sf.opponents || 0} opponent(s) · ${sf.species || 0} species seen`);
+  set("ob-mu-a-hdr", `· ${m.reg} · all games · ${m.mode === "all" ? "all teams" : m.team}`);
+  const sel = $("ob-mu-team");
+  const key = (m.teams || []).map(t => t.team + ":" + t.games).join("|") + "#" + pin;
+  if (sel && key !== muTeamsKey) {
+    muTeamsKey = key;
+    sel.innerHTML = `<option value="">— follow the ladder-run team (${esc(pin || "none pinned → all teams")}) —</option>` +
+      `<option value="*">All teams</option>` +
+      (m.teams || []).map(t => `<option value="${esc(t.team)}">${esc(t.team)} (${t.games} games)</option>`).join("");
+  }
+  if (sel && document.activeElement !== sel) sel.value = m.selected || "";
+  muRows($("ob-mu-a").querySelector("tbody"), (m.alltime || {}).rows);
+  const af = (m.alltime || {}).footer || {};
+  set("ob-mu-a-foot", `${af.games || 0} game(s) · ${af.opponents || 0} opponent(s) · ${af.species || 0} species` +
+      (m.mode === "all" && af.teams && af.teams.length ? ` · teams: ${af.teams.join(", ")}` : "") +
+      (m.loaded ? ` · seeded from ${m.loaded.games} dossier game(s), +${m.loaded.live} live` : ""));
+}
+let thinkTagsKey = "";
+function renderThoughts(t, live) {
+  const box = $("ob-think"); if (!box) return;
+  const set = (id, v) => { const el = $(id); if (el) el.textContent = v; };
+  if (!t) { box.textContent = "thought feed off (VD_THOUGHT_FEED=0) or not started"; set("ob-think-stat", ""); return; }
+  const sel = $("ob-think-tag"), battles = t.battles || [];
+  const key = battles.map(b => b.tag + (b.live ? "L" : b.finished ? "F" : "")).join("|");
+  if (sel && key !== thinkTagsKey) {
+    thinkTagsKey = key;
+    const cur = sel.value;
+    sel.innerHTML = `<option value="">all live battles</option>` + battles.map(b =>
+      `<option value="${esc(b.tag)}">…${esc(b.tag.split("-").pop())} · ${b.live ? "LIVE" : b.finished ? "done" : "idle"}` +
+      ` · ${esc(b.arm || "?")} · vs ${esc(b.opponent || "?")}</option>`).join("");
+    if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
+  }
+  const want = sel ? sel.value : "";
+  set("ob-think-stat", `${t.total || 0} decision(s) narrated` + (t.failed ? ` · ${t.failed} failed` : ""));
+  const anyLive = battles.some(b => b.live);
+  const shown = battles.filter(b => want ? b.tag === want : (anyLive ? b.live : true));
+  const atTop = box.scrollTop <= 4;                 // newest first: stay pinned to the top unless scrolled
+  let html = "";
+  for (const b of shown) {
+    html += `<div class="bh">── ${esc(b.tag)} · ${b.live ? "LIVE" : b.finished ? "finished" : "idle"}` +
+            ` · arm ${esc(b.arm || "?")} · vs ${esc(b.opponent || "?")} · turn ${b.turn ?? "?"}</div>`;
+    for (const e of (t.entries || []).filter(e => e.tag === b.tag))
+      html += `<div class="te${e.kind === "note" ? " warn" : ""}"><span class="ts">${esc(e.ts)}</span> ` +
+              `${esc(e.text).replace(/\n/g, "\n    ")}</div>`;
+  }
+  box.innerHTML = html || `<span class="muted">no decisions yet — the first team preview writes the first block</span>`;
+  if (atTop) box.scrollTop = 0;
 }
 
 function updateOnlineLive() {
@@ -810,6 +938,9 @@ function updateOnlineLive() {
   set("ob-chalout", OB.challenge_out ? "outgoing challenge: " + OB.challenge_out : "");
   set("ob-fmt-note", OB.env_fmt_saved ? OB.env_fmt_saved + " saved — restart the bot to play it." : "");
   $("ob-battle").disabled = !!run.active;
+  // 2026-09-02 (USER): matchup tables (session / regulation per team) + the thought feed
+  renderMatchups(OB.matchups, OB.team_pin || "");
+  renderThoughts(OB.thoughts, OB.live || []);
   // reflect server toggle state, but never fight a control the user is actively editing
   const ae = document.activeElement, aa = $("ob-aa"), ac = $("ob-ac");
   if (aa && ae !== aa) aa.checked = !!OB.auto_accept;

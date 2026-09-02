@@ -88,6 +88,18 @@ BENCH_LOG = BENCH_DIR / "human_bench.jsonl"
 # updates as they happen, and on exit the era benchmark report + an observed-meta refresh, so
 # the grind-to-plateau loop needs no manual report commands.
 LOG_DIR = _REPO / "artifacts" / "logs"
+# 2026-09-02 (USER): the panel's matchup tables seed from the opponent dossiers
+from v_dance.play.opponent_dossier import DOSSIER_DIR as _DOSSIER_DIR   # noqa: E402
+
+
+def _panel_belief():
+    """The served Pikalytics belief (the encoder's singleton) for the matchup tables' item /
+    ability defaults; None when unavailable (the rows then read '—')."""
+    try:
+        from v_dance.play.vgc_base import _default_belief
+        return _default_belief()
+    except Exception:
+        return None
 
 
 def _slog(path: Path, text: str) -> None:
@@ -516,6 +528,12 @@ def _wrap_bench_recording(host: BattleHost, session_id: str, note: str,
                     s = summary(row["opponent"] or "")
                     print(f"[online] dossier: {s}")
                     _slog(LOG_DIR / f"online_{session_id}.log", f"    dossier: {s}")
+                # 2026-09-02 (USER): the panel's game-done tap — matchup tables + thought feed.
+                if getattr(_pvhb, "GAME_DONE_HOOK", None) is not None:
+                    try:
+                        _pvhb.GAME_DONE_HOOK(tag, b, row)
+                    except Exception as exc:
+                        print(f"[online] game-done hook failed (non-fatal): {exc!r}")
         except Exception as exc:                       # recording must never break play
             print(f"[online] bench-record failed (non-fatal): {exc!r}")
         orig(tag)
@@ -790,7 +808,14 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
                         log_line=lambda t: _slog(session_log, t),
                         bench_path=BENCH_LOG,          # all-time peak elo per regulation (2026-09-01)
                         bandit=bandit,                 # era-5 W0 serve-side bandit (None = off)
-                        lanes_default=_int_env("VD_LADDER_LANES", 1))   # 2026-09-02 games at once
+                        lanes_default=_int_env("VD_LADDER_LANES", 1),   # 2026-09-02 games at once
+                        # 2026-09-02 (USER): matchup tables (session + all-time per team, seeded
+                        # from the dossiers; VD_MATCHUPS=0 = off) + the "what the nets are
+                        # thinking" feed (VD_THOUGHT_FEED=0 = off)
+                        session_id=session_id, belief=_panel_belief(),
+                        dossier_dir=_DOSSIER_DIR,
+                        matchups=os.environ.get("VD_MATCHUPS", "1").strip() != "0",
+                        thoughts=os.environ.get("VD_THOUGHT_FEED", "1").strip() != "0")
                     _ctrl = ctrl_ref["c"]
                     _ctrl.recorder = recorder      # W3b-0: status shows games/steps recorded
                     _ctrl.link = link                  # link status in the panel / Mission Control

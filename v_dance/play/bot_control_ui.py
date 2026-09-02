@@ -40,6 +40,7 @@ from typing import Callable, Optional
 import v_dance.play.play_vs_human_browser as _pvhb
 from v_dance.formats import known_formats, reg_token
 from v_dance.play.run_local_battle import discover_teams, load_team, resolve_team_path
+from v_dance.play.matchup_book import ALL_TEAMS, MatchupBook, display_species
 
 _ENV_FORMAT_KEY = "VDANCE_BATTLE_FORMAT"
 _RESEARCH_DELAY_S = 4.0      # settle time between a CONFIRMED-done game and the next /search
@@ -160,7 +161,9 @@ class BotController:
                  log_line: Optional[Callable[[str], None]] = None,
                  auto_close_default: bool = False,
                  bench_path: Optional[Path] = None,
-                 bandit=None, lanes_default: int = 1) -> None:
+                 bandit=None, lanes_default: int = 1,
+                 session_id: Optional[str] = None, belief=None,
+                 dossier_dir: Optional[Path] = None, matchups: bool = True) -> None:
         self.page, self.host, self.tally = page, host, tally
         self.ai_pool, self.fmt, self.username = list(ai_pool), fmt, username
         self.loop, self.env_path = loop, env_path
@@ -201,6 +204,23 @@ class BotController:
         self.events: deque = deque(maxlen=200)
         self._server: Optional[ThreadingHTTPServer] = None
         self.url: Optional[str] = None
+        # 2026-09-02 (USER): matchup tables — SESSION (this process) + ALL-TIME per (format, OUR
+        # team), seeded from the opponent dossiers; None = off. ``belief`` supplies the item /
+        # ability defaults for unrevealed mons ("(belief)" in the UI).
+        self.session_id = session_id
+        self.belief = belief
+        self.matchup_team: str = ""          # "" = follow the ladder-run team; "*" = all teams
+        self.matchups: Optional[MatchupBook] = None
+        if matchups:
+            try:
+                self.matchups = MatchupBook()
+                if dossier_dir is not None:
+                    self.matchups.load_dossiers(dossier_dir)
+                self.log(self.matchups.banner()[len("[panel] "):])
+            except Exception as exc:
+                self.matchups = None
+                self.log(f"matchup book failed to load (non-fatal): {exc!r}")
+        self.thoughts = None                 # "what the nets are thinking" feed (start_control_ui)
 
     # ── logging ──────────────────────────────────────────────────────────────
     def log(self, msg: str) -> None:
@@ -666,6 +686,65 @@ class BotController:
         return f"{fmt} saved — restart the bot to play it."
 
     # ── status for the panel ──────────────────────────────────────────────────
+    # ── 2026-09-02 (USER): matchup tables + the thought feed ────────────────
+    def on_game_done(self, tag: str, battle, row: Optional[dict]) -> None:
+        """GAME_DONE_HOOK tap: a finished battle + its bench row → the matchup books (session +
+        all-time for THIS team) and the thought feed's finished mark. Never raises."""
+        row = row or {}
+        if not self.session_id and row.get("session_id"):
+            self.session_id = str(row["session_id"])
+        try:
+            if self.matchups is not None and self.matchups.record_battle(
+                    battle, row, session_id=self.session_id):
+                seen = [display_species(getattr(m, "species", "?") or "?", self.belief)
+                        for m in (getattr(battle, "opponent_team", None) or {}).values()]
+                res = {"ai": "WON", "human": "LOST"}.get(row.get("result"), "DRAW")
+                self.log(f"matchups: {res} vs {', '.join(seen) or '?'} "
+                         f"(team {row.get('ai_team') or '?'}) — tables updated")
+        except Exception:
+            pass
+        try:
+            if self.thoughts is not None:
+                self.thoughts.mark_finished(_base_tag(tag))
+        except Exception:
+            pass
+
+    def set_matchup_team(self, team) -> str:
+        """Regulation-table team: "" = follow the ladder-run team, "*" = all teams, else a team
+        name (any team with recorded games counts, not only the current pool)."""
+        team = (team or "").strip()
+        if team and team != ALL_TEAMS and self.matchups is not None:
+            known = {d["team"] for d in self.matchups.teams(self.fmt)} | set(self.ai_pool)
+            if team not in known:
+                raise ValueError(f"unknown team {team!r}")
+        if team != self.matchup_team:
+            self.matchup_team = team
+            self.log("matchup table → " + ("follows the ladder-run team" if not team else
+                                            "all teams" if team == ALL_TEAMS else team))
+        return self.matchup_team
+
+    def matchup_status(self) -> Optional[dict]:
+        """Both tables for the panel: SESSION (this process, every team it played) and ALL-TIME
+        for the selected team (the ladder-run pin by default) — always for the active format."""
+        if self.matchups is None:
+            return None
+        sel = self.matchup_team
+        team = None if sel == ALL_TEAMS else (sel or self.team_pin or None)
+        mode = "all" if team is None else ("select" if sel else "pin")
+        try:
+            return {"format": self.fmt, "reg": _reg_label(self.fmt), "team": team or "",
+                    "mode": mode, "selected": sel, "teams": self.matchups.teams(self.fmt),
+                    "session": self.matchups.summary(self.fmt, session_id=self.session_id or "",
+                                                     belief=self.belief),
+                    "alltime": self.matchups.summary(self.fmt, team=(team or ALL_TEAMS),
+                                                     belief=self.belief),
+                    "loaded": {"games": self.matchups.loaded_games,
+                               "files": self.matchups.loaded_files,
+                               "live": self.matchups.live_games}}
+        except Exception as exc:
+            return {"format": self.fmt, "error": str(exc)[:120]}
+
+    # ── status for the panel ──────────────────────────────────────────────────
     def status(self) -> dict:
         return {
             "username": self.username, "format": self.fmt,
@@ -693,6 +772,10 @@ class BotController:
             "lanes": self.lanes, "max_lanes": _MAX_LANES,
             # 2026-09-02 W3b-0: the ladder trajectory recorder (None = off)
             "recorder": (self.recorder.summary() if getattr(self, "recorder", None) is not None else None),
+            # 2026-09-02 (USER): matchup tables (session + all-time per team) and the thought feed
+            "matchups": self.matchup_status(),
+            "thoughts": (self.thoughts.summary(live_tags=self._live)
+                         if self.thoughts is not None else None),
         }
 
     def stop(self) -> None:
@@ -763,6 +846,8 @@ def _make_handler(ctrl: BotController):
                         ctrl.set_bandit_pin(body.get("bandit_pin"))
                     if "lanes" in body:            # rated games at once (1..5)
                         ctrl.set_lanes(body.get("lanes"))
+                    if "matchup_team" in body:     # "" = follow the pin, "*" = all teams
+                        ctrl.set_matchup_team(body.get("matchup_team"))
                 elif p == "/api/team":
                     ctrl.set_team(body.get("team"))
                 elif p == "/api/format":
@@ -784,7 +869,10 @@ def start_control_ui(*, page, host, tally: dict, ai_pool: list, fmt: str, userna
                      auto_close_default: bool = False,
                      open_browser: bool = True,
                      bench_path: Optional[Path] = None,
-                     bandit=None, lanes_default: int = 1) -> BotController:
+                     bandit=None, lanes_default: int = 1,
+                     session_id: Optional[str] = None, belief=None,
+                     dossier_dir: Optional[Path] = None, matchups: bool = True,
+                     thoughts: bool = True) -> BotController:
     """Build the controller + serve the panel on 127.0.0.1 (first free port in [port, port+9]).
     Also chains itself onto ``RATING_HOOK`` (the Δelo battle-done confirm) and
     ``RATING_CHANGE_HOOK`` (post-battle rating → display, peaks, bandit reward) — call AFTER the
@@ -793,7 +881,9 @@ def start_control_ui(*, page, host, tally: dict, ai_pool: list, fmt: str, userna
                          username=username, loop=loop, env_path=env_path,
                          team_pin_default=team_pin_default, log_line=log_line,
                          auto_close_default=auto_close_default, bench_path=bench_path,
-                         bandit=bandit, lanes_default=lanes_default)
+                         bandit=bandit, lanes_default=lanes_default,
+                         session_id=session_id, belief=belief, dossier_dir=dossier_dir,
+                         matchups=matchups)
     prev_hook = _pvhb.RATING_HOOK
 
     def _hook(tag, user, rating):                  # PRE-battle number (poke-env semantics)
@@ -832,6 +922,22 @@ def start_control_ui(*, page, host, tally: dict, ai_pool: list, fmt: str, userna
         ctrl.log(line)
 
     _pvhb.RATING_CHANGE_HOOK = _change_hook
+    # 2026-09-02 (USER): finished-game tap → matchup tables + the thought feed's finished mark
+    prev_done = getattr(_pvhb, "GAME_DONE_HOOK", None)
+
+    def _done_hook(tag, battle, row):
+        if prev_done is not None:
+            prev_done(tag, battle, row)
+        ctrl.on_game_done(tag, battle, row)
+
+    _pvhb.GAME_DONE_HOOK = _done_hook
+    if thoughts:                                   # "what the nets are thinking" (VD_THOUGHT_FEED=0 off)
+        try:
+            from v_dance.play.thought_feed import ThoughtFeed
+            ctrl.thoughts = ThoughtFeed().install(host.player)
+            ctrl.log(ctrl.thoughts.banner())
+        except Exception as exc:
+            ctrl.log(f"thought feed failed to start (non-fatal): {exc!r}")
     ctrl.schedule_site_poll(min_interval=0.0)      # the site's numbers at startup
 
     handler = _make_handler(ctrl)
@@ -899,6 +1005,22 @@ _PANEL_HTML = """<!DOCTYPE html>
   .stat { display:flex; gap:16px; flex-wrap:wrap; font:10pt Verdana; }
   .stat b { color:#2c5a8c; }
   .note { color:#8a5a1f; font-size:8.5pt; margin-top:4px; min-height:1.2em; }
+  /* 2026-09-02 (USER): matchup tables + the "what the nets are thinking" feed */
+  .mu { border-collapse:collapse; width:100%; font:8.5pt Verdana; }
+  .mu th, .mu td { border:1px solid #c7d3dc; padding:3px 6px; text-align:left; white-space:nowrap; }
+  .mu th { background:#e0e7ea; color:#36485a; }
+  .mu td.n { text-align:right; }
+  .mu td:nth-child(5), .mu td:nth-child(6) { white-space:normal; }
+  .mu .seen { color:#1f6b3a; font-weight:bold; }
+  .mu .belief { color:#6b7a88; font-style:italic; }
+  .muwrap { overflow-x:auto; }
+  .twocol { display:grid; grid-template-columns:1fr 1fr; gap:14px; padding:12px; }
+  #think { height:320px; overflow-y:auto; background:#eef2f5; border-top:1px solid #b5c3ce;
+           padding:8px 10px; font: 8.5pt Consolas, monospace; white-space:pre-wrap; color:#33424f; }
+  #think .bh { color:#2c5a8c; font-weight:bold; margin-top:8px; }
+  #think .te { margin-top:4px; }
+  #think .ts { color:#7a8a98; }
+  #think .warn { color:#a0461f; }
 </style></head><body>
 <div class="header"><span class="dot" id="dot"></span><b>Victory Dance</b>
   <span id="who">connecting…</span>
@@ -960,11 +1082,32 @@ _PANEL_HTML = """<!DOCTYPE html>
     </div></div>
   </div>
 
+  <div class="panel full"><h2>Matchups <span class="muted" id="muHdr"></span></h2>
+    <div class="twocol">
+      <div><b>Session</b> <span class="muted" id="muSHdr"></span>
+        <div class="muwrap" style="margin-top:6px"><table class="mu" id="muS"><thead><tr><th>Pokémon</th>
+          <th>games</th><th>W-L</th><th>win %</th><th>item</th><th>ability</th></tr></thead><tbody></tbody></table></div>
+        <div class="muted" id="muSFoot" style="margin-top:4px"></div></div>
+      <div><b>Regulation, all games</b> <span class="muted" id="muAHdr"></span>
+        <select id="muTeam" style="margin-top:6px"></select>
+        <div class="muwrap" style="margin-top:6px"><table class="mu" id="muA"><thead><tr><th>Pokémon</th>
+          <th>games</th><th>W-L</th><th>win %</th><th>item</th><th>ability</th></tr></thead><tbody></tbody></table></div>
+        <div class="muted" id="muAFoot" style="margin-top:4px"></div></div>
+    </div></div>
+
+  <div class="panel full"><h2>What the nets are thinking
+      <span class="muted">(TP net · battle net · gimmick · value head — newest first)</span></h2>
+    <div style="padding:8px 12px"><div class="row" style="margin-top:0;align-items:center">
+      <select id="thinkTag" style="width:auto;min-width:260px"><option value="">all live battles</option></select>
+      <span class="muted" id="thinkStat"></span></div></div>
+    <div id="think"></div></div>
+
   <div class="panel full"><h2>Activity</h2><div id="log"></div></div>
 </div>
 <script>
 const $ = (id) => document.getElementById(id);
-let filled = false, lastNote = "";
+const esc = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let filled = false, lastNote = "", lastS = null;
 
 async function api(path, body) {
   const r = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'},
@@ -1050,9 +1193,83 @@ function render(s) {
   $('startBtn').disabled = s.run.active;
   if (s.env_fmt_saved && !lastNote)
     $('fmtNote').textContent = s.env_fmt_saved + ' saved — restart the bot to play it.';
+  // 2026-09-02 (USER): matchup tables (session / regulation per team) + the thought feed
+  lastS = s;
+  renderMatchups(s.matchups, s.team_pin || '');
+  renderThoughts(s.thoughts);
   const log = $('log'), atEnd = log.scrollTop + log.clientHeight >= log.scrollHeight - 8;
   log.textContent = s.events.join('\\n');
   if (atEnd) log.scrollTop = log.scrollHeight;
+}
+
+function muRows(tbody, rows) {
+  if (!tbody) return;
+  if (!rows || !rows.length) { tbody.innerHTML = '<tr><td colspan="6" class="muted">no games yet</td></tr>'; return; }
+  const dist = (list) => (list && list.length) ? list.map(e =>
+      `<span class="${e.seen ? 'seen' : 'belief'}">${e.name === '?' ? 'unknown' : esc(e.name)}` +
+      `${e.mega ? ' (mega)' : ''} ${e.p}%${e.seen ? ` (${e.seen} seen)` : ''}</span>`).join(' · ') : '—';
+  const legacy = (name, src, n, pct) => src === 'seen' ? `<span class="seen">${esc(name)} ×${n} seen</span>`
+               : src === 'belief' ? `<span class="belief">${esc(name)}${pct != null ? ' ' + pct + '%' : ''} (belief)</span>` : '—';
+  tbody.innerHTML = rows.map(r => {
+    const item = r.items ? dist(r.items) : legacy(r.item, r.item_src, r.item_n, r.item_pct);
+    const ab = r.abilities ? dist(r.abilities) : legacy(r.ability, r.ability_src, r.ability_n, null);
+    return `<tr><td>${esc(r.display || r.species)}</td><td class="n">${r.games}</td>` +
+           `<td class="n">${r.wins}-${r.losses}${r.draws ? '-' + r.draws + 'D' : ''}</td>` +
+           `<td class="n">${r.win_pct == null ? '—' : r.win_pct + '%'}</td><td>${item}</td><td>${ab}</td></tr>`;
+  }).join('');
+}
+let muKey = '', thinkKey = '';
+function renderMatchups(m, pin) {
+  if (!$('muS')) return;
+  if (!m) { $('muHdr').textContent = '(off — VD_MATCHUPS=0)'; return; }
+  if (m.error) { $('muHdr').textContent = 'error: ' + m.error; return; }
+  $('muHdr').textContent = `· ${m.reg} · opponent Pokémon SEEN in battle · item / ability = revealed sightings (green) blended with the belief for the rest`;
+  $('muSHdr').textContent = 'this bot session';
+  muRows($('muS').querySelector('tbody'), (m.session || {}).rows);
+  const sf = (m.session || {}).footer || {};
+  $('muSFoot').textContent = `${sf.games || 0} game(s) · ${sf.opponents || 0} opponent(s) · ${sf.species || 0} species`;
+  $('muAHdr').textContent = m.mode === 'all' ? 'all teams' : `team ${m.team}`;
+  const sel = $('muTeam'), key = (m.teams || []).map(t => t.team + ':' + t.games).join('|') + '#' + pin;
+  if (key !== muKey) {
+    muKey = key;
+    sel.innerHTML = `<option value="">— follow the ladder-run team (${esc(pin || 'none → all teams')}) —</option>` +
+      '<option value="*">All teams</option>' +
+      (m.teams || []).map(t => `<option value="${esc(t.team)}">${esc(t.team)} (${t.games} games)</option>`).join('');
+  }
+  if (document.activeElement !== sel) sel.value = m.selected || '';
+  muRows($('muA').querySelector('tbody'), (m.alltime || {}).rows);
+  const af = (m.alltime || {}).footer || {};
+  $('muAFoot').textContent = `${af.games || 0} game(s) · ${af.opponents || 0} opponent(s) · ${af.species || 0} species` +
+      (m.mode === 'all' && af.teams && af.teams.length ? ` · teams: ${af.teams.join(', ')}` : '') +
+      (m.loaded ? ` · seeded from ${m.loaded.games} dossier game(s), +${m.loaded.live} live` : '');
+}
+function renderThoughts(t) {
+  const box = $('think'); if (!box) return;
+  if (!t) { box.textContent = 'thought feed off (VD_THOUGHT_FEED=0) or not started'; return; }
+  const sel = $('thinkTag'), battles = t.battles || [];
+  const key = battles.map(b => b.tag + (b.live ? 'L' : b.finished ? 'F' : '')).join('|');
+  if (key !== thinkKey) {
+    thinkKey = key;
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">all live battles</option>' + battles.map(b =>
+      `<option value="${esc(b.tag)}">…${esc(b.tag.split('-').pop())} · ${b.live ? 'LIVE' : b.finished ? 'done' : 'idle'}` +
+      ` · ${esc(b.arm || '?')} · vs ${esc(b.opponent || '?')}</option>`).join('');
+    if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
+  }
+  $('thinkStat').textContent = `${t.total || 0} decision(s) narrated` + (t.failed ? ` · ${t.failed} failed` : '');
+  const want = sel.value, anyLive = battles.some(b => b.live);
+  const shown = battles.filter(b => want ? b.tag === want : (anyLive ? b.live : true));
+  const atTop = box.scrollTop <= 4;               // newest first: stay pinned to the top unless scrolled
+  let html = '';
+  for (const b of shown) {
+    html += `<div class="bh">── ${esc(b.tag)} · ${b.live ? 'LIVE' : b.finished ? 'finished' : 'idle'}` +
+            ` · arm ${esc(b.arm || '?')} · vs ${esc(b.opponent || '?')} · turn ${b.turn ?? '?'}</div>`;
+    for (const e of (t.entries || []).filter(e => e.tag === b.tag))
+      html += `<div class="te${e.kind === 'note' ? ' warn' : ''}"><span class="ts">${esc(e.ts)}</span> ` +
+              `${esc(e.text).replace(/\\n/g, '\\n    ')}</div>`;
+  }
+  box.innerHTML = html || '<span class="muted">no decisions yet — the first team preview writes the first block</span>';
+  if (atTop) box.scrollTop = 0;
 }
 
 async function refresh() {
@@ -1075,6 +1292,8 @@ $('banditPin').onchange = () => api('/api/options', {bandit_pin: $('banditPin').
 $('lanes').onchange = () => api('/api/options', {lanes: +$('lanes').value});
 $('teamSel').onchange = () => api('/api/team', {team: $('teamSel').value});
 $('fmtSel').onchange = () => api('/api/format', {format: $('fmtSel').value});
+$('muTeam').onchange = () => api('/api/options', {matchup_team: $('muTeam').value});
+$('thinkTag').onchange = () => renderThoughts(lastS && lastS.thoughts);
 
 setInterval(refresh, 2000);
 refresh();
