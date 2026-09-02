@@ -127,7 +127,9 @@ def compute_tp_weights(examples: Sequence[dict],
                        outcome_weight: bool = False, loss_weight: float = 0.5,
                        own_folders: Optional[Sequence[str]] = None,
                        own_boost: float = 15.0,
-                       own_username: Optional[str] = None) -> Optional[np.ndarray]:
+                       own_username: Optional[str] = None,
+                       own_species: Optional[Sequence[str]] = None,
+                       own_team_weight: float = 0.0) -> Optional[np.ndarray]:
     """TP-N3 per-example loss weights (docs/tp_n3_outcome_finetune_design.md).
 
     Multiplicative: WON examples from an ``--own-folders`` folder ×``own_boost`` (lost/
@@ -142,7 +144,8 @@ def compute_tp_weights(examples: Sequence[dict],
     beating us got imitated ×15 at n=171 (the parking root cause). When set, only rows
     whose perspective username matches are ``own``.
     """
-    if not outcome_weight and not own_folders:
+    own_set = {s for s in (own_species or ()) if s}
+    if not outcome_weight and not own_folders and not own_set:
         return None
     own = tuple(os.path.normcase(os.path.abspath(f)) for f in (own_folders or ()))
     uname_want = _norm_uname(own_username) if own_username else None
@@ -172,6 +175,21 @@ def compute_tp_weights(examples: Sequence[dict],
                          f"(folder in --data? --own-username '{own_username}' spelled like the "
                          f"in-replay name? {n_opp_perspective} rows matched the folder but not "
                          f"the username)")
+    # Era-5 W1 (2026-09-01): own-TEAM weighting — 1 + λ·(fraction of OUR six in the example's
+    # roster); every TP example carries ``our_species`` so no corpus walk is needed. Composes
+    # multiplicatively with the folder/outcome weights above.
+    if own_set:
+        from collections import Counter as _Counter
+        hist = _Counter()
+        for i, ex in enumerate(examples):
+            ov = len(set(ex.get("our_species") or ()) & own_set) / float(len(own_set))
+            hist[int(round(ov * 6))] += 1
+            w[i] *= 1.0 + float(own_team_weight) * ov
+        if sum(hist.get(k, 0) for k in range(1, 7)) == 0:
+            raise SystemExit(f"[train_teampreview] --own-team ({', '.join(sorted(own_set))}) overlaps "
+                             f"NO example — wrong team / paste? Refusing to run a no-op.")
+        print(f"[train_teampreview] own-team weighting λ={own_team_weight:g} — overlap histogram "
+              f"(mons of 6): " + ", ".join(f"{k}:{hist.get(k, 0)}" for k in range(7)))
     mean = w.mean()
     if mean > 0:
         w = w / mean
@@ -412,10 +430,17 @@ def train(args: argparse.Namespace) -> dict:
 
     # TP-N3: outcome/own-folder weights on the TRAIN split only — val metrics stay
     # unweighted (comparable across runs). None when the flags are off.
+    own_species = None
+    if getattr(args, "own_team", None):
+        from v_dance.training.bc_dataset import parse_team_species
+        own_species = parse_team_species(args.own_team)
+        print(f"[train_teampreview] own team: {', '.join(own_species)} "
+              f"(λ={args.own_team_weight:g})")
     tp_weights = compute_tp_weights(
         train_ex, outcome_weight=args.outcome_weight, loss_weight=args.loss_weight,
         own_folders=args.own_folders, own_boost=args.own_boost,
-        own_username=args.own_username)
+        own_username=args.own_username,
+        own_species=own_species, own_team_weight=getattr(args, "own_team_weight", 0.0))
 
     # TP-N3 re-run: checkpoint selection on an OWN-GAMES val slice (bot-perspective rows of
     # the own folders inside the standard val split). Global val stays the printed no-forgetting
@@ -705,6 +730,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                     help="TP-N3 re-run: restrict the own-boost to rows whose PERSPECTIVE "
                          "username matches (normalized). Without this, opponent-perspective "
                          "wins in own folders get boosted too — the n=171 parking root cause.")
+    ap.add_argument("--own-team", default=None,
+                    help="era-5 W1 specialist: a team (paste file / pool name / text); every TRAIN "
+                         "example is weighted 1 + --own-team-weight × (fraction of this team's six "
+                         "in the example's own roster). Composes with the flags above.")
+    ap.add_argument("--own-team-weight", type=float, default=3.0,
+                    help="λ for --own-team (a full-overlap example counts (1+λ)×).")
     ap.add_argument("--select-own-val", action="store_true",
                     help="TP-N3 re-run: best-checkpoint selection on the own-games val slice "
                          "(requires --own-folders; composes with --own-username). Global val "

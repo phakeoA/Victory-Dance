@@ -1,0 +1,336 @@
+"""Serve-side bandit — the ladder as the arbiter (era-5 design §3.0, 2026-09-01).
+
+Every candidate we want to compare live (a battle checkpoint, a team-preview checkpoint, a serve
+knob such as sampling temperature or the TP near-tie epsilon) is an ARM. Before each ladder game
+the panel asks the bandit for an arm, the arm's models/knobs are applied to the served player, the
+game is played, and the server's rating line (OLD → NEW for our account) is the reward: one
+observation of per-game rating delta for that arm. Arms are interleaved PER GAME — every blocked
+comparison this project ran was confounded by band equilibration, and 2a's regression took 50
+games plus a manual rollback to catch; here a −15 pp arm dies at ~40 games automatically.
+
+Allocation = Thompson sampling over each arm's mean per-game rating delta (Normal posterior with a
+weak prior), after a short round-robin warm-up so no arm is judged on zero games. Retirement = the
+arm's Wilson upper bound on win rate sits ≥ ``retire_margin`` under the incumbent's win rate after
+``retire_min_games`` games. The incumbent is never retired by the rule (only replaced by a human
+promotion). Promotion is a HUMAN decision informed by the report (≥ 200 games per arm ≈ ±5 pp).
+
+Byte-identical serve when disabled: ``VD_BANDIT=0`` (or no config file) → no arm is ever applied.
+State persists in ``artifacts/bandit/<format>.json`` so a restart keeps the evidence.
+"""
+from __future__ import annotations
+
+import json
+import math
+import os
+import time
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Callable, Dict, List, Optional
+
+_REPO = Path(__file__).resolve().parents[2]
+DEFAULT_CONFIG = _REPO / "config" / "serve_bandit.json"
+STATE_DIR = _REPO / "artifacts" / "bandit"
+
+
+# ── arms ─────────────────────────────────────────────────────────────────────
+@dataclass
+class Arm:
+    name: str
+    battle_ckpt: Optional[str] = None      # None / "default" = the deployed checkpoint
+    tp_ckpt: Optional[str] = None          # None / "default" = the deployed TP checkpoint
+    tau: float = 0.0                       # battle-policy sampling temperature (0 = argmax)
+    top_p: float = 1.0
+    tp_tie_eps: Optional[float] = None     # None = leave VD_TP_TIE_EPS as launched
+    incumbent: bool = False
+    note: str = ""
+
+    def uses_default(self, which: str) -> bool:
+        v = self.battle_ckpt if which == "battle" else self.tp_ckpt
+        return v is None or str(v).strip().lower() in ("", "default")
+
+
+@dataclass
+class ArmStats:
+    n: int = 0
+    wins: int = 0
+    losses: int = 0
+    draws: int = 0
+    sum_delta: float = 0.0
+    sumsq_delta: float = 0.0
+    retired: bool = False
+    retired_reason: str = ""
+    last_played: float = 0.0
+
+    def mean_delta(self) -> float:
+        return self.sum_delta / self.n if self.n else 0.0
+
+    def win_rate(self) -> Optional[float]:
+        d = self.wins + self.losses
+        return (self.wins / d) if d else None
+
+
+def load_arms(path: Path, *, exists=None) -> List[Arm]:
+    """Read the arms config. Arms whose checkpoint file is missing are DROPPED with a note (a
+    typo'd path must not silently become 'default'). ``exists`` is injectable for tests."""
+    exists = exists or (lambda p: Path(p).is_file())
+    cfg = json.loads(Path(path).read_text(encoding="utf-8"))
+    arms: List[Arm] = []
+    for raw in cfg.get("arms") or []:
+        a = Arm(name=str(raw["name"]), battle_ckpt=raw.get("battle_ckpt"), tp_ckpt=raw.get("tp_ckpt"),
+                tau=float(raw.get("tau", 0.0) or 0.0), top_p=float(raw.get("top_p", 1.0) or 1.0),
+                tp_tie_eps=(None if raw.get("tp_tie_eps") is None else float(raw["tp_tie_eps"])),
+                incumbent=bool(raw.get("incumbent", False)), note=str(raw.get("note", "")))
+        missing = [w for w, v in (("battle", a.battle_ckpt), ("tp", a.tp_ckpt))
+                   if not a.uses_default(w) and not exists(_resolve(v))]
+        if missing:
+            print(f"[bandit] arm {a.name!r} DROPPED — missing {missing} checkpoint file(s)")
+            continue
+        arms.append(a)
+    if arms and not any(a.incumbent for a in arms):
+        arms[0].incumbent = True
+    return arms
+
+
+def config_params(path: Path) -> dict:
+    cfg = json.loads(Path(path).read_text(encoding="utf-8"))
+    return {k: cfg[k] for k in ("prior_games", "prior_sd", "min_games", "retire_min_games",
+                                "retire_margin") if k in cfg}
+
+
+def _resolve(p) -> Path:
+    p = Path(str(p))
+    return p if p.is_absolute() else (_REPO / p)
+
+
+# ── applying an arm to the served player ─────────────────────────────────────
+def apply_arm(host, arm: Arm, cache: dict, *, default_battle, default_tp, device: str = "cpu",
+              seed: int = 0, loader=None) -> None:
+    """Swap the served ``VGCPlayer``'s model handles + serve knobs to ``arm``. Models are loaded
+    ONCE per checkpoint path (``cache``). Must be called BETWEEN battles (the panel guarantees
+    that). ``loader`` is injectable: ``(kind, path) -> loaded tuple`` (tests)."""
+    import numpy as np
+    p = host.player
+    if loader is None:
+        from v_dance.play import model_io as _M
+
+        def loader(kind, path):
+            return (_M.load_bc_policy(path, device) if kind == "battle"
+                    else _M.load_team_chooser(path, device))
+    bpath = Path(default_battle) if arm.uses_default("battle") else _resolve(arm.battle_ckpt)
+    tpath = Path(default_tp) if arm.uses_default("tp") else _resolve(arm.tp_ckpt)
+    bkey, tkey = ("battle", str(bpath)), ("tp", str(tpath))
+    if bkey not in cache:
+        cache[bkey] = loader("battle", bpath)
+    if tkey not in cache:
+        cache[tkey] = loader("tp", tpath)
+    p._model, p._model_heads = cache[bkey]
+    p._team_chooser, p._tc_vocab, p._tc_cfg = cache[tkey]
+    p._temperature = float(arm.tau)
+    p._top_p = float(arm.top_p)
+    p._rng = np.random.default_rng(seed) if arm.tau > 0.0 else None
+    if arm.tp_tie_eps is not None:                    # model_io reads it per decision
+        os.environ["VD_TP_TIE_EPS"] = str(arm.tp_tie_eps)
+    p._arm_name = arm.name
+
+
+# ── the bandit ───────────────────────────────────────────────────────────────
+class ServeBandit:
+    def __init__(self, arms: List[Arm], *, fmt: str, state_path: Optional[Path] = None,
+                 applier: Optional[Callable[[Arm], None]] = None, seed: int = 0,
+                 prior_games: float = 5.0, prior_sd: float = 25.0, min_games: int = 8,
+                 retire_min_games: int = 40, retire_margin: float = 0.10, now=None):
+        import numpy as np
+        if not arms:
+            raise ValueError("ServeBandit needs at least one arm")
+        self.arms = list(arms)
+        self.by_name = {a.name: a for a in self.arms}
+        if len(self.by_name) != len(self.arms):
+            raise ValueError("duplicate arm names")
+        self.fmt = fmt
+        self.state_path = Path(state_path) if state_path else (STATE_DIR / f"{fmt}.json")
+        self.applier = applier
+        self.rng = np.random.default_rng(seed)
+        self.prior_games = float(prior_games)
+        self.prior_sd = float(prior_sd)
+        self.min_games = int(min_games)
+        self.retire_min_games = int(retire_min_games)
+        self.retire_margin = float(retire_margin)
+        self._now = now or time.time
+        self.stats: Dict[str, ArmStats] = {a.name: ArmStats() for a in self.arms}
+        self.pending: Optional[str] = None          # arm applied for the NEXT battle
+        self.by_tag: Dict[str, str] = {}            # base tag -> arm name
+        self.current: Optional[str] = None          # arm currently applied to the player
+        self.load()
+
+    # -- persistence --
+    def load(self) -> None:
+        try:
+            d = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        for name, s in (d.get("stats") or {}).items():
+            if name in self.stats:
+                self.stats[name] = ArmStats(**{k: s.get(k, getattr(ArmStats(), k))
+                                               for k in ArmStats.__dataclass_fields__})
+        self.by_tag = dict(list((d.get("by_tag") or {}).items())[-200:])
+
+    def save(self) -> None:
+        try:
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.state_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"fmt": self.fmt, "saved": self._now(),
+                                       "stats": {k: asdict(v) for k, v in self.stats.items()},
+                                       "by_tag": dict(list(self.by_tag.items())[-200:])},
+                                      indent=1), encoding="utf-8")
+            os.replace(tmp, self.state_path)
+        except Exception:
+            pass                                    # persistence must never break play
+
+    # -- queries --
+    @property
+    def incumbent(self) -> Arm:
+        return next((a for a in self.arms if a.incumbent), self.arms[0])
+
+    def active_arms(self) -> List[Arm]:
+        return [a for a in self.arms if not self.stats[a.name].retired]
+
+    @staticmethod
+    def base_tag(tag: str) -> str:
+        parts = (tag or "").lstrip(">").split("-")
+        return "-".join(parts[:3]) if len(parts) >= 3 else (tag or "")
+
+    # -- allocation --
+    def choose(self) -> Arm:
+        """The arm for the NEXT battle. Idempotent while that battle has not started (a second
+        call before ``bind`` returns the same arm — the search and challenge paths both ask)."""
+        if self.pending and self.pending in self.by_name and not self.stats[self.pending].retired:
+            return self.by_name[self.pending]
+        active = self.active_arms() or [self.incumbent]
+        under = [a for a in active if self.stats[a.name].n < self.min_games]
+        if under:                                   # warm-up: fewest games first, config order
+            arm = min(under, key=lambda a: (self.stats[a.name].n, self.arms.index(a)))
+        else:                                       # Thompson over mean per-game rating delta
+            best, best_s = None, -math.inf
+            for a in active:
+                s = self.stats[a.name]
+                n_eff = self.prior_games + s.n
+                mean = s.sum_delta / n_eff
+                sd = self.prior_sd / math.sqrt(n_eff)
+                sample = float(self.rng.normal(mean, sd))
+                if sample > best_s:
+                    best, best_s = a, sample
+            arm = best or self.incumbent
+        self.pending = arm.name
+        return arm
+
+    def apply_pending(self) -> Optional[Arm]:
+        """Apply the pending arm to the served player (via ``applier``); no-op without one."""
+        arm = self.choose()
+        if self.applier is not None and self.current != arm.name:
+            self.applier(arm)
+        self.current = arm.name
+        return arm
+
+    def bind(self, tag: str) -> Optional[str]:
+        """A battle started: attribute it to the pending arm (else to the current one)."""
+        name = self.pending or self.current
+        if not name:
+            return None
+        base = self.base_tag(tag)
+        if base not in self.by_tag:
+            self.by_tag[base] = name
+            if len(self.by_tag) > 512:
+                for k in list(self.by_tag)[:-256]:
+                    self.by_tag.pop(k, None)
+        self.pending = None
+        return self.by_tag[base]
+
+    def arm_for(self, tag: str) -> Optional[str]:
+        return self.by_tag.get(self.base_tag(tag))
+
+    # -- reward --
+    def observe(self, tag: str, delta: float, won: Optional[bool] = None) -> Optional[str]:
+        """Our post-game rating change for ``tag`` → one observation for its arm."""
+        name = self.arm_for(tag)
+        if name is None or name not in self.stats:
+            return None
+        s = self.stats[name]
+        s.n += 1
+        s.sum_delta += float(delta)
+        s.sumsq_delta += float(delta) ** 2
+        if won is None:
+            won = (delta > 0) if delta != 0 else None
+        if won is True:
+            s.wins += 1
+        elif won is False:
+            s.losses += 1
+        else:
+            s.draws += 1
+        s.last_played = self._now()
+        self._maybe_retire()
+        self.save()
+        return name
+
+    def _maybe_retire(self) -> None:
+        from v_dance.selfplay.gate import wilson_upper_bound
+        inc = self.stats[self.incumbent.name]
+        inc_wr = inc.win_rate()
+        if inc_wr is None or (inc.wins + inc.losses) < self.retire_min_games:
+            return                                  # nothing to compare against yet
+        for a in self.arms:
+            s = self.stats[a.name]
+            if a.incumbent or s.retired:
+                continue
+            g = s.wins + s.losses
+            if g < self.retire_min_games:
+                continue
+            ub = wilson_upper_bound(s.wins, g, z=1.645)
+            if ub <= inc_wr - self.retire_margin:
+                s.retired = True
+                s.retired_reason = (f"WR upper bound {ub:.2f} ≤ incumbent {inc_wr:.2f} − "
+                                    f"{self.retire_margin:.2f} after {g} games")
+
+    # -- reporting --
+    def summary(self) -> List[dict]:
+        out = []
+        for a in self.arms:
+            s = self.stats[a.name]
+            wr = s.win_rate()
+            out.append({"name": a.name, "incumbent": a.incumbent, "n": s.n, "wins": s.wins,
+                        "losses": s.losses, "draws": s.draws,
+                        "mean_delta": round(s.mean_delta(), 1), "win_rate": (None if wr is None else round(wr, 3)),
+                        "retired": s.retired, "reason": s.retired_reason,
+                        "pending": (self.pending == a.name), "current": (self.current == a.name),
+                        "tau": a.tau, "tp_tie_eps": a.tp_tie_eps, "note": a.note})
+        return out
+
+    def banner(self) -> str:
+        active = [a.name for a in self.active_arms()]
+        return (f"[online] serve BANDIT ACTIVE — {len(active)} arm(s), incumbent {self.incumbent.name}: "
+                f"{', '.join(active)}; warm-up {self.min_games} g/arm, retire at ≥{self.retire_min_games} g "
+                f"if WR upper bound ≤ incumbent − {self.retire_margin:.2f}; state {self.state_path.name}")
+
+
+# ── the site's official numbers (the true "elo reflector") ───────────────────
+def fetch_official_ratings(userid: str, timeout: float = 6.0, opener=None) -> dict:
+    """``https://pokemonshowdown.com/users/<userid>.json`` → {format_id: {elo, gxe, glicko,
+    glicko_dev, w, l}}. The site's own numbers (Elo shown on the profile, GXE, Glicko-1 with its
+    deviation, lifetime W/L per format). ``opener`` injectable for tests."""
+    import urllib.request
+    url = f"https://pokemonshowdown.com/users/{userid}.json"
+    if opener is None:
+        def opener(u):
+            with urllib.request.urlopen(u, timeout=timeout) as r:      # noqa: S310 (fixed host)
+                return r.read().decode("utf-8")
+    d = json.loads(opener(url))
+    out = {}
+    for fmt, r in (d.get("ratings") or {}).items():
+        try:
+            out[fmt] = {"elo": int(round(float(r.get("elo") or 0))),
+                        "gxe": (None if r.get("gxe") is None else float(r["gxe"])),
+                        "glicko": (None if r.get("rpr") is None else int(round(float(r["rpr"])))),
+                        "glicko_dev": (None if r.get("rprd") is None else int(round(float(r["rprd"])))),
+                        "w": int(r.get("w") or 0), "l": int(r.get("l") or 0)}
+        except (TypeError, ValueError):
+            continue
+    return out

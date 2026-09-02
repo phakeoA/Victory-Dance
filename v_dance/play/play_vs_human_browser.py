@@ -20,6 +20,7 @@ import asyncio
 import json
 import os
 import random
+import re
 import sys
 import time
 from pathlib import Path
@@ -226,6 +227,43 @@ RATING_HOOK = None
 # harness + prior online behaviour exactly. A declined challenge is SURFACED, never silent-dropped.
 AUTO_ACCEPT = True
 
+# 2026-09-01 (link reconnect — USER: "the server keeps disconnecting the bot", mid-battle): three
+# hooks the ONLINE harness sets; all None/empty = the local harness is byte-identical.
+#   LINK_TICK      — async callable run on every idle tick (~1 s) of the consumer; the online
+#                    LinkWatch's dead-socket detector + auto-reconnect lives behind it.
+#   ROOM_GONE_HOOK — callable(tag) when a battle room answers |noinit| (it no longer exists — the
+#                    game was decided while the link was down); the control panel drops it as live.
+#   REJOINING      — battle tags the host FORGOT for a reconnect rejoin: the server's replayed log
+#                    makes poke-env re-emit the open-team-sheets answer, which is stale mid-battle,
+#                    so it is not shipped; the tag leaves the set once its live |request| arrived.
+LINK_TICK = None
+ROOM_GONE_HOOK = None
+REJOINING: set = set()
+
+# 2026-09-01 (rating reflector): the server's rating line reads "NAME's rating: OLD &rarr;
+# <strong>NEW</strong>". RATING_HOOK receives the PRE-battle number (poke-env's parse, which
+# play_ladder's rows also record). RATING_CHANGE_HOOK(tag, user, old, new) additionally
+# receives the POST-battle number — what the profile page shows — for the live display,
+# the per-regulation peaks and the serve-side bandit's per-game reward (new − old).
+RATING_CHANGE_HOOK = None
+_RATING_CHANGE_RE = re.compile(r"'s rating: (\d+)\D+?(\d+)")
+
+
+def _parse_rating_changes(payload: str) -> list:
+    """[(username, old, new)] for every ``|raw|…'s rating: OLD &rarr; <strong>NEW</strong>…``
+    line in the frame. A line with only one number (unexpected) is skipped."""
+    out = []
+    if "'s rating: " not in payload:
+        return out
+    for line in payload.split("\n"):
+        parts = line.split("|")
+        if len(parts) >= 3 and parts[1] == "raw" and "'s rating: " in parts[2]:
+            user = parts[2].split("'s rating: ", 1)[0].strip()
+            m = _RATING_CHANGE_RE.search(parts[2])
+            if m:
+                out.append((user, int(m.group(1)), int(m.group(2))))
+    return out
+
 
 def _parse_rating_lines(payload: str) -> list:
     """[(username, rating)] from a frame's ``|raw|…'s rating: NNNN…`` lines — the same parse
@@ -378,6 +416,13 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
                 print(f"[ai] …still serving battle (tag={active_tag}); "
                       f"{loop.time() - busy_since:.0f}s since accept, no frames arriving")
                 hb_next = loop.time() + 15.0
+            # 2026-09-01: online dead-socket detection + auto-reconnect rides the idle tick — a
+            # dead link produces exactly this branch (no frames), so it is the right clock.
+            if LINK_TICK is not None:
+                try:
+                    await LINK_TICK()
+                except Exception as exc:                             # the watchdog must never kill play
+                    print(f"[ai] link watchdog error (non-fatal): {exc!r}")
             continue
         try:
             # 1) note any incoming challenge in OUR format (remember it even while busy)
@@ -404,6 +449,27 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
             # 2) battle frame → host decides → ship its commands back into the tab
             elif payload.startswith(">battle"):
                 active_tag = payload.split("\n", 1)[0].lstrip(">")
+                # 2026-09-01: the room is GONE server-side — ``|noinit|nonexistent|`` answers a
+                # reconnect rejoin after the game was decided while the link was down (or a stale
+                # /join). poke-env raises on the event (or, for a forgotten tag, would block forever
+                # in _get_battle), so reclaim the battle HERE and never feed the frame.
+                _second = payload.split("\n", 2)[1] if "\n" in payload else ""
+                if _second.startswith("|noinit|"):
+                    why = _second[len("|noinit|"):].split("|", 1)[0] or "?"
+                    print(f"[ai] room gone ({why}): {active_tag} — abandoning it")
+                    abandon = getattr(host, "abandon_battle", None)
+                    if callable(abandon) and active_tag not in host._ended:
+                        abandon(active_tag)
+                    REJOINING.discard(active_tag)
+                    if ROOM_GONE_HOOK is not None:
+                        try:
+                            ROOM_GONE_HOOK(active_tag)
+                        except Exception as exc:
+                            print(f"[ai] room-gone hook failed (non-fatal): {exc!r}")
+                    timer_sent.discard(active_tag)
+                    busy, active_tag, last_ship = False, None, 0.0
+                    errors = 0
+                    continue
                 # ladder-queue battles arrive with NO accept step → busy_since was never stamped
                 # (the "battle done in 686352s" print) — stamp it on the battle's first frame.
                 if not busy and active_tag != t0_tag and active_tag not in host._ended:
@@ -417,6 +483,12 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
                             RATING_HOOK(active_tag, _u, _rt)
                         except Exception as exc:                     # capture must never break play
                             print(f"[ai] rating-capture failed (non-fatal): {exc!r}")
+                if RATING_CHANGE_HOOK is not None:                   # post-battle number (2026-09-01)
+                    for _u, _old, _new in _parse_rating_changes(payload):
+                        try:
+                            RATING_CHANGE_HOOK(active_tag, _u, _old, _new)
+                        except Exception as exc:
+                            print(f"[ai] rating-change hook failed (non-fatal): {exc!r}")
                 # M5 (DS-M5): OTS |showteam| capture → player._ots_sheets, keyed by the room's
                 # base tag, so team preview can (flag-gated VD_TP_OTS_OVERLAY) feed the
                 # opponent's revealed builds to the TP net. Closed play: no such frames.
@@ -450,11 +522,19 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
                         # game, so the closed-sheets production regime was never actually enforced).
                         if msg.startswith(("/choose", "/team", "/forfeit", "/timer",
                                            "/rejectopenteamsheets", "/acceptopenteamsheets")):
+                            if r in REJOINING and msg.startswith(("/rejectopenteamsheets",
+                                                                    "/acceptopenteamsheets")):
+                                # reconnect rejoin: poke-env re-answers open team sheets from the
+                                # replayed |init| — stale mid-battle, the server would only error.
+                                print(f"[ai] (rejoin: stale {msg} not shipped for {r})")
+                                continue
                             await page.evaluate("(d) => app.socket.send(d.r + '|' + d.m)", {"r": r, "m": msg})
                             if msg.startswith(("/choose", "/team")):
                                 last_ship = loop.time()          # the opponent's think-clock starts now
                         elif r:
                             print(f"[ai] (battle command not shipped: {msg[:30]})")
+                    if REJOINING and active_tag in REJOINING and "\n|request|" in payload:
+                        REJOINING.discard(active_tag)            # live request received: rejoin complete
                 finally:
                     # Battle ended → tally + free up + reclaim state, EVEN IF the feed/ship raised.
                     # Guard on host._ended: Showdown re-sends a room's full log (incl. |win|) on

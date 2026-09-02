@@ -41,6 +41,10 @@ _KNOWN_UNTAGGED = {
     # terrain-AMBIGUOUS moves (type/effect changes with the active terrain — no single axis)
     "Terrain Pulse", "Steel Roller",
     "Mimicry",
+    # Reg M-C (2026-09-01, USER-confirmed): Mega Lucario Z carries Aura Break. It only inverts
+    # Fairy Aura / Dark Aura, which no Champions mon has → an in-format no-op; deliberately
+    # untagged (no encoder category, no layout bump). Re-check if an Aura user ever enters.
+    "Aura Break",
     # manual weather move that is also a pivot; weather handled via the setter table already — n/a
 }
 

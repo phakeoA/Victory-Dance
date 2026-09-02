@@ -566,6 +566,139 @@ def compute_closed_copy_weights(
     return w.astype(np.float32)
 
 
+def parse_team_species(team) -> List[str]:
+    """Normalized species of a team: a paste FILE path, a pool team name (resolved under
+    ``teams/Champions``), or the paste TEXT itself. Era-5 W1 (`--own-team`)."""
+    from v_dance.parser.vod_parser.pokedex import get_pokedex, norm_species
+    s = str(team)
+    text = s
+    if "\n" not in s and len(s) < 260:                # a path or a pool name, not a paste
+        p = Path(s)
+        if p.is_file():
+            text = p.read_text(encoding="utf-8")
+        else:
+            try:
+                from v_dance.play.run_local_battle import resolve_team_path
+                text = Path(resolve_team_path(s)).read_text(encoding="utf-8")
+            except (Exception, SystemExit):        # resolve_team_path exits on an unknown name
+                text = s
+    from v_dance.parser.belief_state import parse_team_sheet
+    try:
+        dex = get_pokedex()                          # Pokedex object (``has``), or None
+    except Exception:
+        dex = None
+    out: List[str] = []
+    for mon in parse_team_sheet(text or ""):
+        sp = norm_species(mon.get("species") or "")
+        if not sp or sp in out:
+            continue
+        if dex is not None and not dex.has(sp):
+            continue                                # not a Pokémon → garbage line, skip
+        out.append(sp)
+    if not out:
+        raise ValueError(f"--own-team: no species parsed from {s[:60]!r}")
+    return out
+
+
+def own_team_overlap(roster: Sequence[str], own: set) -> float:
+    """Fraction of OUR team's species present in a demonstrator's 6-mon roster (0..1)."""
+    from v_dance.parser.vod_parser.pokedex import norm_species
+    if not own:
+        return 0.0
+    r = {norm_species(s) for s in (roster or []) if s}
+    return len(r & own) / float(len(own))
+
+
+def own_team_overlap_map(folders: Sequence[str], own_species: Sequence[str],
+                         cache_dir: Optional[str] = "artifacts",
+                         limit_files: Optional[int] = None) -> Dict[Tuple[str, str], float]:
+    """{(canonical replay id, side): overlap} for every JSONL under ``folders`` — read from the
+    FIRST line of each file (``players.p1/p2.roster``), so no re-encode and no cache-schema bump.
+    JSON-cached per (folder list, team); delete ``artifacts/.own_team_overlap_*.json`` after a
+    corpus folder grows. Examples look themselves up by ``(canonical_rid(replay_id), perspective)``."""
+    import hashlib
+    from v_dance.parser.vod_parser.pokedex import norm_species
+    own = {norm_species(s) for s in own_species if s}
+    flist = sorted(str(f) for f in folders)
+    cache = None
+    if cache_dir and limit_files is None:
+        h = hashlib.md5(("\n".join(flist) + "||" + ",".join(sorted(own))).encode()).hexdigest()[:12]
+        cache = Path(cache_dir) / f".own_team_overlap_{h}.json"
+        if cache.is_file():
+            try:
+                d = json.loads(cache.read_text(encoding="utf-8"))
+                if d.get("folders") == flist and set(d.get("own") or []) == own:
+                    return {tuple(k.split("::", 1)): float(v) for k, v in d["overlap"].items()}
+            except (json.JSONDecodeError, KeyError, OSError, ValueError):
+                pass
+    files: List[str] = []
+    seen: set = set()
+    for folder in folders:
+        for f in iter_jsonl_files(folder):
+            k = os.path.abspath(f)
+            if k not in seen:
+                seen.add(k)
+                files.append(f)
+    if limit_files is not None:
+        files = files[:limit_files]
+    out: Dict[Tuple[str, str], float] = {}
+    for f in files:
+        try:
+            with open(f, encoding="utf-8") as fh:
+                t = json.loads(fh.readline())
+        except Exception:
+            continue
+        players = t.get("players") or {}
+        rid = canonical_rid(t.get("replay_id") or Path(f).stem)
+        for side in ("p1", "p2"):
+            roster = (players.get(side) or {}).get("roster") or []
+            if roster:
+                out[(rid, side)] = own_team_overlap(roster, own)
+    if cache is not None:
+        try:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_text(json.dumps({"folders": flist, "own": sorted(own),
+                                         "overlap": {f"{r}::{s}": v for (r, s), v in out.items()}}),
+                             encoding="utf-8")
+        except OSError:
+            pass
+    return out
+
+
+def _example_overlap(e: dict, overlap_map: Dict[Tuple[str, str], float]) -> Optional[float]:
+    return overlap_map.get((canonical_rid(str(e.get("replay_id"))), e.get("perspective")))
+
+
+def compute_own_team_weights(examples: Sequence[dict], overlap_map: Dict[Tuple[str, str], float],
+                             lam: float) -> Tuple[np.ndarray, Counter]:
+    """Era-5 W1 specialist weight: ``1 + lam·overlap`` per example (overlap = fraction of OUR
+    six in the demonstrator's roster), unmapped → 1.0, MEAN-NORMALISED (compose by multiplying
+    and re-normalising like the other weight vectors). Also returns the overlap histogram
+    (keys 0..6 = mons overlapping, "unmapped") so a typo'd team fails loud upstream."""
+    n = len(examples)
+    w = np.ones(n, dtype=np.float64)
+    hist: Counter = Counter()
+    for i, e in enumerate(examples):
+        ov = _example_overlap(e, overlap_map)
+        if ov is None:
+            hist["unmapped"] += 1
+            continue
+        hist[int(round(ov * 6))] += 1
+        w[i] = 1.0 + float(lam) * float(ov)
+    mean = w.mean() if n else 1.0
+    if mean > 0:
+        w = w / mean
+    return w.astype(np.float32), hist
+
+
+def own_slice_indices(examples: Sequence[dict], overlap_map: Dict[Tuple[str, str], float],
+                      min_overlap: float) -> List[int]:
+    """Indices of examples whose demonstrator roster overlaps OUR team by ≥ ``min_overlap``
+    (fraction) — the own-team val slice."""
+    return [i for i, e in enumerate(examples)
+            if (_example_overlap(e, overlap_map) or 0.0) >= float(min_overlap) - 1e-9]
+
+
 def compute_advantage_weights(
     examples: Sequence[dict],
     value_ckpt: str,

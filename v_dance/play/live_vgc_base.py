@@ -1006,6 +1006,22 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
             log.debug("proto-log prune on finish failed (non-fatal)", exc_info=True)
         return super()._battle_finished_callback(battle)
 
+    def reset_battle_state(self, tag: str) -> None:
+        """Forget every per-battle buffer for ``tag`` WITHOUT the finish bookkeeping (no replay
+        save, no RL finalize). Used by the browser host's ``forget_battle`` on a link reconnect
+        (2026-09-01): the server replays the whole battle log, so the splice / belief / memory /
+        retry buffers must start empty or they would double-count. ``_tp_decision`` is kept on
+        purpose (the team-preview choice already happened server-side)."""
+        t = _norm_tag(tag)
+        for name in ("_proto_log", "_last_error", "_match_belief", "_belief_fed_turn",
+                     "_mem_frames", "_fs_battle_count", "_fs_attempts", "_tried_actions"):
+            d = getattr(self, name, None)
+            if not isinstance(d, dict):
+                continue
+            d.pop(t, None)                              # plain tag-keyed entries
+            for k in [k for k in d if isinstance(k, tuple) and k and k[0] == t]:
+                d.pop(k, None)                          # (tag, turn, …)-keyed entries
+
     def _record_rl_decision(self, battle, state_vec, action_s0, action_s1,
                             gimmick_s0, gimmick_s1, source, decision_type):
         """Self-play collection hook (3c.1). Called with the FINAL decision each

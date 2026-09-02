@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import threading
 import time
@@ -37,7 +38,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 import v_dance.play.play_vs_human_browser as _pvhb
-from v_dance.formats import known_formats
+from v_dance.formats import known_formats, reg_token
 from v_dance.play.run_local_battle import discover_teams, load_team, resolve_team_path
 
 _ENV_FORMAT_KEY = "VDANCE_BATTLE_FORMAT"
@@ -61,6 +62,87 @@ def _base_tag(tag: str) -> str:
     return m.group(1) if m else (tag or "")
 
 
+def _reg_label(fmt: str) -> str:
+    """'gen9championsvgc2026regmb' -> 'M-B' (the regulation, the way the USER names it)."""
+    tok = reg_token(fmt) or ""
+    body = tok[3:].upper() if tok.startswith("reg") else tok.upper()
+    if len(body) == 2:
+        return f"{body[0]}-{body[1]}"
+    return body or (fmt or "?")
+
+
+class RatingBook:
+    """Per-REGULATION rating bookkeeping for the panel (USER 2026-09-01: "peak elo in the panel,
+    sorted by regulation"). Ladder ratings are per format, so every number is keyed by the
+    battle's format id (parsed from its room tag). Session numbers come from the live rating
+    lines; ALL-TIME peaks are seeded from the bench JSONL (every past session's rows) at startup.
+    Before this, both UIs only ever showed the LAST rating — a peak field never existed."""
+
+    def __init__(self, bench_path: Optional[Path] = None):
+        self.fmts: dict = {}
+        self.loaded_rows = 0
+        if bench_path is not None:
+            try:
+                self.load_all_time(Path(bench_path))
+            except Exception:
+                pass                               # a bad/missing bench file = no all-time seed
+
+    @staticmethod
+    def fmt_of(tag: Optional[str]) -> Optional[str]:
+        m = _TAG_RE.match(tag or "")
+        return m.group(1).split("-")[1] if m else None
+
+    def _entry(self, fmt: str) -> dict:
+        return self.fmts.setdefault(fmt, {"current": None, "session_start": None,
+                                          "session_peak": None, "all_time_peak": None,
+                                          "all_time_games": 0})
+
+    def load_all_time(self, path: Path) -> None:
+        """Seed all-time peaks from the bench JSONL. ``rating`` is OUR rating on every row kind
+        (game rows carry it directly; the online transport writes it as ``rating_update`` rows)."""
+        if not path.is_file():
+            return
+        with path.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                except Exception:
+                    continue
+                fmt = self.fmt_of(r.get("battle_tag"))
+                if not fmt:
+                    continue
+                e = self._entry(fmt)
+                if r.get("type") != "rating_update":
+                    e["all_time_games"] += 1
+                # POST-battle value when the row has it (2026-09-01 rows), else the pre-battle one
+                for rt in (r.get("rating"), r.get("rating_after")):
+                    if isinstance(rt, (int, float)) and not isinstance(rt, bool):
+                        e["all_time_peak"] = max(e["all_time_peak"] or 0, int(rt))
+                self.loaded_rows += 1
+
+    def record(self, tag: str, rating) -> None:
+        """A live rating line for OUR account (RATING_HOOK) — session start/peak + all-time peak."""
+        fmt = self.fmt_of(tag)
+        if not fmt or not isinstance(rating, (int, float)) or isinstance(rating, bool):
+            return
+        rating = int(rating)
+        e = self._entry(fmt)
+        e["current"] = rating
+        if e["session_start"] is None:
+            e["session_start"] = rating
+        e["session_peak"] = max(e["session_peak"] or 0, rating)
+        e["all_time_peak"] = max(e["all_time_peak"] or 0, rating)
+
+    def summary(self) -> list:
+        """One dict per format, sorted by regulation (M-A, M-B, M-C, …)."""
+        out = [{"format": fmt, "reg": _reg_label(fmt), **e} for fmt, e in self.fmts.items()]
+        out.sort(key=lambda d: (reg_token(d["format"]) or d["format"]))
+        return out
+
+
 class BotController:
     """State + actions behind the panel. All ``page``-touching methods are coroutines that must run
     on ``self.loop`` (the bot's asyncio loop); the HTTP thread ships them there."""
@@ -69,11 +151,24 @@ class BotController:
                  loop: asyncio.AbstractEventLoop, env_path: Path,
                  team_pin_default: Optional[str] = None,
                  log_line: Optional[Callable[[str], None]] = None,
-                 auto_close_default: bool = False) -> None:
+                 auto_close_default: bool = False,
+                 bench_path: Optional[Path] = None,
+                 bandit=None) -> None:
         self.page, self.host, self.tally = page, host, tally
         self.ai_pool, self.fmt, self.username = list(ai_pool), fmt, username
         self.loop, self.env_path = loop, env_path
         self._log_line = log_line
+        # 2026-09-01: per-regulation rating book (session start/peak + all-time peak) and the
+        # online link watchdog (set by play_online_browser; None for other harnesses).
+        self.ratings = RatingBook(bench_path)
+        self.link = None
+        # 2026-09-01 (era-5 W0): the serve-side bandit (None = off) and the site's official
+        # numbers (Elo / GXE / Glicko / W-L from pokemonshowdown.com/users/<id>.json — the true
+        # "elo reflector"; the in-game rating line lags it by one game).
+        self.bandit = bandit
+        self.official: dict = {}
+        self._official_at = -1e9
+        self._site_poll_enabled = os.environ.get("VD_SITE_POLL", "1").strip() != "0"
         self.team_pin: Optional[str] = team_pin_default if team_pin_default in ai_pool else None
         # ladder-run state
         self.run_active = False
@@ -164,7 +259,18 @@ class BotController:
         self._live.add(tag)
         self._last_battle_frame_at = self.loop.time()   # fresh room = fresh grace for the sweep
         self._search_outstanding = False           # a room appeared — the search resolved
-        self.log(f"battle started: {tag}")
+        arm = None
+        if self.bandit is not None:                # attribute this game to the arm that was applied
+            try:
+                arm = self.bandit.bind(tag)
+            except Exception:
+                arm = None
+        self.log(f"battle started: {tag}" + (f"  [arm {arm}]" if arm else ""))
+        # 2026-09-01: keep ONE tick pending while a battle is live. Before this, nothing was
+        # scheduled between a resolved search and the battle's end, so when a dead link stopped
+        # the frames the ghost-live sweep never ran and the run hung silently (09-01: 2.5 h).
+        if self.run_active:
+            self._schedule_resume(_LIVE_RETRY_S)
 
     def _battle_ended(self, tag: str, payload: str) -> None:
         tag = _base_tag(tag)                       # |win| arrives on the SUFFIXED room id (stall #2)
@@ -215,8 +321,58 @@ class BotController:
             self.log(f"rating exchange confirmed — {base} is done.")
         if self.auto_close:
             self._close_room(base)
+        self.schedule_site_poll()                  # refresh the site's official numbers
         if self.run_active:
             self._schedule_resume(_RESEARCH_DELAY_S)
+
+    # ── 2026-09-01: serve-side bandit + the site's official rating ───────────
+    def apply_next_arm(self, reason: str = "pre-game"):
+        """Pick + apply the bandit arm for the NEXT battle (idempotent until that battle starts —
+        the search path and the challenge path both call this). Skipped while a battle is live:
+        a model swap mid-game would split one game across two arms."""
+        if self.bandit is None:
+            return None
+        if self._live:
+            return None
+        try:
+            before = self.bandit.pending
+            arm = self.bandit.apply_pending()
+        except Exception as exc:
+            self.log(f"bandit: apply failed ({exc!r}) — playing the current model")
+            return None
+        if arm is not None and before != arm.name:
+            extra = f" τ={arm.tau:g}" if arm.tau else ""
+            self.log(f"arm → {arm.name}{extra} ({reason})")
+        return arm
+
+    def schedule_site_poll(self, min_interval: float = 15.0) -> None:
+        """Fetch pokemonshowdown.com/users/<id>.json (Elo, GXE, Glicko-1, W-L per format) off
+        the bot loop; rate-limited; never raises. Result lands in ``self.official``."""
+        if not self._site_poll_enabled or self.loop is None:
+            return
+        try:
+            now = self.loop.time()
+        except Exception:
+            return
+        if now - self._official_at < min_interval:
+            return
+        self._official_at = now
+
+        async def _go():
+            from v_dance.play.serve_bandit import fetch_official_ratings
+            uid = _pvhb._toid(self.username)
+            try:
+                data = await self.loop.run_in_executor(None, fetch_official_ratings, uid)
+                self.official = {"ratings": data, "fetched": time.strftime("%H:%M:%S")}
+            except Exception as exc:
+                if not self.official.get("error"):
+                    self.log(f"site rating poll failed (non-fatal): {type(exc).__name__}")
+                self.official = {**self.official, "error": str(exc)[:80]}
+
+        try:
+            self.loop.create_task(_go())
+        except Exception:
+            pass
 
     def _close_room(self, base: str) -> None:
         full = self._full_tags.get(base, base)
@@ -226,6 +382,38 @@ class BotController:
             self.log(f"closed battle tab {full}")
 
         self.loop.create_task(self._guarded(_leave()))
+
+    def room_gone(self, tag: str) -> None:
+        """The consumer got ``|noinit|`` for a room we thought was live (a reconnect rejoin after
+        the game ended while the link was down). Drop it from the live set, count it toward the
+        run (it WAS a game — decided by the timer), and get the run moving again."""
+        base = _base_tag(tag)
+        was_live = base in self._live
+        self._live.discard(base)
+        self._full_tags.pop(base, None)
+        self.log(f"room gone — {base} no longer exists (decided while the link was down); dropped as live")
+        if was_live and base not in self._counted and self.run_active:
+            self._counted.add(base)
+            self.run_done += 1
+            if self.run_done >= self.run_target:
+                self.run_active = False
+                self.log(f"ladder run COMPLETE — {self.run_done}/{self.run_target} games played.")
+                return
+            self.log(f"ladder run {self.run_done}/{self.run_target} (room-gone game counted)")
+        if self.run_active:
+            self._schedule_resume(_RESEARCH_DELAY_S)
+
+    def on_reconnected(self, rejoining=None) -> None:
+        """The online link came back (LinkWatch). The server re-states the queue via
+        ``|updatesearch|`` after login, so drop the send-time bridge flag; an active run gets its
+        next search out once nothing is live (a rejoined battle keeps the tick deferring)."""
+        self._search_outstanding = False
+        self.searching = False
+        rj = [_base_tag(t) for t in (rejoining or [])]
+        self.log("link reconnected — " + (f"rejoining {', '.join(rj)}" if rj else "no live battle")
+                 + ("; run resumes" if self.run_active else ""))
+        if self.run_active:
+            self._schedule_resume(_RESEARCH_DELAY_S)
 
     def _schedule_resume(self, delay: float) -> None:
         """Single-flight resume timer: while a run is active there is always EXACTLY ONE pending
@@ -269,6 +457,7 @@ class BotController:
         """Pick the battle team (panel pin → Teambuilder-open → random), bind it to the host's
         decision core, and ``/utm`` it — the exact sequence of the consumer's challenge-accept
         path, so the server-side team and the encoder's own-side team can never diverge."""
+        self.apply_next_arm("search")              # era-5 W0: which checkpoint/knobs play next
         name, src = await _pvhb._pick_ai_team(self.page, self.ai_pool, self.team_pin)
         scoped = next((p for p in discover_teams(reg=self.fmt) if Path(p).name == name), name)
         team = self._load_scoped_team(scoped)
@@ -292,6 +481,8 @@ class BotController:
         self._search_outstanding = True
         self._search_sent_at = self.loop.time()
         self.log(f"searching ladder ({self.fmt}) with team {name!r} [{src}]")
+        if self.run_active:                        # the tick-always-pending invariant (2026-09-01)
+            self._schedule_resume(_LIVE_RETRY_S)
 
     async def start_ladder(self, games: int, team: Optional[str]) -> None:
         self.set_team(team)
@@ -391,6 +582,12 @@ class BotController:
             "rating": self.last_rating, "challenge_out": self.challenge_out or "",
             "env_fmt_saved": self.env_fmt_saved or "",
             "events": list(self.events)[-80:],
+            # 2026-09-01: peak elo per regulation + the online link watchdog's health
+            "peaks": self.ratings.summary(),
+            "link": (self.link.status() if self.link is not None else None),
+            # 2026-09-01: the site's official numbers + the serve-side bandit's evidence
+            "official": self.official,
+            "bandit": (self.bandit.summary() if self.bandit is not None else None),
         }
 
     def stop(self) -> None:
@@ -476,25 +673,56 @@ def start_control_ui(*, page, host, tally: dict, ai_pool: list, fmt: str, userna
                      team_pin_default: Optional[str] = None,
                      log_line: Optional[Callable[[str], None]] = None,
                      auto_close_default: bool = False,
-                     open_browser: bool = True) -> BotController:
+                     open_browser: bool = True,
+                     bench_path: Optional[Path] = None,
+                     bandit=None) -> BotController:
     """Build the controller + serve the panel on 127.0.0.1 (first free port in [port, port+9]).
-    Also chains itself onto ``RATING_HOOK`` (rating display + the Δelo battle-done confirm) —
-    call AFTER the harness set it."""
+    Also chains itself onto ``RATING_HOOK`` (the Δelo battle-done confirm) and
+    ``RATING_CHANGE_HOOK`` (post-battle rating → display, peaks, bandit reward) — call AFTER the
+    harness set them. ``bench_path`` seeds the all-time peak per regulation."""
     ctrl = BotController(page=page, host=host, tally=tally, ai_pool=ai_pool, fmt=fmt,
                          username=username, loop=loop, env_path=env_path,
                          team_pin_default=team_pin_default, log_line=log_line,
-                         auto_close_default=auto_close_default)
+                         auto_close_default=auto_close_default, bench_path=bench_path,
+                         bandit=bandit)
     prev_hook = _pvhb.RATING_HOOK
 
-    def _hook(tag, user, rating):
+    def _hook(tag, user, rating):                  # PRE-battle number (poke-env semantics)
         if prev_hook is not None:
             prev_hook(tag, user, rating)
         if _pvhb._toid(user) == _pvhb._toid(username):
-            ctrl.last_rating = rating
-        ctrl.events.append(f"{time.strftime('%H:%M:%S')}  rating: {user} → {rating}")
+            if ctrl.last_rating is None:
+                ctrl.last_rating = rating
+            ctrl.ratings.record(tag, rating)       # session START = the rating before game 1
         ctrl._on_rating(tag, user, rating)         # the Δelo-exchanged battle-done confirm
 
     _pvhb.RATING_HOOK = _hook
+    prev_change = _pvhb.RATING_CHANGE_HOOK
+
+    def _change_hook(tag, user, old, new):         # POST-battle number (what the site shows)
+        if prev_change is not None:
+            prev_change(tag, user, old, new)
+        if _pvhb._toid(user) != _pvhb._toid(username):
+            return
+        ctrl.last_rating = new
+        ctrl.ratings.record(tag, new)
+        delta = int(new) - int(old)
+        line = f"rating: {old} → {new} ({delta:+d})"
+        if ctrl.bandit is not None:
+            try:
+                name = ctrl.bandit.observe(tag, delta)
+            except Exception as exc:
+                name = None
+                ctrl.log(f"bandit: observe failed (non-fatal): {exc!r}")
+            if name:
+                s = ctrl.bandit.stats[name]
+                line += f"  → arm {name}: {s.wins}W-{s.losses}L, mean Δ {s.mean_delta():+.1f} over {s.n}"
+                if s.retired:
+                    line += "  ⛔ RETIRED"
+        ctrl.log(line)
+
+    _pvhb.RATING_CHANGE_HOOK = _change_hook
+    ctrl.schedule_site_poll(min_interval=0.0)      # the site's numbers at startup
 
     handler = _make_handler(ctrl)
     last_exc = None
@@ -604,9 +832,14 @@ _PANEL_HTML = """<!DOCTYPE html>
         starts) only after the rating exchange confirms the battle is done.</div>
       <div class="stat" style="margin-top:10px">
         <span>Rating: <b id="rating">—</b></span>
+        <span>Session peak: <b id="peak">—</b></span>
         <span>Session: <b id="tally">0-0</b></span>
         <span>Live battles: <b id="live">0</b></span>
+        <span>Link: <b id="link">—</b></span>
       </div>
+      <div class="muted" id="peaks" style="margin-top:6px"></div>
+      <div class="muted" id="site" style="margin-top:4px"></div>
+      <div class="muted" id="bandit" style="margin-top:4px;white-space:pre-line"></div>
     </div></div>
   </div>
 
@@ -649,6 +882,32 @@ function render(s) {
   $('tally').textContent = `${s.tally.ai || 0}W-${s.tally.you || 0}L` +
                            (s.tally.draw ? `-${s.tally.draw}D` : '');
   $('live').textContent = s.live.length;
+  // 2026-09-01: session peak for the active regulation + all-time peaks by regulation + link health
+  const peaks = s.peaks || [];
+  const cur = peaks.find(p => p.format === s.format) || peaks[0];
+  $('peak').textContent = (cur && cur.session_peak != null)
+      ? `${cur.session_peak} (start ${cur.session_start})` : '—';
+  $('peaks').textContent = peaks.length
+      ? 'All-time peak by regulation: ' + peaks.map(p =>
+          `${p.reg} ${p.all_time_peak ?? '—'} (${p.all_time_games} games)`).join(' · ')
+      : '';
+  $('link').textContent = s.link
+      ? (s.link.down ? 'DOWN — reconnecting'
+                     : `ok · ${s.link.idle_s}s since last frame` +
+                       (s.link.reconnects ? ` · ${s.link.reconnects} reconnect(s)` : ''))
+      : '—';
+  // the site's official numbers (pokemonshowdown.com/users/<id>.json) + the bandit's evidence
+  const of = (s.official && s.official.ratings) ? s.official.ratings[s.format] : null;
+  $('site').textContent = of
+      ? `Site: Elo ${of.elo} · GXE ${of.gxe ?? '—'}% · Glicko ${of.glicko ?? '—'}±${of.glicko_dev ?? '—'}` +
+        ` · ${of.w}W-${of.l}L lifetime (as of ${s.official.fetched})`
+      : (s.official && s.official.error ? 'Site: rating poll failed' : '');
+  const arms = s.bandit || [];
+  $('bandit').textContent = arms.length
+      ? 'Bandit (◀ = playing, * = incumbent): ' + arms.map(a =>
+          `${a.name}${a.incumbent ? '*' : ''}${a.current ? ' ◀' : ''} ${a.wins}W-${a.losses}L` +
+          ` Δ${a.mean_delta >= 0 ? '+' : ''}${a.mean_delta}${a.retired ? ' RETIRED' : ''}`).join(' · ')
+      : '';
   $('challengeOut').textContent = s.challenge_out ? ('outgoing challenge: ' + s.challenge_out) : '';
   const wait = s.awaiting_confirm.length ? ' — confirming result…' : '';
   $('prog').textContent = s.run.active

@@ -47,7 +47,11 @@ from v_dance.training.bc_dataset import (  # noqa: E402
     canonical_rid,
     compute_advantage_weights,
     compute_closed_copy_weights,
+    compute_own_team_weights,
     compute_sample_weights,
+    own_slice_indices,
+    own_team_overlap_map,
+    parse_team_species,
     examples_from_folders,
     filter_by_rating,
     print_stats,
@@ -572,6 +576,37 @@ def train(args: argparse.Namespace) -> dict:
               f"{n_open} open) -> combined weight min {train_weights.min():.3f} "
               f"max {train_weights.max():.3f} mean {train_weights.mean():.3f}")
 
+    # ── Era-5 W1: own-team SPECIALIST weighting (TRAIN ONLY, default OFF) ─────────
+    # docs/era5_specialist_design.md §3.1 — specialize the OWN side without dropping a single
+    # game (the opponent side stays fully general): weight = 1 + λ·(fraction of our six in the
+    # demonstrator's roster), read from each replay's first line, composed multiplicatively.
+    # The val slice with overlap ≥ min/6 is the offline read this arm is FOR (reported per epoch;
+    # --select-own-slice makes it the checkpoint-selection metric).
+    own_map, own_val_idx, own_species = None, None, None
+    if args.own_team:
+        own_species = parse_team_species(args.own_team)
+        _all_folders = list(dict.fromkeys([*folders, *(args.val_data or []), *(args.type_a or [])]))
+        own_map = own_team_overlap_map(_all_folders, own_species, limit_files=args.limit_files)
+        ot_w, hist = compute_own_team_weights(train_ex, own_map, args.own_team_weight)
+        if sum(hist.get(k, 0) for k in range(1, 7)) == 0:
+            sys.exit(f"[train_bc] --own-team {args.own_team!r} ({', '.join(own_species)}) overlaps "
+                     f"NO train example — wrong team / paste? Refusing to run a no-op.")
+        train_weights = ot_w if train_weights is None else train_weights * ot_w
+        m = float(train_weights.mean())
+        if m > 0:
+            train_weights = (train_weights / m).astype(np.float32)
+        print(f"[train_bc] own-team weighting: {', '.join(own_species)} λ={args.own_team_weight:g} "
+              f"— train overlap histogram (mons of 6): "
+              + ", ".join(f"{k}:{hist.get(k, 0)}" for k in range(7))
+              + f", unmapped {hist.get('unmapped', 0)} -> combined weight min {train_weights.min():.3f} "
+              f"max {train_weights.max():.3f} mean {train_weights.mean():.3f}")
+        own_val_idx = own_slice_indices(val_ex, own_map, args.own_team_min_overlap / 6.0)
+        print(f"[train_bc] own-team val slice: {len(own_val_idx)}/{len(val_ex)} val examples with "
+              f"overlap ≥ {args.own_team_min_overlap}/6")
+        if args.select_own_slice and len(own_val_idx) < 2000:
+            print(f"[train_bc] WARNING: --select-own-slice with only {len(own_val_idx)} slice examples "
+                  f"— selection falls back to pooled val top1 (slice too small to trust)")
+
     # ── Phase-2 offline advantage weighting (TRAIN ONLY, default OFF) ──────────
     # w = f(G − V(s)) from a trained value head: imitate what beat expectation.
     # Composes multiplicatively with the rating/outcome weights above; val stays
@@ -656,6 +691,18 @@ def train(args: argparse.Namespace) -> dict:
               f"prefetch 4, pin_memory={loader_kw['pin_memory']})")
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, **loader_kw)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, **loader_kw)
+    # Era-5 W1: the own-team val slice (same val examples, same stamps → same loader settings).
+    own_val_loader = None
+    if own_val_idx:
+        if args.sequence_len > 1:
+            print("[train_bc] own-team val slice skipped: sequence BC needs whole trajectories")
+        else:
+            own_val_ds = BCDataset([val_ex[i] for i in own_val_idx], with_opp=args.aux_opp_head,
+                                   sequence_len=args.sequence_len,
+                                   archetype_ids=([val_z[i] for i in own_val_idx] if val_z else None),
+                                   lazy_x=args.mmap_cache)
+            own_val_loader = DataLoader(own_val_ds, batch_size=args.batch_size, shuffle=False,
+                                        **loader_kw)
 
     # ── Auxiliary opponent head (task #9): adds opp_a/opp_b ACTION heads (no opp
     # gimmick head).  OUR action/gimmick heads + reported our top1 are unchanged,
@@ -843,6 +890,12 @@ def train(args: argparse.Namespace) -> dict:
         "n_archetypes": (int(z_art["k"]) if z_art else 0),
         "z_dim": (args.z_dim if z_art else 0),
         "z_archetypes": args.z_archetypes,
+        # Era-5 W1 own-team specialist weighting (audit trail; serve behaviour unchanged)
+        "own_team": args.own_team,
+        "own_team_species": own_species,
+        "own_team_weight": (args.own_team_weight if args.own_team else None),
+        "own_team_min_overlap": (args.own_team_min_overlap if args.own_team else None),
+        "select_own_slice": bool(args.select_own_slice and args.own_team),
     })
     # The serve-side nearest-centroid lookup needs the centroid table — embed
     # it in the checkpoint so serve is self-contained (no sidecar artifact).
@@ -898,8 +951,13 @@ def train(args: argparse.Namespace) -> dict:
                        progress_secs=args.progress_secs,
                        pair_dropout=args.pair_dropout)
         va = run_epoch(model, val_loader, device, optimizer=None)
-        history.append({"epoch": epoch, "train": tr, "val": va})
+        # Era-5 W1: the own-team slice (val examples whose demonstrator played ≥ N of our six)
+        own_va = (run_epoch(model, own_val_loader, device, optimizer=None)
+                  if own_val_loader is not None else None)
+        history.append({"epoch": epoch, "train": tr, "val": va, "val_own": own_va})
         opp_str = f" | opp top1 {va['opp_top1']:.3f}" if args.aux_opp_head else ""
+        own_str = (f" | own-slice top1 {own_va['top1']:.3f} (n={len(own_val_loader.dataset)})"
+                   if own_va is not None else "")
         print(
             f"{time.strftime('%H:%M:%S')} epoch {epoch:3d} "
             f"[{(time.time() - _ep_t0) / 60.0:.1f} min] | "
@@ -907,11 +965,16 @@ def train(args: argparse.Namespace) -> dict:
             f"val loss {va['loss']:.4f} top1 {va['top1']:.3f} top3 {va['top3']:.3f} "
             f"(a {va['our_a_top1']:.3f} / b {va['our_b_top1']:.3f}) "
             f"| gim recall {va['gimmick_recall']:.3f} pos {va['gimmick_pos']} "
-            f"| val win-acc {va['value_acc']:.3f} brier {va['value_brier']:.3f}{opp_str}"
+            f"| val win-acc {va['value_acc']:.3f} brier {va['value_brier']:.3f}{opp_str}{own_str}"
         )
 
-        if va["top1"] > best_top1:
-            best_top1 = va["top1"]
+        # Checkpoint selection: pooled val top1 (default) or, with --select-own-slice and a
+        # large-enough slice, the own-team slice top1 (the specialist's target metric).
+        use_own = bool(args.select_own_slice and own_va is not None
+                       and len(own_val_loader.dataset) >= 2000)
+        select_metric = own_va["top1"] if use_own else va["top1"]
+        if select_metric > best_top1:
+            best_top1 = select_metric
             epochs_no_improve = 0
             torch.save(
                 {
@@ -919,11 +982,13 @@ def train(args: argparse.Namespace) -> dict:
                     "config": config,
                     "epoch": epoch,
                     "val_metrics": va,
+                    "val_own_metrics": own_va,
                     "z_artifact": z_artifact_slim,
                 },
                 ckpt_path,
             )
-            print(f"           ↑ new best (val top1 {best_top1:.3f}) -> {ckpt_path}")
+            print(f"           ↑ new best ({'own-slice' if use_own else 'val'} top1 "
+                  f"{best_top1:.3f}) -> {ckpt_path}")
         else:
             epochs_no_improve += 1
             if args.patience and epochs_no_improve >= args.patience:
@@ -985,6 +1050,20 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                          "counter majority-action bias (default: none)")
     ap.add_argument("--class-weight-cap", type=float, default=10.0,
                     help="cap on any single class weight (default: 10)")
+    ap.add_argument("--own-team", default=None,
+                    help="era-5 W1 specialist: a team (paste file path, pool team name, or paste "
+                         "text). TRAIN examples are weighted 1 + --own-team-weight × (fraction of "
+                         "this team's six present in the demonstrator's roster, read from each "
+                         "replay's first line); no game is dropped, so the opponent side stays "
+                         "general. Also reports an own-team val slice (overlap ≥ "
+                         "--own-team-min-overlap of 6) per epoch.")
+    ap.add_argument("--own-team-weight", type=float, default=3.0,
+                    help="λ for --own-team: a full-overlap game counts (1+λ)× a zero-overlap one.")
+    ap.add_argument("--own-team-min-overlap", type=int, default=4,
+                    help="own-team val slice threshold in mons (of 6).")
+    ap.add_argument("--select-own-slice", action="store_true",
+                    help="best-checkpoint selection on the own-team slice top1 instead of pooled "
+                         "val (fine-tune instrument; falls back to pooled when the slice < 2000).")
     ap.add_argument("--gimmick-loss-weight", type=float, default=1.0,
                     help="weight on the gimmick (mega) CE term in the total loss "
                          "(default: 1.0). The gimmick head is always class-balanced.")

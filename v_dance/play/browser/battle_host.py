@@ -207,6 +207,34 @@ class BattleHost:
             locks.pop(tag, None)
         self._outgoing.clear()                         # one battle at a time → safe to drop the buffer
 
+    def forget_battle(self, tag: str) -> None:
+        """Drop a LIVE battle's reconstructed state WITHOUT marking it ended (link reconnect,
+        2026-09-01). After a socket drop the client re-joins the room and the server RE-SENDS the
+        whole battle log from ``|init|``. Feeding that replay into the EXISTING poke-env battle
+        object would double-apply additive events (``|-boost|``, PP use) and duplicate the gap-#6
+        protocol buffer — so forget the object and let the replayed log rebuild it from scratch
+        (poke-env's own spectator / late-join path). ``_ended`` is untouched (the rejoin frames
+        must flow) and ``_tp_decision`` is KEPT (the bring/lead choice was made once, server-side)."""
+        tag = (tag or "").lstrip(">")
+        self.player._battles.pop(tag, None)
+        reset = getattr(self.player, "reset_battle_state", None)
+        if callable(reset):
+            try:
+                reset(tag)
+            except Exception:                          # bookkeeping must never break the reconnect
+                log.debug("reset_battle_state failed (non-fatal)", exc_info=True)
+        locks = getattr(self.player.ps_client, "_battle_locks", None)
+        if isinstance(locks, dict):
+            locks.pop(tag, None)
+
+    def abandon_battle(self, tag: str) -> None:
+        """A live battle whose room is GONE server-side (``|noinit|nonexistent|`` — a reconnect
+        rejoin after the game was decided by the timer while the link was down). Reclaim it like
+        ``end_battle`` (the ``_ended`` gate keeps any stray frame from wedging the feed) but WITHOUT
+        the transport's end_battle wrapper: there is no result, so no bench row is written."""
+        tag = (tag or "").lstrip(">")
+        BattleHost.end_battle(self, tag)
+
     # ── Introspection (for tests / the transport's UI) ────────────────────────────
     @property
     def battles(self) -> dict:

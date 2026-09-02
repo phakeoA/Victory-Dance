@@ -708,8 +708,13 @@ function renderOnline() {
           <div class="chk"><input type="checkbox" id="ob-ac">
             <label for="ob-ac">Auto-close finished battle tabs</label></div>
           <div class="stat" style="margin-top:10px"><span>Rating <b id="ob-rating">—</b></span>
+            <span>Session peak <b id="ob-peak">—</b></span>
             <span>Session <b id="ob-tally">0W-0L</b></span>
-            <span>Live <b id="ob-live">0</b></span></div>
+            <span>Live <b id="ob-live">0</b></span>
+            <span>Link <b id="ob-link">—</b></span></div>
+          <div class="muted" id="ob-peaks" style="margin-top:5px"></div>
+          <div class="muted" id="ob-site" style="margin-top:4px"></div>
+          <div class="muted" id="ob-bandit" style="margin-top:4px;white-space:pre-line"></div>
           <div class="muted" id="ob-chalout" style="margin-top:5px"></div>
         </div>
       </div>
@@ -738,6 +743,22 @@ function updateOnlineLive() {
   set("ob-rating", OB.rating ?? "—");
   set("ob-tally", `${(tally.ai || 0)}W-${(tally.you || 0)}L${tally.draw ? "-" + tally.draw + "D" : ""}`);
   set("ob-live", (OB.live || []).length);
+  // 2026-09-01: session peak (active regulation), all-time peaks by regulation, link watchdog health
+  const peaks = OB.peaks || [], cur = peaks.find(p => p.format === OB.format) || peaks[0];
+  set("ob-peak", (cur && cur.session_peak != null) ? `${cur.session_peak} (start ${cur.session_start})` : "—");
+  set("ob-peaks", peaks.length ? "All-time peak by regulation: " + peaks.map(p =>
+      `${esc(p.reg)} ${p.all_time_peak ?? "—"} (${p.all_time_games} games)`).join(" · ") : "");
+  set("ob-link", OB.link ? (OB.link.down ? "DOWN — reconnecting"
+      : `ok · ${OB.link.idle_s}s idle` + (OB.link.reconnects ? ` · ${OB.link.reconnects} reconnect(s)` : "")) : "—");
+  // the site's official numbers + the serve-side bandit (2026-09-01)
+  const of = (OB.official && OB.official.ratings) ? OB.official.ratings[OB.format] : null;
+  set("ob-site", of ? `Site: Elo ${of.elo} · GXE ${of.gxe ?? "—"}% · Glicko ${of.glicko ?? "—"}±${of.glicko_dev ?? "—"}` +
+      ` · ${of.w}W-${of.l}L lifetime (as of ${esc(OB.official.fetched || "")})`
+      : (OB.official && OB.official.error ? "Site: rating poll failed" : ""));
+  const arms = OB.bandit || [];
+  set("ob-bandit", arms.length ? "Bandit (◀ = playing, * = incumbent): " + arms.map(a =>
+      `${esc(a.name)}${a.incumbent ? "*" : ""}${a.current ? " ◀" : ""} ${a.wins}W-${a.losses}L` +
+      ` Δ${a.mean_delta >= 0 ? "+" : ""}${a.mean_delta}${a.retired ? " RETIRED" : ""}`).join(" · ") : "");
   set("ob-prog", run.active ? `Run: ${run.done}/${run.target} played` + (OB.searching ? " — searching…" : "")
                             : (OB.searching ? "Searching…" : "idle"));
   set("ob-chalout", OB.challenge_out ? "outgoing challenge: " + OB.challenge_out : "");

@@ -44,7 +44,11 @@ if _ENV.get("VDANCE_BATTLE_FORMAT"):
 # read these from os.environ, so a .env entry must be exported too (setdefault → a real
 # environment variable still wins).
 for _k in ("VD_SERVE_TAU", "VD_SERVE_TOP_P", "VD_TP_TIE_EPS", "VD_PAIR_DECODE",
-           "VD_FUTILITY_MASK"):
+           "VD_FUTILITY_MASK",
+           # 2026-09-01 link watchdog knobs (LinkWatch): probe-after / dead-after seconds + kill switch
+           "VD_LINK_PROBE_S", "VD_LINK_DEAD_S", "VD_LINK_RECONNECT",
+           # 2026-09-01 serve-side bandit (era-5 W0) + the site's official-rating poll
+           "VD_BANDIT", "VD_BANDIT_CONFIG", "VD_SITE_POLL"):
     if _ENV.get(_k):
         os.environ.setdefault(_k, _ENV[_k])
 
@@ -208,6 +212,211 @@ async def _login(page, username: str, password: str) -> bool:
             return False
 
 
+_LINK_NAMED_JS = ("(u) => !!(window.app && app.user && app.user.get('named') && "
+                  "app.user.get('name').toLowerCase().replace(/[^a-z0-9]/g,'') === u)")
+_LINK_STATE_JS = "() => (window.app && app.socket) ? app.socket.readyState : -1"
+_LINK_OPEN_JS = "() => !!(window.app && app.socket && app.socket.readyState === 1)"
+_LINK_PROBE_JS = "(u) => app.socket.send('|/cmd userdetails ' + u)"
+_LINK_REJOIN_JS = "(r) => { if (window.app && app.joinRoom && !app.rooms[r]) app.joinRoom(r, 'battle'); }"
+
+
+class LinkWatch:
+    """Dead-socket detector + auto-reconnect for the online tab (2026-09-01).
+
+    USER report: on long sessions "the server keeps disconnecting the bot" — MID-BATTLE, so a slow
+    recovery is a timer loss. Root causes (memory ``ladder-disconnect-diagnosis-2026-09-01``): the
+    legacy client only shows a ReconnectPopup (a CLICK reconnects, nothing automatic), and the
+    consumer could not tell a dead socket from a slow opponent (no close handler; the SockJS
+    heartbeats were dropped before the queue). This watches the RAW frame clock and the socket:
+
+      * ``ws.on("close")`` / readyState != 1  → reconnect on the next idle tick (~1 s).
+      * no raw frame (SockJS ``h`` counts) for ``probe_s`` → send ``/cmd userdetails`` (a reply IS
+        a frame); still nothing at ``dead_s`` → half-open socket → reconnect.
+
+    Reconnect = the client's own recovery (a page reload: cookies keep the login, localStorage
+    keeps teams/prefs, the server re-lists live games and the room is re-joined), THEN the live
+    battle is rebuilt from the server's replayed log — the host FORGETS its battle object first so
+    the replay cannot double-count (``BattleHost.forget_battle``; the tag sits in
+    ``play_vs_human_browser.REJOINING`` until its live ``|request|`` lands). Worst case ≈ ``dead_s``
+    + ~8 s, inside Showdown's disconnect grace. ``VD_LINK_RECONNECT=0`` = detect + log only.
+    """
+
+    def __init__(self, *, page, host, username: str, password: str, loop, log,
+                 probe_s: float = 15.0, dead_s: float = 25.0, cooldown_s: float = 20.0,
+                 reconnect: bool = True, prefs: dict | None = None, ctrl_ref: dict | None = None,
+                 now=None):
+        self.page, self.host = page, host
+        self.username, self.password = username, password
+        self._uid = "".join(c for c in username.lower() if c.isalnum())
+        self.log = log
+        self._now = now or (loop.time if loop is not None else time.monotonic)
+        self.probe_s = max(5.0, float(probe_s))
+        self.dead_s = max(self.probe_s + 5.0, float(dead_s))
+        self.cooldown_s = float(cooldown_s)
+        self.reconnect_enabled = bool(reconnect)
+        self.prefs, self.ctrl_ref = prefs, ctrl_ref
+        self.ws = None                          # the CURRENT websocket (a stale socket's close is noise)
+        self.last_rx = self._now()              # raw-frame clock (heartbeats included)
+        self.closed_at = None                   # set by a close event / failed reconnect → down
+        self.probe_sent_at = None
+        self.last_reconnect_at = -1e9
+        self.reconnects = 0
+        self.probes = 0
+        self.frames = 0
+        self._busy = False
+        self._last_off_warn = -1e9
+
+    # ── transport callbacks (Playwright event thread = the bot loop) ─────────
+    def on_ws_open(self, ws) -> None:
+        self.ws = ws
+        self.closed_at = None
+        self.last_rx = self._now()
+        self.log(f"[online] websocket opened{' (reconnect #%d)' % self.reconnects if self.reconnects else ''}")
+
+    def on_raw_frame(self, _payload) -> None:
+        self.frames += 1
+        self.last_rx = self._now()
+
+    def on_ws_close(self, ws=None) -> None:
+        if ws is not None and self.ws is not None and ws is not self.ws:
+            return                              # an OLD socket closing after we already reconnected
+        if self.closed_at is None:
+            self.closed_at = self._now()
+            self.log("[online] websocket CLOSED — reconnect pending (the client only shows a popup)")
+
+    def on_ws_error(self, err=None) -> None:
+        self.log(f"[online] websocket error: {str(err)[:120]}")
+
+    # ── the tick (runs from the consumer's idle branch, ~1 s cadence) ─────────
+    async def tick(self) -> None:
+        if self._busy:
+            return
+        now = self._now()
+        if self.closed_at is not None:
+            await self._reconnect("socket closed")
+            return
+        idle = now - self.last_rx
+        if idle < self.probe_s:
+            return
+        if self.probe_sent_at is not None and self.probe_sent_at > self.last_rx:
+            if idle >= self.dead_s:             # probed and STILL silent → half-open socket
+                await self._reconnect(f"no frames for {idle:.0f}s, probe unanswered")
+            return
+        # first silence past probe_s: ask the socket itself, then ping the server
+        try:
+            state = await self.page.evaluate(_LINK_STATE_JS)
+        except Exception as exc:
+            self.log(f"[online] link probe: page.evaluate failed ({type(exc).__name__}) — waiting")
+            self.probe_sent_at = now
+            return
+        if state != 1:
+            await self._reconnect(f"socket readyState={state}")
+            return
+        try:
+            await self.page.evaluate(_LINK_PROBE_JS, self.username)
+        except Exception as exc:
+            self.log(f"[online] link probe send failed ({type(exc).__name__}) — waiting")
+        self.probe_sent_at = now
+        self.probes += 1
+
+    def _live_tags(self) -> list:
+        ended = getattr(self.host, "_ended", set())
+        return [t for t, b in list(getattr(self.host, "battles", {}).items())
+                if t not in ended and not getattr(b, "finished", False)]
+
+    async def _ensure_named(self) -> bool:
+        try:
+            await self.page.wait_for_function(_LINK_NAMED_JS, arg=self._uid, timeout=8000)
+            return True
+        except Exception:
+            pass
+        try:                                    # scripted re-login: same steps as _login, no 5-min wait
+            await self.page.evaluate("(n) => app.user.rename(n)", self.username)
+            await self.page.fill("input[name=password]", self.password, timeout=8000)
+            await self.page.click("button[type=submit]", timeout=4000)
+            await self.page.wait_for_function(_LINK_NAMED_JS, arg=self._uid, timeout=15000)
+            return True
+        except Exception as exc:
+            self.log(f"[online] re-login FAILED ({type(exc).__name__}) — log in MANUALLY in the bot window")
+            return False
+
+    async def _reconnect(self, reason: str) -> None:
+        now = self._now()
+        if not self.reconnect_enabled:
+            if now - self._last_off_warn >= 30.0:
+                self.log(f"[online] LINK DOWN ({reason}) — auto-reconnect is OFF (VD_LINK_RECONNECT=0)")
+                self._last_off_warn = now
+            return
+        if now - self.last_reconnect_at < self.cooldown_s:
+            return                              # a reconnect just ran — let it settle, retry after cooldown
+        self._busy = True
+        self.reconnects += 1
+        t0 = now
+        live = self._live_tags()
+        self.log(f"[online] LINK DOWN ({reason}) — reconnecting (#{self.reconnects}); "
+                 f"live battles: {', '.join(live) if live else 'none'}")
+        for t in live:                          # forget BEFORE the replay lands (see class doc)
+            try:
+                self.host.forget_battle(t)
+            except Exception as exc:
+                self.log(f"[online] forget_battle({t}) failed (non-fatal): {exc!r}")
+            _pvhb.REJOINING.add(t)
+        ok, named = False, False
+        try:
+            await self.page.reload(wait_until="domcontentloaded", timeout=25000)
+            await self.page.wait_for_function(_LINK_OPEN_JS, timeout=25000)
+            self.last_rx = self._now()
+            self.closed_at = None
+            self.probe_sent_at = None
+            named = await self._ensure_named()
+            if self.prefs:
+                try:
+                    await self.page.evaluate(_CLIENT_PREFS_JS, self.prefs)
+                except Exception:
+                    pass
+            try:
+                await _default_format(self.page, "online")
+            except Exception:
+                pass
+            for t in live:                      # the client re-joins live games itself; this is the belt
+                try:
+                    await self.page.evaluate(_LINK_REJOIN_JS, t)
+                except Exception as exc:
+                    self.log(f"[online] rejoin {t} failed (non-fatal): {exc!r}")
+            ok = True
+            self.log(f"[online] LINK RECONNECTED in {self._now() - t0:.1f}s"
+                     f"{'' if named else ' (NOT logged in!)'}; rejoining {len(live)} battle(s)")
+        except Exception as exc:
+            self.log(f"[online] reconnect FAILED ({exc!r}) — retrying after {self.cooldown_s:.0f}s")
+            self.closed_at = self._now()        # stay 'down' → the next tick retries after the cooldown
+        finally:
+            self._busy = False
+            self.last_reconnect_at = self._now()
+        if ok:
+            c = (self.ctrl_ref or {}).get("c")
+            if c is not None and hasattr(c, "on_reconnected"):
+                try:
+                    c.on_reconnected(live)
+                except Exception as exc:
+                    self.log(f"[online] panel on_reconnected failed (non-fatal): {exc!r}")
+
+    def room_gone(self, tag: str) -> None:
+        """Consumer hook: a rejoined room no longer exists → tell the panel (run bookkeeping)."""
+        c = (self.ctrl_ref or {}).get("c")
+        if c is not None and hasattr(c, "room_gone"):
+            c.room_gone(tag)
+
+    def banner(self) -> str:
+        return (f"[online] link watchdog ACTIVE — probe after {self.probe_s:.0f}s idle, reconnect on "
+                f"socket close or after {self.dead_s:.0f}s silence; auto-reconnect "
+                f"{'ON' if self.reconnect_enabled else 'OFF (detect + log only, VD_LINK_RECONNECT=0)'}")
+
+    def status(self) -> dict:
+        return {"enabled": self.reconnect_enabled, "down": self.closed_at is not None,
+                "idle_s": round(max(0.0, self._now() - self.last_rx), 1),
+                "reconnects": self.reconnects, "probes": self.probes, "frames": self.frames}
+
+
 def _write_session_summary(session_log: Path, note: str, tally: dict) -> None:
     """On session exit (2026-07-10, USER): append the era benchmark report + refresh the
     observed-meta aggregate — the grind loop's bookkeeping, automated. Never raises."""
@@ -256,7 +465,9 @@ def _wrap_bench_recording(host: BattleHost, session_id: str, note: str,
                        "turns": getattr(b, "turn", None),
                        "rating": getattr(b, "rating", None),
                        "opponent_rating": getattr(b, "opponent_rating", None),
-                       "ckpt": str(ckpt), "tp_ckpt": str(tp_ckpt)}
+                       "ckpt": str(ckpt), "tp_ckpt": str(tp_ckpt),
+                       # 2026-09-01 (era-5 W0): which bandit arm played this game (None = no bandit)
+                       "arm": getattr(host.player, "_arm_name", None)}
                 BENCH_DIR.mkdir(parents=True, exist_ok=True)
                 with BENCH_LOG.open("a", encoding="utf-8") as f:
                     f.write(json.dumps(row) + "\n")
@@ -264,7 +475,8 @@ def _wrap_bench_recording(host: BattleHost, session_id: str, note: str,
                 _slog(LOG_DIR / f"online_{session_id}.log",
                       f"{row['ts']}  game {row['game_idx']:>3}  {row['result'].upper():<5} "
                       f"vs {(row['opponent'] or '?'):<20} {row['turns']}t  "
-                      f"team {row['ai_team'] or '?'}  {row['battle_tag']}")
+                      f"team {row['ai_team'] or '?'}  {row['battle_tag']}"
+                      + (f"  arm {row['arm']}" if row.get("arm") else ""))
                 # B-L2 dossier capture (passive; never raises) — key data for online opponents.
                 from v_dance.play.opponent_dossier import summary, update_from_battle
                 if update_from_battle(b, row["result"],
@@ -305,17 +517,28 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
     # Ladder-rating capture (2026-07-10): the post-battle |raw| rating lines arrive after the
     # game row is written, so they land as separate crash-safe "rating_update" rows keyed by
     # battle_tag; human_benchmark_report joins them onto the game rows at read time.
-    def _rating_row(tag: str, user: str, rating: int) -> None:
-        key = "rating" if _pvhb._toid(user) == _pvhb._toid(username) else "opponent_rating"
+    # 2026-09-01 (rating reflector): the line reads "OLD &rarr; NEW". ``rating`` /
+    # ``opponent_rating`` keep the PRE-battle number (poke-env's semantics, what play_ladder rows
+    # hold, what the report joins on); ``*_after`` is the POST-battle number the profile page
+    # shows — the panel's current rating, the per-regulation peaks and the bandit reward use it.
+    def _rating_change_row(tag: str, user: str, old: int, new: int) -> None:
+        us = _pvhb._toid(user) == _pvhb._toid(username)
+        key = "rating" if us else "opponent_rating"
+        arm = getattr(host.player, "_arm_name", None) if us else None
+        row = {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+               "type": "rating_update", "session_id": session_id,
+               "battle_tag": tag, key: old, key + "_after": new}
+        if arm:
+            row["arm"] = arm
         BENCH_DIR.mkdir(parents=True, exist_ok=True)
         with BENCH_LOG.open("a", encoding="utf-8") as f:
-            f.write(json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                                "type": "rating_update", "session_id": session_id,
-                                "battle_tag": tag, key: rating}) + "\n")
+            f.write(json.dumps(row) + "\n")
         _slog(LOG_DIR / f"online_{session_id}.log",
-              f"    rating: {user} {rating} ({'us' if key == 'rating' else 'them'})  {tag}")
+              f"    rating: {user} {old} ({'us' if us else 'them'}) → {new}  {tag}"
+              + (f"  arm {arm}" if arm else ""))
 
-    _pvhb.RATING_HOOK = _rating_row
+    _pvhb.RATING_HOOK = None                        # the panel chains its confirm logic here
+    _pvhb.RATING_CHANGE_HOOK = _rating_change_row
     session_log = LOG_DIR / f"online_{session_id}.log"
     _slog(session_log, f"=== ONLINE session {session_id} — {username} @ {args.client_url}")
     _slog(session_log, f"    format {BATTLE_FORMAT}  note {args.bench_note!r}")
@@ -333,12 +556,39 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
     _orig_pick = _pvhb._pick_ai_team
     ctrl_ref: dict = {"c": None}                   # filled after login (the panel needs the page)
 
+    # 2026-09-01 (era-5 W0): the serve-side bandit — the ladder picks between candidate
+    # checkpoints / serve knobs per game. OFF when VD_BANDIT=0 or no config file exists
+    # (then the deployed stack plays every game, byte-identical to before).
+    bandit = None
+    if os.environ.get("VD_BANDIT", "1").strip() != "0":
+        try:
+            from v_dance.play import serve_bandit as _SB
+            _cfg = Path(os.environ.get("VD_BANDIT_CONFIG") or _SB.DEFAULT_CONFIG)
+            if _cfg.is_file():
+                _arms = _SB.load_arms(_cfg)
+                if _arms:
+                    _arm_cache: dict = {}
+                    bandit = _SB.ServeBandit(
+                        _arms, fmt=BATTLE_FORMAT,
+                        applier=lambda arm: _SB.apply_arm(host, arm, _arm_cache,
+                                                          default_battle=ckpt, default_tp=tp_ckpt),
+                        **_SB.config_params(_cfg))
+                    print(bandit.banner())
+                    _slog(session_log, "    " + bandit.banner())
+            else:
+                print(f"[online] serve bandit OFF (no config at {_cfg})")
+        except Exception as exc:
+            print(f"[online] serve bandit failed to start (non-fatal — incumbent only): {exc!r}")
+            bandit = None
+
     async def _pick(page, pool, pin, route_for=None):
         # ⚠ MUST accept route_for: _ai_consumer's challenge-accept path calls
         # _pick_ai_team(..., route_for=challenger) (the 4b router param). Without it this
         # wrapper raised TypeError on every incoming challenge accept (caught + swallowed as
         # "accept failed"), so the online bot silently declined all direct challenges.
         c = ctrl_ref.get("c")
+        if c is not None and getattr(c, "bandit", None) is not None:
+            c.apply_next_arm("challenge")          # idempotent: the panel's search path already did
         if c is not None and c.team_pin and c.team_pin in pool:
             host.player._team_name = c.team_pin
             return c.team_pin, "control panel"
@@ -358,8 +608,23 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
             frame_q: asyncio.Queue = asyncio.Queue()
             ctx = await browser.new_context(no_viewport=True)
             page = await ctx.new_page()
+            # 2026-09-01 link watchdog (USER: mid-battle disconnects) — see LinkWatch.
+            _prefs = None
+            if _ENV.get("PS_CLIENT_PREFS"):
+                try:
+                    _prefs = json.loads(_ENV["PS_CLIENT_PREFS"])
+                except Exception:
+                    _prefs = None
+            link = LinkWatch(page=page, host=host, username=username, password=password,
+                             loop=asyncio.get_running_loop(),
+                             log=lambda t: (print(t), _slog(session_log, "    " + t)),
+                             probe_s=float(os.environ.get("VD_LINK_PROBE_S") or 15.0),
+                             dead_s=float(os.environ.get("VD_LINK_DEAD_S") or 25.0),
+                             reconnect=(os.environ.get("VD_LINK_RECONNECT", "1").strip() != "0"),
+                             prefs=_prefs, ctrl_ref=ctrl_ref)
 
             def _on_frame(p) -> None:              # incoming: SockJS unwrap → consumer feed
+                link.on_raw_frame(p)               # RAW clock first: SockJS heartbeats count here
                 for msg in _sockjs_unwrap(p):
                     frame_q.put_nowait(msg)
                     c = ctrl_ref.get("c")          # control panel's read-only frame tap
@@ -367,7 +632,10 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
                         c.tap_frame(msg)
 
             def _on_ws(ws) -> None:
+                link.on_ws_open(ws)
                 ws.on("framereceived", _on_frame)
+                ws.on("close", link.on_ws_close)   # a server/network close → reconnect within ~1 s
+                ws.on("socketerror", link.on_ws_error)
                 # outgoing: the USER's avatar picks send `/avatar <x>` — the only reliable
                 # signal (the server sends no updateuser on avatar changes; see the sync's doc).
                 ws.on("framesent", _sync_avatar_from_send)
@@ -392,6 +660,12 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
                     print(f"[online] WARNING: {len(failed)} team import(s) failed: {failed[:8]}")
                 print(f"[online] {len(teams) - len(failed)} pool teams available in the Teambuilder")
             await _default_format(page, "online")
+            # arm the watchdog only once the tab is logged in + set up (its tick runs from the
+            # consumer's idle branch; verify-flag-uptake rule: the banner is the launch echo).
+            _pvhb.LINK_TICK = link.tick
+            _pvhb.ROOM_GONE_HOOK = link.room_gone
+            print(link.banner())
+            _slog(session_log, "    " + link.banner())
 
             # 2026-07-10 (USER): local control server — ladder-run count / team pin / private
             # challenges / auto-accept, all without touching the bot window. Its HTTP API must keep
@@ -409,8 +683,11 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
                         port=args.control_port, open_browser=args.panel_window,
                         team_pin_default=args.ai_team or default_team,
                         auto_close_default=(_ENV.get("VD_AUTO_CLOSE_ROOMS", "0").strip() == "1"),
-                        log_line=lambda t: _slog(session_log, t))
+                        log_line=lambda t: _slog(session_log, t),
+                        bench_path=BENCH_LOG,          # all-time peak elo per regulation (2026-09-01)
+                        bandit=bandit)                 # era-5 W0 serve-side bandit (None = off)
                     _ctrl = ctrl_ref["c"]
+                    _ctrl.link = link                  # link status in the panel / Mission Control
                     print(f"[online] control server on {_ctrl.url}  —  drive it from Mission Control's "
                           f"'Online bot' tab (or open that URL for the standalone panel).")
                 except Exception as exc:
@@ -437,6 +714,12 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
                 return tally
             await _ai_consumer(page, host, frame_q, ai_pool, tally, stop, args.ai_team)
         finally:
+            _pvhb.LINK_TICK = None                 # disarm the watchdog hooks (process-global)
+            _pvhb.ROOM_GONE_HOOK = None
+            _pvhb.REJOINING.clear()
+            _pvhb.RATING_CHANGE_HOOK = None
+            if bandit is not None:
+                bandit.save()
             if ctrl_ref.get("c") is not None:      # stop the panel's HTTP thread (best-effort)
                 ctrl_ref["c"].stop()
             try:
