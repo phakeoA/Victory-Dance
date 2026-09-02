@@ -383,10 +383,19 @@ class MatchupBook:
                     self.skipped += 1
                     continue
                 opp_mons = []
+                megas_g = g.get("megas") if isinstance(g.get("megas"), list) else None
                 for sp in (g.get("revealed") or []):
                     rec = mons.get(sp) if isinstance(mons.get(sp), dict) else {}
+                    # New-shape dossiers (09-02): the mega forme's ability sits under
+                    # ``mega_ability``, ``ability`` is the base's, and each game lists its
+                    # ``megas``. A game that logged no mega for this species reads the base
+                    # ability so the inference does not re-flag it. Old files (mega ability in
+                    # ``ability``, no ``megas``) still resolve through ``mega_of``.
+                    is_mega = (sp in megas_g) if megas_g is not None else None
+                    ability = (rec.get("ability") if is_mega is False
+                               else (rec.get("mega_ability") or rec.get("ability")))
                     opp_mons.append({"species": sp, "item": rec.get("item"),
-                                     "ability": rec.get("ability")})
+                                     "ability": ability, "mega": is_mega})
                 if self.record_game(None, g.get("our_team"), g.get("result"), opp_mons,
                                     ts=g.get("ts"), tag=tag, opponent=opp):
                     self.loaded_games += 1

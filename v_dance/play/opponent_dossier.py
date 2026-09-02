@@ -11,6 +11,16 @@ CLI:  python -m v_dance.play.opponent_dossier            # list dossiers
 
 ⚠ mega/forme note: ``mon.species`` is the BASE species (poke-env, memory 2026-06-22) — dossier
 keys are base-species; forme/mega shows up in the revealed moves/items instead.
+
+2026-09-02 (USER, "fix at the source"): a MEGA'D mon is recorded as a mega. poke-env keeps the
+base species, swaps ``mon.ability`` to the mega forme's and never sets the stone, so before this
+a Gardevoir was stored as ``ability: pixilate, item: None`` — Pixilate is the mega, and the
+stone is proven. Now: ``item`` = the stone id, ``mega`` = the forme ("Gardevoir-Mega"),
+``mega_ability`` = its ability, ``mega_seen`` = games seen mega'd, and ``ability`` stays the
+BASE forme's (unknown once mega'd — the L2b warm-start must never feed Pixilate to a pre-mega
+Gardevoir). Each game row also lists ``megas`` (base ids that mega'd in that game). Older
+files keep the old shape until ``scratch/dossier_mega_backfill.py --apply`` rewrites them; every
+reader (matchup book, warm-start) accepts both.
 """
 from __future__ import annotations
 
@@ -31,6 +41,17 @@ def _toid(s: str) -> str:
 
 def dossier_path(opponent: str) -> Path:
     return DOSSIER_DIR / f"{_toid(opponent) or 'unknown'}.json"
+
+
+def _mega_of(mon):
+    """The mega forme ``mon`` is PROVEN to be (``matchup_book.mega_of``: the encoder's live
+    detector, or a mega-only ability), else None. Never raises."""
+    try:
+        from v_dance.play.matchup_book import live_is_mega, mega_of
+        return mega_of(getattr(mon, "species", None), getattr(mon, "ability", None),
+                       is_mega=live_is_mega(mon))
+    except Exception:
+        return None
 
 
 def load(opponent: str) -> dict:
@@ -62,6 +83,7 @@ def update_from_battle(battle, result: str, our_team: Optional[str] = None,
         if key:
             d[key] = int(d.get(key, 0)) + 1
         # Revealed sets: union moves, last-seen item/ability, sighting count per base species.
+        megas_this_game: set = set()
         for mon in (getattr(battle, "opponent_team", None) or {}).values():
             sp = _toid(getattr(mon, "species", "") or "")
             if not sp:
@@ -74,6 +96,20 @@ def update_from_battle(battle, result: str, our_team: Optional[str] = None,
             moves.update((getattr(mon, "moves", None) or {}).keys())
             rec["moves"] = sorted(moves)
             item = getattr(mon, "item", None)
+            # 2026-09-02 (USER, "fix at the source"): a MEGA'D mon — the stone is its item, the
+            # forme + its ability go under their own keys, ``ability`` stays the BASE forme's.
+            mg = _mega_of(mon)
+            if mg:
+                megas_this_game.add(sp)
+                rec["mega"] = mg.get("forme")
+                rec["mega_ability"] = _toid(mg.get("ability") or "") or None
+                rec["mega_seen"] = int(rec.get("mega_seen", 0)) + 1
+                stone = _toid(mg.get("stone") or "")
+                if stone:
+                    rec["item"] = stone
+                elif item and item not in ("unknown_item",):
+                    rec["item"] = item
+                continue                                # poke-env's ability = the MEGA's: not the base
             if item and item not in ("unknown_item",):
                 rec["item"] = item
             ability = getattr(mon, "ability", None)
@@ -87,7 +123,8 @@ def update_from_battle(battle, result: str, our_team: Optional[str] = None,
         d["games"].append({"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                            "battle_tag": getattr(battle, "battle_tag", None),
                            "result": result, "turns": getattr(battle, "turn", None),
-                           "our_team": our_team, "note": note, "revealed": revealed})
+                           "our_team": our_team, "note": note, "revealed": revealed,
+                           "megas": sorted(megas_this_game)})
         d["games"] = d["games"][-MAX_GAMES:]
         DOSSIER_DIR.mkdir(parents=True, exist_ok=True)
         p = dossier_path(opp)

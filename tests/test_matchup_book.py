@@ -310,6 +310,34 @@ def test_mega_evolution_proves_the_stone_and_labels_the_ability():
     assert r["item"] == "Gardevoirite" and r["ability_mega"] and r["mega"] == 1
 
 
+def test_load_dossiers_new_mega_shape(tmp_path: Path):
+    """The capture now writes the mega under its own keys + per-game ``megas`` (USER 09-02 "fix at
+    the source"): the loader counts the mega only in the games it happened and reads the base
+    ability for the others."""
+    if MB._dex() is None:
+        pytest.skip("data/pokedex.json not available")
+    d = tmp_path / "dossiers"
+    d.mkdir()
+    (d / "megafan.json").write_text(json.dumps({
+        "opponent": "MegaFan",
+        "games": [{"ts": "2026-09-02T12:00:00Z", "battle_tag": _tag(MB_FMT, 1), "result": "human",
+                   "our_team": "T", "revealed": ["gardevoir"], "megas": ["gardevoir"]},
+                  {"ts": "2026-09-02T12:30:00Z", "battle_tag": _tag(MB_FMT, 2), "result": "ai",
+                   "our_team": "T", "revealed": ["gardevoir"], "megas": []}],
+        "mons": {"gardevoir": {"species": "gardevoir", "moves": [], "item": "gardevoirite",
+                               "ability": "trace", "mega": "Gardevoir-Mega", "mega_ability": "pixilate",
+                               "mega_seen": 1, "times_seen": 2}}}), encoding="utf-8")
+    b = MatchupBook()
+    assert b.load_dossiers(d) == (2, 1)
+    r = b.summary(MB_FMT, team="T")["rows"][0]
+    assert (r["games"], r["mega"], r["pop"]) == (2, 1, 1)
+    assert r["items"][0]["name"] == "Gardevoirite" and r["items"][0]["seen"] == 1
+    # one opponent: its Gardevoir showed BOTH the mega ability and the base one
+    names = {e["name"]: e for e in r["abilities"]}
+    assert names["Pixilate"]["mega"] is True and names["Pixilate"]["seen"] == 1
+    assert names["Trace"]["seen"] == 1 and names["Trace"]["mega"] is False
+
+
 def test_display_species_fallbacks():
     assert MB.display_species("incineroar", FakeBelief()) == "Incineroar"
     # no belief hit -> the pokedex name (title-cased) when data is present, else the id itself

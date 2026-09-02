@@ -98,3 +98,19 @@ def test_base_species_used_for_mega_formes(tmp_path, monkeypatch):
             "opp_bench": []}
     out = apply_dossier(snap, _battle())
     assert out["opp_active"]["opp_a"]["known_ability"] == "Intimidate"
+
+
+def test_new_shape_mega_record_feeds_the_stone_but_never_the_mega_ability(tmp_path, monkeypatch):
+    """USER 2026-09-02 ("fix at the source"): the capture stores a mega'd mon as item = the stone,
+    ``mega_ability`` = the mega's, ``ability`` = the base's (None once mega'd). The warm-start feeds
+    the stone (cross-game knowledge: this Gardevoir carries Gardevoirite) and must NOT feed
+    Pixilate to a pre-mega Gardevoir."""
+    _write_dossier(tmp_path, monkeypatch, {
+        "gardevoir": {"species": "gardevoir", "ability": None, "item": "gardevoirite",
+                      "mega": "Gardevoir-Mega", "mega_ability": "pixilate", "mega_seen": 2,
+                      "moves": ["hypervoice", "protect"], "times_seen": 2}})
+    out = apply_dossier(_snapshot(species="Gardevoir"), _battle())
+    mon = out["opp_active"]["opp_a"]
+    assert mon["known_item"] == "Gardevoirite"
+    assert mon["known_ability"] is None
+    assert mon["known_moves"] == ["Hyper Voice", "Protect"]
