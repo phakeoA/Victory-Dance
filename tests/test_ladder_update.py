@@ -299,3 +299,50 @@ def test_selection_repairs_the_recorders_empty_slot_zero_into_pass(world):
     assert sel_bad.n_games == 1 and sel_bad.pass_repaired == 0
     with pytest.raises(AssertionError, match="illegal under"):
         assert_actions_legal(sel_bad.trajectories[0].transitions)
+
+
+def test_chain_mode_learning_base_anchor_gate_and_rotation(world, tmp_path):
+    """2026-09-03 L3: ``--base learning`` trains from the ONE learning arm's checkpoint; the ruler runs
+    against the ANCHOR too (absolute floor); registering flags the new arm learning and benches the old."""
+    import shutil
+    cfg_p = tmp_path / "chain.json"
+    shutil.copy(world.cfg, cfg_p)
+    cfg = json.loads(cfg_p.read_text(encoding="utf-8"))
+    with pytest.raises(ValueError, match="exactly ONE learning arm"):
+        LU.learning_base(LU.arm_table(cfg_p))                       # none flagged yet
+    for a in cfg["arms"]:
+        if a["name"] == "tau03":
+            a["learning"] = True
+    cfg_p.write_text(json.dumps(cfg), encoding="utf-8")
+    arms = LU.arm_table(cfg_p)
+    assert LU.learning_arms(arms) == ["tau03"]
+    assert LU.learning_base(arms).resolve() == world.base.resolve()
+    # the anchor gate: commands + parsing + the combined verdict
+    calls = []
+
+    def fake_run(cmd):
+        calls.append(cmd)
+        row = "  top1           0.6155   0.6121 (-0.0034)   (n=1000)\n" if "anchor.pt" not in cmd else \
+              "  top1           0.6300   0.6100 (-0.0200)   (n=1000)\n"
+        return SimpleNamespace(stdout=(row if "bc_val_report" in cmd else ">>> VERDICT: RESPECTS"),
+                               stderr="", returncode=0)
+    ext = LU.run_external_gates("base.pt", "cand.pt", tmp_path, run=fake_run, anchor="anchor.pt",
+                                ruler_abs_floor_pp=-1.0)
+    assert len(calls) == 3 and "anchor.pt" in ext["commands"]["ruler_anchor"]
+    assert ext["ruler_anchor_delta_pp"] == pytest.approx(-2.0) and ext["ruler_anchor_ok"] is False
+    assert ext["ruler_ok"] and ext["type_eff_ok"] and LU.external_ok(ext) is False   # the anchor floor bites
+    ext2 = LU.run_external_gates("base.pt", "cand.pt", tmp_path, run=fake_run, anchor="anchor.pt",
+                                 ruler_abs_floor_pp=-3.0)
+    assert ext2["ruler_anchor_ok"] and LU.external_ok(ext2) is True
+    assert LU.external_ok({"ruler_ok": True, "type_eff_ok": True}) is True   # no anchor = the old verdict
+    # registration in chain mode: the new arm is the learning arm, the old one is benched + unflagged
+    entry = LU.register_arm(cfg_p, name="ppo_x", battle_ckpt=world.base, tau=0.3, note="chain", learning=True)
+    assert entry["learning"] is True
+    assert LU.rotate_learning_arm(cfg_p, keep="ppo_x", stamp="20260904") == ["tau03"]
+    cfg = json.loads(cfg_p.read_text(encoding="utf-8"))
+    names = [a["name"] for a in cfg["arms"]]                        # (world.cfg may carry an arm an earlier test registered)
+    assert "tau03" not in names and names[-1] == "ppo_x" and {"inc", "tau05", "other03"} <= set(names)
+    old = next(a for a in cfg["benched"] if a["name"] == "tau03")
+    assert old["learning"] is False and "superseded as the LEARNING arm by ppo_x" in old["benched_20260904"]
+    assert LU.learning_arms(LU.arm_table(cfg_p)) == ["ppo_x"]
+    assert LU.rotate_learning_arm(cfg_p, keep="ppo_x", stamp="20260905") == []   # idempotent

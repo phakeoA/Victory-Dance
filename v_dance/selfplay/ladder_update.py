@@ -46,7 +46,10 @@ RECIPE = {
     "epochs": 2, "minibatch": 256, "max_grad_norm": 0.5, "gamma": 0.997, "lam": 0.95,
     "warmup_updates": 1,
 }
-GATES = {"max_kl": 0.15, "min_ev": 0.0, "ruler_floor_pp": -0.5, "max_pair_flips": 0.05}
+GATES = {"max_kl": 0.15, "min_ev": 0.0, "ruler_floor_pp": -0.5, "max_pair_flips": 0.05,
+         # 2026-09-03 L3 (chain mode): the ruler vs the ANCHOR (the incumbent) — an absolute floor so a
+         # nightly chain of −0.4 pp steps cannot drift away from era2 unnoticed
+         "ruler_abs_floor_pp": -1.0}
 
 
 # ── selection ─────────────────────────────────────────────────────────────────
@@ -113,6 +116,28 @@ def arm_plays_base(arm, base, *, default_battle=None) -> bool:
     if arm.uses_default("battle"):
         return default_battle is not None and _same_file(default_battle, base)
     return _same_file(_resolve(arm.battle_ckpt), base)
+
+
+def learning_arms(arms: dict) -> List[str]:
+    """The arm(s) flagged ``learning`` (the adaptive τ arm the nightly update trains from)."""
+    return [n for n, a in arms.items() if getattr(a, "learning", False)]
+
+
+def learning_base(arms: dict, *, default_battle=None) -> Path:
+    """2026-09-03 L3 (chain mode, ``--base learning``): the checkpoint the ONE learning arm plays — the
+    nightly update trains FROM it on ITS games, so the policy compounds night over night instead of
+    restarting from the incumbent. Exactly one learning arm is required (the chain has one head)."""
+    from v_dance.play.serve_bandit import _resolve
+    names = learning_arms(arms)
+    if len(names) != 1:
+        raise ValueError("chain mode needs exactly ONE learning arm in the bandit config, found "
+                         f"{names or 'none'} — flag one with \"learning\": true")
+    a = arms[names[0]]
+    if a.uses_default("battle"):
+        if default_battle is None:
+            raise ValueError(f"learning arm {a.name!r} plays the deployed default checkpoint — pass --base explicitly")
+        return Path(default_battle)
+    return _resolve(a.battle_ckpt)
 
 
 def exploration_arms(arms: dict, base, *, default_battle=None) -> List[str]:
@@ -345,9 +370,10 @@ def repo_relative(p) -> str:
 
 
 def register_arm(config_path, *, name: str, battle_ckpt, tau: float, note: str,
-                 tp_ckpt: str = "default") -> dict:
+                 tp_ckpt: str = "default", learning: bool = False) -> dict:
     """Append arm ``name`` to the bandit config (same τ as the data, top-p 1.0, adapt-rules OFF —
-    the next night's data from it stays clean). Refuses a duplicate name."""
+    the next night's data from it stays clean). Refuses a duplicate name. ``learning=True`` (L3 chain
+    mode) flags it as the learning arm: retire-exempt, the L2 floor share, tomorrow's ``--base learning``."""
     p = Path(config_path)
     cfg = json.loads(p.read_text(encoding="utf-8"))
     arms = cfg.setdefault("arms", [])
@@ -355,19 +381,50 @@ def register_arm(config_path, *, name: str, battle_ckpt, tau: float, note: str,
         raise ValueError(f"arm {name!r} already exists in {p}")
     entry = {"name": name, "battle_ckpt": repo_relative(battle_ckpt), "tp_ckpt": tp_ckpt,
              "tau": float(tau), "top_p": 1.0, "tp_tie_eps": 1.0, "adapt_rules": False, "note": note}
+    if learning:
+        entry["learning"] = True
     arms.append(entry)
     p.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return entry
 
 
+def rotate_learning_arm(config_path, *, keep: str, stamp: str) -> List[str]:
+    """L3 chain mode: after ``keep`` is registered as the new learning arm, every OTHER learning arm is
+    un-flagged and BENCHED (moved to ``benched`` with a dated note) — the chain has one head, and a
+    superseded τ 0.3 snapshot kept in the rotation would only bleed rating (USER ruling 2026-09-03:
+    bench superseded snapshots of one lineage). Its ladder record stays in the bandit state file.
+    Returns the benched names."""
+    p = Path(config_path)
+    cfg = json.loads(p.read_text(encoding="utf-8"))
+    arms = cfg.setdefault("arms", [])
+    bench = cfg.setdefault("benched", [])
+    out: List[str] = []
+    for a in list(arms):
+        if a.get("learning") and a.get("name") != keep:
+            a["learning"] = False
+            a[f"benched_{stamp}"] = (f"superseded as the LEARNING arm by {keep} (W3b chain: the newest PPO "
+                                    f"checkpoint at tau {a.get('tau', 0)} is the learning arm)")
+            arms.remove(a)
+            bench.append(a)
+            out.append(str(a.get("name")))
+    if out:
+        p.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return out
+
+
 # ── external gates (the ruler / type-eff probe / suite) ───────────────────────
-def external_gate_commands(base, candidate, out_dir, *, py: str = ".venv/Scripts/python.exe") -> Dict[str, str]:
-    """The three commands the design's gate list needs beyond the in-process numbers."""
-    return {
+def external_gate_commands(base, candidate, out_dir, *, py: str = ".venv/Scripts/python.exe",
+                           anchor=None) -> Dict[str, str]:
+    """The three commands the design's gate list needs beyond the in-process numbers (+ the ruler vs
+    the ANCHOR checkpoint in chain mode — the absolute floor, 2026-09-03 L3)."""
+    out = {
         "ruler": f'{py} -m v_dance.eval.bc_val_report --ckpt "{base}" --ckpt "{candidate}"',
         "type_eff": f'{py} scratch/type_eff_probe.py --ckpt "{candidate}" --out "{Path(out_dir) / "type_eff_probe.json"}"',
         "suite": f"{py} -m pytest tests -q",
     }
+    if anchor is not None:
+        out["ruler_anchor"] = f'{py} -m v_dance.eval.bc_val_report --ckpt "{anchor}" --ckpt "{candidate}"'
+    return out
 
 
 _TOP1_ROW = re.compile(r"^\s*top1\s+([0-9.]+)\s+([0-9.]+)\s*\(([+-][0-9.]+)\)", re.M)
@@ -392,9 +449,18 @@ def _first_line(text: str) -> str:
     return ""
 
 
+def external_ok(ext: dict) -> bool:
+    """Every external gate that ran passed (the anchor gate only counts when it ran)."""
+    ok = bool(ext.get("ruler_ok")) and bool(ext.get("type_eff_ok"))
+    if "ruler_anchor_ok" in ext:
+        ok = ok and bool(ext.get("ruler_anchor_ok"))
+    return ok
+
+
 def run_external_gates(base, candidate, out_dir, *, py: Optional[str] = None,
                        ruler_floor_pp: float = GATES["ruler_floor_pp"], run=None,
-                       which: Sequence[str] = ("ruler", "type_eff")) -> dict:
+                       which: Optional[Sequence[str]] = None, anchor=None,
+                       ruler_abs_floor_pp: float = GATES["ruler_abs_floor_pp"]) -> dict:
     """Run the external gates (minutes each), keep their output under ``<out_dir>/gates/``, parse
     the verdicts. ``run`` is injectable (tests). Returns a dict with per-gate ok flags.
 
@@ -403,8 +469,10 @@ def run_external_gates(base, candidate, out_dir, *, py: Optional[str] = None,
     internal or external command") — both gates returned None and the candidate was refused for the
     wrong reason. They now EXECUTE with this interpreter's absolute path (quoted); ``commands`` keeps the
     friendly form the user can paste. An unparsable gate reports its first output line as ``<name>_note``."""
-    cmds = external_gate_commands(base, candidate, out_dir)              # the printed / recorded form
-    exec_cmds = external_gate_commands(base, candidate, out_dir, py=(py or f'"{sys.executable}"'))
+    cmds = external_gate_commands(base, candidate, out_dir, anchor=anchor)   # the printed / recorded form
+    exec_cmds = external_gate_commands(base, candidate, out_dir, py=(py or f'"{sys.executable}"'), anchor=anchor)
+    if which is None:
+        which = ("ruler", "type_eff") + (("ruler_anchor",) if anchor is not None else ())
     gdir = Path(out_dir) / "gates"
     gdir.mkdir(parents=True, exist_ok=True)
     run = run or (lambda cmd: subprocess.run(cmd, shell=True, cwd=str(_REPO), capture_output=True,
@@ -423,6 +491,10 @@ def run_external_gates(base, candidate, out_dir, *, py: Optional[str] = None,
             v = parse_type_eff(text)
             out["type_eff_verdict"] = parsed = v
             out["type_eff_ok"] = bool(v)
+        elif name == "ruler_anchor":                  # L3: the absolute floor vs the incumbent
+            d = parse_ruler_delta_pp(text)
+            out["ruler_anchor_delta_pp"] = parsed = d
+            out["ruler_anchor_ok"] = (d is not None and d >= ruler_abs_floor_pp)
         out[f"{name}_returncode"] = int(getattr(r, "returncode", 0) or 0)
         if parsed is None:                       # the gate did not run / did not print its row
             out[f"{name}_note"] = f"gate output unparsable (rc {out[f'{name}_returncode']}): {_first_line(text)}"

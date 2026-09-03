@@ -328,6 +328,9 @@ class LadderRecorder:
             "gimmick_sampled": sampled_heads,       # argmax in serve → its term is 0 (skip it)
             "replacement_sampled": sampled_heads,   # argmax in serve → replacement steps carry 0
             "value_source": "serve_value_head",
+            # 2026-09-03 (USER): open team sheets — both sheets were revealed for this game (the battle
+            # net played with the opponent's true sets stamped in)
+            "ots": self._ots_known(tag),
             "opponent": opponent, "rating_before": rating_before,
             "opp_rating_before": opp_rating_before, "lane": lane,
             "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self._now())),
@@ -342,6 +345,13 @@ class LadderRecorder:
         self.store.append(traj)
         self.games += 1
         return traj
+
+    def _ots_known(self, tag: str) -> bool:
+        try:
+            from v_dance.play.ots_sheets import ots_known
+            return ots_known(self.player, tag)
+        except Exception:                            # noqa: BLE001 — never break a seal
+            return False
 
     @staticmethod
     def _roster(battle, *, own: bool) -> list:

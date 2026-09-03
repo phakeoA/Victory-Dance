@@ -34,6 +34,37 @@ import time
 import webbrowser
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import urllib.request as _urlreq
+
+
+class DuplicateBotError(RuntimeError):
+    """2026-09-03: another online bot is already serving this account on this box. The launcher
+    treats it as FATAL — two bot processes on one account receive the SAME battles and fight over
+    every order (the afternoon of 2026-09-03: 13 rejections in 14 games, a game sealed under arm
+    None, the bandit state written by both). The panel never had a way to notice: ``HTTPServer``
+    sets SO_REUSEADDR, and on Windows that lets a second process bind the SAME port."""
+
+
+class _ExclusiveServer(ThreadingHTTPServer):
+    allow_reuse_address = False        # a second bind on the port FAILS (Windows honours this)
+
+
+def find_running_panel(ports, *, timeout: float = 0.5, probe=None):
+    """The first bot control panel answering on ``ports`` → ``(port, username)``, else None. A panel
+    is recognised by its status shape (``run`` + ``tally``, the same test Mission Control uses).
+    ``probe(port)`` is injectable for tests (returns the status dict or raises)."""
+    def _probe(port):
+        with _urlreq.urlopen(f"http://127.0.0.1:{port}/api/status", timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8"))
+    probe = probe or _probe
+    for port in ports:
+        try:
+            js = probe(port)
+        except Exception:
+            continue
+        if isinstance(js, dict) and "run" in js and "tally" in js:
+            return int(port), str(js.get("username") or "")
+    return None
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -625,6 +656,14 @@ class BotController:
                                      f"GRACE — /timer on after {_pvhb._OPP_TIMER_S:.0f}s of opponent "
                                      f"silence, per room"))
 
+    def set_ots_accept(self, on: bool) -> None:
+        """USER 2026-09-03: open team sheets. ON = answer the server's team-preview offer with
+        /acceptopenteamsheets (when the opponent accepts too, both sheets are revealed and the opponent's
+        feeds the battle net); OFF = /rejectopenteamsheets (closed sheets). Applies from the next battle."""
+        _pvhb.OTS_ACCEPT = bool(on)
+        self.log("open team sheets: " + ("ACCEPT — the opponent's sheet feeds the battle net when they accept too"
+                                         if on else "REJECT — closed sheets"))
+
     def set_bandit_pin(self, name: Optional[str]) -> Optional[str]:
         """Serve mode from the panel (2026-09-02): pin one arm (FROZEN — it plays every game) or
         unpin (explore). Takes effect at the NEXT battle: applied right away on the bot loop when
@@ -764,6 +803,9 @@ class BotController:
             # 2026-09-02 (USER): battle-timer mode (immediate vs per-room grace) + the grace length
             "timer_immediate": bool(_pvhb.TIMER_IMMEDIATE),
             "timer_grace_s": float(_pvhb._OPP_TIMER_S),
+            # 2026-09-03 (USER): open team sheets — the toggle + games with both sheets this session
+            "ots_accept": bool(getattr(_pvhb, "OTS_ACCEPT", False)),
+            "ots_games": len(getattr(getattr(self.host, "player", None), "_ots_sheets", None) or {}),
             "awaiting_confirm": sorted(self._ended_unconfirmed),
             "run": {"active": self.run_active, "target": self.run_target, "done": self.run_done},
             "searching": bool(self.searching or self._search_outstanding),
@@ -858,6 +900,8 @@ def _make_handler(ctrl: BotController):
                         ctrl.set_auto_close(bool(body.get("auto_close")))
                     if "timer_immediate" in body:  # battle timer at the first frame vs the grace
                         ctrl.set_timer_immediate(bool(body.get("timer_immediate")))
+                    if "ots_accept" in body:       # 2026-09-03: open team sheets accept / reject
+                        ctrl.set_ots_accept(bool(body.get("ots_accept")))
                     if "bandit_pin" in body:       # "" / null = unpin (explore)
                         ctrl.set_bandit_pin(body.get("bandit_pin"))
                     if "lanes" in body:            # rated games at once (1..5)
@@ -888,7 +932,8 @@ def start_control_ui(*, page, host, tally: dict, ai_pool: list, fmt: str, userna
                      bandit=None, lanes_default: int = 1,
                      session_id: Optional[str] = None, belief=None,
                      dossier_dir: Optional[Path] = None, matchups: bool = True,
-                     thoughts: bool = True) -> BotController:
+                     thoughts: bool = True,
+                     guard_duplicates: bool = True) -> BotController:
     """Build the controller + serve the panel on 127.0.0.1 (first free port in [port, port+9]).
     Also chains itself onto ``RATING_HOOK`` (the Δelo battle-done confirm) and
     ``RATING_CHANGE_HOOK`` (post-battle rating → display, peaks, bandit reward) — call AFTER the
@@ -958,9 +1003,20 @@ def start_control_ui(*, page, host, tally: dict, ai_pool: list, fmt: str, userna
 
     handler = _make_handler(ctrl)
     last_exc = None
+    # 2026-09-03: ONE bot per account. Before binding, look for a live panel in the port range —
+    # a second bot process on the same account plays the same battles and every one of its orders
+    # is rejected (see DuplicateBotError). Any username is refused: one box, one ladder account.
+    other = find_running_panel(range(port, port + 10)) if guard_duplicates else None
+    if other is not None:
+        o_port, o_user = other
+        raise DuplicateBotError(
+            f"an online bot is ALREADY RUNNING on this box — its panel answers on :{o_port} as "
+            f"{o_user or '?'} (this launch: {username}). Two bots on one account fight over the same "
+            f"battles (every order of the second one is rejected). Stop the running bot first "
+            f"(Mission Control → Jobs, or close its console), then launch again.")
     for p in range(port, port + 10):
         try:
-            ctrl._server = ThreadingHTTPServer(("127.0.0.1", p), handler)
+            ctrl._server = _ExclusiveServer(("127.0.0.1", p), handler)
             break
         except OSError as exc:
             last_exc = exc
@@ -1043,7 +1099,13 @@ _PANEL_HTML = """<!DOCTYPE html>
   .ab.pin { background:#eedcf7; color:#5a2a7a; border-color:#b58ad0; }
   .ab.learn { background:#d9ecfa; color:#134a73; border-color:#7fb5e6; }
   .ab.ret { background:#f8d7d7; color:#8a2020; border-color:#d98a8a; }
-  .muwrap { overflow-x:auto; }
+  .muwrap { overflow:auto; max-height:460px; }                 /* 2026-09-03: every species, scrollable */
+  .mu th { position:sticky; top:0; z-index:1; }
+  .pk { width:32px; height:32px; vertical-align:middle; margin-right:4px; image-rendering:pixelated; }
+  .pk.mega { width:24px; height:24px; opacity:.9; }
+  .pkq { display:inline-block; min-width:22px; text-align:center; font-weight:bold; color:#b23;
+         border:1px dashed #b23; border-radius:4px; margin-right:4px; }
+  .musort { font:8.5pt Verdana; margin-left:6px; }
   .twocol { display:grid; grid-template-columns:1fr 1fr; gap:14px; padding:12px; }
   #think { height:320px; overflow-y:auto; background:#eef2f5; border-top:1px solid #b5c3ce;
            padding:8px 10px; font: 8.5pt Consolas, monospace; white-space:pre-wrap; color:#33424f; }
@@ -1091,6 +1153,8 @@ _PANEL_HTML = """<!DOCTYPE html>
         <label for="autoClose">Auto-close finished battle tabs</label></div>
       <div class="toggle"><input type="checkbox" id="timerNow">
         <label for="timerNow">Start the battle timer immediately <span class="muted" id="timerNote">(off = after 30 s of opponent silence, per room)</span></label></div>
+      <div class="toggle"><input type="checkbox" id="otsAccept">
+        <label for="otsAccept">Accept open team sheets <span class="muted" id="otsNote">(both must accept; the opponent's sheet then feeds the battle net)</span></label></div>
       <label class="fld" style="margin-top:8px">Serve mode</label>
       <select id="banditPin" disabled><option value="">Bandit — explore (per-game arm choice)</option></select>
       <div class="muted" id="banditPinNote"></div>
@@ -1128,10 +1192,14 @@ _PANEL_HTML = """<!DOCTYPE html>
   <div class="panel full"><h2>Matchups <span class="muted" id="muHdr"></span></h2>
     <div class="twocol">
       <div><b>Session</b> <span class="muted" id="muSHdr"></span>
+        <select id="muSSort" class="musort"><option value="default">sort: games</option><option value="wr_desc">win % high→low</option>
+          <option value="wr_asc">win % low→high</option><option value="alpha">A→Z</option><option value="recent">recently seen</option></select>
         <div class="muwrap" style="margin-top:6px"><table class="mu" id="muS"><thead><tr><th>Pokémon</th>
           <th>games</th><th>W-L</th><th>win %</th><th>item</th><th>ability</th></tr></thead><tbody></tbody></table></div>
         <div class="muted" id="muSFoot" style="margin-top:4px"></div></div>
       <div><b>Regulation, all games</b> <span class="muted" id="muAHdr"></span>
+        <select id="muASort" class="musort"><option value="default">sort: games</option><option value="wr_desc">win % high→low</option>
+          <option value="wr_asc">win % low→high</option><option value="alpha">A→Z</option><option value="recent">recently seen</option></select>
         <select id="muTeam" style="margin-top:6px"></select>
         <div class="muwrap" style="margin-top:6px"><table class="mu" id="muA"><thead><tr><th>Pokémon</th>
           <th>games</th><th>W-L</th><th>win %</th><th>item</th><th>ability</th></tr></thead><tbody></tbody></table></div>
@@ -1232,6 +1300,9 @@ function render(s) {
   if (document.activeElement !== $('lanes')) $('lanes').value = String(s.lanes || 1);
   // 2026-09-02 (USER): battle-timer mode — immediate vs the per-room grace
   if (document.activeElement !== $('timerNow')) $('timerNow').checked = !!s.timer_immediate;
+  // 2026-09-03 (USER): open team sheets
+  if (document.activeElement !== $('otsAccept')) $('otsAccept').checked = !!s.ots_accept;
+  $('otsNote').textContent = `(both must accept; the opponent's sheet then feeds the battle net · ${s.ots_games || 0} game(s) with sheets this session)`;
   $('timerNote').textContent = `(off = after ${Math.round(s.timer_grace_s || 30)} s of opponent silence, per room)`;
   const wait = s.awaiting_confirm.length ? ' — confirming result…' : '';
   const lanesTxt = (s.lanes || 1) > 1 ? ` · live ${s.live.length}/${s.lanes}` : '';
@@ -1250,9 +1321,31 @@ function render(s) {
   if (atEnd) log.scrollTop = log.scrollHeight;
 }
 
-function muRows(tbody, rows) {
+// 2026-09-03 (USER): mini sprites from the official sprite CDN (the local Showdown copy is the SERVER — it
+// ships no sprites); a missing file (e.g. a Champions-only mega) shows a red '?' so a bug stays visible.
+const SPRITES = 'https://play.pokemonshowdown.com/sprites/gen5/';
+function pkMissing(img) {
+  const s = document.createElement('span'); s.className = 'pkq'; s.textContent = '?';
+  s.title = 'no sprite for ' + (img.dataset.id || '?'); img.replaceWith(s);
+}
+function pkIcon(r) {
+  const one = (id, cls, title) => id ? `<img class="pk${cls}" src="${SPRITES}${esc(id)}.png" data-id="${esc(id)}" ` +
+      `alt="" title="${esc(title)}" onerror="pkMissing(this)">` : '';
+  return one(r.sprite, '', r.display || r.species) + (r.mega_sprite ? one(r.mega_sprite, ' mega', 'mega seen: ' + (r.mega_name || r.mega)) : '');
+}
+function muSorted(rows, key) {
+  const wp = r => (r.win_pct == null ? -1 : r.win_pct);
+  const out = rows.slice();
+  if (key === 'wr_desc') out.sort((a, b) => wp(b) - wp(a) || b.games - a.games || (a.display || a.species).localeCompare(b.display || b.species));
+  else if (key === 'wr_asc') out.sort((a, b) => (wp(a) < 0) - (wp(b) < 0) || wp(a) - wp(b) || b.games - a.games);
+  else if (key === 'alpha') out.sort((a, b) => (a.display || a.species).localeCompare(b.display || b.species));
+  else if (key === 'recent') out.sort((a, b) => String(b.last_seen || '').localeCompare(String(a.last_seen || '')) || b.games - a.games);
+  return out;                                        // default = the server order (games, wins, name)
+}
+function muRows(tbody, rows, sortKey) {
   if (!tbody) return;
   if (!rows || !rows.length) { tbody.innerHTML = '<tr><td colspan="6" class="muted">no games yet</td></tr>'; return; }
+  rows = muSorted(rows, sortKey || 'default');
   const dist = (list) => (list && list.length) ? list.map(e =>
       `<span class="${e.seen ? 'seen' : 'belief'}">${e.name === '?' ? 'unknown' : esc(e.name)}` +
       `${e.mega ? ' (mega)' : ''} ${e.p}%${e.seen ? ` (${e.seen} seen)` : ''}</span>`).join(' · ') : '—';
@@ -1261,7 +1354,7 @@ function muRows(tbody, rows) {
   tbody.innerHTML = rows.map(r => {
     const item = r.items ? dist(r.items) : legacy(r.item, r.item_src, r.item_n, r.item_pct);
     const ab = r.abilities ? dist(r.abilities) : legacy(r.ability, r.ability_src, r.ability_n, null);
-    return `<tr><td>${esc(r.display || r.species)}</td><td class="n">${r.games}</td>` +
+    return `<tr><td>${pkIcon(r)}${esc(r.display || r.species)}</td><td class="n">${r.games}</td>` +
            `<td class="n">${r.wins}-${r.losses}${r.draws ? '-' + r.draws + 'D' : ''}</td>` +
            `<td class="n">${r.win_pct == null ? '—' : r.win_pct + '%'}</td><td>${item}</td><td>${ab}</td></tr>`;
   }).join('');
@@ -1304,6 +1397,7 @@ function renderArms(s) {
       `${(100 * rule.retire_prob).toFixed(0)}%` +
       (rule.retire_margin_elo ? ` (by ≥ ${rule.retire_margin_elo} Elo/game)` : '') +
       ((rule.learning || []).length ? ` · learning arm(s) exempt: ${rule.learning.join(', ')}` : ' · no learning arm') +
+      (rule.learning_share ? ` · learning-arm floor share ${Math.round(100 * rule.learning_share)}% of games` : '') +
       ' · the incumbent is never retired by the rule; promotion is a human call at ≥ 200 games.'
     : '';
 }
@@ -1314,7 +1408,7 @@ function renderMatchups(m, pin) {
   if (m.error) { $('muHdr').textContent = 'error: ' + m.error; return; }
   $('muHdr').textContent = `· ${m.reg} · opponent Pokémon SEEN in battle · item / ability = revealed sightings (green) blended with the belief for the rest`;
   $('muSHdr').textContent = 'this bot session';
-  muRows($('muS').querySelector('tbody'), (m.session || {}).rows);
+  muRows($('muS').querySelector('tbody'), (m.session || {}).rows, $('muSSort').value);
   const sf = (m.session || {}).footer || {};
   $('muSFoot').textContent = `${sf.games || 0} game(s) · ${sf.opponents || 0} opponent(s) · ${sf.species || 0} species`;
   $('muAHdr').textContent = m.mode === 'all' ? 'all teams' : `team ${m.team}`;
@@ -1326,7 +1420,7 @@ function renderMatchups(m, pin) {
       (m.teams || []).map(t => `<option value="${esc(t.team)}">${esc(t.team)} (${t.games} games)</option>`).join('');
   }
   if (document.activeElement !== sel) sel.value = m.selected || '';
-  muRows($('muA').querySelector('tbody'), (m.alltime || {}).rows);
+  muRows($('muA').querySelector('tbody'), (m.alltime || {}).rows, $('muASort').value);
   const af = (m.alltime || {}).footer || {};
   $('muAFoot').textContent = `${af.games || 0} game(s) · ${af.opponents || 0} opponent(s) · ${af.species || 0} species` +
       (m.mode === 'all' && af.teams && af.teams.length ? ` · teams: ${af.teams.join(', ')}` : '') +
@@ -1378,6 +1472,8 @@ $('cancelChallengeBtn').onclick = () => api('/api/challenge/cancel');
 $('autoAccept').onchange = () => api('/api/options', {auto_accept: $('autoAccept').checked});
 $('autoClose').onchange = () => api('/api/options', {auto_close: $('autoClose').checked});
 $('timerNow').onchange = () => api('/api/options', {timer_immediate: $('timerNow').checked});
+$('muSSort').onchange = $('muASort').onchange = () => refresh();   // 2026-09-03: re-sort the matchup tables
+$('otsAccept').onchange = () => api('/api/options', {ots_accept: $('otsAccept').checked});
 $('banditPin').onchange = () => api('/api/options', {bandit_pin: $('banditPin').value});
 $('lanes').onchange = () => api('/api/options', {lanes: +$('lanes').value});
 $('teamSel').onchange = () => api('/api/team', {team: $('teamSel').value});

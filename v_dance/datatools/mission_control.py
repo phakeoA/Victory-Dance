@@ -59,11 +59,13 @@ _ENV_READ_KEYS = ("PS_USERNAME", "PS_AVATAR", "PS_CLIENT_URL", "VDANCE_BATTLE_FO
                   # 2026-09-02 ladder lanes: rated games at once at launch (1..5)
                   "VD_LADDER_LANES",
                   # 2026-09-02 (USER): battle-timer mode at launch (1 = /timer on at the first frame)
-                  "VD_TIMER_IMMEDIATE")
+                  "VD_TIMER_IMMEDIATE",
+                  # 2026-09-03 (USER): open team sheets at launch (1 = accept the offer)
+                  "VD_OTS_ACCEPT")
 _ENV_WRITE_KEYS = ("VDANCE_BATTLE_FORMAT", "VD_BATTLE_CKPT", "VD_TP_CKPT",
                    "VD_DEFAULT_TEAM", "VD_AUTO_CLOSE_ROOMS",
                    "VD_SERVE_TAU", "VD_SERVE_TOP_P",
-                   "VD_BANDIT", "VD_BANDIT_PIN", "VD_LADDER_LANES", "VD_TIMER_IMMEDIATE")
+                   "VD_BANDIT", "VD_BANDIT_PIN", "VD_LADDER_LANES", "VD_TIMER_IMMEDIATE", "VD_OTS_ACCEPT")
 
 def _bandit_arm_names() -> list:
     """Arm names from config/serve_bandit.json (names only — the launch-default pin picker; the
@@ -358,7 +360,7 @@ def _recent_logs(n: int = 40) -> list:
 # heavy=True → copy-only (server refuses to launch). envopts → optional env toggles.
 REGISTRY = [
     # ---- PLAY ----
-    dict(id="play_online", cat="play", heavy=False, title="Online bot (browser)",
+    dict(id="play_online", cat="play", heavy=False, single=True, title="Online bot (browser)",
          module="v_dance.play.play_online_browser",
          desc="Logs into play.pokemonshowdown.com. Drive it live from the Online bot tab — set the "
               "format + launch there (format writes .env), then ladder runs, auto-accept, private "
@@ -745,6 +747,15 @@ class _Jobs:
         argv = _build_argv(entry, options, teams, _ckpt_inventory())
         heavy = bool(entry.get("heavy"))
         with self._lock:
+            if entry.get("single"):
+                # 2026-09-03: ONE online bot at a time. Two launches 5 min apart played the SAME
+                # battles on one account (13 rejections in 14 games, a game sealed under arm None,
+                # the bandit state written by both). The bot itself also refuses (DuplicateBotError).
+                dup = next((j for j in self._jobs.values() if j.entry_id == entry["id"] and j.alive), None)
+                if dup is not None:
+                    raise ValueError(
+                        f"{entry.get('title', entry['id'])} is already running ({dup.jid}). One bot per "
+                        "account — stop it in the Jobs tab (or wait for it to finish) before launching again.")
             if heavy:
                 # ONE heavy run at a time (RTX 3070 Ti 8GB / 32GB RAM). A 2nd heavy launch is
                 # refused with the offender named — stop it (or wait) before starting another.

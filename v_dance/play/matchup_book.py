@@ -61,20 +61,64 @@ def display_species(species: str, belief=None) -> str:
     if belief is not None:
         try:
             key = belief._resolve(sp)        # noqa: SLF001 — the belief's display key
-            if key:
+            # 2026-09-03 (USER: "mausholdfour was spelt wrong"): an UNRESOLVED species echoes its id
+            # back — that is not a display name, fall through to the pokedex ("Maushold-Four").
+            if key and str(key) != sp:
                 return str(key)
         except Exception:
             pass
+    e = _dex_entry(sp)
+    name = (e or {}).get("name")
+    if name:
+        return _title(str(name))
+    return sp
+
+
+def _dex_entry(species: str) -> Optional[dict]:
+    """The parser pokedex entry for an id / display name (None when unknown or the dex is missing)."""
     try:
         from v_dance.parser.vod_parser.pokedex import get_pokedex
         dx = get_pokedex()
-        e = dx.entry(sp) if dx is not None else None
-        name = (e or {}).get("name")
-        if name:
-            return _title(str(name))
+        return dx.entry(species) if dx is not None else None
     except Exception:
-        pass
-    return sp
+        return None
+
+
+def base_species_id(species: str) -> Optional[str]:
+    """``'mausholdfour' -> 'maushold'`` (the dex's ``baseSpecies``), None for a base forme / unknown."""
+    e = _dex_entry(species)
+    base = (e or {}).get("baseSpecies")
+    b = toid(base) if base else ""
+    return b if (b and b != toid(species)) else None
+
+
+def sprite_id(species: str) -> str:
+    """The official sprite file name for a species id (2026-09-03, USER: mini icons next to the names):
+    Showdown's ``spriteid`` = toID(baseSpecies) + ('-' + toID(forme) if forme) — ``maushold-four``,
+    ``aggron-mega``, ``charizard-megay``, ``raichu-alola``; a plain id for a base forme or an unknown
+    species (the UI shows a '?' when the CDN has no such file, e.g. a Champions-only mega)."""
+    sp = toid(species)
+    e = _dex_entry(species)
+    if not e:
+        return sp
+    base = toid(e.get("baseSpecies") or e.get("name") or sp) or sp
+    forme = toid(e.get("forme") or "")
+    return f"{base}-{forme}" if forme else base
+
+
+def _mega_forme_name(species: str, abilities: list) -> Optional[str]:
+    """The mega forme a species row was seen as ("Aggron-Mega"): the mega-proving ability in the row's
+    blend first, else the species' single mega forme; None when ambiguous (Charizard X / Y unseen)."""
+    try:
+        top_ab = next((e.get("name") for e in (abilities or []) if e.get("mega")), None)
+        mg = mega_of(species, top_ab, is_mega=True) if top_ab else None
+        if mg is None:
+            dx = _dex()
+            megas = dx.mega_formes_for(species) if dx is not None else []
+            mg = megas[0] if len(megas) == 1 else None
+        return (mg or {}).get("forme") or None
+    except Exception:
+        return None
 
 
 def _display(kind: str, raw: str) -> str:
@@ -176,8 +220,15 @@ def _prior(belief, sp: str, kind: str) -> list:
             if not dist:
                 top = belief.top_ability(sp)
                 dist = [{"name": top, "p": 1.0}] if top else []
-        return [(str(d["name"]), float(d.get("p") or 0.0)) for d in dist
-                if isinstance(d, dict) and d.get("name")]
+        out = [(str(d["name"]), float(d.get("p") or 0.0)) for d in dist
+               if isinstance(d, dict) and d.get("name")]
+        if not out:
+            # 2026-09-03 (USER: "unknown 100%" on Maushold-Four): the belief keys the BASE forme
+            # ("Maushold") — a cosmetic / regional forme with no entry of its own borrows the base's prior.
+            base = base_species_id(sp)
+            if base:
+                return _prior(belief, base, kind)
+        return out
     except Exception:
         return []
 
@@ -423,10 +474,12 @@ class MatchupBook:
         return e["name"], ("seen" if e["seen"] else ("belief" if prior else "none")), int(e["seen"]), e["p"]
 
     def summary(self, fmt: str, *, team: Optional[str] = ALL_TEAMS,
-                session_id: Optional[str] = None, top: int = 12, belief=None) -> dict:
+                session_id: Optional[str] = None, top: Optional[int] = None, belief=None) -> dict:
         """Rows for one table. ``session_id`` set -> the session book (every team of that
         session); else the all-time book for ``team`` (``ALL_TEAMS`` / None = every team of the
-        format)."""
+        format). ``top`` = None (2026-09-03, USER: "scroll through all the species") returns EVERY
+        row — the UIs scroll + sort client-side; the old 12-row cap hid e.g. the Mega Aggron the USER
+        had just seen."""
         if session_id is not None:
             keys = [("session", fmt, str(session_id))]
             stores = [self._session.get((fmt, str(session_id)), {})]
@@ -461,6 +514,11 @@ class MatchupBook:
                          "item": item, "item_src": item_src, "item_n": item_n, "item_pct": item_pct,
                          "ability": ability, "ability_src": ability_src, "ability_n": ability_n,
                          "ability_mega": ability_mega, "mega": st["mega"],
+                         # 2026-09-03 (USER): mini sprites (the official sprite CDN's file names); the mega
+                         # forme's sprite when the mega was seen (st["mega"] is the sighting COUNT)
+                         "sprite": sprite_id(sp),
+                         "mega_name": (mega_name := _mega_forme_name(sp, abilities) if st["mega"] else None),
+                         "mega_sprite": (sprite_id(mega_name) if mega_name else None),
                          "opponents": len(st["opponents"]), "last_seen": st["last_seen"]})
         rows.sort(key=lambda r: (-r["games"], -r["wins"], r["species"]))
         games = sum(self._games[k] for k in keys)
@@ -469,7 +527,7 @@ class MatchupBook:
             opps |= self._opps.get(k, set())
         footer = {"games": games, "opponents": len(opps), "species": len(rows),
                   "teams": (sorted({t for (_s, _f, t) in keys}) if session_id is None else [])}
-        return {"rows": rows[:max(0, int(top))], "footer": footer}
+        return {"rows": (rows if top is None else rows[:max(0, int(top))]), "footer": footer}
 
     def banner(self) -> str:
         fmts = ", ".join(self.formats()) or "no games"

@@ -68,7 +68,13 @@
   .obstat span { white-space:nowrap; }
   .obstat b { color:#e8f1f8; white-space:nowrap; word-break:normal; }
   /* 2026-09-02 (USER): matchup tables + the "what the nets are thinking" feed */
-  .muwrap { overflow-x:auto; }
+  .muwrap { overflow:auto; max-height:460px; }                 /* 2026-09-03: every species, scrollable */
+  table.mu th { position:sticky; top:0; z-index:1; background:#1b2733; }
+  .pk { width:32px; height:32px; vertical-align:middle; margin-right:4px; image-rendering:pixelated; }
+  .pk.mega { width:24px; height:24px; opacity:.9; }
+  .pkq { display:inline-block; min-width:22px; text-align:center; font-weight:bold; color:#ff9a9a;
+         border:1px dashed #ff9a9a; border-radius:4px; margin-right:4px; }
+  .musort { font:8.5pt Verdana; margin-left:auto; }
   table.mu { font-size:8.5pt; }
   table.mu th, table.mu td { padding:3px 6px; white-space:nowrap; }
   table.mu td.n { text-align:right; }
@@ -535,6 +541,10 @@ function renderDeploy() {
         <div class="note">Battle timer at launch: VD_TIMER_IMMEDIATE=1 = /timer on at the first frame of
         every game (team preview included); 0 / unset = /timer on once our decision sat unanswered
         30 s, judged per room. Runtime toggle in the Online-bot tab.</div>
+        ${envRow("VD_OTS_ACCEPT", "bool")}
+        <div class="note">Open team sheets at launch: VD_OTS_ACCEPT=1 = accept the server's team-preview offer
+        (when the opponent accepts too, both sheets are revealed and the opponent's feeds the battle net);
+        0 / unset = reject (closed sheets). Runtime toggle in the Online-bot tab.</div>
         <div class="note">Serve mode at launch: VD_BANDIT=0 = bandit off (the .env stack plays every
         game); VD_BANDIT_PIN = an arm name → FROZEN (that arm every game), "explore" → the bandit
         picks per game, unset → the pin saved in artifacts/bandit/&lt;format&gt;.json. Runtime
@@ -734,6 +744,8 @@ function renderOnline() {
           <select id="ob-launch-lanes">${lanesOpts}</select>
           <div class="chk"><input type="checkbox" id="ob-launch-timer" ${String((S && S.env && S.env.VD_TIMER_IMMEDIATE) || "0") === "1" ? "checked" : ""}>
             <label for="ob-launch-timer">Start the battle timer immediately <span class="muted">(VD_TIMER_IMMEDIATE — saved to .env; off = after 30 s of opponent silence, per room)</span></label></div>
+          <div class="chk"><input type="checkbox" id="ob-launch-ots" ${String((S && S.env && S.env.VD_OTS_ACCEPT) || "0") === "1" ? "checked" : ""}>
+            <label for="ob-launch-ots">Accept open team sheets <span class="muted">(VD_OTS_ACCEPT — saved to .env; both must accept, the opponent's sheet then feeds the battle net)</span></label></div>
           <div class="chk"><input type="checkbox" id="ob-launch-dossier" checked>
             <label for="ob-launch-dossier">--dossier (S1 belief warm-start)</label></div>
           <div class="chk"><input type="checkbox" id="ob-launch-adapt" checked>
@@ -757,6 +769,10 @@ function renderOnline() {
       $("ob-launch-timer").onchange = async () => {          // 2026-09-02 battle-timer mode at launch
         await api("/api/env", { key: "VD_TIMER_IMMEDIATE", value: $("ob-launch-timer").checked ? "1" : "0" });
         toast("VD_TIMER_IMMEDIATE saved — applies on launch (timer at the first frame vs the 30 s grace)");
+      };
+      $("ob-launch-ots").onchange = async () => {            // 2026-09-03 open team sheets at launch
+        await api("/api/env", { key: "VD_OTS_ACCEPT", value: $("ob-launch-ots").checked ? "1" : "0" });
+        toast("VD_OTS_ACCEPT saved — applies on launch (accept the open-team-sheet offer vs closed sheets)");
       };
       return;
     }
@@ -794,6 +810,8 @@ function renderOnline() {
             <label for="ob-ac">Auto-close finished battle tabs</label></div>
           <div class="chk"><input type="checkbox" id="ob-timer">
             <label for="ob-timer">Start the battle timer immediately <span class="muted" id="ob-timer-note">(off = after 30 s of opponent silence, per room)</span></label></div>
+          <div class="chk"><input type="checkbox" id="ob-ots">
+            <label for="ob-ots">Accept open team sheets <span class="muted" id="ob-ots-note">(both must accept; the opponent's sheet then feeds the battle net)</span></label></div>
           <label class="fld" style="margin-top:8px">Serve mode <span class="muted">(applies from the next game)</span></label>
           <select id="ob-pin" ${OB.bandit_on ? "" : "disabled"}>${pinLive}</select>
           <div class="muted" id="ob-pin-note"></div>
@@ -825,7 +843,9 @@ function renderOnline() {
         </div>
       </div>
       <div class="cards fit" style="margin-top:12px">
-        <div class="card"><h3>Session matchups <span class="muted" id="ob-mu-s-hdr"></span></h3>
+        <div class="card"><h3>Session matchups <span class="muted" id="ob-mu-s-hdr"></span>
+            <select id="ob-mu-s-sort" class="musort"><option value="default">sort: games</option><option value="wr_desc">win % high→low</option>
+              <option value="wr_asc">win % low→high</option><option value="alpha">A→Z</option><option value="recent">recently seen</option></select></h3>
           <div class="desc">Opponent Pokémon SEEN in this bot session (the brought four) · our W-L and win %
             in the games they appeared in · item / ability = share over the opponents who used it: revealed
             sightings (green, "n seen") blended with the belief for the unrevealed rest (italic).</div>
@@ -833,7 +853,9 @@ function renderOnline() {
             <th>W-L</th><th>win %</th><th>item</th><th>ability</th></tr></thead><tbody></tbody></table></div>
           <div class="muted" id="ob-mu-s-foot" style="margin-top:5px"></div>
         </div>
-        <div class="card"><h3>Regulation matchups <span class="muted" id="ob-mu-a-hdr"></span></h3>
+        <div class="card"><h3>Regulation matchups <span class="muted" id="ob-mu-a-hdr"></span>
+            <select id="ob-mu-a-sort" class="musort"><option value="default">sort: games</option><option value="wr_desc">win % high→low</option>
+              <option value="wr_asc">win % low→high</option><option value="alpha">A→Z</option><option value="recent">recently seen</option></select></h3>
           <label class="fld">Team <span class="muted">(every recorded game of this regulation with THAT team —
             M-B/The_Big_6, M-B/maw_zard and M-A/maw_zard are separate tables)</span></label>
           <select id="ob-mu-team"></select>
@@ -853,6 +875,7 @@ function renderOnline() {
       <h2 class="sec">Activity</h2>
       <div id="oblog"></div>`;
     $("ob-mu-team").onchange = () => onlineAction("/options", { matchup_team: $("ob-mu-team").value });
+    $("ob-mu-s-sort").onchange = $("ob-mu-a-sort").onchange = () => renderMatchups(OB.matchups, OB.team_pin || "");   // 2026-09-03
     $("ob-think-tag").onchange = () => renderThoughts(OB.thoughts, OB.live || []);
     $("ob-battle").onclick = () => onlineAction("/ladder/start",
       { games: +$("ob-games").value || 1, team: $("ob-team").value });
@@ -864,6 +887,7 @@ function renderOnline() {
     $("ob-aa").onchange = () => onlineAction("/options", { auto_accept: $("ob-aa").checked });
     $("ob-ac").onchange = () => onlineAction("/options", { auto_close: $("ob-ac").checked });
     $("ob-timer").onchange = () => onlineAction("/options", { timer_immediate: $("ob-timer").checked });
+    $("ob-ots").onchange = () => onlineAction("/options", { ots_accept: $("ob-ots").checked });   // 2026-09-03
     $("ob-pin").onchange = () => onlineAction("/options", { bandit_pin: $("ob-pin").value });
     $("ob-lanes").onchange = () => onlineAction("/options", { lanes: +$("ob-lanes").value });
     $("ob-team").onchange = () => onlineAction("/team", { team: $("ob-team").value });
@@ -873,9 +897,31 @@ function renderOnline() {
 }
 
 /* ── 2026-09-02 (USER): matchup tables + "what the nets are thinking" ── */
-function muRows(tbody, rows) {
+// 2026-09-03 (USER): mini sprites from the official sprite CDN (the local Showdown copy is the SERVER — it
+// ships no sprites); a missing file (e.g. a Champions-only mega) shows a red '?' so a bug stays visible.
+const SPRITES = "https://play.pokemonshowdown.com/sprites/gen5/";
+function pkMissing(img) {
+  const s = document.createElement("span"); s.className = "pkq"; s.textContent = "?";
+  s.title = "no sprite for " + (img.dataset.id || "?"); img.replaceWith(s);
+}
+function pkIcon(r) {
+  const one = (id, cls, title) => id ? `<img class="pk${cls}" src="${SPRITES}${esc(id)}.png" data-id="${esc(id)}" ` +
+      `alt="" title="${esc(title)}" onerror="pkMissing(this)">` : "";
+  return one(r.sprite, "", r.display || r.species) + (r.mega_sprite ? one(r.mega_sprite, " mega", "mega seen: " + (r.mega_name || r.mega)) : "");
+}
+function muSorted(rows, key) {
+  const wp = r => (r.win_pct == null ? -1 : r.win_pct);
+  const out = rows.slice();
+  if (key === "wr_desc") out.sort((a, b) => wp(b) - wp(a) || b.games - a.games || (a.display || a.species).localeCompare(b.display || b.species));
+  else if (key === "wr_asc") out.sort((a, b) => (wp(a) < 0) - (wp(b) < 0) || wp(a) - wp(b) || b.games - a.games);
+  else if (key === "alpha") out.sort((a, b) => (a.display || a.species).localeCompare(b.display || b.species));
+  else if (key === "recent") out.sort((a, b) => String(b.last_seen || "").localeCompare(String(a.last_seen || "")) || b.games - a.games);
+  return out;                                        // default = the server order (games, wins, name)
+}
+function muRows(tbody, rows, sortKey) {
   if (!tbody) return;
   if (!rows || !rows.length) { tbody.innerHTML = `<tr><td colspan="6" class="muted">no games yet</td></tr>`; return; }
+  rows = muSorted(rows, sortKey || "default");
   // item / ability cells = the BLENDED distribution (USER 09-02): revealed sightings (green, "n seen")
   // are hard evidence for the opponents who showed them; the belief fills the unrevealed rest (italic)
   const dist = (list) => (list && list.length) ? list.map(e =>
@@ -888,7 +934,7 @@ function muRows(tbody, rows) {
     const item = r.items ? dist(r.items) : legacy(r.item, r.item_src, r.item_n, r.item_pct, false);
     const ab = r.abilities ? dist(r.abilities) : legacy(r.ability, r.ability_src, r.ability_n, null, r.ability_mega);
     const wp = r.win_pct == null ? "—" : r.win_pct + "%";
-    return `<tr><td>${esc(r.display || r.species)}</td><td class="n">${r.games}</td>` +
+    return `<tr><td>${pkIcon(r)}${esc(r.display || r.species)}</td><td class="n">${r.games}</td>` +
            `<td class="n">${r.wins}-${r.losses}${r.draws ? "-" + r.draws + "D" : ""}</td><td class="n">${wp}</td>` +
            `<td>${item}</td><td>${ab}</td></tr>`;
   }).join("");
@@ -900,7 +946,7 @@ function renderMatchups(m, pin) {
   if (!m) { set("ob-mu-s-hdr", "(off — VD_MATCHUPS=0)"); set("ob-mu-a-hdr", "(off)"); return; }
   if (m.error) { set("ob-mu-s-hdr", "error: " + m.error); return; }
   set("ob-mu-s-hdr", `· ${m.reg} · this session`);
-  muRows($("ob-mu-s").querySelector("tbody"), (m.session || {}).rows);
+  muRows($("ob-mu-s").querySelector("tbody"), (m.session || {}).rows, ($("ob-mu-s-sort") || {}).value);
   const sf = (m.session || {}).footer || {};
   set("ob-mu-s-foot", `${sf.games || 0} game(s) · ${sf.opponents || 0} opponent(s) · ${sf.species || 0} species seen`);
   set("ob-mu-a-hdr", `· ${m.reg} · all games · ${m.mode === "all" ? "all teams" : m.team}`);
@@ -913,7 +959,7 @@ function renderMatchups(m, pin) {
       (m.teams || []).map(t => `<option value="${esc(t.team)}">${esc(t.team)} (${t.games} games)</option>`).join("");
   }
   if (sel && document.activeElement !== sel) sel.value = m.selected || "";
-  muRows($("ob-mu-a").querySelector("tbody"), (m.alltime || {}).rows);
+  muRows($("ob-mu-a").querySelector("tbody"), (m.alltime || {}).rows, ($("ob-mu-a-sort") || {}).value);
   const af = (m.alltime || {}).footer || {};
   set("ob-mu-a-foot", `${af.games || 0} game(s) · ${af.opponents || 0} opponent(s) · ${af.species || 0} species` +
       (m.mode === "all" && af.teams && af.teams.length ? ` · teams: ${af.teams.join(", ")}` : "") +
@@ -996,6 +1042,9 @@ function updateOnlineLive() {
   const tm = $("ob-timer");                           // 2026-09-02 battle-timer mode (immediate vs grace)
   if (tm && ae !== tm) tm.checked = !!OB.timer_immediate;
   set("ob-timer-note", `(off = after ${Math.round(OB.timer_grace_s || 30)} s of opponent silence, per room)`);
+  const ots = $("ob-ots");                             // 2026-09-03 open team sheets
+  if (ots && ae !== ots) ots.checked = !!OB.ots_accept;
+  set("ob-ots-note", `(both must accept; the opponent's sheet then feeds the battle net · ${OB.ots_games || 0} game(s) with sheets this session)`);
   const lanesEl = $("ob-lanes");                      // 2026-09-02 lanes (rated games at once)
   if (lanesEl && ae !== lanesEl) lanesEl.value = String(OB.lanes || 1);
   const pin = $("ob-pin");                            // 2026-09-02 serve mode (frozen pin vs explore)
@@ -1056,6 +1105,7 @@ function renderArms(ob) {
       `${(100 * rule.retire_prob).toFixed(0)}%` +
       (rule.retire_margin_elo ? ` (by ≥ ${rule.retire_margin_elo} Elo/game)` : "") +
       ((rule.learning || []).length ? ` · learning arm(s) exempt: ${rule.learning.join(", ")}` : " · no learning arm") +
+      (rule.learning_share ? ` · learning-arm floor share ${Math.round(100 * rule.learning_share)}% of games` : "") +
       " · the incumbent is never retired by the rule; promotion is a human call at ≥ 200 games."
     : "";
 }

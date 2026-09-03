@@ -21,6 +21,11 @@ incumbent is never retired by the rule (only replaced by a human promotion) and 
 (``docs/w3b_ladder_ppo_design.md``): it bleeds rating by design and must keep playing.
 Promotion is a HUMAN decision informed by the report (≥ 200 games per arm ≈ ±5 pp).
 
+L2 learning share (2026-09-03, design §10): Thompson starves a losing learning arm (6 % of night 1), so
+after the warm-up a coin with p = ``learning_share`` (config; 0.30) hands the game to the learning arm
+instead of the Thompson draw — a FLOOR on its share of games (its rating cost is the accepted price of
+the data). No learning arm / share 0 = pure Thompson (byte-identical allocation).
+
 Byte-identical serve when disabled: ``VD_BANDIT=0`` (or no config file) → no arm is ever applied.
 State persists in ``artifacts/bandit/<format>.json`` so a restart keeps the evidence.
 
@@ -131,7 +136,7 @@ def config_params(path: Path) -> dict:
     cfg = json.loads(Path(path).read_text(encoding="utf-8"))
     # 2026-09-03: ``retire_margin`` (the old Wilson win-rate rule) is ignored if still present.
     return {k: cfg[k] for k in ("prior_games", "prior_sd", "min_games", "retire_min_games",
-                                "retire_prob", "retire_margin_elo") if k in cfg}
+                                "retire_prob", "retire_margin_elo", "learning_share") if k in cfg}
 
 
 def _resolve(p) -> Path:
@@ -240,7 +245,7 @@ class ServeBandit:
                  applier: Optional[Callable[[Arm], None]] = None, seed: int = 0,
                  prior_games: float = 5.0, prior_sd: float = 25.0, min_games: int = 8,
                  retire_min_games: int = 40, retire_prob: float = 0.90,
-                 retire_margin_elo: float = 0.0, now=None):
+                 retire_margin_elo: float = 0.0, learning_share: float = 0.0, now=None):
         import numpy as np
         if not arms:
             raise ValueError("ServeBandit needs at least one arm")
@@ -258,6 +263,7 @@ class ServeBandit:
         self.retire_min_games = int(retire_min_games)
         self.retire_prob = float(retire_prob)                 # 2026-09-03: P(worse than the incumbent)
         self.retire_margin_elo = float(retire_margin_elo)     # ... by at least this many Elo per game
+        self.learning_share = float(learning_share)           # 2026-09-03 L2: the learning arm's floor share
         self._now = now or time.time
         self.stats: Dict[str, ArmStats] = {a.name: ArmStats() for a in self.arms}
         self.pending: Optional[str] = None          # arm applied for the NEXT battle
@@ -328,6 +334,8 @@ class ServeBandit:
         under = [a for a in active if played(a) < self.min_games]
         if under:                                   # warm-up: fewest games first, config order
             arm = min(under, key=lambda a: (played(a), self.arms.index(a)))
+        elif self._learning_turn(active):           # 2026-09-03 L2: the learning arm's floor share
+            arm = min((a for a in active if a.learning), key=lambda a: (played(a), self.arms.index(a)))
         else:                                       # Thompson over mean per-game rating delta
             best, best_s = None, -math.inf
             for a in active:
@@ -341,6 +349,14 @@ class ServeBandit:
             arm = best or self.incumbent
         self.pending = arm.name
         return arm
+
+    def _learning_turn(self, active) -> bool:
+        """L2: with probability ``learning_share`` the next game goes to a learning arm (after the
+        warm-up, never under a pin). False when there is no active learning arm or the share is 0 —
+        then the RNG is not consumed and the Thompson sequence is unchanged."""
+        if self.learning_share <= 0.0 or not any(a.learning for a in active):
+            return False
+        return float(self.rng.random()) < self.learning_share
 
     def apply_pending(self) -> Optional[Arm]:
         """Apply the pending arm to the served player (via ``applier``); no-op without one."""
@@ -464,7 +480,8 @@ class ServeBandit:
         return {"min_games": self.min_games, "retire_min_games": self.retire_min_games,
                 "retire_prob": self.retire_prob, "retire_margin_elo": self.retire_margin_elo,
                 "incumbent": self.incumbent.name,
-                "learning": [a.name for a in self.arms if a.learning]}
+                "learning": [a.name for a in self.arms if a.learning],
+                "learning_share": self.learning_share}
 
     # -- reporting --
     def summary(self) -> List[dict]:
@@ -489,7 +506,8 @@ class ServeBandit:
         active = [a.name for a in self.active_arms()]
         pin = f"; PINNED → {self.pinned} (frozen: every game until unpinned)" if self.pinned else ""
         learn = [a.name for a in self.arms if a.learning]
-        exempt = f" (learning arm(s) exempt: {', '.join(learn)})" if learn else ""
+        exempt = (f" (learning arm(s) exempt: {', '.join(learn)}"
+                  + (f", floor share {self.learning_share:.0%}" if self.learning_share > 0 else "") + ")") if learn else ""
         return (f"[online] serve BANDIT ACTIVE — {len(active)} arm(s), incumbent {self.incumbent.name}: "
                 f"{', '.join(active)}; warm-up {self.min_games} g/arm, retire at ≥{self.retire_min_games} g "
                 f"if P(worse than the incumbent) ≥ {self.retire_prob:.2f}{exempt}; state {self.state_path.name}{pin}")

@@ -44,6 +44,19 @@ _OPP_TIMER_S = 30.0    # opponent think-time before the consumer sends /timer on
 # (team preview included), so an opponent who walks away at preview can never hold a lane. Runtime
 # toggle in the control panel / Mission Control; launch default VD_TIMER_IMMEDIATE (online harness).
 TIMER_IMMEDIATE = False
+# 2026-09-03 (USER): OPEN TEAM SHEETS. poke-env answers the server's team-preview offer at |init| with
+# /rejectopenteamsheets (its own accept mode would also DEFER our team-preview pick until both |showteam|
+# lines arrive — a hang whenever the opponent declines, so it stays off). True = the consumer ships
+# /acceptopenteamsheets INSTEAD (ots_answer); when the opponent accepts too, the sheets arrive at preview,
+# the capture below stores them (player._ots_sheets) and the battle net's opponent snapshot is stamped with
+# the opponent's sheet (live_vgc_base._apply_ots_sheets). Runtime toggle in the panel / Mission Control;
+# launch default VD_OTS_ACCEPT (online harness). The team-preview net keeps its closed-sheet input.
+OTS_ACCEPT = False
+
+
+def ots_answer(msg: str) -> str:
+    """The open-team-sheet answer actually shipped for poke-env's init-time ``/rejectopenteamsheets``."""
+    return "/acceptopenteamsheets" if (msg == "/rejectopenteamsheets" and OTS_ACCEPT) else msg
 
 # The local client redirects to https://localhost.psim.us then opens insecure ws://localhost:8000;
 # fresh Chromium blocks that (mixed-content / private-network). These flags allow it (LOCAL dev only).
@@ -563,6 +576,10 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
                     decisions = await asyncio.wrap_future(
                         asyncio.run_coroutine_threadsafe(host.feed_async(payload), POKE_LOOP))
                     for r, msg in decisions:
+                        if msg == "/rejectopenteamsheets" and OTS_ACCEPT:   # 2026-09-03 (USER): the OTS toggle
+                            msg = ots_answer(msg)
+                            print(f"[ai] open team sheets: ACCEPT sent for {r} — the sheets feed the battle "
+                                  f"net if the opponent accepts too")
                         # ship every ROOM-scoped decision: /choose, /team, /forfeit (the forced-switch
                         # backstop — dropping it would hang the battle) AND the OTS answer + timer.
                         # ⚠ the old "the client auto-handles the OTS command" assumption is FALSE on

@@ -154,7 +154,7 @@ def test_retire_rule_kills_a_clearly_worse_arm_but_never_the_incumbent_or_the_le
     assert rows["learn"]["learning"] is True and rows["a"]["learning"] is False
     assert rows["inc"]["p_worse"] is None and rows["a"]["p_worse"] > 0.99
     assert b.rule() == {"min_games": 2, "retire_min_games": 40, "retire_prob": 0.9, "retire_margin_elo": 0.0,
-                        "incumbent": "inc", "learning": ["learn"]}
+                        "incumbent": "inc", "learning": ["learn"], "learning_share": 0.0}
     assert "P(worse than the incumbent) ≥ 0.90" in b.banner() and "learning arm(s) exempt: learn" in b.banner()
     # a margin in Elo/game makes the rule stricter: 'a' is 10/g under the incumbent, so 12/g never retires it
     b2 = SB.ServeBandit(arms, fmt=FMT, state_path=tmp_path / "state2.json", seed=1, now=lambda: 1000.0,
@@ -337,3 +337,45 @@ def test_fetch_official_ratings_default_opener_sends_a_real_user_agent(monkeypat
     assert seen["url"].endswith("/users/victoriousdancing.json")
     assert seen["ua"] and "python-urllib" not in seen["ua"].lower() and "Victory-Dance" in seen["ua"]
     assert out["gen9championsvgc2026regmb"]["elo"] == 1166 and out["gen9championsvgc2026regmb"]["w"] == 443
+
+
+def test_learning_share_is_a_floor_for_the_learning_arm_after_warm_up(tmp_path: Path):
+    """2026-09-03 L2: Thompson starved the learning arm (6 % of night 1); with learning_share the arm
+    gets at least that share of games after the warm-up. Share 0 / no learning arm = pure Thompson."""
+    def bandit(share, learning=True, seed=1):
+        arms = [SB.Arm(name="inc", incumbent=True), SB.Arm(name="good"),
+                SB.Arm(name="learn", tau=0.3, learning=learning)]
+        b = SB.ServeBandit(arms, fmt=FMT, state_path=tmp_path / f"s{share}{learning}.json", seed=seed,
+                           now=lambda: 1000.0, min_games=2, learning_share=share)
+        k = 0
+        for name, deltas in (("inc", [+8, +8]), ("good", [+20, +20]), ("learn", [-15, -15])):   # warm-up
+            for d in deltas:
+                b.pending = name
+                b.bind(_tag(k))
+                b.observe(_tag(k), d)
+                k += 1
+        picks = []
+        for i in range(200):
+            b.pending = None
+            picks.append(b.choose().name)
+            b.bind(_tag(1000 + i))
+            b.observe(_tag(1000 + i), {"inc": 8, "good": 20, "learn": -15}[picks[-1]])
+        return b, picks
+    _, p0 = bandit(0.0)
+    assert p0.count("learn") <= 30                                  # Thompson alone starves the -15/g arm
+    b3, p3 = bandit(0.3)
+    assert 40 <= p3.count("learn") <= 90                            # the floor: ~30 % of 200 (+ Thompson's few)
+    assert p3.count("good") >= 80                                   # the rest still goes to Thompson's favourite
+    assert p3.count("learn") > p0.count("learn") + 20               # the floor is what made the difference
+    assert b3.rule()["learning_share"] == 0.3 and "floor share 30%" in b3.banner()
+    _, p1 = bandit(1.0)
+    assert p1.count("learn") == 200                                 # share 1.0 = every post-warm-up game
+    _, pn = bandit(0.3, learning=False)
+    assert pn.count("learn") <= 30                                  # no learning arm → the floor is inert
+    assert SB.config_params(_cfg_with(tmp_path, {"learning_share": 0.3})) == {"learning_share": 0.3}
+
+
+def _cfg_with(tmp_path: Path, extra: dict) -> Path:
+    p = tmp_path / "share.json"
+    p.write_text(json.dumps({**extra, "arms": [{"name": "inc"}]}), encoding="utf-8")
+    return p

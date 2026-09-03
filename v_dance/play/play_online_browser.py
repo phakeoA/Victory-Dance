@@ -56,7 +56,9 @@ for _k in ("VD_SERVE_TAU", "VD_SERVE_TOP_P", "VD_TP_TIE_EPS", "VD_PAIR_DECODE",
            # 2026-09-02 W3b-0: record ladder games as RL trajectories (default ON; 0 = off)
            "VD_LADDER_RECORD",
            # 2026-09-02 (USER): battle-timer mode at launch (1 = /timer on at every game's first frame)
-           "VD_TIMER_IMMEDIATE"):
+           "VD_TIMER_IMMEDIATE",
+           # 2026-09-03 (USER): open team sheets at launch (1 = accept the server's team-preview offer)
+           "VD_OTS_ACCEPT"):
     if _ENV.get(_k):
         os.environ.setdefault(_k, _ENV[_k])
 
@@ -75,6 +77,22 @@ def _timer_banner(immediate: bool, grace_s: float) -> str:
                 "(VD_TIMER_IMMEDIATE=1; toggle live in the panel / Mission Control)")
     return (f"[online] battle timer: GRACE — /timer on once our decision sat unanswered {grace_s:.0f}s, "
             f"judged per room (VD_TIMER_IMMEDIATE=1 = at the first frame; toggle live in the panel)")
+
+
+def _ots_accept_env() -> bool:
+    """Launch default for OPEN TEAM SHEETS (USER 2026-09-03): ``VD_OTS_ACCEPT=1`` → the consumer answers the
+    server's team-preview offer with /acceptopenteamsheets; unset / 0 → reject (closed sheets, the old
+    behaviour). Runtime toggle in the panel / Mission Control."""
+    return str(os.environ.get("VD_OTS_ACCEPT") or _ENV.get("VD_OTS_ACCEPT") or "0").strip() == "1"
+
+
+def _ots_banner(accept: bool) -> str:
+    """The launch echo for the open-team-sheet mode (verify-flag-uptake rule: every launch knob echoes)."""
+    if accept:
+        return ("[online] open team sheets: ACCEPT — when the opponent accepts too, their sheet is stamped into "
+                "the battle net's opponent view (VD_OTS_ACCEPT=1; toggle live in the panel / Mission Control)")
+    return ("[online] open team sheets: REJECT — closed sheets (VD_OTS_ACCEPT=1 = accept the offer; toggle live "
+            "in the panel / Mission Control)")
 
 
 def _int_env(key: str, default: int) -> int:
@@ -811,6 +829,11 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
             _tb = _timer_banner(_pvhb.TIMER_IMMEDIATE, _pvhb._OPP_TIMER_S)
             print(_tb)
             _slog(session_log, "    " + _tb)
+            # 2026-09-03 (USER): open team sheets — accept the offer / reject (launch echo)
+            _pvhb.OTS_ACCEPT = _ots_accept_env()
+            _ob = _ots_banner(_pvhb.OTS_ACCEPT)
+            print(_ob)
+            _slog(session_log, "    " + _ob)
 
             # 2026-07-10 (USER): local control server — ladder-run count / team pin / private
             # challenges / auto-accept, all without touching the bot window. Its HTTP API must keep
@@ -845,6 +868,14 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
                     print(f"[online] control server on {_ctrl.url}  —  drive it from Mission Control's "
                           f"'Online bot' tab (or open that URL for the standalone panel).")
                 except Exception as exc:
+                    from v_dance.play.bot_control_ui import DuplicateBotError
+                    if isinstance(exc, DuplicateBotError):
+                        # 2026-09-03: a second bot on this account would play the SAME battles as
+                        # the running one and lose every order — refuse to serve, loudly.
+                        msg = f"[online] REFUSED TO START — {exc}"
+                        print(msg)
+                        _slog(session_log, "    " + msg)
+                        raise SystemExit(3)
                     print(f"[online] control panel failed to start (non-fatal): {exc!r}")
 
             print("\n" + "=" * 64)

@@ -302,6 +302,7 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
         # previous turn (the A3 belief feed), so a normal turn parses the prefix once.
         opp_snapshot, prev_turn = self._reconstruct_decision(battle)
         self._feed_match_belief(battle, prev_turn)                      # A3: feed prev-turn damage+speed (no-op unless on)
+        opp_snapshot = self._apply_ots_sheets(opp_snapshot, battle)     # 2026-09-03 OTS: sheet-authoritative, FIRST
         # S1 L2b: cross-game dossier warm-start FIRST (weakest evidence tier), then the
         # within-game match belief refines on top; the encoder's belief narrowers run last.
         # getattr: test stubs drive choose_move without running __init__ (adapt_rules pattern).
@@ -628,6 +629,22 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
             mb = store[tag] = MatchBelief(belief, level=getattr(self._encoder, "level", 50))
         return mb
 
+    def _apply_ots_sheets(self, opp_snapshot: Optional[dict], battle: DoubleBattle) -> Optional[dict]:
+        """2026-09-03 (USER): OPEN TEAM SHEETS. When both players accepted the server's offer, the opponent's
+        ``|showteam|`` sheet (captured by the consumer into ``self._ots_sheets``) is stamped into the
+        reconstructed snapshot FIRST — sheet-authoritative, exactly as the training corpus stamps its OTS
+        games (``ots_sheets.stamp_ots_sheets``) — so the dossier fills nothing and the match belief narrows
+        around ground truth. Closed games: a true no-op. Guarded: a stamp hiccup can never cost a turn."""
+        if opp_snapshot is None:
+            return opp_snapshot
+        try:
+            from v_dance.play.ots_sheets import apply_ots_sheets, opp_sheet_mons
+            mons = opp_sheet_mons(self, battle)
+            return apply_ots_sheets(opp_snapshot, mons) if mons else opp_snapshot
+        except Exception:                                # noqa: BLE001
+            log.debug("OTS sheet stamp failed (non-fatal)", exc_info=True)
+            return opp_snapshot
+
     def _apply_match_belief(
         self, opp_snapshot: Optional[dict], battle: DoubleBattle
     ) -> Optional[dict]:
@@ -909,6 +926,7 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
         opp_snapshot = None
         try:
             opp_snapshot = self._build_opp_snapshot_current(battle)
+            opp_snapshot = self._apply_ots_sheets(opp_snapshot, battle)     # 2026-09-03 OTS: same tier order
             if getattr(self, "_use_dossier", False):        # S1 L2b: same tier order as choose_move
                 from v_dance.play.opponent_dossier import apply_dossier
                 opp_snapshot = apply_dossier(opp_snapshot, battle)
