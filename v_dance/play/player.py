@@ -53,12 +53,16 @@ log = logging.getLogger(__name__)
 # In open-team-sheet games the consumer captures |showteam| frames into
 # ``player._ots_sheets[room_base_tag] = {"p1": [mons], "p2": [mons]}``; at team
 # preview the opponent's revealed builds ride team_order's ``opp_known`` (the
-# tpfeat-v7 pathway). DEFAULT OFF (flag below) — enable ONLY with a TP ckpt that
-# actually trained on non-zero opp overlays (v7 / a future OTS-mixed ckpt); the
-# deployed v6 never saw them. Ladder is unaffected either way: OTS-reject means
-# |showteam| never arrives there, so the store stays empty (closed regime).
+# tpfeat-v7 pathway). 2026-09-03 (USER: "the TP should adapt to both OTS and closed
+# games" — no launch tick): AUTO by default — a TP ckpt whose config certifies
+# ``ots_overlay_trained`` (train_teampreview --ots-overlay) gets the opponent's sheet
+# whenever one was captured and the closed-sheet input otherwise; an uncertified ckpt
+# (the closed-sheet n3_rerun lineage) never sees an overlay. ``VD_TP_OTS_OVERLAY=0``
+# forces the overlay OFF for a certified ckpt (an A/B lever); ``=1`` is the old explicit
+# ON (still certification-guarded, warns once on an uncertified ckpt).
 import os as _os
-TP_OTS_OVERLAY = _os.environ.get("VD_TP_OTS_OVERLAY", "") == "1"
+_raw_tp_ots = _os.environ.get("VD_TP_OTS_OVERLAY", "").strip()
+TP_OTS_OVERLAY = None if _raw_tp_ots == "" else (_raw_tp_ots == "1")   # None = auto
 
 
 def room_base_tag(tag: str) -> str:
@@ -70,16 +74,17 @@ def room_base_tag(tag: str) -> str:
 
 def ots_opp_known(player, battle) -> Optional[dict]:
     """{norm_species: OwnKnown} for the OPPONENT's revealed sheets of this battle,
-    or None (flag off / closed sheets / nothing captured). Never raises."""
-    if not TP_OTS_OVERLAY:
-        return None
+    or None (forced off / uncertified ckpt / closed sheets / nothing captured). Never raises."""
+    if TP_OTS_OVERLAY is False:
+        return None                                    # VD_TP_OTS_OVERLAY=0: forced off
     # Footgun guard: the overlay writes tpfeat-v7 channels that are ZERO unless the ckpt
     # actually trained on open-sheet overlays. The schema stamp does NOT certify that
     # (checkpoints_set is tpfeat-v7 yet trained closed-sheet). Require an explicit
-    # config marker so the env flag can't feed OOD input to a closed-sheet net.
+    # config marker so a closed-sheet net can never be fed OOD input — in AUTO mode an
+    # uncertified ckpt is simply the closed regime (no warning); the explicit =1 warns once.
     cfg = getattr(player, "_tc_cfg", None) or {}
     if not cfg.get("ots_overlay_trained"):
-        if not getattr(player, "_ots_overlay_warned", False):
+        if TP_OTS_OVERLAY is True and not getattr(player, "_ots_overlay_warned", False):
             log.warning("VD_TP_OTS_OVERLAY=1 but the TP ckpt config lacks "
                         "ots_overlay_trained=True — serving WITHOUT the opp overlay "
                         "(it would be out-of-distribution for this net).")

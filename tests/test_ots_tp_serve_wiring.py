@@ -1,6 +1,7 @@
 """M5 (DS-M5, 2026-07-11): OTS |showteam| → TP opp_known serve wiring.
 
-Contract: flag-gated (VD_TP_OTS_OVERLAY, default OFF = byte-identical serve);
+Contract (2026-09-03): AUTO by default — a ckpt certified ``ots_overlay_trained`` gets the sheets,
+an uncertified one never does; VD_TP_OTS_OVERLAY=0 forces off, =1 the old explicit on;
 sheets keyed by the room's BASE tag (private-suffix rooms must hit the same
 entry); the opponent side is picked by our player_role; mons with nothing
 revealed contribute no overlay; the builder never raises.
@@ -39,9 +40,23 @@ def _flag_on(monkeypatch):
     monkeypatch.setattr(player_mod, "TP_OTS_OVERLAY", True)
 
 
-def test_flag_off_returns_none():
+def test_forced_off_returns_none(monkeypatch):
+    monkeypatch.setattr(player_mod, "TP_OTS_OVERLAY", False)   # VD_TP_OTS_OVERLAY=0
     p, b = _fake(sheets={"battle-gen9x-123": _SIDES})
-    assert ots_opp_known(p, b) is None                     # default OFF = byte-identical
+    assert ots_opp_known(p, b) is None                     # forced off = byte-identical
+
+
+def test_auto_default_follows_the_ckpt_certification(monkeypatch):
+    """2026-09-03 (USER): no launch tick — a certified OTS-trained TP ckpt uses the sheets when
+    captured and serves the closed input otherwise; an uncertified ckpt never sees an overlay."""
+    monkeypatch.setattr(player_mod, "TP_OTS_OVERLAY", None)    # env unset = AUTO
+    p, b = _fake(role="p1", sheets={"battle-gen9x-123": _SIDES})
+    assert set(ots_opp_known(p, b)) == {"pelipper"}         # certified + sheets → overlay
+    p2, b2 = _fake(role="p1", sheets={})
+    assert ots_opp_known(p2, b2) is None                    # certified, closed game → closed input
+    p3, b3 = _fake(role="p1", sheets={"battle-gen9x-123": _SIDES}, cfg={})
+    assert ots_opp_known(p3, b3) is None                    # uncertified (n3_rerun) → never, no warning
+    assert not getattr(p3, "_ots_overlay_warned", False)
 
 
 def test_opp_side_by_role_and_base_tag(_flag_on):

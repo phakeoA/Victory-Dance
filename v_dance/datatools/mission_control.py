@@ -374,7 +374,7 @@ REGISTRY = [
                dict(name="ckpt", type="ckpt", label="Battle ckpt override (optional)"),
                dict(name="tp-ckpt", type="tpckpt", label="TP ckpt override (optional)")],
          envopts=[dict(key="VD_ROUTE_TEAMS", label="VD_ROUTE_TEAMS=1 (4b router, challenge-accepts)"),
-                  dict(key="VD_TP_OTS_OVERLAY", label="VD_TP_OTS_OVERLAY=1 (M5 — v7-style ckpt only)")]),
+                  dict(key="VD_TP_OTS_OVERLAY", label="VD_TP_OTS_OVERLAY=1 (force the TP sheet overlay ON; unset = AUTO — a certified OTS-trained TP ckpt already uses the sheets)")]),
     dict(id="play_vs_human_browser", cat="play", heavy=False, title="Play vs human (browser, local)",
          module="v_dance.play.play_vs_human_browser",
          desc="Local Showdown in a headed browser: you in one tab, the bot in the other.",
