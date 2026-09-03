@@ -117,6 +117,60 @@ def test_select_actions_records_deduped_mask(monkeypatch):
     assert m0[SWITCH_OFFSET] is True          # slot 0's mask unchanged
 
 
+def test_select_actions_stashes_the_behaviour_logp_from_the_decode_record(monkeypatch):
+    """W3b-1a: the sampler's per-slot log-probs + EFFECTIVE masks travel from model_io's decode
+    record into player._sampling_logp / _sampling_masks keyed by (tag, 'turn'); the cross-slot
+    switch dedup merges slot 0 of the first decode with slot 1 of the re-decode (inexact)."""
+    _setup_path()
+    import types
+    import numpy as np
+    import v_dance.play.player as P
+    from v_dance.encoders.state_encoder import SWITCH_OFFSET
+
+    def fake_mask(battle, slot):
+        row = [False] * 16
+        row[SWITCH_OFFSET] = True
+        if slot == 1:
+            row[0] = True
+        return row
+
+    calls = []
+
+    def fake_indices(model, heads, sv, m0, m1, device, **kwargs):
+        calls.append(1)
+        if m1[SWITCH_OFFSET]:                     # first decode: both want the same switch
+            picks, lp = (SWITCH_OFFSET, SWITCH_OFFSET), (-0.5, -0.6)
+            dropped = [ok for ok in m1]; dropped[3] = False    # a pair-futility drop on slot 1
+        else:                                     # re-decode with the collision masked
+            picks, lp = (SWITCH_OFFSET, 0), (-0.9, -0.8)
+            dropped = list(m1)
+        P._M._stash(P._M.LAST_DECODE, masks=(list(m0), dropped), picks=picks, logp=lp,
+                    tau=0.3, top_p=1.0, pair=True, first=0, cond_on=picks[0])
+        return picks
+
+    monkeypatch.setattr(P, "build_legal_action_mask", fake_mask)
+    monkeypatch.setattr(P._M, "bc_action_indices", fake_indices)
+    battle = types.SimpleNamespace(battle_tag="b-lp")
+    fake = types.SimpleNamespace(_model=object(), _model_heads=("our_a", "our_b"),
+                                 _device="cpu", _temperature=0.3, _top_p=1.0, _rng=None,
+                                 _record_masks=True, _sampling_masks={})
+    a0, a1, _ = P.VGCPlayer._select_actions(fake, battle, np.zeros(4, np.float32))
+    assert (a0, a1) == (SWITCH_OFFSET, 0) and len(calls) == 2
+    m0, m1 = fake._sampling_masks[("b-lp", "turn")]
+    assert m1[SWITCH_OFFSET] is False and m0[SWITCH_OFFSET] is True   # dedup'd slot-1 mask kept
+    lp = fake._sampling_logp[("b-lp", "turn")]
+    assert lp["logp"] == (-0.5, -0.8) and lp["exact"] is False      # slot 0 first call, slot 1 re-decode
+    assert lp["tau"] == 0.3 and lp["pair"] is True and lp["first"] == 0
+
+    # a decode that never stashes (a stale / foreign record) → masks fall back, no log-prob recorded
+    def silent_indices(model, heads, sv, m0, m1, device, **kwargs):
+        return (0, 0)
+    monkeypatch.setattr(P._M, "bc_action_indices", silent_indices)
+    battle2 = types.SimpleNamespace(battle_tag="b-silent")
+    P.VGCPlayer._select_actions(fake, battle2, np.zeros(4, np.float32))
+    assert ("b-silent", "turn") in fake._sampling_masks and ("b-silent", "turn") not in fake._sampling_logp
+
+
 def test_select_actions_logs_value_when_trained(monkeypatch):
     """The value-head readout (#2) records the per-turn win-prob when the model has
     a TRAINED value head (and is skipped for a legacy/untrained one)."""

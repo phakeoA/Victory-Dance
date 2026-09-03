@@ -180,7 +180,7 @@ def test_hook_failures_never_raise(tmp_path: Path):
 
 def test_banner_summary_and_terminal_helper(tmp_path: Path):
     rec, _ = _recorder(tmp_path)
-    assert "ladder RECORDER ACTIVE" in rec.banner() and "logprob placeholder" in rec.banner()
+    assert "ladder RECORDER ACTIVE" in rec.banner() and "behaviour log-prob" in rec.banner()
     assert set(rec.summary()) >= {"games", "steps", "rejected", "failed", "path"}
     assert terminal_type_for(True, False) == "win" and terminal_type_for(False, True) == "loss"
     assert terminal_type_for(None, None) == "draw"
@@ -197,4 +197,96 @@ def test_private_room_suffix_is_stripped_from_the_sealed_battle_id(tmp_path: Pat
     t = rec.finish(full, _battle(full, won=True), won=True)
     assert t.meta.battle_id == f"battle-{FMT}-4242"
     assert LadderRecorder.base_tag(">" + full) == f"battle-{FMT}-4242"
+
+
+# ── W3b-1a (2026-09-02): the behaviour log-prob from the sampler ─────────────
+def _lp(lp0, lp1, tau=0.3, top_p=1.0, exact=True):
+    return {"logp": (lp0, lp1), "tau": tau, "top_p": top_p, "pair": True, "first": 0,
+            "cond_on": 3, "exact": exact}
+
+
+def test_sampler_logprob_is_summed_per_step_and_a_clean_tau_arm_seals_valid(tmp_path: Path):
+    p = _player()
+    tag = f"battle-{FMT}-11"
+    info = {"arm": "2b_tau03", "pinned": False, "tau": 0.3, "top_p": 1.0, "pair_decode": True,
+            "adapt_rules": False}
+    rec, _ = _recorder(tmp_path, p, arm_info=lambda t: info)
+    assert isinstance(p._sampling_logp, dict)                          # installed by the recorder
+    b = _battle(tag, turn=1)
+    p._sampling_logp[(tag, "turn")] = _lp(-0.4, -1.1)
+    rec.record(b, _state(1), 3, 5, 0, 0, "model", "turn")
+    assert rec._collectors[tag].last_step().logprob == pytest.approx(-1.5)
+    assert rec._collectors[tag].last_step().pair_first == 0             # W3b-1b: the decode order
+    assert (tag, "turn") not in p._sampling_logp                       # consumed
+    b.turn = 2
+    p._sampling_logp[(tag, "turn")] = _lp(None, -0.2)                  # slot 0 had no pick → 0
+    rec.record(b, _state(2), None, 4, 0, 0, "model", "turn")
+    assert rec._collectors[tag].last_step().logprob == pytest.approx(-0.2)
+    b.turn = 3                                                         # forced replacement: argmax → 0
+    p._sampling_logp[(tag, "replacement")] = {"logp": (0.0, None), "tau": 0.0, "top_p": 1.0,
+                                              "pair": False, "first": None, "cond_on": None, "exact": True}
+    rec.record(b, _state(3), 13, None, 0, 0, "forced_switch_model", "replacement")
+    assert rec._collectors[tag].last_step().logprob == 0.0
+    t = rec.finish(tag, _battle(tag, won=True), won=True)
+    s = t.meta.sampling
+    assert s["logprob_valid"] is True and s["logprob_reason"] is None
+    assert s["logprob_source"] == "sampler" and s["logprob_inexact_steps"] == 0
+    assert s["turn_steps"] == 2 and s["replacement_steps"] == 1
+    assert s["gimmick_sampled"] is False and s["replacement_sampled"] is False
+    assert s["logprob_site"] == "model_io.masked_sample_logp"
+    assert rec.lp_steps == 2 and rec.valid_games == 1 and rec.summary()["valid_games"] == 1
+    back = read_trajectories(rec.path, expected_state_dim=DIM)
+    assert back[0].transitions[0].logprob == pytest.approx(-1.5) and back[0].meta.sampling["logprob_valid"]
+
+
+def test_logprob_verdict_names_every_reason_a_game_is_not_trainable():
+    V = LadderRecorder.logprob_verdict
+    clean = {"turn": 3, "sampler": 3, "missing": 0, "inexact": 1, "repl": 0, "taus": {0.3}, "top_ps": {1.0}}
+    v = V(clean, tau=0.3, top_p=1.0, adapt_rules=False)
+    assert v["logprob_valid"] and v["logprob_inexact_steps"] == 1     # inexact steps stay trainable
+    assert "argmax" in V(dict(clean, taus={0.0}), tau=0.0, top_p=1.0, adapt_rules=False)["logprob_reason"]
+    assert "top-p" in V(clean, tau=0.3, top_p=0.9, adapt_rules=False)["logprob_reason"]
+    assert "adapt-rules" in V(clean, tau=0.3, top_p=1.0, adapt_rules=True)["logprob_reason"]
+    v = V(dict(clean, sampler=2, missing=1), tau=0.3, top_p=1.0, adapt_rules=False)
+    assert not v["logprob_valid"] and "without a sampler" in v["logprob_reason"] and v["logprob_source"] == "mixed"
+    v = V(dict(clean, taus={0.2, 0.3}), tau=0.3, top_p=1.0, adapt_rules=False)
+    assert "changed mid-game" in v["logprob_reason"]
+    v = V(dict(clean, taus={0.5}), tau=0.3, top_p=1.0, adapt_rules=False)
+    assert "differs from the arm" in v["logprob_reason"]
+    v = V(None, tau=0.3, top_p=1.0, adapt_rules=False)
+    assert not v["logprob_valid"] and v["logprob_source"] == "placeholder" and "no turn decisions" in v["logprob_reason"]
+    v = V(dict(clean, top_ps={0.9}), tau=0.3, top_p=1.0, adapt_rules=False)
+    assert "sampler used top-p" in v["logprob_reason"]
+
+
+def test_placeholder_steps_without_a_sampler_logprob_seal_invalid(tmp_path: Path):
+    p = _player()
+    tag = f"battle-{FMT}-12"
+    info = {"arm": "2b_tau03", "tau": 0.3, "top_p": 1.0, "pair_decode": True, "adapt_rules": False}
+    rec, _ = _recorder(tmp_path, p, arm_info=lambda t: info)
+    b = _battle(tag, turn=1)
+    rec.record(b, _state(1), 1, 2, 0, 0, "model", "turn")              # nothing stashed → placeholder
+    assert rec._collectors[tag].last_step().logprob == 0.0
+    t = rec.finish(tag, _battle(tag, won=True), won=True)
+    s = t.meta.sampling
+    assert s["logprob_valid"] is False and "without a sampler log-prob" in s["logprob_reason"]
+    assert s["logprob_source"] == "placeholder" and rec.valid_games == 0
+
+
+def test_rejection_recall_and_discard_unbook_the_logprob_accounting(tmp_path: Path):
+    p = _player()
+    tag = f"battle-{FMT}-13"
+    info = {"arm": "2b_tau03", "tau": 0.3, "top_p": 1.0, "pair_decode": True, "adapt_rules": False}
+    rec, _ = _recorder(tmp_path, p, arm_info=lambda t: info)
+    b = _battle(tag, turn=1)
+    p._sampling_logp[(tag, "turn")] = _lp(-0.3, -0.3, exact=False)
+    rec.record(b, _state(1), 1, 1, 0, 0, "model", "turn")              # rejected by Showdown …
+    p._sampling_logp[(tag, "turn")] = _lp(-0.7, -0.1)
+    rec.record(b, _state(2), 2, 2, 0, 0, "model", "turn")              # … re-call replaces it
+    assert rec.rejected == 1 and rec.lp_steps == 1 and rec.lp_inexact == 0
+    assert rec._lp[tag]["turn"] == 1 and rec._lp[tag]["inexact"] == 0
+    rec.discard(b, "turn")                                             # the executed order was not the model's
+    assert rec.lp_steps == 0 and rec._lp[tag]["turn"] == 0
+    t = rec.finish(tag, _battle(tag, won=True), won=True)
+    assert t is None                                                   # nothing left to seal
 

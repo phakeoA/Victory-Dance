@@ -79,11 +79,30 @@ def masked_sample(
     ``rng`` may be a numpy Generator / RandomState (or None → module default).
     Pure-argmax serving is brittle on OOD boards; a small temperature trades a
     little top-1 fidelity for exploration / less exploitability (TIER-4)."""
+    return masked_sample_logp(logits, mask, temperature, top_p, rng)[0]
+
+
+def masked_sample_logp(
+    logits: Sequence[float], mask: Sequence[bool],
+    temperature: float = 0.0, top_p: float = 1.0, rng=None,
+) -> Tuple[Optional[int], Optional[float]]:
+    """``masked_sample`` PLUS the log-probability of the returned index under the
+    distribution it was drawn from — the BEHAVIOUR log-prob PPO's importance ratio
+    needs (W3b-1a, 2026-09-02: recorded AT the sampling site, nothing downstream can
+    reconstruct it faithfully). ``masked_sample`` is this function's first element:
+    same draw, same RNG consumption, same first-wins tie-breaking.
+
+    Returns ``(None, None)`` with no legal action; ``(argmax, 0.0)`` at
+    ``temperature <= 0`` (the argmax has probability 1 in the τ→0 limit — the
+    self-play convention, ``game_runner.record_decision``); otherwise ``(index,
+    log p[index])`` where p is the tempered softmax over the LEGAL actions, taken
+    AFTER the top-p truncation when ``top_p < 1`` (the truncated distribution IS
+    the one sampled from, so this is the true behaviour probability)."""
     legal = [i for i, ok in enumerate(mask) if ok and i < len(logits)]
     if not legal:
-        return None
+        return None, None
     if temperature is None or temperature <= 0.0:
-        return max(legal, key=lambda i: float(logits[i]))
+        return max(legal, key=lambda i: float(logits[i])), 0.0
 
     z = np.array([float(logits[i]) for i in legal], dtype=np.float64) / float(temperature)
     z -= z.max()                                   # stabilise before exp
@@ -102,8 +121,8 @@ def masked_sample(
         if total > 0:
             p = masked / total
 
-    draw = (rng if rng is not None else np.random).choice(len(legal), p=p)
-    return legal[int(draw)]
+    draw = int((rng if rng is not None else np.random).choice(len(legal), p=p))
+    return legal[draw], float(np.log(p[draw]))
 
 
 # ── Battle policy (two-head BC) ───────────────────────────────────────────────
@@ -125,6 +144,41 @@ def _stash(target: dict, **kw) -> None:
         target.update(kw)
     except Exception:
         pass
+
+
+# ── W3b-1a (2026-09-02): the behaviour record of a decode, for the RL recorders ──────────
+# ``bc_action_indices`` stashes, next to the narration numbers above, the per-slot EFFECTIVE
+# masks (cross-slot dedup + pair-futility drops folded in) and ``logp`` = the per-slot log-prob
+# of each pick under the exact distribution the sampler drew it from (``masked_sample_logp``).
+# The player snapshots it right after the call (``decode_record``) and hands it to the
+# recorder, which sums the slots into the step's joint behaviour log-prob.
+def decode_record() -> dict:
+    """A snapshot of ``LAST_DECODE`` right after a ``bc_action_indices`` call ({} if empty)."""
+    try:
+        return dict(LAST_DECODE)
+    except Exception:
+        return {}
+
+
+def merge_dedup_records(first: dict, second: dict) -> dict:
+    """The cross-slot switch dedup (``VGCPlayer._select_actions``) re-decodes with slot 1's
+    colliding switch masked out and keeps slot 0 from the FIRST call, slot 1 from the SECOND.
+    The behaviour record of the executed pair follows the same rule. ``dedup_resample=True``
+    flags that slot 1's term is the re-decode's own distribution (under 2b its partner
+    conditioning came from the discarded resample of slot 0), so the joint log-prob is a close
+    approximation rather than exact — the recorder counts such steps per game."""
+    def _slot(rec, key, slot):
+        v = (rec or {}).get(key)
+        try:
+            return v[slot] if v is not None else None
+        except Exception:
+            return None
+    out = dict(second or {})
+    out["masks"] = (_slot(first, "masks", 0), _slot(second, "masks", 1))
+    out["logp"] = (_slot(first, "logp", 0), _slot(second, "logp", 1))
+    out["picks"] = (_slot(first, "picks", 0), _slot(second, "picks", 1))
+    out["dedup_resample"] = True
+    return out
 
 
 def load_bc_policy(path, device: str = "cpu", _ckpt=None):
@@ -316,11 +370,11 @@ def bc_action_indices(
         l0 = l0 + np.asarray(bias0, dtype=l0.dtype)
     if bias1 is not None:
         l1 = l1 + np.asarray(bias1, dtype=l1.dtype)
-    a0 = masked_sample(l0, mask0, temperature, top_p, rng)
-    a1 = masked_sample(l1, mask1, temperature, top_p, rng)
+    a0, lp0 = masked_sample_logp(l0, mask0, temperature, top_p, rng)
+    a1, lp1 = masked_sample_logp(l1, mask1, temperature, top_p, rng)
     _stash(LAST_DECODE, pair=False, first=None, conf=None, cond_on=None,
            probs=(_masked_softmax(l0, mask0).tolist(), _masked_softmax(l1, mask1).tolist()),
-           masks=(list(mask0), list(mask1)), picks=(a0, a1),
+           masks=(list(mask0), list(mask1)), picks=(a0, a1), logp=(lp0, lp1),
            tau=float(temperature or 0.0), top_p=float(top_p), dropped=())
     return a0, a1
 
@@ -348,14 +402,15 @@ def _pair_decode_indices(
     logits = (l0, l1)
     masks = (mask0, mask1)
     biases = (bias0, bias1)
-    a_first = masked_sample(logits[first], masks[first], temperature, top_p, rng)
+    a_first, lp_first = masked_sample_logp(logits[first], masks[first], temperature, top_p, rng)
     second = 1 - first
     if a_first is None:                       # nothing to condition on → zero-cond second
-        a_other = masked_sample(logits[second], masks[second], temperature, top_p, rng)
+        a_other, lp_other = masked_sample_logp(logits[second], masks[second], temperature, top_p, rng)
         picks = (None, a_other) if first == 0 else (a_other, None)
         _stash(LAST_DECODE, pair=True, first=first, conf=(conf0, conf1), cond_on=None,
                probs=(_masked_softmax(l0, mask0).tolist(), _masked_softmax(l1, mask1).tolist()),
                masks=(list(mask0), list(mask1)), picks=picks,
+               logp=((None, lp_other) if first == 0 else (lp_other, None)),
                tau=float(temperature or 0.0), top_p=float(top_p), dropped=())
         return picks
     onehot = torch.zeros(int(getattr(model, "action_dim")), dtype=torch.float32)
@@ -383,14 +438,15 @@ def _pair_decode_indices(
                 mask_second = trimmed
             else:
                 dropped = set()                   # fail-open: nothing was actually dropped
-    a_second = masked_sample(l_pair, mask_second, temperature, top_p, rng)
+    a_second, lp_second = masked_sample_logp(l_pair, mask_second, temperature, top_p, rng)
     picks = (a_first, a_second) if first == 0 else (a_second, a_first)
-    probs, smasks = [None, None], [None, None]
+    probs, smasks, logp = [None, None], [None, None], [None, None]
     probs[first] = _masked_softmax(logits[first], masks[first]).tolist()
     probs[second] = _masked_softmax(l_pair, mask_second).tolist()
     smasks[first], smasks[second] = list(masks[first]), list(mask_second)
+    logp[first], logp[second] = lp_first, lp_second      # W3b-1a: p(a_first) · p(a_second | a_first)
     _stash(LAST_DECODE, pair=True, first=first, conf=(conf0, conf1), cond_on=int(a_first),
-           probs=tuple(probs), masks=tuple(smasks), picks=picks,
+           probs=tuple(probs), masks=tuple(smasks), picks=picks, logp=tuple(logp),
            tau=float(temperature or 0.0), top_p=float(top_p),
            dropped=tuple(sorted(int(i) for i in dropped            # only drops that were legal
                                 if i < len(masks[second]) and masks[second][i])))

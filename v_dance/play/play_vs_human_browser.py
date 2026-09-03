@@ -39,6 +39,11 @@ URL = f"http://{SHOWDOWN_HOST}:{SHOWDOWN_PORT}"
 # went silent). Module-level so the self-test budget can be sized ABOVE it (#16) from a single source.
 _MAX_BATTLE_S = 600.0
 _OPP_TIMER_S = 30.0    # opponent think-time before the consumer sends /timer on (USER, 2026-07-10)
+# 2026-09-02 (USER): battle-timer MODE. False = the grace above (per room: /timer on once OUR decision
+# has sat unanswered for _OPP_TIMER_S). True = IMMEDIATE: /timer on at the FIRST frame of every battle
+# (team preview included), so an opponent who walks away at preview can never hold a lane. Runtime
+# toggle in the control panel / Mission Control; launch default VD_TIMER_IMMEDIATE (online harness).
+TIMER_IMMEDIATE = False
 
 # The local client redirects to https://localhost.psim.us then opens insecure ws://localhost:8000;
 # fresh Chromium blocks that (mixed-content / private-network). These flags allow it (LOCAL dev only).
@@ -352,11 +357,46 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
     pending = None               # a challenger (our format) seen while busy — accepted once free
     seen_wrong_fmt: set = set()  # (challenger, fmt) pairs already warned about (dedup the repeated frames)
     errors = 0                   # consecutive frame-handling errors → stop if the tab is dead
-    last_ship = 0.0              # loop.time() of our last shipped /choose|/team — from then until our
-                                 # NEXT ship, the opponent (or server) is the one we're waiting on
+    last_ship: dict = {}         # battle tag -> loop.time() of OUR last shipped /choose|/team in THAT
+                                 # room; from then until our next ship there, the opponent (or the
+                                 # server) is the one we're waiting on. PER ROOM since 2026-09-02:
+                                 # one global stamp let a busy neighbour room hide a stalled one (lanes).
     timer_sent: set = set()      # battles we already sent /timer on for (once per battle)
     t0_tag = None                # ladder battles ARRIVE without an accept (the Battle! queue), so
                                  # busy_since was never set → stamp it on a battle's FIRST frame
+
+    async def _timer_on(tag: str, why: str) -> None:
+        """``/timer on`` for ONE room, once per battle (a failure is logged, never retried: every
+        ship goes through the same page, so a dead page fails everything anyway)."""
+        timer_sent.add(tag)
+        try:
+            await page.evaluate("(d) => app.socket.send(d.r + '|' + d.m)", {"r": tag, "m": "/timer on"})
+            print(f"[ai] {why} — /timer on ({tag})")
+        except Exception as exc:
+            print(f"[ai] timer-on failed (non-fatal): {exc!r}")
+
+    async def _timer_sweep() -> None:
+        """Opponent-stall timer (USER 2026-07-10; PER ROOM since 2026-09-02): a room where OUR decision
+        shipped > _OPP_TIMER_S ago with no later decision of ours is one where the opponent (or the
+        server) is sitting on the game → /timer on, once per battle. Runs EVERY loop iteration, frames
+        or not: under lanes the other rooms' frames keep the loop busy, and the old idle-tick-only
+        check (one global 'active' room, one global ship stamp) never looked at the stalled room —
+        the USER's 09-02 report: an opponent who left at team preview held a lane for good. A rare
+        false positive (an extremely long turn resolution) is harmless — the timer is a legitimate
+        tool either way."""
+        now = loop.time()
+        for tag, at in list(last_ship.items()):
+            if tag in timer_sent or tag in host._ended:
+                continue
+            if now - at > _OPP_TIMER_S:
+                await _timer_on(tag, f"opponent slow (>{_OPP_TIMER_S:.0f}s)")
+
+    def _forget_room(tag) -> None:
+        """Per-room bookkeeping reclaim (battle over / room gone / watchdog)."""
+        if tag:
+            timer_sent.discard(tag)
+            last_ship.pop(tag, None)
+
     # _MAX_BATTLE_S is module-level (#16) so run()'s self-test budget can be sized above it.
     while not stop.is_set():
         # watchdog: free up if a battle ran absurdly long / went silent (tab closed, desync)
@@ -364,7 +404,14 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
             print(f"[ai] watchdog: battle exceeded {_MAX_BATTLE_S:.0f}s — freeing up to accept again")
             if active_tag:
                 host.end_battle(active_tag)
+                _forget_room(active_tag)
             busy, active_tag = False, None
+        # 2026-09-02: the stall timer is judged per room on EVERY pass (see _timer_sweep) — not only
+        # on idle ticks, which under lanes may never come while neighbouring rooms stream frames.
+        try:
+            await _timer_sweep()
+        except Exception as exc:                                     # the timer must never kill play
+            print(f"[ai] timer sweep error (non-fatal): {exc!r}")
         # accept a pending challenge as soon as we're free (checked every loop, incl. idle ticks, so a
         # challenge issued mid-battle is honoured once the current one ends — not silently dropped).
         if not busy and pending is not None:
@@ -403,20 +450,8 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
                 print("[ai] browser window closed — stopping (auto Ctrl-C).")
                 stop.set()
                 return
-            # Opponent-stall timer (USER request 2026-07-10): our decision shipped >30s ago and the
-            # battle hasn't advanced (no frames since → we're on idle ticks) → /timer on, once per
-            # battle. A rare false positive (e.g. an extremely long turn resolution) is harmless —
-            # the timer is a legitimate tool either way.
-            if (active_tag and last_ship and active_tag not in timer_sent
-                    and active_tag not in host._ended
-                    and loop.time() - last_ship > _OPP_TIMER_S):
-                timer_sent.add(active_tag)
-                try:
-                    await page.evaluate("(d) => app.socket.send(d.r + '|' + d.m)",
-                                        {"r": active_tag, "m": "/timer on"})
-                    print(f"[ai] opponent slow (>{_OPP_TIMER_S:.0f}s) — /timer on ({active_tag})")
-                except Exception as exc:
-                    print(f"[ai] timer-on failed (non-fatal): {exc!r}")
+            # (The opponent-stall timer used to live here, idle ticks only — it is now the per-room
+            # _timer_sweep at the top of every pass; lanes made idle ticks an unreliable clock.)
             # Heartbeat while serving: if we accepted a battle but no frames are arriving, surface the
             # stall (battle never started / frames not captured / desync) instead of failing silently.
             if busy and loop.time() >= hb_next:
@@ -473,14 +508,20 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
                             ROOM_GONE_HOOK(active_tag)
                         except Exception as exc:
                             print(f"[ai] room-gone hook failed (non-fatal): {exc!r}")
-                    timer_sent.discard(active_tag)
-                    busy, active_tag, last_ship = False, None, 0.0
+                    _forget_room(active_tag)
+                    busy, active_tag = False, None
                     errors = 0
                     continue
                 # ladder-queue battles arrive with NO accept step → busy_since was never stamped
                 # (the "battle done in 686352s" print) — stamp it on the battle's first frame.
                 if not busy and active_tag != t0_tag and active_tag not in host._ended:
                     busy_since, t0_tag = loop.time(), active_tag
+                # 2026-09-02 (USER): IMMEDIATE timer mode — /timer on at a room's FIRST frame (team
+                # preview included), once per battle; the per-room sweep stays as the backstop. An
+                # already-ended room's stray frame and a reconnect's replayed |init| (tag still in
+                # timer_sent) never re-send.
+                if TIMER_IMMEDIATE and active_tag not in timer_sent and active_tag not in host._ended:
+                    await _timer_on(active_tag, "timer mode IMMEDIATE")
                 # ladder-rating capture: these |raw| lines belong to an already-ENDED battle
                 # (recorded + torn down), so scan the text BEFORE the host's ended-tag guard
                 # drops the frame. No-op unless a harness installed RATING_HOOK.
@@ -537,7 +578,8 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
                                 continue
                             await page.evaluate("(d) => app.socket.send(d.r + '|' + d.m)", {"r": r, "m": msg})
                             if msg.startswith(("/choose", "/team")):
-                                last_ship = loop.time()          # the opponent's think-clock starts now
+                                # the opponent's think-clock starts now — for THIS room (lanes)
+                                last_ship[r or active_tag] = loop.time()
                         elif r:
                             print(f"[ai] (battle command not shipped: {msg[:30]})")
                     if REJOINING and active_tag in REJOINING and "\n|request|" in payload:
@@ -555,8 +597,8 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
                         bo3_state.record_game_end(host.player, active_tag, result)
                         _credit(host, active_tag, result, tally)
                         host.end_battle(active_tag)
-                        timer_sent.discard(active_tag)
-                        busy, active_tag, last_ship = False, None, 0.0
+                        _forget_room(active_tag)
+                        busy, active_tag = False, None
                         print(f"[ai] battle done in {loop.time() - busy_since:.0f}s — "
                               f"tally: AI {tally['ai']} / you {tally['you']} / draws {tally['draw']}")
             errors = 0                                               # a clean iteration resets the failure streak

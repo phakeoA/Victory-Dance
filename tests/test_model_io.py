@@ -86,6 +86,81 @@ def test_masked_sample_low_temp_concentrates_on_top():
     assert cold.count(0) > 185           # near-deterministic when cold
 
 
+# ── W3b-1a (2026-09-02): the behaviour log-prob at the sampling site ─────────
+def test_masked_sample_logp_is_the_same_draw_plus_its_log_probability():
+    import math
+    import numpy as np
+    logits, mask = [0.1, 2.0, 1.0, -3.0], [True, True, True, False]
+    picks = [M.masked_sample(logits, mask, temperature=1.0, rng=np.random.default_rng(3))
+             for _ in range(20)]
+    both = [M.masked_sample_logp(logits, mask, temperature=1.0, rng=np.random.default_rng(3))
+            for _ in range(20)]
+    assert [i for i, _ in both] == picks                        # same draw, same RNG consumption
+    p = M._masked_softmax(logits, mask)                         # tau 1 → the stash's own softmax
+    for i, lp in both:
+        assert lp == pytest.approx(math.log(p[i]))
+    # tempered: p_tau ∝ exp(l / tau) over the legal set
+    i, lp = M.masked_sample_logp(logits, mask, temperature=0.5, rng=np.random.default_rng(1))
+    z = np.array([l / 0.5 for l, ok in zip(logits, mask) if ok]); pt = np.exp(z - z.max()); pt /= pt.sum()
+    assert lp == pytest.approx(math.log(pt[[k for k, ok in enumerate(mask) if ok].index(i)]))
+    # argmax convention: probability 1 → log-prob 0; no legal action → (None, None)
+    assert M.masked_sample_logp(logits, mask, temperature=0.0) == (1, 0.0)
+    assert M.masked_sample_logp(logits, [False] * 4, temperature=1.0) == (None, None)
+
+
+def test_masked_sample_logp_top_p_reports_the_truncated_distribution():
+    import math
+    import numpy as np
+    logits, mask = [3.0, 2.5, -5.0, -5.0], [True] * 4
+    i, lp = M.masked_sample_logp(logits, mask, temperature=1.0, top_p=0.9,
+                                 rng=np.random.default_rng(0))
+    assert i in (0, 1)                                          # the nucleus = the two big ones
+    z = np.array(logits) - 3.0; p = np.exp(z); p /= p.sum()
+    keep = p[:2] / p[:2].sum()                                  # renormalised over the nucleus
+    assert lp == pytest.approx(math.log(keep[i]))               # NOT the untruncated softmax
+
+
+class _FakeNet:
+    """A two-head 'model' for the independent decode path (no pair_cond flag)."""
+    memory_dim = 0
+
+    def __init__(self, l0, l1):
+        import torch
+        self.l0, self.l1 = torch.tensor(l0), torch.tensor(l1)
+
+    def __call__(self, t, **kw):
+        return {"our_a": self.l0, "our_b": self.l1}
+
+
+def test_bc_action_indices_stashes_the_per_slot_behaviour_logp():
+    pytest.importorskip("torch")
+    import math
+    import numpy as np
+    net = _FakeNet([0.0, 1.0, 2.0, 0.5], [2.0, 0.0, -1.0, 1.0])
+    m0, m1 = [True, True, True, True], [True, False, True, True]
+    x = np.zeros(4, np.float32)
+    a0, a1 = M.bc_action_indices(net, ("our_a", "our_b"), x, m0, m1, temperature=1.0,
+                                 rng=np.random.default_rng(5))
+    rec = M.decode_record()
+    assert rec["picks"] == (a0, a1) and rec["pair"] is False and rec["tau"] == 1.0
+    lp0, lp1 = rec["logp"]
+    assert lp0 == pytest.approx(math.log(M._masked_softmax(net.l0.numpy(), m0)[a0]))
+    assert lp1 == pytest.approx(math.log(M._masked_softmax(net.l1.numpy(), m1)[a1]))
+    assert rec["masks"] == (m0, m1)
+    # argmax serve → 0.0 by convention; an action-less slot → None
+    M.bc_action_indices(net, ("our_a", "our_b"), x, m0, [False] * 4)
+    assert M.decode_record()["logp"] == (0.0, None) and M.decode_record()["picks"] == (2, None)
+
+
+def test_merge_dedup_records_keeps_slot0_from_the_first_and_slot1_from_the_second():
+    first = {"masks": ([1, 1], [1, 1]), "logp": (-0.5, -0.6), "picks": (7, 7), "tau": 0.3, "pair": True}
+    second = {"masks": ([1, 1], [1, 0]), "logp": (-0.9, -0.8), "picks": (3, 0), "tau": 0.3, "pair": True}
+    out = M.merge_dedup_records(first, second)
+    assert out["masks"] == ([1, 1], [1, 0]) and out["logp"] == (-0.5, -0.8) and out["picks"] == (7, 0)
+    assert out["dedup_resample"] is True and out["tau"] == 0.3
+    assert M.merge_dedup_records({}, {})["logp"] == (None, None)   # robust to empty records
+
+
 # ── BC policy load + decode (needs torch + trained checkpoint) ────────────────
 @pytest.fixture(scope="module")
 def bc_loaded():

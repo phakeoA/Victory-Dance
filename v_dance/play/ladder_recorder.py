@@ -7,10 +7,16 @@ used, decision type, turn, the served model's value-head estimate) and seals eac
 ±1 terminal reward (the reward bible: terminal only, no shaping) plus per-game metadata — which
 bandit ARM played it, pinned or not, τ / top-p, pair decode, adapt-rules, opponent + ratings.
 
-⚠ ``logprob`` is a PLACEHOLDER (0.0) and every game is stamped ``sampling.logprob_valid = false``
-until W3b-1a records the behaviour log-prob at the sampling site (model_io). Trajectories so stamped
-must never be trained on — the update script refuses them. Everything else needed for an exact
-recompute later is here.
+W3b-1a (2026-09-02): ``logprob`` is the step's joint BEHAVIOUR log-prob, summed from the per-slot
+log-probs the sampler recorded at the sampling site (``model_io.masked_sample_logp`` → the decode
+record → ``player._sampling_logp``): under the 2b decode that is log p(a_first) + log p(a_second |
+a_first) over the EFFECTIVE masks; the gimmick and forced-replacement heads are argmax in serve
+(log-prob 0 by the τ→0 convention — ``sampling.gimmick_sampled`` / ``replacement_sampled`` say so,
+the evaluator must skip those terms). A game seals ``sampling.logprob_valid = true`` ONLY when every
+turn step carried a sampler log-prob AND the arm is clean (τ > 0, top-p 1.0, adapt-rules off, one τ
+for the whole game); otherwise ``logprob_reason`` says why and the update script refuses it.
+``logprob_inexact_steps`` counts cross-slot switch-dedup re-decodes (slot 1's term is the re-decode's
+own distribution — a close approximation, model_io.merge_dedup_records).
 
 Zero-impact when disabled (``VD_LADDER_RECORD=0``): the hooks stay the base no-ops. Every hook is
 guarded — recording must never cost a turn.
@@ -65,6 +71,11 @@ class LadderRecorder:
         self.rejected = 0                           # rejection re-calls replaced (same turn + type)
         self.failed = 0                             # guarded hook failures (never cost a turn)
         self.skipped_empty = 0                      # games that ended with no model decision recorded
+        # W3b-1a: behaviour log-prob accounting — per open game and session totals
+        self._lp: Dict[str, dict] = {}              # tag -> {turn, sampler, missing, inexact, repl, taus, top_ps}
+        self.lp_steps = 0                           # turn steps whose log-prob came from the sampler
+        self.lp_inexact = 0                         # ... of which cross-slot dedup re-decodes
+        self.valid_games = 0                        # games sealed logprob_valid=true
         self.install()
 
     # ── hooks ────────────────────────────────────────────────────────────────
@@ -73,6 +84,8 @@ class LadderRecorder:
         p._record_masks = True                      # stash the EFFECTIVE per-slot masks (#10/#11)
         if not isinstance(getattr(p, "_sampling_masks", None), dict):
             p._sampling_masks = {}
+        if not isinstance(getattr(p, "_sampling_logp", None), dict):   # W3b-1a behaviour log-probs
+            p._sampling_logp = {}
         rec = self
         p._record_rl_decision = types.MethodType(lambda _p, *a, **k: rec.record(*a, **k), p)
         p._discard_rl_decision = types.MethodType(lambda _p, *a, **k: rec.discard(*a, **k), p)
@@ -120,25 +133,122 @@ class LadderRecorder:
                 m0 = stash[0] if (stash and stash[0] is not None) else legal(battle, 0)
                 m1 = stash[1] if (stash and stash[1] is not None) else legal(battle, 1)
                 gm0, gm1 = gim(battle, 0), gim(battle, 1)
+            # W3b-1a: the behaviour log-prob the sampler recorded for THIS decision (None = none)
+            lp = None
+            slp = getattr(self.player, "_sampling_logp", None)
+            if isinstance(slp, dict):
+                lp = slp.pop((tag, decision_type), None)
             c = self._collector_for(battle)
             turn = int(getattr(battle, "turn", 0) or 0)
             last = c.last_step()
             if last is not None and last.turn == turn and last.decision_type == decision_type:
                 c.pop_step()                        # Showdown rejected the prior order → keep the executed one
                 self.rejected += 1
+                self._uncount(tag, last.decision_type)
             wp = getattr(self.player, "_last_value", None)
             value = (2.0 * float(wp) - 1.0) if isinstance(wp, (int, float)) else 0.0
+            logprob = self._joint_logprob(tag, decision_type, lp)
             c.add_step(state=state_vec,
                        action_s0=(PASS_ACTION if a0 is None else int(a0)),
                        action_s1=(PASS_ACTION if a1 is None else int(a1)),
                        gimmick_s0=int(g0 or 0), gimmick_s1=int(g1 or 0),
-                       logprob=0.0,                 # placeholder until W3b-1a (logprob_valid=false)
-                       value=value, decision_type=decision_type, turn=turn,
-                       mask_s0=m0, mask_s1=m1, gmask_s0=gm0, gmask_s1=gm1)
+                       logprob=logprob, value=value, decision_type=decision_type, turn=turn,
+                       mask_s0=m0, mask_s1=m1, gmask_s0=gm0, gmask_s1=gm1,
+                       # W3b-1b: the behaviour decode's first slot (pair decode only)
+                       pair_first=(lp.get("first") if (isinstance(lp, dict) and lp.get("pair")
+                                                       and decision_type == "turn") else None))
             self.steps += 1
         except Exception:
             self.failed += 1
             log.debug("ladder record failed (non-fatal)", exc_info=True)
+
+    # ── W3b-1a: behaviour log-prob accounting ────────────────────────────────
+    def _lp_for(self, tag: str) -> dict:
+        st = self._lp.get(tag)
+        if st is None:
+            st = self._lp[tag] = {"turn": 0, "sampler": 0, "missing": 0, "inexact": 0, "repl": 0,
+                                  "taus": set(), "top_ps": set(), "last": []}
+        return st
+
+    def _joint_logprob(self, tag: str, decision_type: str, lp: Optional[dict]) -> float:
+        """Sum the per-slot sampler log-probs into the step's joint behaviour log-prob (a slot with
+        no pick contributes 0, mirroring the evaluator's PASS handling); the gimmick term is 0
+        (argmax in serve). Books the step so ``finish`` can judge ``logprob_valid``."""
+        st = self._lp_for(tag)
+        terms = list((lp or {}).get("logp") or ()) if isinstance(lp, dict) else []
+        have = bool(lp) and any(t is not None for t in terms)
+        total = float(sum(float(t) for t in terms if t is not None)) if have else 0.0
+        if decision_type == "replacement":
+            st["repl"] += 1
+            st["last"].append(("replacement", False, False))
+            return total                            # argmax in serve → 0.0 by convention
+        st["turn"] += 1
+        if have:
+            st["sampler"] += 1
+            self.lp_steps += 1
+            st["taus"].add(round(float(lp.get("tau", 0.0) or 0.0), 6))
+            st["top_ps"].add(round(float(lp.get("top_p", 1.0) or 1.0), 6))
+            inexact = not bool(lp.get("exact", True))
+            if inexact:
+                st["inexact"] += 1
+                self.lp_inexact += 1
+            st["last"].append(("turn", True, inexact))
+        else:
+            st["missing"] += 1
+            st["last"].append(("turn", False, False))
+        return total
+
+    def _uncount(self, tag: str, decision_type: str) -> None:
+        """A step was popped (rejection re-call / discard) — undo its booking."""
+        st = self._lp.get(tag)
+        if not st or not st["last"]:
+            return
+        kind, sampler, inexact = st["last"].pop()
+        if kind == "replacement":
+            st["repl"] = max(0, st["repl"] - 1)
+            return
+        st["turn"] = max(0, st["turn"] - 1)
+        if sampler:
+            st["sampler"] = max(0, st["sampler"] - 1)
+            self.lp_steps = max(0, self.lp_steps - 1)
+            if inexact:
+                st["inexact"] = max(0, st["inexact"] - 1)
+                self.lp_inexact = max(0, self.lp_inexact - 1)
+        else:
+            st["missing"] = max(0, st["missing"] - 1)
+
+    @staticmethod
+    def logprob_verdict(st: Optional[dict], *, tau: float, top_p: float, adapt_rules: bool) -> dict:
+        """The seal's log-prob fields for one game (pure — testable): ``logprob_valid`` is true only
+        when every turn step carried a sampler log-prob AND the arm is clean (τ > 0, top-p 1.0,
+        adapt-rules off, one τ for the whole game that matches the arm's). Otherwise
+        ``logprob_reason`` lists why. ``logprob_source`` = sampler / mixed / placeholder."""
+        st = st or {}
+        turn, sampler = int(st.get("turn", 0)), int(st.get("sampler", 0))
+        missing, inexact = int(st.get("missing", 0)), int(st.get("inexact", 0))
+        taus, top_ps = set(st.get("taus") or ()), set(st.get("top_ps") or ())
+        reasons = []
+        if tau <= 0.0:
+            reasons.append("argmax arm (tau 0): behaviour log-prob is 0 by convention")
+        if top_p < 1.0:
+            reasons.append(f"top-p {top_p:g} truncation (PPO needs top-p 1.0)")
+        if adapt_rules:
+            reasons.append("adapt-rules logit bias not reproducible")
+        if turn == 0:
+            reasons.append("no turn decisions recorded")
+        if missing:
+            reasons.append(f"{missing} turn step(s) without a sampler log-prob")
+        if len(taus) > 1:
+            reasons.append(f"tau changed mid-game ({sorted(taus)})")
+        elif taus and abs(next(iter(taus)) - round(float(tau), 6)) > 1e-6:
+            reasons.append(f"sampler tau {next(iter(taus))} differs from the arm's {tau:g}")
+        if any(tp < 1.0 for tp in top_ps) and top_p >= 1.0:
+            reasons.append("sampler used top-p < 1.0")
+        source = "sampler" if (turn and not missing) else ("mixed" if sampler else "placeholder")
+        return {"logprob_valid": not reasons, "logprob_source": source,
+                "logprob_reason": ("; ".join(reasons) if reasons else None),
+                "logprob_inexact_steps": inexact, "turn_steps": turn,
+                "replacement_steps": int(st.get("repl", 0))}
 
     def discard(self, battle, decision_type) -> None:
         """The model's pick for this (turn, type) did NOT execute — drop it."""
@@ -150,6 +260,7 @@ class LadderRecorder:
             turn = int(getattr(battle, "turn", 0) or 0)
             if last is not None and last.turn == turn and last.decision_type == decision_type:
                 c.pop_step()
+                self._uncount(battle.battle_tag, decision_type)
         except Exception:
             self.failed += 1
             log.debug("ladder discard failed (non-fatal)", exc_info=True)
@@ -164,6 +275,7 @@ class LadderRecorder:
         c = self._collectors.pop(tag, None)
         if c is None or len(c) == 0:
             self.skipped_empty += 1
+            self._lp.pop(tag, None)                 # W3b-1a: nothing to seal → drop its booking
             return None
         tp = ((getattr(self.player, "_tp_decision", None) or {}).get(tag)) or {}
         own_team = list(tp.get("own_team") or self._roster(battle, own=True))
@@ -177,14 +289,24 @@ class LadderRecorder:
             except Exception:
                 info = {}
         model = getattr(self.player, "_model", None)
+        tau = float(info.get("tau", getattr(self.player, "_temperature", 0.0) or 0.0))
+        top_p = float(info.get("top_p", getattr(self.player, "_top_p", 1.0) or 1.0))
+        adapt = bool(info.get("adapt_rules", self.adapt_rules))
+        verdict = self.logprob_verdict(self._lp.pop(tag, None), tau=tau, top_p=top_p, adapt_rules=adapt)
+        if verdict["logprob_valid"]:
+            self.valid_games += 1
+        sampled_heads = bool(getattr(self.player, "_collect_sample", False))
         sampling = {
             "source": "ladder", "session": self.session_id, "fmt": self.fmt,
             "arm": info.get("arm"), "pinned": bool(info.get("pinned", False)),
-            "tau": float(info.get("tau", getattr(self.player, "_temperature", 0.0) or 0.0)),
-            "top_p": float(info.get("top_p", getattr(self.player, "_top_p", 1.0) or 1.0)),
+            "tau": tau, "top_p": top_p,
             "pair_decode": bool(info.get("pair_decode", getattr(model, "_pair_decode", False))),
-            "adapt_rules": bool(info.get("adapt_rules", self.adapt_rules)),
-            "logprob_valid": False,                 # W3b-1a flips this when the sampler records it
+            "adapt_rules": adapt,
+            # W3b-1a: the behaviour log-prob's provenance + the evaluator's parity contract
+            **verdict,
+            "logprob_site": "model_io.masked_sample_logp",
+            "gimmick_sampled": sampled_heads,       # argmax in serve → its term is 0 (skip it)
+            "replacement_sampled": sampled_heads,   # argmax in serve → replacement steps carry 0
             "value_source": "serve_value_head",
             "opponent": opponent, "rating_before": rating_before,
             "opp_rating_before": opp_rating_before, "lane": lane,
@@ -216,7 +338,10 @@ class LadderRecorder:
     def summary(self) -> dict:
         return {"games": self.games, "steps": self.steps, "rejected": self.rejected,
                 "failed": self.failed, "skipped_empty": self.skipped_empty,
-                "open": len(self._collectors), "path": str(self.path)}
+                "open": len(self._collectors), "path": str(self.path),
+                # W3b-1a: how much of the session is PPO-trainable
+                "lp_steps": self.lp_steps, "lp_inexact": self.lp_inexact,
+                "valid_games": self.valid_games}
 
     def banner(self) -> str:
         try:
@@ -224,7 +349,8 @@ class LadderRecorder:
         except ValueError:
             rel = self.path
         return (f"[online] ladder RECORDER ACTIVE — trajectories → {rel} (states / actions / masks / "
-                f"value / arm per game; logprob placeholder until W3b-1a); VD_LADDER_RECORD=0 disables")
+                f"value / arm per game; behaviour log-prob from the sampler [W3b-1a] — clean τ arms seal "
+                f"logprob_valid=true); VD_LADDER_RECORD=0 disables")
 
     def close(self) -> None:
         try:

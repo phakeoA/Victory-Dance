@@ -616,6 +616,15 @@ class BotController:
         self.auto_close = bool(on)
         self.log(f"auto-close finished battle tabs: {'ON' if on else 'OFF'}")
 
+    def set_timer_immediate(self, on: bool) -> None:
+        """USER 2026-09-02: battle-timer mode. ON = /timer on at the first frame of every game (team
+        preview included); OFF = the consumer's per-room grace (/timer on once our decision sat
+        unanswered ``_OPP_TIMER_S``). Applies from the next battle frame — no restart."""
+        _pvhb.TIMER_IMMEDIATE = bool(on)
+        self.log("battle timer: " + ("IMMEDIATE — /timer on at every game's first frame" if on else
+                                     f"GRACE — /timer on after {_pvhb._OPP_TIMER_S:.0f}s of opponent "
+                                     f"silence, per room"))
+
     def set_bandit_pin(self, name: Optional[str]) -> Optional[str]:
         """Serve mode from the panel (2026-09-02): pin one arm (FROZEN — it plays every game) or
         unpin (explore). Takes effect at the NEXT battle: applied right away on the bot loop when
@@ -752,6 +761,9 @@ class BotController:
             "teams": self.ai_pool, "team_pin": self.team_pin or "",
             "auto_accept": bool(_pvhb.AUTO_ACCEPT),
             "auto_close": bool(self.auto_close),
+            # 2026-09-02 (USER): battle-timer mode (immediate vs per-room grace) + the grace length
+            "timer_immediate": bool(_pvhb.TIMER_IMMEDIATE),
+            "timer_grace_s": float(_pvhb._OPP_TIMER_S),
             "awaiting_confirm": sorted(self._ended_unconfirmed),
             "run": {"active": self.run_active, "target": self.run_target, "done": self.run_done},
             "searching": bool(self.searching or self._search_outstanding),
@@ -842,6 +854,8 @@ def _make_handler(ctrl: BotController):
                         ctrl.set_auto_accept(bool(body.get("auto_accept")))
                     if "auto_close" in body:
                         ctrl.set_auto_close(bool(body.get("auto_close")))
+                    if "timer_immediate" in body:  # battle timer at the first frame vs the grace
+                        ctrl.set_timer_immediate(bool(body.get("timer_immediate")))
                     if "bandit_pin" in body:       # "" / null = unpin (explore)
                         ctrl.set_bandit_pin(body.get("bandit_pin"))
                     if "lanes" in body:            # rated games at once (1..5)
@@ -1059,6 +1073,8 @@ _PANEL_HTML = """<!DOCTYPE html>
         <label for="autoAccept">Auto-accept incoming challenges</label></div>
       <div class="toggle"><input type="checkbox" id="autoClose">
         <label for="autoClose">Auto-close finished battle tabs</label></div>
+      <div class="toggle"><input type="checkbox" id="timerNow">
+        <label for="timerNow">Start the battle timer immediately <span class="muted" id="timerNote">(off = after 30 s of opponent silence, per room)</span></label></div>
       <label class="fld" style="margin-top:8px">Serve mode</label>
       <select id="banditPin" disabled><option value="">Bandit — explore (per-game arm choice)</option></select>
       <div class="muted" id="banditPinNote"></div>
@@ -1185,6 +1201,9 @@ function render(s) {
   $('recorder').textContent = rc ? `RL recorder: ${rc.games} game(s) / ${rc.steps} decision(s) this session` +
       (rc.failed ? ` · ${rc.failed} failed` : '') : '';
   if (document.activeElement !== $('lanes')) $('lanes').value = String(s.lanes || 1);
+  // 2026-09-02 (USER): battle-timer mode — immediate vs the per-room grace
+  if (document.activeElement !== $('timerNow')) $('timerNow').checked = !!s.timer_immediate;
+  $('timerNote').textContent = `(off = after ${Math.round(s.timer_grace_s || 30)} s of opponent silence, per room)`;
   const wait = s.awaiting_confirm.length ? ' — confirming result…' : '';
   const lanesTxt = (s.lanes || 1) > 1 ? ` · live ${s.live.length}/${s.lanes}` : '';
   $('prog').textContent = s.run.active
@@ -1288,6 +1307,7 @@ $('challengeBtn').onclick = () => api('/api/challenge',
 $('cancelChallengeBtn').onclick = () => api('/api/challenge/cancel');
 $('autoAccept').onchange = () => api('/api/options', {auto_accept: $('autoAccept').checked});
 $('autoClose').onchange = () => api('/api/options', {auto_close: $('autoClose').checked});
+$('timerNow').onchange = () => api('/api/options', {timer_immediate: $('timerNow').checked});
 $('banditPin').onchange = () => api('/api/options', {bandit_pin: $('banditPin').value});
 $('lanes').onchange = () => api('/api/options', {lanes: +$('lanes').value});
 $('teamSel').onchange = () => api('/api/team', {team: $('teamSel').value});

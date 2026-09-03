@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
 from pathlib import Path
 from typing import List, Optional, Sequence
 
@@ -514,11 +515,18 @@ async def run_self_play_games(
     battle_timeout: Optional[float] = 90.0, matchup_seed: int = 0, n_workers: int = 1,
     match_belief: str = "off", search: str = "off", live_dir=None, save_replays: bool = False,
     n_servers: int = 1, sample: str = "off", serve_tau: float = 0.45, serve_top_p: float = 1.0,
+    spawn_rooms: int = 0,
 ):
     """Play ``n_games`` self-play battles (the shared policy on BOTH sides) over a
     side-balanced team rotation, collect both perspectives of each game, and write the
     Type-C store. Returns ``(pairs, source_counts)``. ``n_workers`` (task #13) runs that
     many pairings concurrently via the shared runner (default 1 = sequential, as before).
+
+    ``spawn_rooms`` > 0 (W2 throughput, 2026-09-03): each pairing runs through the SERVER-SIDE
+    spawner instead of the challenge protocol — the plugin keeps that many battles alive between
+    the pair's two accounts (``spawn_client.play_pairing_spawned``; the plugin is installed into the
+    clone before the servers start). 0 = the challenge path, byte-identical. ``source_counts`` then
+    also carries ``spawn_*`` throughput keys (pairs, decisions, elapsed_s, stalls, ghosts).
 
     ``match_belief`` (A3 within-game belief A/B): ``"off"`` (default — neither side),
     ``"both"`` (the live-wiring Phase-0 smoke — belief ON on both seats), or ``"ab"`` (the
@@ -536,6 +544,7 @@ async def run_self_play_games(
     import v_dance.play.run_local_battle as R
     from poke_env import AccountConfiguration
     from v_dance.play import parallel_battles as PB
+    from v_dance.selfplay import spawn_client as SC
     from v_dance.eval.gauntlet import team_matchups
 
     # #22f: shard workers across a POOL of K local Showdown servers (ports 8000..8000+K-1). ONE server's
@@ -544,6 +553,16 @@ async def run_self_play_games(
     # sockets and the safe worker ceiling scales ~K×. n_servers<=1 (or an externally-managed server,
     # manage_server=False) reduces to the single localhost:8000 path, byte-identical to before.
     _n_servers = max(1, int(n_servers)) if manage_server else 1
+    _spawn = max(0, int(spawn_rooms or 0))
+    if _spawn and manage_server:
+        # W2 step 2: the server-side spawner must be in the clone BEFORE the servers start (the
+        # launcher's `node build` at start compiles it). Idempotent copy; a failure falls back loudly.
+        try:
+            from v_dance.selfplay.spawn_plugin import install_rlspawn
+            _ins = install_rlspawn()
+            log.info("rlspawn plugin %s", "installed" if _ins["changed"] else "current")
+        except Exception:
+            log.error("rlspawn plugin install FAILED — spawn path may not work", exc_info=True)
     pool = R.ServerPool(_n_servers, manage=manage_server).start_all()
     _multi_server = _n_servers > 1
     pairs: List[tuple] = []
@@ -569,22 +588,37 @@ async def run_self_play_games(
         # localhost:8000 default (byte-identical to before).
         _srv = ({"server_configuration": R.localhost_server_config(pool.port_for_worker(uid))}
                 if _multi_server else {})
+        # W2 step 2: under the spawner a pair holds `spawn_rooms` battles at once — the poke-env
+        # count queue must sit above that (spawn_client.max_concurrent_for); 1 on the challenge path.
+        _mcb = SC.max_concurrent_for(_spawn) if _spawn else 1
         p1 = SelfPlayVGCPlayer(
             actor_critic, tau=p1_tau, sample_seed=seed + uid, top_p=p1_top_p,
             replay_path=_REPO_ROOT / "artifacts" / "replay_buffer" / f"SP1_{uid}.jsonl",
             account_configuration=AccountConfiguration(f"SP1x{uid}", None),
-            battle_format=R.BATTLE_FORMAT, team=ta, max_concurrent_battles=1,
+            battle_format=R.BATTLE_FORMAT, team=ta, max_concurrent_battles=_mcb,
             log_level=_logging.WARNING, use_match_belief=p1_belief, use_search=p1_search,
             live_dir=live_dir, save_replays=save_replays, **_srv)
         p2 = SelfPlayVGCPlayer(
             actor_critic, tau=p2_tau, sample_seed=seed + 100000 + uid, top_p=p2_top_p,
             replay_path=_REPO_ROOT / "artifacts" / "replay_buffer" / f"SP2_{uid}.jsonl",
             account_configuration=AccountConfiguration(f"SP2x{uid}", None),
-            battle_format=R.BATTLE_FORMAT, team=tb, max_concurrent_battles=1,
+            battle_format=R.BATTLE_FORMAT, team=tb, max_concurrent_battles=_mcb,
             log_level=_logging.WARNING, use_match_belief=p2_belief, use_search=p2_search,
             live_dir=live_dir, save_replays=save_replays, **_srv)
         try:
-            await PB.play_pairing(p1, p2, n, battle_timeout=battle_timeout, label="self-play")
+            if _spawn:
+                _st = await SC.play_pairing_spawned(
+                    p1, p2, n, fmt=R.BATTLE_FORMAT,
+                    cfg=SC.SpawnConfig(rooms=_spawn, battle_timeout=battle_timeout),
+                    label=f"self-play spawn uid{uid}")
+                source_counts["spawn_pairs"] += int(_st.pairs)
+                source_counts["spawn_decisions"] += int(_st.decisions)
+                source_counts["spawn_elapsed_s"] += int(round(_st.elapsed_s))
+                source_counts["spawn_stalls"] += int(_st.stalls_forfeited)
+                source_counts["spawn_ghosts"] += int(_st.ghosts_rescued)
+                source_counts["spawn_abandoned"] += int(_st.abandoned)
+            else:
+                await PB.play_pairing(p1, p2, n, battle_timeout=battle_timeout, label="self-play")
         except Exception:
             log.warning("self-play chunk failed — continuing.", exc_info=True)
         finally:
@@ -677,6 +711,11 @@ def main(argv=None) -> int:
                          "high --workers count doesn't storm one server's startup handshakes (single-server "
                          "ceiling ~40 workers). Ignored with --no-server. Default 1 = single server.")
     ap.add_argument("--no-server", action="store_true")
+    ap.add_argument("--spawn-rooms", type=int, default=0,
+                    help="W2 throughput (2026-09-03): run each pairing through the SERVER-SIDE spawner "
+                         "(rlspawn plugin) keeping this many battles alive between the pair's two accounts "
+                         "instead of the challenge protocol. 0 = challenge path (default). The report then "
+                         "carries games/min + decisions/min.")
     ap.add_argument("--min-games", type=int, default=200)
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args(argv)
@@ -706,13 +745,22 @@ def main(argv=None) -> int:
         store_path.unlink()
 
     try:
+        _t_run = time.monotonic()
         pairs, sources = asyncio.run(run_self_play_games(
             ac, team_pool=args.teams, n_games=args.games, store_path=store_path,
             tau=args.tau, seed=args.seed, manage_server=not args.no_server,
             battle_timeout=args.battle_timeout, matchup_seed=args.matchup_seed,
             n_workers=args.workers, match_belief=args.match_belief, search=args.search,
             n_servers=args.servers, live_dir=args.live_dir, save_replays=bool(args.live_dir),
-            sample=args.sample, serve_tau=args.serve_tau, serve_top_p=args.serve_top_p))
+            sample=args.sample, serve_tau=args.serve_tau, serve_top_p=args.serve_top_p,
+            spawn_rooms=args.spawn_rooms))
+        _elapsed = max(1e-9, time.monotonic() - _t_run)
+        _decisions = sum(len(t.transitions) for pair in pairs for t in pair)
+        print(f"[phase0] THROUGHPUT ({'spawn x%d' % args.spawn_rooms if args.spawn_rooms else 'challenge path'}, "
+              f"workers {args.workers}, servers {args.servers}): {len(pairs)} games in {_elapsed:.0f}s = "
+              f"{60.0 * len(pairs) / _elapsed:.1f} games/min, {60.0 * _decisions / _elapsed:.0f} decisions/min"
+              + (f"; stalls {sources.get('spawn_stalls', 0)} ghosts {sources.get('spawn_ghosts', 0)} "
+                 f"abandoned {sources.get('spawn_abandoned', 0)}" if args.spawn_rooms else ""))
     except KeyboardInterrupt:
         # Ctrl-C now fires promptly (the parallel_battles heartbeat keeps the Windows select() loop awake);
         # run_self_play_games' `finally` has already stopped the Showdown server during unwind. Exit cleanly

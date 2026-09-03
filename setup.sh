@@ -381,6 +381,15 @@ else
     log "npm install complete ✅"
 fi
 
+# 2026-09-03: server-side self-play spawn plugin (W2 throughput stack, docs/ps_ppo_review_2026-09-02.md §4.1).
+# The repo's v_dance/selfplay/showdown_plugins/rlspawn.ts is the source of truth; the clone is gitignored,
+# so copy it in here. `node pokemon-showdown start` rebuilds on every start, which compiles it.
+if python -m v_dance.selfplay.spawn_plugin --install; then
+    log "rlspawn plugin installed into the Showdown clone ✅"
+else
+    log "rlspawn plugin install failed (non-fatal) — later: python -m v_dance.selfplay.spawn_plugin --install"
+fi
+
 # Copy default config if not already present
 if [[ ! -f "$SHOWDOWN_DIR/config/config.js" ]]; then
     if [[ -f "$SHOWDOWN_DIR/config/config-example.js" ]]; then

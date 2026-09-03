@@ -115,6 +115,47 @@ except ImportError:
     log.warning("PyTorch not found — VGCPlayer will always use random fallback.")
 
 
+def _stash_sampling(player, battle, decision_type: str, fallback_masks, dec: dict,
+                    picks=None) -> None:
+    """W3b-1a (2026-09-02): stash what the sampler ACTUALLY used for one decision, keyed by
+    ``(battle_tag, decision_type)``, for the RL recorders (ladder + self-play):
+
+      * ``player._sampling_masks[key]`` = the EFFECTIVE per-slot masks — the decode record's
+        (cross-slot dedup + pair-futility drops folded in) when it describes the executed
+        picks, else ``fallback_masks`` (the masks the caller passed in; slot 1 already dedup'd);
+      * ``player._sampling_logp[key]`` = ``{"logp": (lp0, lp1), "tau", "top_p", "pair", "first",
+        "cond_on", "exact"}`` — the per-slot behaviour log-probs from ``masked_sample_logp``
+        (None = that slot had no pick), ONLY when the record describes the executed picks.
+
+    A MODULE function (not a method): the decision methods are exercised on bare namespaces by
+    the stub-self tests. A stale / foreign record (``picks`` ≠ the executed pair — e.g. a test
+    fake that never stashed) falls back to the masks and records no log-prob. Never raises."""
+    try:
+        key = (battle.battle_tag, decision_type)
+        trusted = bool(dec) and picks is not None and tuple(dec.get("picks") or ()) == tuple(picks)
+        masks = dec.get("masks") if trusted else None
+        m0 = masks[0] if (masks and masks[0] is not None) else fallback_masks[0]
+        m1 = masks[1] if (masks and len(masks) > 1 and masks[1] is not None) else fallback_masks[1]
+        if not isinstance(getattr(player, "_sampling_masks", None), dict):
+            player._sampling_masks = {}
+        player._sampling_masks[key] = (m0, m1)
+        logp = dec.get("logp") if trusted else None
+        if logp is None:
+            return
+        if not isinstance(getattr(player, "_sampling_logp", None), dict):
+            player._sampling_logp = {}
+        if len(player._sampling_logp) > 2048:      # a recorder that never pops (self-play) can't leak:
+            player._sampling_logp.clear()          # stash + record are synchronous per decision
+        player._sampling_logp[key] = {
+            "logp": (logp[0], logp[1] if len(logp) > 1 else None),
+            "tau": float(dec.get("tau") or 0.0), "top_p": float(dec.get("top_p", 1.0) or 1.0),
+            "pair": bool(dec.get("pair", False)), "first": dec.get("first"),
+            "cond_on": dec.get("cond_on"), "exact": not bool(dec.get("dedup_resample", False)),
+        }
+    except Exception:
+        log.debug("sampling stash failed (non-fatal)", exc_info=True)
+
+
 class VGCPlayer(VGCPlayerBase):
     """
     VGC player driven by a trained PyTorch model, with the gap-#6 opponent
@@ -290,11 +331,13 @@ class VGCPlayer(VGCPlayerBase):
             # or when VD_FUTILITY_MASK=0 — bc_action_indices ignores it then.
             from v_dance.play.vgc_base import hh_pair_futility_hook
             pair_hook = hh_pair_futility_hook(battle)
+            _M.LAST_DECODE.clear()          # W3b-1a: a stale record must never describe THIS decode
             a0, a1 = _M.bc_action_indices(
                 self._model, self._model_heads, state_vec, mask0, mask1, self._device,
                 temperature=self._temperature, top_p=self._top_p, rng=self._rng,
                 bias0=bias0, bias1=bias1, pair_futility=pair_hook,
             )
+            dec = _M.decode_record()        # effective masks + behaviour log-probs of (a0, a1)
             # ── Cross-slot SWITCH dedup (doubles "can only switch in once") ──────
             # The two heads pick independently, so both active slots can choose the
             # SAME bench mon to switch into — Showdown rejects the second order.
@@ -304,18 +347,22 @@ class VGCPlayer(VGCPlayerBase):
                     and a0 < len(mask1) and mask1[a0]):
                 mask1 = list(mask1)
                 mask1[a0] = False
+                _M.LAST_DECODE.clear()
                 _, a1 = _M.bc_action_indices(
                     self._model, self._model_heads, state_vec, mask0, mask1, self._device,
                     temperature=self._temperature, top_p=self._top_p, rng=self._rng,
                     bias0=bias0, bias1=bias1, pair_futility=pair_hook,
                 )
+                # W3b-1a: slot 0's term from the first decode, slot 1's from the re-decode
+                dec = _M.merge_dedup_records(dec, _M.decode_record())
             # 2026-09-02 (USER): "what the nets are thinking" — narrate the decode just made
             # (reads model_io.LAST_DECODE; no extra forward; no-op without an installed feed).
             _TF.tap_turn(self, battle, a0, a1, wp, decode=_M.LAST_DECODE)
-            # #10: stash the masks the model was sampled under (mask1 carries the cross-slot switch dedup)
-            # so the recorded behaviour mask matches the sampling distribution.
+            # #10: stash the masks the model was sampled under (mask1 carries the cross-slot switch
+            # dedup; the decode record adds the pair-futility drops) so the recorded behaviour mask
+            # matches the sampling distribution — and, W3b-1a, the behaviour log-probs with it.
             if getattr(self, "_record_masks", False):
-                self._sampling_masks[(battle.battle_tag, "turn")] = (mask0, mask1)
+                _stash_sampling(self, battle, "turn", (mask0, mask1), dec, picks=(a0, a1))
             # None ⟺ all-zero mask ⟺ empty/fainted slot → 0 (passes via _safe_order).
             return (a0 if a0 is not None else 0,
                     a1 if a1 is not None else 0,
@@ -422,8 +469,14 @@ class VGCPlayer(VGCPlayerBase):
             logits = (l0, l1)
             out: List[Optional[int]] = [None, None]
             rep_masks: List = [None, None]   # #11: per-slot mask actually argmaxed under (with dedup)
+            rep_logp: List = [None, None]    # W3b-1a: per-slot behaviour log-prob (0.0 under argmax)
             taken: set = set()      # bench indices already assigned (dedupe slots)
             forced_any = False
+            # #9b: sample the replacement at tau in self-play (match the recorded log-prob + explore),
+            # deterministic argmax in eval/serve — masked_sample_logp(temperature<=0) IS masked_argmax
+            # (same function, same first-wins tie-break), so serve stays byte-identical.
+            sampled = bool(getattr(self, "_collect_sample", False))
+            rep_tau = float(self._temperature) if sampled else 0.0
             for slot in (0, 1):
                 if slot >= len(force) or not force[slot]:
                     continue        # not switching → out[slot] stays None → Pass
@@ -432,11 +485,8 @@ class VGCPlayer(VGCPlayerBase):
                 for i in taken:
                     mask[SWITCH_OFFSET + i] = False
                 rep_masks[slot] = mask
-                # #9b: sample the replacement at tau in self-play (match the recorded log-prob + explore),
-                # deterministic argmax in eval/serve. masked_sample(temperature<=0) == masked_argmax.
-                a = (_M.masked_sample(logits[slot], mask, temperature=self._temperature, rng=self._rng)
-                     if getattr(self, "_collect_sample", False)
-                     else _M.masked_argmax(logits[slot], mask))
+                a, rep_logp[slot] = _M.masked_sample_logp(logits[slot], mask, temperature=rep_tau,
+                                                          rng=getattr(self, "_rng", None))
                 if a is None:
                     # Forced slot but the brought bench is exhausted (Pattern A): PASS
                     # this slot (out[slot] stays None).  This is the model's decision,
@@ -448,7 +498,11 @@ class VGCPlayer(VGCPlayerBase):
             if not forced_any:
                 return None         # nothing to replace → defer (defensive; caller gates on any(force))
             if getattr(self, "_record_masks", False):
-                self._sampling_masks[(battle.battle_tag, "replacement")] = (rep_masks[0], rep_masks[1])
+                _stash_sampling(self, battle, "replacement", (rep_masks[0], rep_masks[1]),
+                                {"masks": (rep_masks[0], rep_masks[1]), "logp": tuple(rep_logp),
+                                 "picks": (out[0], out[1]), "tau": rep_tau, "top_p": 1.0,
+                                 "pair": False, "first": None, "cond_on": None},
+                                picks=(out[0], out[1]))
             _TF.tap_replacement(self, battle, logits, rep_masks, out, softmax=_M._masked_softmax)
             return out[0], out[1], "forced_switch_model"
         except Exception as exc:

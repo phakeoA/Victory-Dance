@@ -69,9 +69,13 @@ class Transition:
     mask_s1: Optional[List[int]] = None
     gmask_s0: Optional[List[int]] = None
     gmask_s1: Optional[List[int]] = None
+    # W3b-1b (2026-09-02): the slot the BEHAVIOUR decode picked FIRST under the era-4 2b sequential
+    # pair decode (0 / 1), None for an independent decode or a legacy step. policy_eval's pair mode
+    # recomputes log p(a_first) · p(a_second | a_first) in that order — exact parity at the warm start.
+    pair_first: Optional[int] = None
 
     def to_obj(self) -> dict:
-        return {
+        d = {
             "state": np.asarray(self.state, dtype=np.float32).tolist(),
             "action_s0": int(self.action_s0), "action_s1": int(self.action_s1),
             "gimmick_s0": int(self.gimmick_s0), "gimmick_s1": int(self.gimmick_s1),
@@ -82,6 +86,9 @@ class Transition:
             "mask_s0": _mask_to_list(self.mask_s0), "mask_s1": _mask_to_list(self.mask_s1),
             "gmask_s0": _mask_to_list(self.gmask_s0), "gmask_s1": _mask_to_list(self.gmask_s1),
         }
+        if self.pair_first is not None:                  # only written when it carries information
+            d["pair_first"] = int(self.pair_first)
+        return d
 
     @classmethod
     def from_obj(cls, d: dict) -> "Transition":
@@ -96,6 +103,7 @@ class Transition:
             decision_type=d.get("decision_type", "turn"), turn=int(d.get("turn", 0)),
             mask_s0=_mask_to_list(d.get("mask_s0")), mask_s1=_mask_to_list(d.get("mask_s1")),
             gmask_s0=_mask_to_list(d.get("gmask_s0")), gmask_s1=_mask_to_list(d.get("gmask_s1")),
+            pair_first=(None if d.get("pair_first") is None else int(d["pair_first"])),
         )
 
 

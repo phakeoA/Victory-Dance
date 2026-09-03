@@ -63,6 +63,14 @@ class PPOConfig:
     standardize_adv: bool = True   # per-minibatch advantage standardisation (sec 3)
     adv_eps: float = 1e-8
     tau: float = 1.0               # policy temperature (MUST match collection)
+    # W3b-1b (2026-09-02, ladder PPO — parity with the served 2b decode; policy_eval docstring):
+    pair_decode: bool = False      # recompute log-probs under the SEQUENTIAL pair decode (p(a)·p(b|a))
+    pair_order: str = "recorded"   # "recorded" = the behaviour decode's first slot (ratio exactly 1 at
+                                   # the warm start) | "recompute" = re-derive it from the current model
+    gimmick_terms: bool = True     # False = the gimmick head was ARGMAX in serve (behaviour log-prob 0
+                                   # by convention) → skip its log-prob / entropy / KL terms
+    replacement_policy: bool = True  # False = forced replacements were argmax in serve → no policy
+                                     # terms for those steps (they still feed the value loss)
 
 
 def make_reference_policy(ac, device: str = "cpu"):
@@ -244,15 +252,24 @@ def ppo_loss_from_batch(
     pull the stored old logprob/value, and assemble the PPO loss. ``advantages`` and
     ``returns`` come from ``gae.compute_batch_gae`` (numpy, value_pm space — pass them
     UN-standardised; standardisation happens here per-minibatch)."""
-    ev = policy_eval.ppo_forward(ac, list(transitions), cfg.tau, device, ref_policy=ref_policy,
-                                 gimmick_kl_weight=cfg.gimmick_kl_weight)
+    txns = list(transitions)
+    pm = None if cfg.replacement_policy else policy_eval.replacement_policy_mask(txns, device)
+    ev = policy_eval.ppo_forward(ac, txns, cfg.tau, device, ref_policy=ref_policy,
+                                 gimmick_kl_weight=cfg.gimmick_kl_weight,
+                                 pair=cfg.pair_decode, order=cfg.pair_order,
+                                 gimmick_terms=cfg.gimmick_terms, policy_mask=pm)
     old_logprob = _col(transitions, "logprob", device)
+    if pm is not None:                        # masked steps: old = new = 0 → ratio 1, no policy gradient
+        old_logprob = torch.where(pm, old_logprob, torch.zeros_like(old_logprob))
     old_value_pm = _col(transitions, "value", device)
     adv = torch.as_tensor(np.asarray(advantages, np.float32), device=device)
     ret = torch.as_tensor(np.asarray(returns, np.float32), device=device)
-    return ppo_losses(
+    loss, stats = ppo_losses(
         new_logprob=ev.logprob, old_logprob=old_logprob, advantages=adv,
         value_pm=ev.value_pm, old_value_pm=old_value_pm, returns=ret,
         entropy=ev.entropy, kl_to_ref=ev.kl_to_ref, opp_ce=ev.opp_ce,
         atoms_logits=ev.atoms_logits, support=getattr(ac.critic, "support", None), cfg=cfg,
     )
+    if ev.pair_flips is not None:
+        stats["pair_flips"] = float(ev.pair_flips)
+    return loss, stats

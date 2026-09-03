@@ -22,6 +22,19 @@ Value comes from the SEPARATE critic in ``value_pm`` space ([-1,1]) — the same
 as the terminal reward and the GAE baseline (see actor_critic / sec 3). Everything is
 differentiable (no ``no_grad``): PPO backprops the policy loss through the actor heads
 and the value loss through the critic.
+
+W3b-1b (2026-09-02, ladder PPO — docs/w3b_ladder_ppo_design.md §3): the served era-4 2b
+decode is SEQUENTIAL (model_io._pair_decode_indices): the slot with the higher zero-cond
+confidence is drawn first from its zero-cond logits, the other slot from a second forward
+conditioned on that pick — p(a)·p(b|a), not two independent softmaxes. ``pair=True`` here
+reproduces exactly that: the first slot's term over the zero-cond logits, the second slot's
+over the partner-conditioned logits, both over the stored EFFECTIVE masks (the recorder folds
+the cross-slot dedup + pair-futility drops in). With the behaviour's ``pair_first`` recorded
+(``order="recorded"``) the recomputed log-prob equals the sampler's at the warm start, so the
+ratio is exactly 1 before the first update. Two more parity switches: ``gimmick_terms=False``
+drops the gimmick head's terms (argmax in serve → behaviour log-prob 0 by convention) and
+``policy_mask`` zeroes the policy terms of steps the serve argmaxed (forced replacements) —
+they still feed the value loss.
 """
 from __future__ import annotations
 
@@ -168,6 +181,105 @@ def _joint_logprob_entropy(action_logits, gimmick_logits, slot_batches, tau):
     return total_lp, total_ent
 
 
+# ── W3b-1b (2026-09-02): the served 2b SEQUENTIAL decode, recomputed ─────────
+def replacement_policy_mask(transitions, device: str = "cpu") -> torch.Tensor:
+    """(B,) bool — True for steps whose POLICY terms count. Forced replacements are argmax in
+    serve (behaviour log-prob 0 by convention, ``sampling.replacement_sampled=false``), so under
+    the ladder recorder they must not enter the ratio / entropy / KL; they still feed the value
+    loss (GAE runs over the whole trajectory)."""
+    return torch.as_tensor([t.decision_type != "replacement" for t in transitions],
+                           dtype=torch.bool, device=device)
+
+
+def _no_gimmick(slot_batches):
+    """Slot batches with every gimmick decision switched off (the gimmick head was argmax in
+    serve — ``sampling.gimmick_sampled=false`` — so its behaviour log-prob is 0 and the
+    recompute must skip it too)."""
+    out = []
+    for sb in slot_batches:
+        out.append(_SlotBatch(sb.head, sb.acts, sb.valid, sb.amask, sb.gims, sb.gmask,
+                              torch.zeros_like(sb.has_g), False))
+    return out
+
+
+def _onehot_rows(actions: torch.Tensor, n: int, active: torch.Tensor) -> torch.Tensor:
+    """(B,n) float one-hots of ``actions`` on rows where ``active`` (and the action is not
+    PASS); zeros elsewhere — zeros are exactly the zero-cond forward the pair columns were
+    trained with (bc_model_attn: a missing partner vector → zeros)."""
+    out = torch.zeros(actions.shape[0], n, dtype=torch.float32, device=actions.device)
+    ok = active & (actions >= 0)
+    if bool(ok.any()):
+        out[ok, actions[ok]] = 1.0
+    return out
+
+
+def pair_order(zero_logits, slot_batches, transitions, order: str = "recorded",
+               device: str = "cpu"):
+    """``(first, recomputed)`` — per row, the slot decoded FIRST. Serve
+    (model_io._pair_decode_indices): first = the slot whose zero-cond masked softmax (τ 1) has
+    the higher max, slot 0 on ties, a slot with no legal action counts 0. ``order="recorded"``
+    uses the behaviour decode's ``pair_first`` where the step carries it (exact parity at the
+    warm start; a legacy step without it falls back to the recompute), ``"recompute"`` always
+    re-derives it from the CURRENT model (the flip rate vs the recorded order is a parity
+    diagnostic — ``PPOEval.pair_flips``)."""
+    confs = []
+    for s in (0, 1):
+        sb = slot_batches[s]
+        p = masked_log_softmax(zero_logits[sb.head], sb.amask, 1.0).exp().max(-1).values
+        confs.append(torch.where(sb.valid, p, torch.zeros_like(p)))
+    zero = torch.zeros_like(slot_batches[0].acts)
+    recomputed = torch.where(confs[0] >= confs[1], zero, zero + 1)
+    if order == "recompute":
+        return recomputed, recomputed
+    rec = torch.as_tensor([(-1 if getattr(t, "pair_first", None) is None else int(t.pair_first))
+                           for t in transitions], dtype=torch.int64, device=device)
+    return torch.where(rec >= 0, rec, recomputed), recomputed
+
+
+def pair_partner_vectors(first: torch.Tensor, slot_batches, head_names, action_dim: int) -> dict:
+    """``{head: (B,A)}`` partner one-hots for the conditioned forward: the slot decoded SECOND
+    reads the first slot's executed action; the first slot reads zeros (its own zero-cond
+    decode). Both heads are conditioned in ONE forward for the whole batch."""
+    return {head_names[0]: _onehot_rows(slot_batches[1].acts, action_dim, first == 1),
+            head_names[1]: _onehot_rows(slot_batches[0].acts, action_dim, first == 0)}
+
+
+def pair_effective_logits(policy, states, zero_logits, first, partner, head_names) -> dict:
+    """Per action head: the zero-cond logits on rows where that slot decoded first, the
+    partner-conditioned logits (one extra forward) on the rows where it decoded second."""
+    cond, _, _ = policy(states, partner_actions=partner)
+    out = dict(zero_logits)
+    for s in (0, 1):
+        h = head_names[s]
+        out[h] = torch.where((first == s).unsqueeze(-1), zero_logits[h], cond[h])
+    return out
+
+
+def _pair_setup(policy, states, zero_logits, slot_batches, transitions, head_names, order, device):
+    """(effective action logits, first, partner vectors, flip fraction) for the pair mode."""
+    first, recomputed = pair_order(zero_logits, slot_batches, transitions, order, device)
+    A = zero_logits[head_names[0]].shape[-1]
+    partner = pair_partner_vectors(first, slot_batches, head_names, A)
+    eff = pair_effective_logits(policy, states, zero_logits, first, partner, head_names)
+    both = slot_batches[0].valid & slot_batches[1].valid       # order only matters with two picks
+    flips = float(((first != recomputed) & both).float().sum() / max(int(both.sum()), 1))
+    return eff, first, partner, flips
+
+
+def _apply_policy_mask(policy_mask, *tensors):
+    """Zero the given per-row tensors where ``policy_mask`` is False (None = untouched)."""
+    if policy_mask is None:
+        return tensors
+    out = []
+    for t in tensors:
+        if t is None:
+            out.append(None)
+            continue
+        pm = policy_mask.to(t.device)
+        out.append(torch.where(pm, t, torch.zeros_like(t)))
+    return tuple(out)
+
+
 def _joint_kl(new_a, new_g, ref_a, ref_g, slot_batches, tau, gimmick_kl_weight: float = 1.0):
     """Sum the per-head forward KL(ref||new) over the slots that decided. ``gimmick_kl_weight`` scales the
     GIMMICK (mega) head's KL contribution ONLY (default 1.0 = byte-identical to the old joint KL). Set it
@@ -226,7 +338,9 @@ def _states_tensor(transitions, device):
 
 
 def evaluate_actions(
-    ac, transitions: List[Transition], tau: float = 1.0, device: str = "cpu"
+    ac, transitions: List[Transition], tau: float = 1.0, device: str = "cpu", *,
+    pair: bool = False, order: str = "recorded", gimmick_terms: bool = True,
+    policy_mask: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Run the actor-critic over a batch of transitions and return
     ``(logprob, entropy, value_pm)``, each (B,). This is the COLLECTION-side entry
@@ -237,7 +351,10 @@ def evaluate_actions(
       * ``value_pm`` — the SEPARATE critic's value in [-1,1].
 
     Differentiable: policy terms carry gradient to the actor heads, ``value_pm`` to
-    the critic. ``tau`` is the policy temperature and MUST match what collection used."""
+    the critic. ``tau`` is the policy temperature and MUST match what collection used.
+    W3b-1b parity switches (module docstring): ``pair`` = the served sequential decode,
+    ``order`` = "recorded" | "recompute", ``gimmick_terms=False`` skips the gimmick head,
+    ``policy_mask`` (B,) bool zeroes the policy terms of argmax-served steps."""
     if not transitions:
         z = torch.zeros(0, device=device)
         return z, z, z
@@ -246,7 +363,13 @@ def evaluate_actions(
     A = next(iter(action_logits.values())).shape[-1]
     G = next(iter(gimmick_logits.values())).shape[-1] if gimmick_logits else 0
     sb = _slot_batches(transitions, ac.head_names, ac.gimmick_head_names, A, G, device)
+    if not gimmick_terms:
+        sb = _no_gimmick(sb)
+    if pair:
+        action_logits, _first, _partner, _flips = _pair_setup(
+            ac.policy, states, action_logits, sb, transitions, ac.head_names, order, device)
     lp, ent = _joint_logprob_entropy(action_logits, gimmick_logits, sb, tau)
+    lp, ent = _apply_policy_mask(policy_mask, lp, ent)
     # C51: collection records the distribution MEAN as value_pm (still in [-1,1]); scalar keeps win-prob.
     if getattr(ac, "critic", None) is not None and ac.critic.is_c51:
         return lp, ent, ac.critic.value_pm(states)
@@ -262,16 +385,22 @@ class PPOEval:
     kl_to_ref: Optional[torch.Tensor]  # (B,) KL(BC||new), or None if no reference given
     opp_ce: Optional[torch.Tensor] = None  # 0-dim aux opp-prediction CE, or None (no opp head / no target)
     atoms_logits: Optional[torch.Tensor] = None  # (B, n_atoms) C51 per-atom value logits, or None (scalar critic)
+    pair_flips: Optional[float] = None  # W3b-1b pair mode: fraction of two-pick rows whose recomputed
+                                        # decode order differs from the recorded one (parity diagnostic)
 
 
 def ppo_forward(
     ac, transitions: List[Transition], tau: float = 1.0, device: str = "cpu",
-    ref_policy=None, gimmick_kl_weight: float = 1.0,
+    ref_policy=None, gimmick_kl_weight: float = 1.0, *,
+    pair: bool = False, order: str = "recorded", gimmick_terms: bool = True,
+    policy_mask: Optional[torch.Tensor] = None,
 ) -> PPOEval:
     """One actor-critic forward (+ one frozen-reference forward if given) → the
     PPOEval bundle. Returned ``kl_to_ref`` is the exact per-step forward KL(BC||new)
     summed over decided heads — a logged diagnostic always, and the KL-to-BC penalty
-    when ``cfg.kl_coef > 0`` (3b.3). At init (new == BC) it is exactly 0."""
+    when ``cfg.kl_coef > 0`` (3b.3). At init (new == BC) it is exactly 0.
+    W3b-1b switches as in ``evaluate_actions``; under ``pair`` the reference is conditioned
+    on the SAME decode order + partner picks, so the KL compares like with like."""
     if not transitions:
         z = torch.zeros(0, device=device)
         return PPOEval(z, z, z, None if ref_policy is None else z)
@@ -289,6 +418,14 @@ def ppo_forward(
     A = next(iter(action_logits.values())).shape[-1]
     G = next(iter(gimmick_logits.values())).shape[-1] if gimmick_logits else 0
     sb = _slot_batches(transitions, ac.head_names, ac.gimmick_head_names, A, G, device)
+    if not gimmick_terms:
+        sb = _no_gimmick(sb)
+    zero_logits = action_logits                      # the aux opp heads read the zero-cond logits
+    first = partner = None
+    flips = None
+    if pair:
+        action_logits, first, partner, flips = _pair_setup(
+            ac.policy, states, action_logits, sb, transitions, ac.head_names, order, device)
     lp, ent = _joint_logprob_entropy(action_logits, gimmick_logits, sb, tau)
     # C51: the value baseline is the distribution MEAN and the loss needs the raw per-atom logits;
     # the scalar critic keeps the win-prob path. value_pm stays in [-1,1] either way.
@@ -302,9 +439,13 @@ def ppo_forward(
     kl = None
     if ref_policy is not None:
         ref_a, ref_g, _ = ref_policy(states)        # frozen BC reference logits
+        if pair:                                     # same order + partner picks as the new policy
+            ref_a = pair_effective_logits(ref_policy, states, ref_a, first, partner, ac.head_names)
         kl = _joint_kl(action_logits, gimmick_logits, ref_a, ref_g, sb, tau, gimmick_kl_weight)
-    opp_ce, _ = opp_aux_ce(action_logits, transitions, ac.head_names, device)
-    return PPOEval(lp, ent, value_pm, kl, opp_ce=opp_ce, atoms_logits=atoms_logits)
+    lp, ent, kl = _apply_policy_mask(policy_mask, lp, ent, kl)
+    opp_ce, _ = opp_aux_ce(zero_logits, transitions, ac.head_names, device)
+    return PPOEval(lp, ent, value_pm, kl, opp_ce=opp_ce, atoms_logits=atoms_logits,
+                   pair_flips=flips)
 
 
 # ── data-integrity guard (mirrors corpus_qa's "illegal under mask") ───────────

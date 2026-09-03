@@ -57,11 +57,13 @@ _ENV_READ_KEYS = ("PS_USERNAME", "PS_AVATAR", "PS_CLIENT_URL", "VDANCE_BATTLE_FO
                   # 2026-09-02 serve mode: bandit on/off + the launch-time pin (frozen arm)
                   "VD_BANDIT", "VD_BANDIT_PIN",
                   # 2026-09-02 ladder lanes: rated games at once at launch (1..5)
-                  "VD_LADDER_LANES")
+                  "VD_LADDER_LANES",
+                  # 2026-09-02 (USER): battle-timer mode at launch (1 = /timer on at the first frame)
+                  "VD_TIMER_IMMEDIATE")
 _ENV_WRITE_KEYS = ("VDANCE_BATTLE_FORMAT", "VD_BATTLE_CKPT", "VD_TP_CKPT",
                    "VD_DEFAULT_TEAM", "VD_AUTO_CLOSE_ROOMS",
                    "VD_SERVE_TAU", "VD_SERVE_TOP_P",
-                   "VD_BANDIT", "VD_BANDIT_PIN", "VD_LADDER_LANES")
+                   "VD_BANDIT", "VD_BANDIT_PIN", "VD_LADDER_LANES", "VD_TIMER_IMMEDIATE")
 
 def _bandit_arm_names() -> list:
     """Arm names from config/serve_bandit.json (names only — the launch-default pin picker; the

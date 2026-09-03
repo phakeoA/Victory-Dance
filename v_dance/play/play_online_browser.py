@@ -54,9 +54,27 @@ for _k in ("VD_SERVE_TAU", "VD_SERVE_TOP_P", "VD_TP_TIE_EPS", "VD_PAIR_DECODE",
            # 2026-09-02 ladder lanes: rated games at once at launch (1..5)
            "VD_LADDER_LANES",
            # 2026-09-02 W3b-0: record ladder games as RL trajectories (default ON; 0 = off)
-           "VD_LADDER_RECORD"):
+           "VD_LADDER_RECORD",
+           # 2026-09-02 (USER): battle-timer mode at launch (1 = /timer on at every game's first frame)
+           "VD_TIMER_IMMEDIATE"):
     if _ENV.get(_k):
         os.environ.setdefault(_k, _ENV[_k])
+
+
+def _timer_immediate_env() -> bool:
+    """Launch default for the battle-timer MODE (USER 2026-09-02): ``VD_TIMER_IMMEDIATE=1`` → /timer on
+    at the FIRST frame of every game (team preview included); unset / 0 → the per-room grace (the
+    consumer's ``_OPP_TIMER_S`` of opponent silence after our decision). Runtime toggle in the panel."""
+    return str(os.environ.get("VD_TIMER_IMMEDIATE") or _ENV.get("VD_TIMER_IMMEDIATE") or "0").strip() == "1"
+
+
+def _timer_banner(immediate: bool, grace_s: float) -> str:
+    """The launch echo for the timer mode (verify-flag-uptake rule: every launch knob echoes)."""
+    if immediate:
+        return ("[online] battle timer: IMMEDIATE — /timer on at the first frame of every game "
+                "(VD_TIMER_IMMEDIATE=1; toggle live in the panel / Mission Control)")
+    return (f"[online] battle timer: GRACE — /timer on once our decision sat unanswered {grace_s:.0f}s, "
+            f"judged per room (VD_TIMER_IMMEDIATE=1 = at the first frame; toggle live in the panel)")
 
 
 def _int_env(key: str, default: int) -> int:
@@ -788,6 +806,11 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
             _pvhb.ROOM_GONE_HOOK = link.room_gone
             print(link.banner())
             _slog(session_log, "    " + link.banner())
+            # 2026-09-02 (USER): battle-timer mode — immediate vs the per-room grace (launch echo)
+            _pvhb.TIMER_IMMEDIATE = _timer_immediate_env()
+            _tb = _timer_banner(_pvhb.TIMER_IMMEDIATE, _pvhb._OPP_TIMER_S)
+            print(_tb)
+            _slog(session_log, "    " + _tb)
 
             # 2026-07-10 (USER): local control server — ladder-run count / team pin / private
             # challenges / auto-accept, all without touching the bot window. Its HTTP API must keep

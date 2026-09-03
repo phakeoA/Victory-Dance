@@ -510,6 +510,10 @@ function renderDeploy() {
         ${envRow("VD_BANDIT", "bool")}
         ${envRow("VD_BANDIT_PIN", "pin")}
         ${envRow("VD_LADDER_LANES", "lanes")}
+        ${envRow("VD_TIMER_IMMEDIATE", "bool")}
+        <div class="note">Battle timer at launch: VD_TIMER_IMMEDIATE=1 = /timer on at the first frame of
+        every game (team preview included); 0 / unset = /timer on once our decision sat unanswered
+        30 s, judged per room. Runtime toggle in the Online-bot tab.</div>
         <div class="note">Serve mode at launch: VD_BANDIT=0 = bandit off (the .env stack plays every
         game); VD_BANDIT_PIN = an arm name → FROZEN (that arm every game), "explore" → the bandit
         picks per game, unset → the pin saved in artifacts/bandit/&lt;format&gt;.json. Runtime
@@ -707,6 +711,8 @@ function renderOnline() {
           <select id="ob-launch-pin">${pinOpts}</select>
           <label class="fld">Games at once at launch <span class="muted">(VD_LADDER_LANES — Showdown allows 5 per account)</span></label>
           <select id="ob-launch-lanes">${lanesOpts}</select>
+          <div class="chk"><input type="checkbox" id="ob-launch-timer" ${String((S && S.env && S.env.VD_TIMER_IMMEDIATE) || "0") === "1" ? "checked" : ""}>
+            <label for="ob-launch-timer">Start the battle timer immediately <span class="muted">(VD_TIMER_IMMEDIATE — saved to .env; off = after 30 s of opponent silence, per room)</span></label></div>
           <div class="chk"><input type="checkbox" id="ob-launch-dossier" checked>
             <label for="ob-launch-dossier">--dossier (S1 belief warm-start)</label></div>
           <div class="chk"><input type="checkbox" id="ob-launch-adapt" checked>
@@ -726,6 +732,10 @@ function renderOnline() {
       $("ob-launch-lanes").onchange = async () => {
         await api("/api/env", { key: "VD_LADDER_LANES", value: $("ob-launch-lanes").value });
         toast("VD_LADDER_LANES saved — applies on launch (rated games at once)");
+      };
+      $("ob-launch-timer").onchange = async () => {          // 2026-09-02 battle-timer mode at launch
+        await api("/api/env", { key: "VD_TIMER_IMMEDIATE", value: $("ob-launch-timer").checked ? "1" : "0" });
+        toast("VD_TIMER_IMMEDIATE saved — applies on launch (timer at the first frame vs the 30 s grace)");
       };
       return;
     }
@@ -761,6 +771,8 @@ function renderOnline() {
             <label for="ob-aa">Auto-accept incoming challenges</label></div>
           <div class="chk"><input type="checkbox" id="ob-ac">
             <label for="ob-ac">Auto-close finished battle tabs</label></div>
+          <div class="chk"><input type="checkbox" id="ob-timer">
+            <label for="ob-timer">Start the battle timer immediately <span class="muted" id="ob-timer-note">(off = after 30 s of opponent silence, per room)</span></label></div>
           <label class="fld" style="margin-top:8px">Serve mode <span class="muted">(applies from the next game)</span></label>
           <select id="ob-pin" ${OB.bandit_on ? "" : "disabled"}>${pinLive}</select>
           <div class="muted" id="ob-pin-note"></div>
@@ -818,6 +830,7 @@ function renderOnline() {
     $("ob-chal-x").onclick = () => onlineAction("/challenge/cancel");
     $("ob-aa").onchange = () => onlineAction("/options", { auto_accept: $("ob-aa").checked });
     $("ob-ac").onchange = () => onlineAction("/options", { auto_close: $("ob-ac").checked });
+    $("ob-timer").onchange = () => onlineAction("/options", { timer_immediate: $("ob-timer").checked });
     $("ob-pin").onchange = () => onlineAction("/options", { bandit_pin: $("ob-pin").value });
     $("ob-lanes").onchange = () => onlineAction("/options", { lanes: +$("ob-lanes").value });
     $("ob-team").onchange = () => onlineAction("/team", { team: $("ob-team").value });
@@ -945,6 +958,9 @@ function updateOnlineLive() {
   const ae = document.activeElement, aa = $("ob-aa"), ac = $("ob-ac");
   if (aa && ae !== aa) aa.checked = !!OB.auto_accept;
   if (ac && ae !== ac) ac.checked = !!OB.auto_close;
+  const tm = $("ob-timer");                           // 2026-09-02 battle-timer mode (immediate vs grace)
+  if (tm && ae !== tm) tm.checked = !!OB.timer_immediate;
+  set("ob-timer-note", `(off = after ${Math.round(OB.timer_grace_s || 30)} s of opponent silence, per room)`);
   const lanesEl = $("ob-lanes");                      // 2026-09-02 lanes (rated games at once)
   if (lanesEl && ae !== lanesEl) lanesEl.value = String(OB.lanes || 1);
   const pin = $("ob-pin");                            // 2026-09-02 serve mode (frozen pin vs explore)

@@ -44,6 +44,7 @@ class TrajectoryCollector:
         logprob: float = 0.0, value: float = 0.0,
         decision_type: str = "turn", turn: int = 0,
         mask_s0=None, mask_s1=None, gmask_s0=None, gmask_s1=None,
+        pair_first: Optional[int] = None,
     ) -> None:
         """Append one decision step. ``logprob`` is the joint log-prob of the chosen
         (a0,g0,a1,g1) under the BEHAVIOUR policy; ``value`` is the critic V(s) at
@@ -58,6 +59,7 @@ class TrajectoryCollector:
             logprob=float(logprob), value=float(value),
             reward=0.0, done=False, decision_type=decision_type, turn=int(turn),
             mask_s0=mask_s0, mask_s1=mask_s1, gmask_s0=gmask_s0, gmask_s1=gmask_s1,
+            pair_first=(None if pair_first is None else int(pair_first)),   # W3b-1b
         ))
 
     def __len__(self) -> int:

@@ -1,0 +1,250 @@
+"""W3b-2 (2026-09-02) — the nightly ladder PPO update (docs/w3b_ladder_ppo_design.md §5).
+
+Drives the whole path on a tiny pair_cond checkpoint: games recorded the way the online bot records
+them (the real serve sampler under the pair decode → behaviour log-prob + effective masks + decode
+order), the selection rules (only clean, valid, on-base τ-arm games; one τ per update), the recipe
+configs with the W3b-1b parity switches, one leashed update through the real trainer, the gates,
+the saved candidate (loadable by the BC loader the bandit uses) and the arm registration. Also the
+trainer's recipe options (AdamW, backbone LR scale, per-epoch approx-KL stop)."""
+from __future__ import annotations
+
+import copy
+import json
+import time
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+pytest.importorskip("torch")
+import numpy as np
+import torch
+
+from v_dance.encoders.state_encoder import get_action_dim, get_state_dim
+from v_dance.models.bc_model_attn import AttnBCPolicy
+from v_dance.play import model_io as M
+from v_dance.selfplay import ladder_update as LU
+from v_dance.selfplay.actor_critic import ActorCritic, AttnCritic
+from v_dance.selfplay.collector import TrajectoryCollector
+from v_dance.selfplay.reward import place_terminal_reward
+from v_dance.selfplay.schema import PASS_ACTION
+from v_dance.selfplay.store import write_trajectories
+from v_dance.selfplay.trainer import PPOTrainer, TrainConfig
+from v_dance.selfplay.ppo import PPOConfig
+
+A, S = get_action_dim(), get_state_dim()
+HEADS = ("our_a", "our_b", "opp_a", "opp_b")
+FMT = "gen9championsvgc2026regmb"
+NOW = 1_800_000_000.0
+
+
+def _base_ckpt(tmp_path: Path, seed: int = 3) -> Path:
+    torch.manual_seed(seed)
+    pol = AttnBCPolicy(d_model=32, n_heads=4, n_layers=1, dropout=0.0, heads=HEADS,
+                       gimmick_heads=("our_a", "our_b"), pair_cond=True).eval()
+    ac = ActorCritic(pol, AttnCritic(copy.deepcopy(pol)).eval(), pol.head_names, pol.gimmick_head_names, True)
+    p = tmp_path / "base" / "battle_base.pt"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    ac.save(p)
+    return p
+
+
+def _masks(rng):
+    m = [False] * A
+    for i in rng.choice(A, size=int(rng.integers(4, 12)), replace=False):
+        m[int(i)] = True
+    return m
+
+
+def _game(policy, *, arm: str, tau: float, n: int, seed: int, won: bool, valid: bool = True,
+          terminal: str = None, recorded_at: float = NOW, **over):
+    """One ladder game as the recorder seals it — the real sampler under the pair decode."""
+    rng = np.random.default_rng(seed)
+    c = TrajectoryCollector(f"battle-{FMT}-{seed}", "p1")
+    for turn in range(1, n + 1):
+        x = rng.standard_normal(S).astype(np.float32)
+        m0, m1 = _masks(rng), _masks(rng)
+        M.LAST_DECODE.clear()
+        a0, a1 = M.bc_action_indices(policy, policy.head_names, x, m0, m1, temperature=tau, rng=rng)
+        rec = M.decode_record()
+        lp = sum(float(t) for t in rec["logp"] if t is not None)
+        c.add_step(state=x, action_s0=(PASS_ACTION if a0 is None else a0),
+                   action_s1=(PASS_ACTION if a1 is None else a1), logprob=lp,
+                   value=float(rng.uniform(-0.5, 0.5)), decision_type="turn", turn=turn,
+                   mask_s0=list(rec["masks"][0]), mask_s1=list(rec["masks"][1]),
+                   pair_first=rec["first"])
+    sampling = {"source": "ladder", "session": "s", "fmt": FMT, "arm": arm, "pinned": False,
+                "tau": tau, "top_p": 1.0, "pair_decode": True, "adapt_rules": False,
+                "logprob_valid": valid, "logprob_reason": (None if valid else "placeholder"),
+                "logprob_source": ("sampler" if valid else "placeholder"), "logprob_inexact_steps": 0,
+                "gimmick_sampled": False, "replacement_sampled": False,
+                "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(recorded_at))}
+    sampling.update(over)
+    tr = c.finish(own_team=["A"] * 6, opp_team=["B"] * 6, tp_bring=[0, 1, 2, 3], tp_leads=[0, 1],
+                  won=won, terminal_type=(terminal or ("win" if won else "loss")), n_turns=n,
+                  sampling=sampling)
+    if tr.meta.is_trainable:
+        place_terminal_reward(tr)
+    return tr
+
+
+def _config(tmp_path: Path, base: Path, other: Path) -> Path:
+    cfg = {"prior_games": 5, "prior_sd": 25, "min_games": 8, "retire_min_games": 40, "retire_margin": 0.1,
+           "arms": [{"name": "inc", "incumbent": True, "battle_ckpt": str(base), "tau": 0},
+                    {"name": "tau03", "battle_ckpt": str(base), "tau": 0.3, "top_p": 1.0, "adapt_rules": False},
+                    {"name": "tau05", "battle_ckpt": str(base), "tau": 0.5, "top_p": 1.0, "adapt_rules": False},
+                    {"name": "other03", "battle_ckpt": str(other), "tau": 0.3, "top_p": 1.0}]}
+    p = tmp_path / "serve_bandit.json"
+    p.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    return p
+
+
+@pytest.fixture(scope="module")
+def world(tmp_path_factory):
+    tmp = tmp_path_factory.mktemp("ladder_update")
+    base = _base_ckpt(tmp)
+    other = tmp / "other" / "battle_base.pt"
+    other.parent.mkdir(parents=True)
+    other.write_bytes(b"not a real checkpoint")
+    cfg = _config(tmp, base, other)
+    policy, _ = M.load_bc_policy(base)
+    games = [_game(policy, arm="tau03", tau=0.3, n=5, seed=i, won=(i % 2 == 0)) for i in range(6)]
+    games += [_game(policy, arm="tau05", tau=0.5, n=4, seed=100 + i, won=True) for i in range(2)]
+    games += [_game(policy, arm="tau03", tau=0.3, n=3, seed=200, won=True, valid=False),     # pre-1a data
+              _game(policy, arm="other03", tau=0.3, n=3, seed=201, won=True),               # off-base arm
+              _game(policy, arm="inc", tau=0.0, n=3, seed=202, won=True, valid=False),      # argmax arm
+              _game(policy, arm="tau03", tau=0.3, n=3, seed=203, won=True, terminal="fallback"),
+              _game(policy, arm="tau03", tau=0.3, n=3, seed=204, won=True, recorded_at=NOW - 3 * 86400)]
+    d = tmp / "ladder_rl" / FMT
+    d.mkdir(parents=True)
+    write_trajectories(d / "s1.jsonl", games)
+    return SimpleNamespace(tmp=tmp, base=base, other=other, cfg=cfg, dir=d, policy=policy, games=games)
+
+
+# ── selection ─────────────────────────────────────────────────────────────────
+def test_selection_keeps_only_clean_on_base_valid_games_and_picks_one_tau(world):
+    arms = LU.arm_table(world.cfg)
+    assert set(arms) == {"inc", "tau03", "tau05", "other03"}
+    assert LU.exploration_arms(arms, world.base) == ["tau03", "tau05"]     # τ>0 AND on the base
+    files = LU.trajectory_files(world.tmp / "ladder_rl", FMT, days=1.0)
+    assert len(files) == 1
+    sel = LU.select_trajectories(files, base=world.base, arms=["tau03", "tau05"], arm_table=arms,
+                                 days=1.0, now=NOW + 60, tau="auto", expected_state_dim=S)
+    assert sel.tau == 0.3 and sel.n_games == 6 and sel.per_arm == {"tau03": 6}
+    assert sel.n_turn_steps == 30 and sel.n_replacement_steps == 0
+    assert sel.tau_candidates == {0.3: 30, 0.5: 8}
+    sk = sel.skipped
+    assert sk["tau 0.5 != chosen 0.3"] == 2
+    assert sk["logprob invalid: placeholder"] == 1                        # the pre-W3b-1a game
+    assert sk["arm not selected (other03)"] == 1 and sk["arm not selected (inc)"] == 1
+    assert sk["terminal FALLBACK"] == 1 and sk["outside the window"] == 1
+    assert sel.pair_decode is True and sel.gimmick_sampled is False and sel.replacement_sampled is False
+    # asking for the other τ, or for an off-base arm, is refused for the right reason
+    sel5 = LU.select_trajectories(files, base=world.base, arms=["tau03", "tau05"], arm_table=arms,
+                                  now=NOW + 60, tau=0.5, expected_state_dim=S)
+    assert sel5.tau == 0.5 and sel5.n_games == 2 and sel5.skipped["tau 0.3 != chosen 0.5"] == 7
+    sel_off = LU.select_trajectories(files, base=world.base, arms=["other03"], arm_table=arms,
+                                     now=NOW + 60, expected_state_dim=S)
+    assert sel_off.n_games == 0 and sel_off.skipped["arm other03 plays another checkpoint"] == 1
+    assert "skipped" in LU.format_selection(sel) and "tau03: 6" in LU.format_selection(sel)
+
+
+def test_build_configs_applies_the_recipe_and_the_parity_switches(world):
+    arms = LU.arm_table(world.cfg)
+    sel = LU.select_trajectories([world.dir / "s1.jsonl"], base=world.base, arms=["tau03"], arm_table=arms,
+                                 now=NOW + 60, expected_state_dim=S)
+    ppo, train = LU.build_configs(sel, epochs=1, minibatch=0)
+    assert ppo.tau == 0.3 and ppo.clip_eps == 0.1 and ppo.entropy_coef == 0.02 and ppo.kl_coef == 0.5
+    assert ppo.pair_decode is True and ppo.gimmick_terms is False and ppo.replacement_policy is False
+    assert train.ppo_epochs == 1 and train.minibatch_size == 0 and train.target_kl_from_bc == 0.15
+    assert train.approx_kl_stop == 0.02 and train.actor_weight_decay == 1e-2 and train.backbone_lr_scale == 0.1
+    assert train.gamma == 0.997 and train.lam == 0.95
+    with pytest.raises(ValueError):                                       # an argmax arm cannot drive PPO
+        LU.build_configs(LU.Selection(trajectories=[], tau=0.0, pair_decode=True))
+    with pytest.raises(ValueError):                                       # mixed decodes
+        LU.build_configs(LU.Selection(trajectories=[], tau=0.3, pair_decode=None))
+
+
+# ── the update, the gates, the artefacts ──────────────────────────────────────
+def test_run_update_gates_saves_a_loadable_candidate_and_registers_the_arm(world, tmp_path):
+    arms = LU.arm_table(world.cfg)
+    sel = LU.select_trajectories([world.dir / "s1.jsonl"], base=world.base, arms=["tau03"], arm_table=arms,
+                                 days=1.0, now=NOW + 60, expected_state_dim=S)
+    ppo, train = LU.build_configs(sel, epochs=2, minibatch=0, approx_kl_stop=None)
+    ac, report = LU.run_update(world.base, sel, ppo, train, seed=1)
+    assert report["n_games"] == 6 and report["n_steps"] == 30 and report["tau"] == 0.3
+    assert abs(report["kl_to_base_init"]) < 1e-6                          # exactly the base before the step
+    assert np.isfinite(report["kl_to_base_after"]) and report["update"]["epochs_run"] == 2
+    assert report["pair_flips"] is not None and report["ppo_config"]["pair_decode"] is True
+    ok, fails, warns = LU.gate(report, max_kl=10.0, min_ev=-10.0)
+    assert ok and fails == []
+    ok2, fails2, _ = LU.gate(dict(report, kl_to_base_after=1.0), max_kl=0.15, min_ev=-10.0)
+    assert not ok2 and "KL to base" in fails2[0]
+    _, _, w3 = LU.gate(dict(report, halted=True, halt_reason="approx_kl 0.03 > 0.02 after epoch 1"),
+                       max_kl=10.0, min_ev=-10.0)
+    assert any("early stop" in w for w in w3)
+    out = tmp_path / "checkpoints_attn_ladder_ppo_test"
+    ckpt = LU.save_candidate(ac, out, report)
+    assert ckpt.is_file() and (out / "ladder_ppo_meta.json").is_file()
+    cand, heads = M.load_bc_policy(ckpt)                                  # what the bandit will load
+    assert getattr(cand, "pair_cond", False) and tuple(heads)[:2] == ("our_a", "our_b")
+    meta = json.loads((out / "ladder_ppo_meta.json").read_text(encoding="utf-8"))
+    assert meta["n_games"] == 6
+    # the weights moved (a real update), the base did not
+    base_pol, _ = M.load_bc_policy(world.base)
+    diff = sum(float((p - q).abs().sum()) for p, q in zip(cand.parameters(), base_pol.parameters()))
+    assert diff > 0.0
+    # registration: same τ, clean knobs, repo-relative path when inside the repo, duplicate refused
+    entry = LU.register_arm(world.cfg, name="ppo_test", battle_ckpt=ckpt, tau=sel.tau, note="n")
+    assert entry["tau"] == 0.3 and entry["top_p"] == 1.0 and entry["adapt_rules"] is False
+    assert [a["name"] for a in json.loads(world.cfg.read_text(encoding="utf-8"))["arms"]][-1] == "ppo_test"
+    with pytest.raises(ValueError):
+        LU.register_arm(world.cfg, name="ppo_test", battle_ckpt=ckpt, tau=0.3, note="dup")
+
+
+def test_external_gate_parsing_and_runner(tmp_path):
+    ruler = ("  [BASE] a\n  [CAND1] b\n"
+             "                    BASE     CAND1 (delta)\n"
+             "  top1           0.6155   0.6121 (-0.0034)   (n=1000)\n")
+    assert LU.parse_ruler_delta_pp(ruler) == pytest.approx(-0.34)
+    assert LU.parse_ruler_delta_pp("no rows") is None
+    assert LU.parse_type_eff(">>> VERDICT: RESPECTS type-eff (graded): x") is True
+    assert LU.parse_type_eff(">>> VERDICT: VIOLATES type-eff") is False and LU.parse_type_eff("") is None
+    calls = []
+
+    def fake_run(cmd):
+        calls.append(cmd)
+        return SimpleNamespace(stdout=(ruler if "bc_val_report" in cmd else ">>> VERDICT: RESPECTS"),
+                               stderr="", returncode=0)
+    out = LU.run_external_gates("base.pt", "cand.pt", tmp_path, run=fake_run, ruler_floor_pp=-0.5)
+    assert out["ruler_delta_pp"] == pytest.approx(-0.34) and out["ruler_ok"] and out["type_eff_ok"]
+    assert (tmp_path / "gates" / "ruler.txt").is_file() and len(calls) == 2
+    out2 = LU.run_external_gates("base.pt", "cand.pt", tmp_path, run=fake_run, ruler_floor_pp=-0.1)
+    assert out2["ruler_ok"] is False                                      # −0.34 pp below a −0.1 floor
+    cmds = LU.external_gate_commands("b.pt", "c.pt", tmp_path)
+    assert "bc_val_report" in cmds["ruler"] and "type_eff_probe" in cmds["type_eff"] and "pytest" in cmds["suite"]
+
+
+# ── the trainer's recipe options ──────────────────────────────────────────────
+def test_trainer_recipe_options_param_groups_adamw_and_approx_kl_stop(world):
+    ac = ActorCritic.from_bc_checkpoint(world.base)
+    t = PPOTrainer(ac, PPOConfig(), TrainConfig(actor_lr=1e-3, backbone_lr_scale=0.1, actor_weight_decay=1e-2))
+    assert isinstance(t.actor_opt, torch.optim.AdamW) and len(t.actor_opt.param_groups) == 2
+    lrs = sorted(g["lr"] for g in t.actor_opt.param_groups)
+    assert lrs == pytest.approx([1e-4, 1e-3])
+    n_params = sum(len(g["params"]) for g in t.actor_opt.param_groups)
+    assert n_params == len(ac.actor_parameters())                         # every actor param, once
+    t.reset_optimizers()
+    assert isinstance(t.actor_opt, torch.optim.AdamW) and len(t.actor_opt.param_groups) == 2
+    t0 = PPOTrainer(ac, PPOConfig(), TrainConfig())
+    assert type(t0.actor_opt) is torch.optim.Adam and len(t0.actor_opt.param_groups) == 1   # byte-identical default
+    # approx-KL stop: a huge LR moves the policy → the epoch's approx KL trips the stop after epoch 1
+    arms = LU.arm_table(world.cfg)
+    sel = LU.select_trajectories([world.dir / "s1.jsonl"], base=world.base, arms=["tau03"], arm_table=arms,
+                                 now=NOW + 60, expected_state_dim=S)
+    ppo = PPOConfig(tau=0.3, pair_decode=True, gimmick_terms=False, replacement_policy=False, kl_coef=0.0)
+    tr = PPOTrainer(ActorCritic.from_bc_checkpoint(world.base), ppo,
+                    TrainConfig(actor_lr=5e-2, ppo_epochs=4, minibatch_size=0, approx_kl_stop=1e-6,
+                                assert_value_space=False), seed=0)
+    st = tr.ppo_update(sel.trajectories)
+    assert st["halted"] and str(st["halt_reason"]).startswith("approx_kl") and st["epochs_run"] < 4

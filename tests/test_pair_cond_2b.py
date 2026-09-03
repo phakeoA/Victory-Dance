@@ -209,6 +209,35 @@ def test_pair_decode_sequential_conditions_second_slot():
     assert (a0, a1) == (5, 2)
 
 
+def test_pair_decode_stashes_the_sequential_behaviour_logp():
+    """W3b-1a: the record carries log p(a_first) from the zero-cond logits and log p(a_second |
+    a_first) from the partner-conditioned forward — each equal to the log of the stash's own
+    masked softmax of the SAME logits the sampler drew from (tau 1)."""
+    import math
+    import numpy as np
+    from v_dance.play import model_io as M
+    m = _rigged_pair_model()
+    m._pair_decode = True
+    x = _rand_x().numpy()
+    mask = [True] * A
+    a0, a1 = M.bc_action_indices(m, ("our_a", "our_b"), x, mask, mask)        # argmax serve
+    rec = M.decode_record()
+    assert rec["pair"] is True and rec["picks"] == (5, 7) and rec["logp"] == (0.0, 0.0)
+    a0, a1 = M.bc_action_indices(m, ("our_a", "our_b"), x, mask, mask, temperature=1.0,
+                                 rng=np.random.default_rng(11))
+    rec = M.decode_record()
+    assert rec["picks"] == (a0, a1) and rec["first"] == 0 and rec["cond_on"] == a0
+    lp0, lp1 = rec["logp"]
+    assert lp0 == pytest.approx(math.log(rec["probs"][0][a0]))               # zero-cond slot
+    assert lp1 == pytest.approx(math.log(rec["probs"][1][a1]))               # conditioned slot
+    assert lp0 < 0.0 and lp1 <= 0.0        # the rigged pair column makes p(7 | 5) ≈ 1 → log 1 = 0
+    # no legal first slot → the survivor's term only
+    M.bc_action_indices(m, ("our_a", "our_b"), x, [False] * A, mask, temperature=1.0,
+                        rng=np.random.default_rng(2))
+    rec = M.decode_record()
+    assert rec["logp"][0] is None and rec["logp"][1] == pytest.approx(math.log(rec["probs"][1][rec["picks"][1]]))
+
+
 def test_pair_decode_no_legal_first_slot_degrades_to_zero_cond():
     from v_dance.play.model_io import bc_action_indices
     m = _rigged_pair_model()

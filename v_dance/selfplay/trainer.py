@@ -72,6 +72,12 @@ class TrainConfig:
     target_kl_max: Optional[float] = None           # cap for the relaxed guard (None = uncapped)
     min_explained_variance: Optional[float] = None  # post-update halt guard (None = off)
     assert_value_space: bool = True                 # 3b.6 value_pm backstop each update
+    # W3b-2 (2026-09-02, the ladder PPO recipe — docs/w3b_ladder_ppo_design.md §5 / ps-ppo review):
+    actor_weight_decay: float = 0.0     # > 0 → AdamW on the actor (decoupled decay); 0 = Adam, byte-identical
+    backbone_lr_scale: float = 1.0      # < 1 → the trunk (everything but the action / gimmick heads) trains
+                                        # at actor_lr × scale; 1.0 = one param group, byte-identical
+    approx_kl_stop: Optional[float] = None  # per-EPOCH early stop: the epoch's mean approx KL(old||new)
+                                            # above this halts the remaining epochs (recipe: 0.02); None = off
 
 
 class PPOTrainer:
@@ -83,11 +89,31 @@ class PPOTrainer:
         self.tcfg = train_cfg or TrainConfig()
         self.device = device
         self.ref = ref_policy if ref_policy is not None else make_reference_policy(ac, device)
-        self.actor_opt = torch.optim.Adam(ac.actor_parameters(), lr=self.tcfg.actor_lr)
+        self.actor_opt = self._make_actor_opt()
         self.critic_opt = torch.optim.Adam(ac.critic_parameters(), lr=self.tcfg.critic_lr)
         self.rng = np.random.default_rng(seed)
         self.updates = 0
         self.warmups = 0
+
+    def _make_actor_opt(self):
+        """The actor optimiser. W3b-2 options: AdamW (``actor_weight_decay`` > 0) and a backbone
+        LR scale (the action / gimmick heads at ``actor_lr``, the trunk at ``actor_lr ×
+        backbone_lr_scale``). Defaults = one Adam group at ``actor_lr`` — byte-identical."""
+        lr = float(self.tcfg.actor_lr)
+        scale = float(self.tcfg.backbone_lr_scale)
+        wd = float(self.tcfg.actor_weight_decay)
+        named = [(n, p) for n, p in self.ac.policy.named_parameters()
+                 if not n.startswith("value_head.")]           # == ac.actor_parameters()
+        if scale == 1.0:
+            groups = [{"params": [p for _, p in named]}]
+        else:
+            is_head = lambda n: n.startswith(("heads.", "gimmick_heads."))   # noqa: E731
+            groups = [{"params": [p for n, p in named if is_head(n)], "lr": lr},
+                      {"params": [p for n, p in named if not is_head(n)], "lr": lr * scale}]
+            groups = [g for g in groups if g["params"]]
+        if wd > 0.0:
+            return torch.optim.AdamW(groups, lr=lr, weight_decay=wd)
+        return torch.optim.Adam(groups, lr=lr)
 
     def reset_optimizers(self) -> None:
         """Re-initialise the Adam optimisers, clearing the first/second-moment estimates.
@@ -96,7 +122,7 @@ class PPOTrainer:
         the just-restored policy back off the same cliff. Fresh moments let recovery start
         clean at the configured LRs (the champion checkpoint also carries critic_state, so
         ``restore_from`` reloads a matching critic — value baseline + policy stay aligned)."""
-        self.actor_opt = torch.optim.Adam(self.ac.actor_parameters(), lr=self.tcfg.actor_lr)
+        self.actor_opt = self._make_actor_opt()
         self.critic_opt = torch.optim.Adam(self.ac.critic_parameters(), lr=self.tcfg.critic_lr)
 
     # ── batch helpers ─────────────────────────────────────────────────────────
@@ -130,9 +156,13 @@ class PPOTrainer:
         return explained_variance(v, ret)
 
     def _kl_from_bc(self, txns) -> float:
+        cfg = self.cfg
+        pm = None if cfg.replacement_policy else policy_eval.replacement_policy_mask(txns, self.device)
         with torch.no_grad():
-            ev = policy_eval.ppo_forward(self.ac, txns, self.cfg.tau, self.device,
-                                         ref_policy=self.ref, gimmick_kl_weight=self.cfg.gimmick_kl_weight)
+            ev = policy_eval.ppo_forward(self.ac, txns, cfg.tau, self.device,
+                                         ref_policy=self.ref, gimmick_kl_weight=cfg.gimmick_kl_weight,
+                                         pair=cfg.pair_decode, order=cfg.pair_order,   # W3b-1b parity
+                                         gimmick_terms=cfg.gimmick_terms, policy_mask=pm)
         return float(ev.kl_to_ref.mean())
 
     # ── critic-only warm-up (actor frozen) ────────────────────────────────────
@@ -203,7 +233,10 @@ class PPOTrainer:
         agg: List[Dict[str, float]] = []
         halted, reason = False, None
         nonfinite_skips = 0     # defensive: minibatches dropped for a NaN/inf loss or grad (never step them)
+        epochs_run = 0
         for _epoch in range(self.tcfg.ppo_epochs):
+            epoch_start = len(agg)
+            epochs_run += 1
             for mb in self._minibatches(len(txns)):
                 mb_txns = [txns[i] for i in mb]
                 loss, st = P.ppo_loss_from_batch(self.ac, mb_txns, adv[mb], ret[mb],
@@ -236,12 +269,21 @@ class PPOTrainer:
                 if kl_bc > self.tcfg.target_kl_from_bc:
                     halted, reason = True, f"kl_from_bc {kl_bc:.4f} > {self.tcfg.target_kl_from_bc}"
                     break
+            # W3b-2: the recipe's per-epoch approx-KL early stop (a BENIGN stop — the epochs that ran
+            # are kept; it is not a collapse guard). Reported through halt_reason as "approx_kl …".
+            if self.tcfg.approx_kl_stop is not None and len(agg) > epoch_start:
+                akl = float(np.mean([s.get("approx_kl_old_new", 0.0) for s in agg[epoch_start:]]))
+                if akl > self.tcfg.approx_kl_stop:
+                    halted, reason = True, (f"approx_kl {akl:.4f} > {self.tcfg.approx_kl_stop} "
+                                            f"after epoch {epochs_run}")
+                    break
         self.updates += 1
 
         stats = _mean_stats(agg)
         ev = self._critic_ev(txns, ret)
         stats["explained_variance"] = ev
         stats["n_steps"] = len(txns)
+        stats["epochs_run"] = epochs_run
         stats["nonfinite_skips"] = nonfinite_skips
         if nonfinite_skips:
             log.warning("PPO update: %d minibatch(es) skipped this gen for non-finite loss/grad.", nonfinite_skips)
