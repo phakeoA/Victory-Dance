@@ -374,7 +374,7 @@ REGISTRY = [
          opts=[dict(name="mode", type="choice", label="--mode", choices=["random", "choose"], default="random"),
                dict(name="ai-team", type="team", label="AI team (choose mode)"),
                dict(name="human-team", type="team", label="Your team (choose mode)"),
-               dict(name="n-battles", type="int", label="--n-battles (blank = until Ctrl-C)", min=1, max=500),
+               dict(name="n-battles", type="int", label="--n-battles (blank = until Ctrl-C)", min=1, max=10000),
                dict(name="dossier", type="flag", label="--dossier"),
                dict(name="bench-note", type="text", label="--bench-note", default="")]),
     dict(id="run_local_battle", cat="play", heavy=False, title="AI vs AI local battle (spectate)",

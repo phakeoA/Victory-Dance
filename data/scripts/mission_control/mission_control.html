@@ -756,7 +756,7 @@ function renderOnline() {
           <select id="ob-fmt">${fOpts}</select>
           <div class="note" id="ob-fmt-note"></div>
           <label class="fld">Rated games to play</label>
-          <input type="number" id="ob-games" min="1" max="500" value="${(OB.run && OB.run.target) || 10}">
+          <input type="number" id="ob-games" min="1" max="10000" value="${(OB.run && OB.run.target) || 10}">
           <button class="battlebtn" id="ob-battle">Battle!</button>
           <div class="row"><button class="btn" id="ob-stop">Stop run</button>
             <button class="btn" id="ob-cancel">Cancel search</button></div>

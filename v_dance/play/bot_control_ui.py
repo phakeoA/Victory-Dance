@@ -566,7 +566,7 @@ class BotController:
 
     async def start_ladder(self, games: int, team: Optional[str]) -> None:
         self.set_team(team)
-        self.run_target = max(1, min(int(games), 500))
+        self.run_target = max(1, min(int(games), 10000))
         self.run_done = 0
         self.run_active = True
         self.log(f"ladder run started — target {self.run_target} game(s), "
@@ -1048,7 +1048,7 @@ _PANEL_HTML = """<!DOCTYPE html>
     <label class="fld">Team</label>
     <select id="teamSel"></select>
     <label class="fld">Rated games to play</label>
-    <input type="number" id="games" min="1" max="500" value="10">
+    <input type="number" id="games" min="1" max="10000" value="10">
     <button class="battlebtn" id="startBtn">Battle!</button>
     <div class="row">
       <button class="btn" id="stopBtn">Stop run</button>

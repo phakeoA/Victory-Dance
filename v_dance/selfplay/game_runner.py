@@ -352,9 +352,14 @@ def phase0_report(pairs: List[tuple], source_counts: dict, *, min_games: int = 2
     # (reward._MODEL_DRIVEN_SOURCES now lists it), exactly like "model".
     belief = {k[len("belief_"):]: v for k, v in source_counts.items() if str(k).startswith("belief_")}
     search_diag = {k[len("search_"):]: v for k, v in source_counts.items() if str(k).startswith("search_")}
+    # W2 spawn path (2026-09-03): the spawner's THROUGHPUT counters (pairs / decisions / elapsed_s /
+    # stalls / ghosts / abandoned) ride source_counts too — bookkeeping, not decisions. Stripped here
+    # exactly like belief_* / search_* (the USER's first block read MODEL-DRIVEN 46% because ~290
+    # spawn_* units were being summed as non-model steps) and surfaced as rep["spawn"].
+    spawn = {k[len("spawn_"):]: v for k, v in source_counts.items() if str(k).startswith("spawn_")}
     sc = {k: v for k, v in source_counts.items()
           if not str(k).startswith("tp_") and not str(k).startswith("belief_")
-          and not str(k).startswith("search_")}
+          and not str(k).startswith("search_") and not str(k).startswith("spawn_")}
     resamples = sc.get("rejected_resample", 0)
     # audit: count EVERY executed NON-model source (forced_default / forced_partial / forced_switch /
     # forfeit / retry / retry_default / forced_switch_escape …) — a BLOCKLIST, not a 3-key whitelist that
@@ -390,6 +395,7 @@ def phase0_report(pairs: List[tuple], source_counts: dict, *, min_games: int = 2
     data_clean = dup_steps == 0
     rep = {
         "n_games": n, "enough_games": enough, "min_games": min_games,
+        "spawn": spawn,                       # W2 spawn-path throughput counters ({} on the challenge path)
         "model_steps": n_steps, "duplicate_steps": dup_steps, "data_clean": data_clean,
         "model_driven": md, "model_driven_ok": md_ok, "non_model_executed": non_model,
         "resample_count": resamples, "resample_rate": resample_rate,
@@ -695,10 +701,14 @@ def main(argv=None) -> int:
                          "as JSON to PATH, so a run is self-describing without scraping the terminal")
     ap.add_argument("--live-dir", default=None,
                     help="write per-battle spectate/replay files here (enables save_replays)")
-    ap.add_argument("--teams", nargs="+",
-                    default=["team1", "WolfeGlick", "Kronomono1", "Kronomono3"])
-    ap.add_argument("--ckpt", default=str(_REPO_ROOT / "ai_train_scripts" / "BC_model"
-                                          / "checkpoints_attn" / "battle_selfplay_gen141.pt"))
+    # 2026-09-03: defaults follow the SERVED stack — the old defaults were four Reg M-A teams and the
+    # gen141 checkpoint (layout v17), which the v19 encoder refuses (USER hit it launching the W2 block).
+    ap.add_argument("--teams", nargs="+", default=None,
+                    help="team names from the served format's Champions pool (default: The_Big_6 + the "
+                         "first three other teams discovered for the format)")
+    ap.add_argument("--ckpt", default=None,
+                    help="battle net to warm-start the actor-critic from (default: the served incumbent "
+                         "checkpoints_attn_era4_2b/battle_base.pt, else model_io's DEFAULT_BC_CHECKPOINT)")
     ap.add_argument("--tau", type=float, default=1.0, help="collection temperature (>0)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--matchup-seed", type=int, default=0)
@@ -725,6 +735,28 @@ def main(argv=None) -> int:
         logging.getLogger("poke_env").setLevel(logging.WARNING)
         logging.getLogger("websockets").setLevel(logging.WARNING)
 
+    if args.ckpt is None:
+        from v_dance.play.model_io import DEFAULT_BC_CHECKPOINT
+        _inc = _REPO_ROOT / "ai_train_scripts" / "BC_model" / "checkpoints_attn_era4_2b" / "battle_base.pt"
+        args.ckpt = str(_inc if _inc.is_file() else DEFAULT_BC_CHECKPOINT)
+    if not args.teams:
+        import v_dance.play.run_local_battle as _R
+        _pool = [Path(p).name for p in _R.discover_teams(reg=_R.BATTLE_FORMAT)]
+        # the OWN team = .env VD_DEFAULT_TEAM (the served team; The_Big_6_v2 since 2026-09-03), else The_Big_6
+        _env_team = None
+        try:
+            for _line in (_REPO_ROOT / ".env").read_text(encoding="utf-8").splitlines():
+                if _line.strip().startswith("VD_DEFAULT_TEAM="):
+                    _env_team = _line.split("=", 1)[1].strip()
+        except Exception:
+            _env_team = None
+        _own_name = _env_team if _env_team in _pool else ("The_Big_6" if "The_Big_6" in _pool else None)
+        _own = [_own_name] if _own_name else []
+        args.teams = (_own + [t for t in _pool if t != _own_name][:3]) if _pool else []
+        if not args.teams:
+            print(f"[phase0] no teams discovered for {_R.BATTLE_FORMAT} — pass --teams", file=sys.stderr)
+            return 2
+    print(f"[phase0] ckpt {args.ckpt}\n[phase0] teams {args.teams}")
     ckpt = Path(args.ckpt)
     if not ckpt.exists():
         print(f"[phase0] checkpoint not found: {ckpt}", file=sys.stderr)

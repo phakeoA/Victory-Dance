@@ -214,6 +214,43 @@ def test_collect_specs_latest_collects_both_perspectives():
     assert res.n_games == 1                            # one game (our perspective count)
 
 
+def test_collect_specs_spawn_rooms_dispatches_to_the_spawner_and_books_its_stats():
+    """W2 step 2b (2026-09-03): a spec with spawn_rooms > 0 plays through the injected spawner pairing
+    (not play_pairing) with the rooms count, and its SpawnStats land as spawn_* bookkeeping keys."""
+    from types import SimpleNamespace
+    calls = []
+
+    async def fake_spawned(our, opp, n, *, rooms, battle_timeout, label):
+        calls.append((n, rooms, battle_timeout, label))
+        return SimpleNamespace(pairs=n, decisions=7 * n, stalls_forfeited=1, ghosts_rescued=0,
+                               abandoned=0, elapsed_s=12.4)
+
+    spec = ChunkSpec("A", "B", 3, "latest", None, None, 4, spawn_rooms=8)
+    res = asyncio.run(MP._collect_specs(
+        None, [spec], tau=1.0, seed=0, team_chooser=None, battle_timeout=55.0, async_workers=2,
+        build_players=_fake_build_players, play_spawned=fake_spawned))
+    assert calls == [(3, 8, 55.0, "latest spawn uid4")]
+    assert res.source_counts["spawn_pairs"] == 3 and res.source_counts["spawn_decisions"] == 21
+    assert res.source_counts["spawn_stalls"] == 1 and res.source_counts["spawn_elapsed_s"] == 12
+    assert res.source_counts["model"] == 8 and len(res.trajectories) == 2   # recorders unchanged
+    # default = the challenge path: the spawner is never called
+    calls.clear()
+    MP_res = asyncio.run(MP._collect_specs(
+        None, [ChunkSpec("A", "B", 1, "latest", None, None, 5)], tau=1.0, seed=0, team_chooser=None,
+        battle_timeout=None, async_workers=2, build_players=_fake_build_players, play_spawned=fake_spawned))
+    assert calls == [] and "spawn_pairs" not in MP_res.source_counts
+
+
+def test_chunkspec_spawn_rooms_defaults_zero_pickles_and_is_stamped_by_the_plan():
+    import pickle
+    s = ChunkSpec("A", "B", 2, "latest", None, None, 1)
+    assert s.spawn_rooms == 0 and pickle.loads(pickle.dumps(s)).spawn_rooms == 0
+    specs = MP.build_chunk_specs(_FakeLeague(["latest"]), ["A", "B"], 4, chunk_size=2, spawn_rooms=6)
+    assert specs and all(sp.spawn_rooms == 6 for sp in specs)
+    assert pickle.loads(pickle.dumps(specs[0])).spawn_rooms == 6
+    assert all(sp.spawn_rooms == 0 for sp in MP.build_chunk_specs(_FakeLeague(["latest"]), ["A", "B"], 2))
+
+
 def test_collect_specs_snapshot_records_pfsp():
     res = _collect([ChunkSpec("A", "B", 1, "snapshot", "g3.pt", "gen3", 2)])
     assert len(res.trajectories) == 1                  # only our perspective

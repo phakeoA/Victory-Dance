@@ -194,6 +194,34 @@ def test_helpers_on_a_players_view():
     assert SC.finished_pairs(p, q) == 1 and SC.decisions_recorded(p, q) == 8
 
 
+def test_phase0_report_never_counts_spawn_counters_as_non_model_steps():
+    """Regression (USER's first W2 block, 2026-09-03): the spawner's throughput counters live in
+    source_counts; the Phase-0 gate summed them as non-model decisions → MODEL-DRIVEN 46% → FAIL."""
+    pytest.importorskip("torch")
+    import numpy as np
+    from v_dance.selfplay.collector import TrajectoryCollector
+    from v_dance.selfplay.game_runner import phase0_report
+    from v_dance.selfplay.reward import place_terminal_reward
+
+    def _traj(won, role):
+        c = TrajectoryCollector("battle-x-1", role)
+        for turn in (1, 2, 3):
+            c.add_step(state=np.zeros(4, np.float32), action_s0=1, action_s1=2, turn=turn,
+                       value=0.1 if won else -0.1)
+        t = c.finish(own_team=["A"], opp_team=["B"], tp_bring=[0], tp_leads=[0], won=won,
+                     terminal_type=("win" if won else "loss"), n_turns=3)
+        return place_terminal_reward(t)
+
+    pairs = [(_traj(True, "p1"), _traj(False, "p2"))]
+    counts = {"model": 6, "spawn_pairs": 1, "spawn_decisions": 6, "spawn_elapsed_s": 30,
+              "spawn_stalls": 0, "spawn_ghosts": 0, "spawn_abandoned": 0}
+    rep = phase0_report(pairs, counts, min_games=0)
+    assert rep["model_driven"] == pytest.approx(1.0)                  # spawn_* are NOT decisions
+    assert rep["spawn"] == {"pairs": 1, "decisions": 6, "elapsed_s": 30, "stalls": 0, "ghosts": 0, "abandoned": 0}
+    rep2 = phase0_report(pairs, {"model": 6}, min_games=0)
+    assert rep2["spawn"] == {} and rep2["model_driven"] == pytest.approx(1.0)
+
+
 # ── live: the first throughput number of the stack ────────────────────────────
 @pytest.mark.skipif(os.environ.get("VD_SPAWN_LIVE_TEST") != "1",
                     reason="opt-in: VD_SPAWN_LIVE_TEST=1 starts a local Showdown server and plays real games")

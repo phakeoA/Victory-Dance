@@ -708,7 +708,7 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                          resume_from=None, resume_gen=None, keep_snapshots: int = 25,
                          save_replays: bool = False, keep_replay_buffers: int = 200,
                          restart_server_every: int = 20, n_servers: int = 1,
-                         snapshot_path=None, max_hours=None) -> dict:
+                         snapshot_path=None, max_hours=None, spawn_rooms: int = 0) -> dict:
     """Run real generations end-to-end (collect via the league -> PPO update -> gauntlet
     eval -> promotion gate -> admit/refresh/revert), RESUMABLY (3c.4 / #20): a PER-GENERATION
     snapshot (``snap_gen{N}.pt`` in ``archive/sub_checkpoints/``) is written after every generation, so a later run
@@ -852,7 +852,8 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                     tau=tau_gen, seed=seed + gen * 1000, matchup_seed=gen,
                     team_chooser=team_chooser, status=status, live_dir=_coll_live,
                     save_replays=save_replays, generation=gen,   # 22d: gen-keyed account names
-                    ports=_pool_ports)                           # 22f: spread workers across the pool
+                    ports=_pool_ports,                           # 22f: spread workers across the pool
+                    spawn_rooms=_spawn)                          # W2: server-side spawner per pair
             finally:
                 # ALWAYS drop the per-gen ckpt — even if collection raised (Ctrl-C lands inside the
                 # blocking submit) — else a full-weight file orphans each crashed gen (review fix).
@@ -996,6 +997,22 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
         print(f"   [server] --servers {_n_servers} has NO effect with --collect-procs<=1 (the asyncio "
               f"collect/eval paths only use localhost:8000) — using 1 server.")
         _n_servers = 1
+    # W2 spawn path (2026-09-03): the server-side spawner drives each worker's pair (mp collection only —
+    # the asyncio path keeps the challenge protocol). The plugin must be in the clone BEFORE the servers
+    # start (the launcher's `node build` at start compiles it).
+    _spawn = max(0, int(spawn_rooms or 0))
+    if _spawn and not _mp:
+        print(f"   [spawn] --spawn-rooms {_spawn} applies to MULTIPROCESS collection only "
+              f"(--collect-procs > 1) — ignored on the asyncio path.")
+        _spawn = 0
+    if _spawn and manage_server:
+        try:
+            from v_dance.selfplay.spawn_plugin import install_rlspawn
+            _ins = install_rlspawn()
+            print(f"   [spawn] rlspawn plugin {'installed' if _ins['changed'] else 'current'}; each worker "
+                  f"pair keeps {_spawn} rooms alive")
+        except Exception as exc:
+            print(f"   [spawn] rlspawn plugin install FAILED ({exc!r}) — the spawn path may not work")
     server_pool = R.ServerPool(_n_servers, manage=manage_server).start_all()
     _pool_ports = server_pool.ports if _n_servers > 1 else None   # None => poke-env's 8000 default
     reports = []
@@ -1262,6 +1279,7 @@ def _launch_live(args):
         resume_gen=args.resume_gen, keep_snapshots=args.keep_snapshots,
         save_replays=args.save_replays, keep_replay_buffers=args.keep_replay_buffers,
         restart_server_every=args.restart_server_every, n_servers=args.servers,
+        spawn_rooms=args.spawn_rooms,
         snapshot_path=args.snapshot, max_hours=args.hours)
 
 
@@ -1551,6 +1569,10 @@ if __name__ == "__main__":
                     help="concurrent COLLECTION battles (3c.8c); defaults to the CPU-cap "
                          "worker count. Collection is latency-bound (~30%% CPU at 6) so you "
                          "can set this HIGHER (e.g. 12) to use the headroom; eval stays capped.")
+    ap.add_argument("--spawn-rooms", type=int, default=0,
+                    help="W2 throughput (2026-09-03): with --collect-procs > 1, each worker pair plays through "
+                         "the SERVER-SIDE spawner keeping this many rooms alive (rlspawn plugin) instead of the "
+                         "challenge protocol. 0 = challenge path (default).")
     ap.add_argument("--collect-procs", type=int, default=1,
                     help="TRUE multiprocessing collection across this many worker PROCESSES "
                          "(14b; default 1 = single-process asyncio). >1 bypasses the GIL on model "
