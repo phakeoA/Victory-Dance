@@ -780,6 +780,8 @@ class BotController:
             # 2026-09-02: serve mode (frozen pin vs explore); bandit_on = the panel control is live
             "bandit_on": self.bandit is not None,
             "bandit_pin": (self.bandit.pinned if self.bandit is not None else None),
+            # 2026-09-03 (USER): the arms PANEL — the allocation / retire parameters + the learning arms
+            "bandit_rule": (self.bandit.rule() if self.bandit is not None else None),
             # 2026-09-02: lanes = rated games at once (server cap 5)
             "lanes": self.lanes, "max_lanes": _MAX_LANES,
             # 2026-09-02 W3b-0: the ladder trajectory recorder (None = off)
@@ -1027,6 +1029,20 @@ _PANEL_HTML = """<!DOCTYPE html>
   .mu td:nth-child(5), .mu td:nth-child(6) { white-space:normal; }
   .mu .seen { color:#1f6b3a; font-weight:bold; }
   .mu .belief { color:#6b7a88; font-style:italic; }
+  /* 2026-09-03 (USER): the bandit arms panel — badges + row states */
+  .mu.arms td:nth-child(5), .mu.arms td:nth-child(6) { white-space:nowrap; }
+  .mu.arms td:nth-child(8) { white-space:normal; max-width:340px; color:#5c6c7a; }
+  .mu.arms tr.retired td { color:#8b9aa8; }
+  .mu.arms tr.retired td b { text-decoration:line-through; }
+  .mu.arms tr.learning td { background:#e6f2fb; }
+  .abs { display:flex; flex-wrap:wrap; gap:4px; margin-top:3px; }
+  .ab { font:bold 7.5pt Verdana; padding:1px 7px; border-radius:9px; background:#e0e7ea; color:#36485a;
+        border:1px solid #b5c3ce; white-space:nowrap; }
+  .ab.play { background:#d8f3de; color:#1f6b3a; border-color:#7fc491; }
+  .ab.inc { background:#fff1c2; color:#7a5a00; border-color:#d9b84a; }
+  .ab.pin { background:#eedcf7; color:#5a2a7a; border-color:#b58ad0; }
+  .ab.learn { background:#d9ecfa; color:#134a73; border-color:#7fb5e6; }
+  .ab.ret { background:#f8d7d7; color:#8a2020; border-color:#d98a8a; }
   .muwrap { overflow-x:auto; }
   .twocol { display:grid; grid-template-columns:1fr 1fr; gap:14px; padding:12px; }
   #think { height:320px; overflow-y:auto; background:#eef2f5; border-top:1px solid #b5c3ce;
@@ -1097,6 +1113,17 @@ _PANEL_HTML = """<!DOCTYPE html>
       <div class="muted" id="recorder" style="margin-top:4px"></div>
     </div></div>
   </div>
+
+  <div class="panel full"><h2>Bandit arms <span class="muted" id="armsHdr"></span></h2><div class="pad">
+    <div class="muted">One row per serve arm (a checkpoint / serve-knob candidate the ladder judges); all-time
+      evidence from artifacts/bandit/&lt;format&gt;.json. ◀ playing · ★ incumbent (the retire rule's reference,
+      never retired by it) · 📌 pinned (frozen mode) · 🧠 learning = the adaptive τ arm whose games feed the
+      nightly ladder-PPO update (retire-exempt) · ⛔ retired (hover for the reason). P(worse) = the retire
+      rule's number.</div>
+    <div class="muwrap" style="margin-top:6px"><table class="mu arms" id="arms"><thead><tr><th>arm</th><th>games</th>
+      <th>W-L</th><th>win %</th><th>Δ Elo/g</th><th>P(worse)</th><th>τ</th><th>note</th></tr></thead><tbody></tbody></table></div>
+    <div class="muted" id="armsNote" style="margin-top:6px"></div>
+  </div></div>
 
   <div class="panel full"><h2>Matchups <span class="muted" id="muHdr"></span></h2>
     <div class="twocol">
@@ -1191,11 +1218,13 @@ function render(s) {
       ? 'Bandit OFF (VD_BANDIT=0 / no config) — the deployed .env stack plays every game.'
       : (s.bandit_pin ? `FROZEN: ${s.bandit_pin} plays every game from the next battle (still credited to its arm; bench rows carry pinned).`
                       : 'Exploring: warm-up, then Thompson picks the arm per game.');
+  // 2026-09-03 (USER): the arms live in their own panel (renderArms); this line is the pointer
   $('bandit').textContent = arms.length
-      ? 'Bandit (◀ = playing, * = incumbent, 📌 = pinned): ' + arms.map(a =>
-          `${a.name}${a.incumbent ? '*' : ''}${a.pinned ? ' 📌' : ''}${a.current ? ' ◀' : ''} ${a.wins}W-${a.losses}L` +
-          ` Δ${a.mean_delta >= 0 ? '+' : ''}${a.mean_delta}${a.retired ? ' RETIRED' : ''}`).join(' · ')
+      ? `Bandit: ${arms.length} arm(s), ${arms.filter(a => !a.retired).length} active` +
+        (arms.some(a => a.current) ? ` · playing ${arms.filter(a => a.current).map(a => a.name).join(', ')}` : '') +
+        ' — see the Bandit arms panel below'
       : '';
+  renderArms(s);
   $('challengeOut').textContent = s.challenge_out ? ('outgoing challenge: ' + s.challenge_out) : '';
   const rc = s.recorder;
   $('recorder').textContent = rc ? `RL recorder: ${rc.games} game(s) / ${rc.steps} decision(s) this session` +
@@ -1236,6 +1265,47 @@ function muRows(tbody, rows) {
            `<td class="n">${r.wins}-${r.losses}${r.draws ? '-' + r.draws + 'D' : ''}</td>` +
            `<td class="n">${r.win_pct == null ? '—' : r.win_pct + '%'}</td><td>${item}</td><td>${ab}</td></tr>`;
   }).join('');
+}
+/* 2026-09-03 (USER): the bandit ARMS PANEL — win rate, retired / active, the LEARNING label */
+function armBadges(a) {
+  const b = [];
+  if (a.current) b.push('<span class="ab play" title="bound to a live game / the next game">◀ playing</span>');
+  if (a.incumbent) b.push('<span class="ab inc" title="the incumbent: the retire rule reference; never retired by the rule">★ incumbent</span>');
+  if (a.pinned) b.push('<span class="ab pin" title="frozen mode: this arm plays every game until unpinned">📌 pinned</span>');
+  if (a.learning) b.push('<span class="ab learn" title="the adaptive arm: its games feed the nightly ladder-PPO update; exempt from the retire rule">🧠 learning</span>');
+  b.push(a.retired ? `<span class="ab ret" title="${esc(a.reason || '')}">⛔ retired</span>`
+                   : '<span class="ab" title="in the Thompson rotation">active</span>');
+  if (a.in_flight) b.push(`<span class="ab" title="games bound but not yet rewarded">${a.in_flight} in flight</span>`);
+  return b.join(' ');
+}
+function renderArms(s) {
+  const tb = $('arms'); if (!tb) return;
+  const arms = s.bandit || [], rule = s.bandit_rule || {};
+  const hdr = $('armsHdr'), note = $('armsNote'), body = tb.querySelector('tbody');
+  if (!s.bandit_on) {
+    hdr.textContent = '(bandit OFF — VD_BANDIT=0 / no config: the .env stack plays every game)';
+    body.innerHTML = ''; note.textContent = ''; return;
+  }
+  hdr.textContent = `· ${arms.length} arm(s) · ${arms.filter(a => !a.retired).length} active` +
+      (s.bandit_pin ? ` · FROZEN on ${esc(s.bandit_pin)}` : ' · exploring');
+  body.innerHTML = arms.map(a => {
+    const d = (a.wins || 0) + (a.losses || 0), wr = d ? (100 * a.wins / d) : null;
+    const cls = a.retired ? 'retired' : (a.learning ? 'learning' : '');
+    return `<tr class="${cls}"><td><b>${esc(a.name)}</b><div class="abs">${armBadges(a)}</div></td>` +
+      `<td class="n">${a.n}</td><td class="n">${a.wins}-${a.losses}${a.draws ? '-' + a.draws + 'D' : ''}</td>` +
+      `<td class="n">${wr == null ? '—' : wr.toFixed(1) + '%'}</td>` +
+      `<td class="n">${a.mean_delta >= 0 ? '+' : ''}${a.mean_delta}</td>` +
+      `<td class="n">${a.p_worse == null ? '—' : (100 * a.p_worse).toFixed(0) + '%'}</td>` +
+      `<td class="n">${a.tau}</td><td title="${esc(a.note || '')}">${esc(a.note || '')}</td></tr>`;
+  }).join('');
+  note.textContent = rule.retire_min_games
+    ? `Warm-up ${rule.min_games} game(s) per arm, then Thompson sampling over the mean Δ Elo/game. ` +
+      `Retire at ≥ ${rule.retire_min_games} games when P(worse than the incumbent ${rule.incumbent}) ≥ ` +
+      `${(100 * rule.retire_prob).toFixed(0)}%` +
+      (rule.retire_margin_elo ? ` (by ≥ ${rule.retire_margin_elo} Elo/game)` : '') +
+      ((rule.learning || []).length ? ` · learning arm(s) exempt: ${rule.learning.join(', ')}` : ' · no learning arm') +
+      ' · the incumbent is never retired by the rule; promotion is a human call at ≥ 200 games.'
+    : '';
 }
 let muKey = '', thinkKey = '';
 function renderMatchups(m, pin) {

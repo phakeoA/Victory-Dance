@@ -236,6 +236,21 @@ def _panel_status() -> dict:
     return {"up": False}
 
 
+def _dashboard_status() -> dict:
+    """2026-09-03 (USER: "embed the dashboard so I can see it better"): the self-play dashboard's run
+    summary — its ``/run_info.json`` (the run its feeds follow + that run's ``status.json``) — for the
+    Dashboard tab's run strip, or ``{'up': False}`` when :5175 is not answering."""
+    port = _SERVICES["dashboard"]["port"]
+    if not _port_open(port):
+        return {"up": False}
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/run_info.json", timeout=0.8) as r:
+            js = json.loads(r.read().decode("utf-8"))
+        return {"up": True, **js} if isinstance(js, dict) else {"up": False}
+    except Exception:
+        return {"up": False}
+
+
 def _panel_post(path: str, body: dict) -> dict:
     if path not in _PANEL_POST_OK:
         raise ValueError(f"not a panel endpoint: {path}")
@@ -827,6 +842,8 @@ def _make_handler():
                     self._json(_exploit_summary())
                 elif u.path == "/api/online/status":
                     self._json(_panel_status())
+                elif u.path == "/api/dashboard/status":     # 2026-09-03: the Dashboard tab's run strip
+                    self._json(_dashboard_status())
                 elif u.path == "/api/species":
                     self._json({"species": _species_list()})
                 elif u.path == "/api/log":

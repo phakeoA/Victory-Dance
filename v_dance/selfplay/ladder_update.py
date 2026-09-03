@@ -23,6 +23,7 @@ import json
 import logging
 import re
 import subprocess
+import sys
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -65,12 +66,14 @@ class Selection:
     pair_decode: Optional[bool] = None                           # None = mixed / unknown
     gimmick_sampled: bool = False
     replacement_sampled: bool = False
+    pass_repaired: int = 0                                       # empty-slot action 0 -> PASS (2026-09-03)
 
     def summary(self) -> dict:
         return {
             "files": list(self.files), "tau": self.tau, "games": self.n_games, "steps": self.n_steps,
             "turn_steps": self.n_turn_steps, "replacement_steps": self.n_replacement_steps,
-            "inexact_steps": self.inexact_steps, "per_arm": dict(self.per_arm),
+            "inexact_steps": self.inexact_steps, "pass_repaired": self.pass_repaired,
+            "per_arm": dict(self.per_arm),
             "skipped": dict(self.skipped), "tau_candidates": {str(k): v for k, v in self.tau_candidates.items()},
             "pair_decode": self.pair_decode, "gimmick_sampled": self.gimmick_sampled,
             "replacement_sampled": self.replacement_sampled,
@@ -128,6 +131,28 @@ def trajectory_files(root=LADDER_RL_DIR, fmt: Optional[str] = None, *, days: flo
         return []
     cutoff = now - float(days) * 86400.0
     return sorted(p for p in d.glob("*.jsonl") if p.stat().st_mtime >= cutoff)
+
+
+def repair_pass_slots(trajectories) -> int:
+    """Recorder bug, 2026-09-03 (the first W3b update tripped ``assert_actions_legal``): before the
+    fix the ladder recorder wrote the live player's EMPTY-slot encoding — action 0 with an all-zero
+    effective mask (``_select_actions``: None -> 0, the slot passes) — where the self-play schema
+    means ``PASS_ACTION`` (``game_runner.resolve_action``). Repair in place: a non-PASS action under
+    an ABSENT or ALL-ZERO mask becomes ``PASS_ACTION`` (the evaluator then skips the slot, exactly
+    as the sampler did — its term was never in the recorded joint log-prob, ``masked_sample_logp``
+    returns None with no legal action). Returns the number of slots repaired. A non-PASS action
+    that is illegal under a NON-EMPTY mask is NOT touched — that stays the corruption alarm."""
+    from v_dance.selfplay.schema import PASS_ACTION
+    n = 0
+    for tr in trajectories:
+        for t in tr.transitions:
+            for a_attr, m_attr in (("action_s0", "mask_s0"), ("action_s1", "mask_s1")):
+                a = getattr(t, a_attr)
+                m = getattr(t, m_attr)
+                if a != PASS_ACTION and (m is None or not any(m)):
+                    setattr(t, a_attr, PASS_ACTION)
+                    n += 1
+    return n
 
 
 def select_trajectories(files: Sequence, *, base, arms: Sequence[str], arm_table: dict,
@@ -202,6 +227,7 @@ def select_trajectories(files: Sequence, *, base, arms: Sequence[str], arm_table
         sel.gimmick_sampled |= bool(s.get("gimmick_sampled", False))
         sel.replacement_sampled |= bool(s.get("replacement_sampled", False))
     sel.pair_decode = (pair_values.pop() if len(pair_values) == 1 else None)
+    sel.pass_repaired = repair_pass_slots(sel.trajectories)    # 2026-09-03 recorder bug (see the helper)
     return sel
 
 
@@ -359,30 +385,47 @@ def parse_type_eff(text: str) -> Optional[bool]:
     return None if m is None else m.group(1).upper().startswith("RESPECTS")
 
 
-def run_external_gates(base, candidate, out_dir, *, py: str = ".venv/Scripts/python.exe",
+def _first_line(text: str) -> str:
+    for ln in (text or "").splitlines():
+        if ln.strip():
+            return ln.strip()[:160]
+    return ""
+
+
+def run_external_gates(base, candidate, out_dir, *, py: Optional[str] = None,
                        ruler_floor_pp: float = GATES["ruler_floor_pp"], run=None,
                        which: Sequence[str] = ("ruler", "type_eff")) -> dict:
     """Run the external gates (minutes each), keep their output under ``<out_dir>/gates/``, parse
-    the verdicts. ``run`` is injectable (tests). Returns a dict with per-gate ok flags."""
-    cmds = external_gate_commands(base, candidate, out_dir, py=py)
+    the verdicts. ``run`` is injectable (tests). Returns a dict with per-gate ok flags.
+
+    2026-09-03 (the first ``--run-gates`` run): the commands go through ``cmd.exe`` on Windows, which
+    cannot resolve the forward-slash ``.venv/Scripts/python.exe`` form ("'.venv' is not recognized as an
+    internal or external command") — both gates returned None and the candidate was refused for the
+    wrong reason. They now EXECUTE with this interpreter's absolute path (quoted); ``commands`` keeps the
+    friendly form the user can paste. An unparsable gate reports its first output line as ``<name>_note``."""
+    cmds = external_gate_commands(base, candidate, out_dir)              # the printed / recorded form
+    exec_cmds = external_gate_commands(base, candidate, out_dir, py=(py or f'"{sys.executable}"'))
     gdir = Path(out_dir) / "gates"
     gdir.mkdir(parents=True, exist_ok=True)
     run = run or (lambda cmd: subprocess.run(cmd, shell=True, cwd=str(_REPO), capture_output=True,
                                              text=True, encoding="utf-8", errors="replace"))
     out: dict = {"commands": cmds}
     for name in which:
-        r = run(cmds[name])
+        r = run(exec_cmds[name])
         text = (getattr(r, "stdout", "") or "") + "\n" + (getattr(r, "stderr", "") or "")
         (gdir / f"{name}.txt").write_text(text, encoding="utf-8")
+        parsed = None
         if name == "ruler":
             d = parse_ruler_delta_pp(text)
-            out["ruler_delta_pp"] = d
+            out["ruler_delta_pp"] = parsed = d
             out["ruler_ok"] = (d is not None and d >= ruler_floor_pp)
         elif name == "type_eff":
             v = parse_type_eff(text)
-            out["type_eff_verdict"] = v
+            out["type_eff_verdict"] = parsed = v
             out["type_eff_ok"] = bool(v)
         out[f"{name}_returncode"] = int(getattr(r, "returncode", 0) or 0)
+        if parsed is None:                       # the gate did not run / did not print its row
+            out[f"{name}_note"] = f"gate output unparsable (rc {out[f'{name}_returncode']}): {_first_line(text)}"
     return out
 
 
@@ -393,7 +436,8 @@ def format_selection(sel: Selection) -> str:
              f"  tau              : {sel.tau if sel.tau is not None else '-'}   candidates (tau: turn steps) "
              + (", ".join(f"{k:g}: {v}" for k, v in sorted(sel.tau_candidates.items())) or "-"),
              f"  games / steps    : {sel.n_games} / {sel.n_steps}  (turn {sel.n_turn_steps}, replacement "
-             f"{sel.n_replacement_steps}, dedup-inexact {sel.inexact_steps})",
+             f"{sel.n_replacement_steps}, dedup-inexact {sel.inexact_steps}, empty-slot->PASS repaired "
+             f"{sel.pass_repaired})",
              f"  per arm          : " + (", ".join(f"{k}: {v}" for k, v in sorted(sel.per_arm.items())) or "-"),
              f"  parity switches  : pair_decode={sel.pair_decode} gimmick_terms={sel.gimmick_sampled} "
              f"replacement_policy={sel.replacement_sampled}"]

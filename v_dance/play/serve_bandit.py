@@ -9,10 +9,17 @@ comparison this project ran was confounded by band equilibration, and 2a's regre
 games plus a manual rollback to catch; here a −15 pp arm dies at ~40 games automatically.
 
 Allocation = Thompson sampling over each arm's mean per-game rating delta (Normal posterior with a
-weak prior), after a short round-robin warm-up so no arm is judged on zero games. Retirement = the
-arm's Wilson upper bound on win rate sits ≥ ``retire_margin`` under the incumbent's win rate after
-``retire_min_games`` games. The incumbent is never retired by the rule (only replaced by a human
-promotion). Promotion is a HUMAN decision informed by the report (≥ 200 games per arm ≈ ±5 pp).
+weak prior), after a short round-robin warm-up so no arm is judged on zero games. Retirement
+(2026-09-03, USER "readjust the retire rule, except the adaptive arm") = the same quantity the
+allocator optimises: after ``retire_min_games`` games an arm is retired when the posterior
+probability that its mean per-game rating delta is below the incumbent's (by at least
+``retire_margin_elo``) reaches ``retire_prob`` (default 0.90; Normal approximation on the observed
+mean and sd, ``p_worse``). The old Wilson-upper-bound-on-win-rate rule was inert: at these win
+rates it needed 30 % WR at 40 games or 40 % at 320 to fire, so nothing was ever retired. The
+incumbent is never retired by the rule (only replaced by a human promotion) and neither is a
+``learning`` arm — the adaptive τ arm whose games feed the nightly ladder PPO update
+(``docs/w3b_ladder_ppo_design.md``): it bleeds rating by design and must keep playing.
+Promotion is a HUMAN decision informed by the report (≥ 200 games per arm ≈ ±5 pp).
 
 Byte-identical serve when disabled: ``VD_BANDIT=0`` (or no config file) → no arm is ever applied.
 State persists in ``artifacts/bandit/<format>.json`` so a restart keeps the evidence.
@@ -62,6 +69,9 @@ class Arm:
     # default for argmax arms, but FORCED OFF for τ > 0 arms — the tilt is not recorded, so a
     # sampled decision under it could never be recomputed for PPO (docs/w3b_ladder_ppo_design.md §3).
     adapt_rules: Optional[bool] = None
+    # 2026-09-03: the ADAPTIVE / learning arm (its games are the nightly ladder-PPO data): exempt
+    # from the retire rule and labelled in both UIs. Exactly the τ arm that plays the incumbent.
+    learning: bool = False
 
     def adapt_rules_for(self, launch_default: bool) -> bool:
         if self.adapt_rules is not None:
@@ -104,7 +114,8 @@ def load_arms(path: Path, *, exists=None) -> List[Arm]:
                 tau=float(raw.get("tau", 0.0) or 0.0), top_p=float(raw.get("top_p", 1.0) or 1.0),
                 tp_tie_eps=(None if raw.get("tp_tie_eps") is None else float(raw["tp_tie_eps"])),
                 incumbent=bool(raw.get("incumbent", False)), note=str(raw.get("note", "")),
-                adapt_rules=(None if raw.get("adapt_rules") is None else bool(raw["adapt_rules"])))
+                adapt_rules=(None if raw.get("adapt_rules") is None else bool(raw["adapt_rules"])),
+                learning=bool(raw.get("learning", False)))
         missing = [w for w, v in (("battle", a.battle_ckpt), ("tp", a.tp_ckpt))
                    if not a.uses_default(w) and not exists(_resolve(v))]
         if missing:
@@ -118,8 +129,9 @@ def load_arms(path: Path, *, exists=None) -> List[Arm]:
 
 def config_params(path: Path) -> dict:
     cfg = json.loads(Path(path).read_text(encoding="utf-8"))
+    # 2026-09-03: ``retire_margin`` (the old Wilson win-rate rule) is ignored if still present.
     return {k: cfg[k] for k in ("prior_games", "prior_sd", "min_games", "retire_min_games",
-                                "retire_margin") if k in cfg}
+                                "retire_prob", "retire_margin_elo") if k in cfg}
 
 
 def _resolve(p) -> Path:
@@ -227,7 +239,8 @@ class ServeBandit:
     def __init__(self, arms: List[Arm], *, fmt: str, state_path: Optional[Path] = None,
                  applier: Optional[Callable[[Arm], None]] = None, seed: int = 0,
                  prior_games: float = 5.0, prior_sd: float = 25.0, min_games: int = 8,
-                 retire_min_games: int = 40, retire_margin: float = 0.10, now=None):
+                 retire_min_games: int = 40, retire_prob: float = 0.90,
+                 retire_margin_elo: float = 0.0, now=None):
         import numpy as np
         if not arms:
             raise ValueError("ServeBandit needs at least one arm")
@@ -243,7 +256,8 @@ class ServeBandit:
         self.prior_sd = float(prior_sd)
         self.min_games = int(min_games)
         self.retire_min_games = int(retire_min_games)
-        self.retire_margin = float(retire_margin)
+        self.retire_prob = float(retire_prob)                 # 2026-09-03: P(worse than the incumbent)
+        self.retire_margin_elo = float(retire_margin_elo)     # ... by at least this many Elo per game
         self._now = now or time.time
         self.stats: Dict[str, ArmStats] = {a.name: ArmStats() for a in self.arms}
         self.pending: Optional[str] = None          # arm applied for the NEXT battle
@@ -401,24 +415,56 @@ class ServeBandit:
         self.save()
         return name
 
+    def _delta_posterior(self, name: str):
+        """``(mean, standard error)`` of the arm's per-game rating delta — a Normal approximation on
+        the observed mean with the observed sd (``prior_sd`` when fewer than 2 games / no spread)."""
+        s = self.stats[name]
+        if s.n <= 0:
+            return 0.0, self.prior_sd
+        mean = s.sum_delta / s.n
+        var = max(s.sumsq_delta / s.n - mean * mean, 0.0)
+        sd = math.sqrt(var) if (s.n >= 2 and var > 0.0) else self.prior_sd
+        return mean, sd / math.sqrt(s.n)
+
+    def p_worse(self, name: str) -> Optional[float]:
+        """2026-09-03: the retire rule's number — P(arm's mean Δ/game < incumbent's − ``retire_margin_elo``)
+        under the two Normal posteriors (one-sided). None for the incumbent itself or before either
+        side has a game. Shown per arm in both UIs."""
+        if name == self.incumbent.name or name not in self.stats:
+            return None
+        s, inc = self.stats[name], self.stats[self.incumbent.name]
+        if s.n <= 0 or inc.n <= 0:
+            return None
+        m, se = self._delta_posterior(name)
+        im, ise = self._delta_posterior(self.incumbent.name)
+        z = (im - m - self.retire_margin_elo) / math.sqrt(se * se + ise * ise)
+        return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+
     def _maybe_retire(self) -> None:
-        from v_dance.selfplay.gate import wilson_upper_bound
+        """2026-09-03 rule: after ``retire_min_games`` games (both the arm and the incumbent), retire an
+        arm when ``p_worse`` ≥ ``retire_prob``. Never the incumbent, never a ``learning`` arm."""
         inc = self.stats[self.incumbent.name]
-        inc_wr = inc.win_rate()
-        if inc_wr is None or (inc.wins + inc.losses) < self.retire_min_games:
+        if inc.n < self.retire_min_games:
             return                                  # nothing to compare against yet
         for a in self.arms:
             s = self.stats[a.name]
-            if a.incumbent or s.retired:
+            if a.incumbent or a.learning or s.retired:
                 continue
-            g = s.wins + s.losses
-            if g < self.retire_min_games:
+            if s.n < self.retire_min_games:
                 continue
-            ub = wilson_upper_bound(s.wins, g, z=1.645)
-            if ub <= inc_wr - self.retire_margin:
+            p = self.p_worse(a.name)
+            if p is not None and p >= self.retire_prob:
                 s.retired = True
-                s.retired_reason = (f"WR upper bound {ub:.2f} ≤ incumbent {inc_wr:.2f} − "
-                                    f"{self.retire_margin:.2f} after {g} games")
+                s.retired_reason = (f"P(worse than incumbent {self.incumbent.name}) = {p:.2f} ≥ "
+                                    f"{self.retire_prob:.2f} after {s.n} games "
+                                    f"({s.mean_delta():+.1f}/g vs {inc.mean_delta():+.1f}/g)")
+
+    def rule(self) -> dict:
+        """The allocation / retire parameters + the learning arms, for the UIs' arms panel."""
+        return {"min_games": self.min_games, "retire_min_games": self.retire_min_games,
+                "retire_prob": self.retire_prob, "retire_margin_elo": self.retire_margin_elo,
+                "incumbent": self.incumbent.name,
+                "learning": [a.name for a in self.arms if a.learning]}
 
     # -- reporting --
     def summary(self) -> List[dict]:
@@ -433,15 +479,20 @@ class ServeBandit:
                         "pending": (self.pending == a.name), "current": (self.current == a.name),
                         "pinned": (self.pinned == a.name),
                         "in_flight": self.in_flight.get(a.name, 0),
+                        # 2026-09-03: the learning label + the retire rule's number per arm
+                        "learning": a.learning,
+                        "p_worse": (None if (p := self.p_worse(a.name)) is None else round(p, 3)),
                         "tau": a.tau, "tp_tie_eps": a.tp_tie_eps, "note": a.note})
         return out
 
     def banner(self) -> str:
         active = [a.name for a in self.active_arms()]
         pin = f"; PINNED → {self.pinned} (frozen: every game until unpinned)" if self.pinned else ""
+        learn = [a.name for a in self.arms if a.learning]
+        exempt = f" (learning arm(s) exempt: {', '.join(learn)})" if learn else ""
         return (f"[online] serve BANDIT ACTIVE — {len(active)} arm(s), incumbent {self.incumbent.name}: "
                 f"{', '.join(active)}; warm-up {self.min_games} g/arm, retire at ≥{self.retire_min_games} g "
-                f"if WR upper bound ≤ incumbent − {self.retire_margin:.2f}; state {self.state_path.name}{pin}")
+                f"if P(worse than the incumbent) ≥ {self.retire_prob:.2f}{exempt}; state {self.state_path.name}{pin}")
 
 
 # ── launch-time pin from the environment (VD_BANDIT_PIN) ─────────────────────

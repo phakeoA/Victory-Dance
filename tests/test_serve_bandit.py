@@ -123,23 +123,62 @@ def test_thompson_prefers_the_arm_with_better_rating_deltas(tmp_path: Path):
     assert picks.count("good") >= 40 and picks.count("bad") <= 6
 
 
-def test_retire_rule_kills_a_clearly_worse_arm_but_never_the_incumbent(tmp_path: Path):
-    b = _bandit(tmp_path, retire_min_games=40, retire_margin=0.10)
-    # incumbent 30W-10L (75%), arm 'a' 10W-30L (25%), arm 'b' 28W-12L (70%) — only 'a' dies
+def test_retire_rule_kills_a_clearly_worse_arm_but_never_the_incumbent_or_the_learning_arm(tmp_path: Path):
+    """2026-09-03 rule: retire at >= retire_min_games when P(mean delta/game < the incumbent's) >= retire_prob.
+    Never the incumbent, never the LEARNING (adaptive) arm — it bleeds rating by design."""
+    arms = [SB.Arm(name="inc", incumbent=True), SB.Arm(name="a"), SB.Arm(name="b"),
+            SB.Arm(name="learn", tau=0.3, learning=True)]
+    b = SB.ServeBandit(arms, fmt=FMT, state_path=tmp_path / "state.json", seed=1, now=lambda: 1000.0,
+                       min_games=2, retire_min_games=40, retire_prob=0.90)
+    # incumbent 30W-10L (+5/g), 'a' 10W-30L (-5/g, P(worse) ~ 1), 'b' 28W-12L (+4/g, P ~ .70),
+    # 'learn' = the same record as 'a' but flagged learning — only 'a' dies
     k = 0
-    for name, wins, losses in (("inc", 30, 10), ("a", 10, 30), ("b", 28, 12)):
+    for name, wins, losses in (("inc", 30, 10), ("a", 10, 30), ("b", 28, 12), ("learn", 10, 30)):
         for d in [+10] * wins + [-10] * losses:
             b.pending = name
             b.bind(_tag(k))
             b.observe(_tag(k), d)
             k += 1
-    assert b.stats["a"].retired and "upper bound" in b.stats["a"].retired_reason
-    assert not b.stats["inc"].retired and not b.stats["b"].retired
-    assert [a.name for a in b.active_arms()] == ["inc", "b"]
+    assert b.stats["a"].retired and "P(worse than incumbent inc)" in b.stats["a"].retired_reason
+    assert "after 40 games" in b.stats["a"].retired_reason
+    assert not b.stats["inc"].retired and not b.stats["b"].retired and not b.stats["learn"].retired
+    assert [a.name for a in b.active_arms()] == ["inc", "b", "learn"]
+    assert b.p_worse("inc") is None and b.p_worse("a") > 0.99 and b.p_worse("learn") > 0.99
+    assert 0.6 < b.p_worse("b") < 0.8
     # a retired arm is never chosen again
     for _ in range(30):
         b.pending = None
         assert b.choose().name != "a"
+    # the UIs' fields: the learning label, P(worse) per arm, the rule summary, the banner
+    rows = {r["name"]: r for r in b.summary()}
+    assert rows["learn"]["learning"] is True and rows["a"]["learning"] is False
+    assert rows["inc"]["p_worse"] is None and rows["a"]["p_worse"] > 0.99
+    assert b.rule() == {"min_games": 2, "retire_min_games": 40, "retire_prob": 0.9, "retire_margin_elo": 0.0,
+                        "incumbent": "inc", "learning": ["learn"]}
+    assert "P(worse than the incumbent) ≥ 0.90" in b.banner() and "learning arm(s) exempt: learn" in b.banner()
+    # a margin in Elo/game makes the rule stricter: 'a' is 10/g under the incumbent, so 12/g never retires it
+    b2 = SB.ServeBandit(arms, fmt=FMT, state_path=tmp_path / "state2.json", seed=1, now=lambda: 1000.0,
+                        min_games=2, retire_min_games=40, retire_prob=0.90, retire_margin_elo=12.0)
+    k = 0
+    for name, wins, losses in (("inc", 30, 10), ("a", 10, 30)):
+        for d in [+10] * wins + [-10] * losses:
+            b2.pending = name
+            b2.bind(_tag(k))
+            b2.observe(_tag(k), d)
+            k += 1
+    assert not b2.stats["a"].retired and b2.p_worse("a") < 0.5
+
+
+def test_config_params_reads_the_new_retire_keys_and_ignores_the_old_margin(tmp_path: Path):
+    p = tmp_path / "arms.json"
+    p.write_text(json.dumps({"min_games": 8, "retire_min_games": 40, "retire_margin": 0.1, "retire_prob": 0.9,
+                             "retire_margin_elo": 0.0,
+                             "arms": [{"name": "inc", "incumbent": True},
+                                      {"name": "tau03", "tau": 0.3, "learning": True}]}), encoding="utf-8")
+    assert SB.config_params(p) == {"min_games": 8, "retire_min_games": 40, "retire_prob": 0.9,
+                                   "retire_margin_elo": 0.0}
+    arms = SB.load_arms(p, exists=lambda q: True)
+    assert [a.learning for a in arms] == [False, True]
 
 
 def test_state_persists_across_restarts(tmp_path: Path):

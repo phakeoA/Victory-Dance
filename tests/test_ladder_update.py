@@ -223,6 +223,17 @@ def test_external_gate_parsing_and_runner(tmp_path):
     assert out2["ruler_ok"] is False                                      # −0.34 pp below a −0.1 floor
     cmds = LU.external_gate_commands("b.pt", "c.pt", tmp_path)
     assert "bc_val_report" in cmds["ruler"] and "type_eff_probe" in cmds["type_eff"] and "pytest" in cmds["suite"]
+    # 2026-09-03: the gates EXECUTE with this interpreter's absolute path (cmd.exe cannot resolve
+    # `.venv/Scripts/python.exe` — the first --run-gates run failed both gates with None), while the
+    # recorded commands keep the pasteable form; an unparsable gate says why
+    import sys
+    assert all(c.startswith(f'"{sys.executable}"') for c in calls)
+    assert out["commands"]["ruler"].startswith(".venv/Scripts/python.exe")
+    dead = LU.run_external_gates("base.pt", "cand.pt", tmp_path, ruler_floor_pp=-0.5,
+                                 run=lambda cmd: SimpleNamespace(stdout="", stderr="'.venv' is not recognized",
+                                                                 returncode=1))
+    assert dead["ruler_delta_pp"] is None and dead["ruler_ok"] is False and dead["type_eff_ok"] is False
+    assert "not recognized" in dead["ruler_note"] and "rc 1" in dead["type_eff_note"]
 
 
 # ── the trainer's recipe options ──────────────────────────────────────────────
@@ -248,3 +259,43 @@ def test_trainer_recipe_options_param_groups_adamw_and_approx_kl_stop(world):
                                 assert_value_space=False), seed=0)
     st = tr.ppo_update(sel.trajectories)
     assert st["halted"] and str(st["halt_reason"]).startswith("approx_kl") and st["epochs_run"] < 4
+
+
+def test_selection_repairs_the_recorders_empty_slot_zero_into_pass(world):
+    """2026-09-03: games recorded BEFORE the recorder fix carry action 0 under an all-zero mask for an
+    empty / fainted slot (the first W3b update died in ``assert_actions_legal`` on transition 23,
+    ~10 % of turn steps, every arm). The selector repairs them to PASS_ACTION, counts + reports them,
+    and the legality guard then passes; an action illegal under a NON-EMPTY mask stays the alarm."""
+    from v_dance.selfplay.policy_eval import assert_actions_legal
+    g = _game(world.policy, arm="tau03", tau=0.3, n=4, seed=300, won=True)
+    t = g.transitions[1]
+    t.action_s1, t.mask_s1 = 0, [0] * A                                # what the old recorder wrote
+    t2 = g.transitions[2]
+    t2.action_s0, t2.mask_s0 = 0, None                                 # absent mask + action -> PASS too
+    d = world.tmp / "ladder_rl_repair" / FMT
+    d.mkdir(parents=True)
+    write_trajectories(d / "s2.jsonl", [g])
+    arms = LU.arm_table(world.cfg)
+    with pytest.raises(AssertionError, match="illegal under"):        # the raw file is what tripped the run
+        assert_actions_legal(g.transitions)
+    sel = LU.select_trajectories([d / "s2.jsonl"], base=world.base, arms=["tau03"], arm_table=arms,
+                                 now=NOW + 60, expected_state_dim=S)
+    assert sel.n_games == 1 and sel.pass_repaired == 2
+    tr = sel.trajectories[0]
+    assert tr.transitions[1].action_s1 == PASS_ACTION and tr.transitions[1].action_s0 != PASS_ACTION
+    assert tr.transitions[2].action_s0 == PASS_ACTION and tr.transitions[0].action_s0 != PASS_ACTION
+    assert "empty-slot->PASS repaired 2" in LU.format_selection(sel)
+    assert sel.summary()["pass_repaired"] == 2
+    assert_actions_legal(tr.transitions)                               # the guard passes after the repair
+    # a genuinely illegal action (NON-empty mask) is NOT repaired — still the corruption alarm
+    bad = _game(world.policy, arm="tau03", tau=0.3, n=2, seed=301, won=True)
+    bt = bad.transitions[0]
+    m = [0] * A
+    m[5] = 1
+    bt.action_s0, bt.mask_s0 = 3, m
+    write_trajectories(d / "s3.jsonl", [bad])
+    sel_bad = LU.select_trajectories([d / "s3.jsonl"], base=world.base, arms=["tau03"], arm_table=arms,
+                                     now=NOW + 60, expected_state_dim=S)
+    assert sel_bad.n_games == 1 and sel_bad.pass_repaired == 0
+    with pytest.raises(AssertionError, match="illegal under"):
+        assert_actions_legal(sel_bad.trajectories[0].transitions)

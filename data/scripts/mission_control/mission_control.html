@@ -108,6 +108,27 @@
   .mchip b { color:#8ae0ae; }
   iframe.embed { width:100%; height:80vh; border:1px solid #34506e; border-radius:8px;
                  background:#fff; }
+  /* 2026-09-03 (USER): the Dashboard tab — a full-height embed + a run strip; the arms panel badges */
+  iframe.embed.tall { height:calc(100vh - 150px); min-height:640px; }
+  .page.wide { max-width:1600px; }
+  .runstrip { background:#22303e; border:1px solid #34506e; border-radius:8px; padding:7px 12px;
+              margin:0 0 8px; font-size:9pt; color:#c4d3e0; }
+  .runstrip b { color:#e8f1f8; }
+  .runstrip .live { color:#8ae0ae; font-weight:bold; }
+  .runstrip .stale { color:#e0b36a; font-weight:bold; }
+  table.arms td:nth-child(5), table.arms td:nth-child(6) { white-space:nowrap; }
+  table.arms td:nth-child(8) { white-space:normal; max-width:360px; color:#9db0c0; }
+  table.arms tr.retired td { color:#6f8394; }
+  table.arms tr.retired td b { color:#8a9db0; text-decoration:line-through; }
+  table.arms tr.learning td { background:#1f3345; }
+  .abs { display:flex; flex-wrap:wrap; gap:4px; margin-top:3px; }
+  .ab { font:bold 7.5pt Verdana; padding:1px 7px; border-radius:9px; background:#2c3f52; color:#aecbe6;
+        border:1px solid #46627e; white-space:nowrap; }
+  .ab.play { background:#2f5a3a; color:#b6f0c6; border-color:#4c8a5c; }
+  .ab.inc { background:#4a4222; color:#ffe08a; border-color:#8a7a3a; }
+  .ab.pin { background:#4a2f5a; color:#e0b6f0; border-color:#7a4c8a; }
+  .ab.learn { background:#23465e; color:#8fd3ff; border-color:#3f7aa6; }
+  .ab.ret { background:#5a2424; color:#ffb0b0; border-color:#8a3a3a; }
   .battlebtn { display:block; width:100%; margin-top:12px; padding:11px 0; cursor:pointer;
       font:bold 13pt Verdana; color:#fff; text-shadow:0 1px 0 #16324f;
       background:linear-gradient(#4d81b5,#2c5a8c); border:1px solid #16324f; border-radius:9px; }
@@ -144,7 +165,7 @@
 <div class="page" id="page-data"></div>
 <div class="page" id="page-eval"></div>
 <div class="page" id="page-deploy"></div>
-<div class="page" id="page-monitor"></div>
+<div class="page wide" id="page-monitor"></div>
 <div class="page" id="page-jobs"></div>
 <div class="toast" id="toast"></div>
 <datalist id="fmtlist"></datalist>
@@ -153,7 +174,7 @@
 const $ = (id) => document.getElementById(id);
 const TABS = [["overview","Overview"],["online","Online bot"],["play","Play"],["train","Train"],
               ["generate","Generate"],["parser","Parser"],["data","Data"],["eval","Eval"],
-              ["deploy","Deploy"],["monitor","Monitor"],["jobs","Jobs"]];
+              ["deploy","Deploy"],["monitor","Dashboard"],["jobs","Jobs"]];
 let S = null, CMDS = null, OB = {up:false}, SPECIES = null, GEN_CORE = [], GEN_TEAMS = [],
     curTab = "overview", logName = null, logOffset = 0, logTimer = null;
 
@@ -786,9 +807,21 @@ function renderOnline() {
             <span>Link <b id="ob-link">—</b></span></div>
           <div class="muted" id="ob-peaks" style="margin-top:5px"></div>
           <div class="muted" id="ob-site" style="margin-top:4px"></div>
-          <div class="muted" id="ob-bandit" style="margin-top:4px;white-space:pre-line"></div>
+          <div class="muted" id="ob-bandit" style="margin-top:4px"></div>
           <div class="muted" id="ob-recorder" style="margin-top:4px"></div>
           <div class="muted" id="ob-chalout" style="margin-top:5px"></div>
+        </div>
+      </div>
+      <div class="cards fit" style="margin-top:12px">
+        <div class="card"><h3>Bandit arms <span class="muted" id="ob-arms-hdr"></span></h3>
+          <div class="desc">One row per serve arm (a checkpoint / serve-knob candidate the ladder judges); all-time
+            evidence from artifacts/bandit/&lt;format&gt;.json. <b>◀ playing</b> = bound to a live / the next game ·
+            <b>★ incumbent</b> = the retire rule's reference, never retired by it · <b>📌 pinned</b> = frozen mode ·
+            <b>🧠 learning</b> = the adaptive τ arm whose games feed the nightly ladder-PPO update (retire-exempt) ·
+            <b>⛔ retired</b> = the rule fired (hover for the reason). P(worse) = the retire rule's number.</div>
+          <div class="muwrap"><table class="mu arms" id="ob-arms"><thead><tr><th>arm</th><th>games</th>
+            <th>W-L</th><th>win %</th><th>Δ Elo/g</th><th>P(worse)</th><th>τ</th><th>note</th></tr></thead><tbody></tbody></table></div>
+          <div class="muted" id="ob-arms-note" style="margin-top:6px"></div>
         </div>
       </div>
       <div class="cards fit" style="margin-top:12px">
@@ -938,10 +971,12 @@ function updateOnlineLive() {
   set("ob-site", of ? `Site: Elo ${of.elo} · GXE ${of.gxe ?? "—"}% · Glicko ${of.glicko ?? "—"}±${of.glicko_dev ?? "—"}` +
       ` · ${of.w}W-${of.l}L lifetime (as of ${esc(OB.official.fetched || "")})`
       : (OB.official && OB.official.error ? "Site: rating poll failed" : ""));
+  // 2026-09-03 (USER): the arms live in their own panel (renderArms); this line is the pointer
   const arms = OB.bandit || [];
-  set("ob-bandit", arms.length ? "Bandit (◀ = playing, * = incumbent, 📌 = pinned): " + arms.map(a =>
-      `${esc(a.name)}${a.incumbent ? "*" : ""}${a.pinned ? " 📌" : ""}${a.current ? " ◀" : ""} ${a.wins}W-${a.losses}L` +
-      ` Δ${a.mean_delta >= 0 ? "+" : ""}${a.mean_delta}${a.retired ? " RETIRED" : ""}`).join(" · ") : "");
+  set("ob-bandit", arms.length ? `Bandit: ${arms.length} arm(s), ${arms.filter(a => !a.retired).length} active` +
+      (arms.some(a => a.current) ? ` · playing ${arms.filter(a => a.current).map(a => esc(a.name)).join(", ")}` : "") +
+      " — see the Bandit arms panel below" : "");
+  renderArms(OB);
   const rc = OB.recorder;
   set("ob-recorder", rc ? `RL recorder: ${rc.games} game(s) / ${rc.steps} decision(s) this session` +
       (rc.failed ? ` · ${rc.failed} failed` : "") : "");
@@ -981,6 +1016,48 @@ function updateOnlineLive() {
     const txt = (OB.events || []).join("\n");
     if (lg.textContent !== txt) { lg.textContent = txt; if (atEnd) lg.scrollTop = lg.scrollHeight; }
   }
+}
+
+/* ── 2026-09-03 (USER): the bandit ARMS PANEL — win rate, retired / active, the LEARNING label ── */
+function armBadges(a) {
+  const b = [];
+  if (a.current) b.push(`<span class="ab play" title="bound to a live game / the next game">◀ playing</span>`);
+  if (a.incumbent) b.push(`<span class="ab inc" title="the incumbent: the retire rule's reference; never retired by the rule">★ incumbent</span>`);
+  if (a.pinned) b.push(`<span class="ab pin" title="frozen mode: this arm plays every game until unpinned">📌 pinned</span>`);
+  if (a.learning) b.push(`<span class="ab learn" title="the adaptive arm: its games feed the nightly ladder-PPO update (scratch/ladder_ppo_update.py); exempt from the retire rule">🧠 learning</span>`);
+  b.push(a.retired ? `<span class="ab ret" title="${esc(a.reason || "")}">⛔ retired</span>`
+                   : `<span class="ab act" title="in the Thompson rotation">active</span>`);
+  if (a.in_flight) b.push(`<span class="ab" title="games bound but not yet rewarded">${a.in_flight} in flight</span>`);
+  return b.join(" ");
+}
+function renderArms(ob) {
+  const tb = $("ob-arms"); if (!tb) return;
+  const arms = ob.bandit || [], rule = ob.bandit_rule || {};
+  const hdr = $("ob-arms-hdr"), note = $("ob-arms-note"), body = tb.querySelector("tbody");
+  if (!ob.bandit_on) {
+    hdr.textContent = "(bandit OFF — VD_BANDIT=0 / no config: the .env stack plays every game)";
+    body.innerHTML = ""; note.textContent = ""; return;
+  }
+  hdr.textContent = `· ${arms.length} arm(s) · ${arms.filter(a => !a.retired).length} active` +
+      (ob.bandit_pin ? ` · FROZEN on ${esc(ob.bandit_pin)}` : " · exploring");
+  body.innerHTML = arms.map(a => {
+    const d = (a.wins || 0) + (a.losses || 0), wr = d ? (100 * a.wins / d) : null;
+    const cls = a.retired ? "retired" : (a.learning ? "learning" : "");
+    return `<tr class="${cls}"><td><b>${esc(a.name)}</b><div class="abs">${armBadges(a)}</div></td>` +
+      `<td class="n">${a.n}</td><td class="n">${a.wins}-${a.losses}${a.draws ? "-" + a.draws + "D" : ""}</td>` +
+      `<td class="n">${wr == null ? "—" : wr.toFixed(1) + "%"}</td>` +
+      `<td class="n">${a.mean_delta >= 0 ? "+" : ""}${a.mean_delta}</td>` +
+      `<td class="n">${a.p_worse == null ? "—" : (100 * a.p_worse).toFixed(0) + "%"}</td>` +
+      `<td class="n">${a.tau}</td><td title="${esc(a.note || "")}">${esc(a.note || "")}</td></tr>`;
+  }).join("");
+  note.textContent = rule.retire_min_games
+    ? `Warm-up ${rule.min_games} game(s) per arm, then Thompson sampling over the mean Δ Elo/game. ` +
+      `Retire at ≥ ${rule.retire_min_games} games when P(worse than the incumbent ${rule.incumbent}) ≥ ` +
+      `${(100 * rule.retire_prob).toFixed(0)}%` +
+      (rule.retire_margin_elo ? ` (by ≥ ${rule.retire_margin_elo} Elo/game)` : "") +
+      ((rule.learning || []).length ? ` · learning arm(s) exempt: ${rule.learning.join(", ")}` : " · no learning arm") +
+      " · the incumbent is never retired by the rule; promotion is a human call at ≥ 200 games."
+    : "";
 }
 
 /* ── embedded UIs (team builder :5174, self-play dashboard :5175) ── */
@@ -1118,9 +1195,51 @@ async function genSave(i){
     toast("saved → "+j.path+"  (use --ai-team "+name.trim()+")");
   }catch(e){ toast("save failed: "+e.message, true); }
 }
+/* 2026-09-03 (USER: "embed the dashboard so I can see it better"): the Dashboard tab STARTS the
+   self-play dashboard service when opened (once per page load), embeds it full height, and shows a
+   run strip (which run the feeds follow, phase, generation, games, win-rate, champion) above it. */
+let dashAutoStarted = false;
 function renderMonitor() {
-  embedTab("page-monitor", "dashboard", 5175, "svc_dashboard", "Self-play dashboard",
-    "Live self-play generations, eval feeds, a run launcher, and the console. Embedded here once running.");
+  const svc = (S && S.services && S.services.dashboard) || {};
+  const up = !!svc.up, el = $("page-monitor");
+  if (!up && !dashAutoStarted && S) {
+    dashAutoStarted = true;
+    api("/api/job/start", { id: "svc_dashboard", options: {}, env: {} })
+      .then(() => toast("Self-play dashboard starting on :5175 — embedding when it answers"))
+      .catch(() => {});
+  }
+  const want = up ? "up" : (dashAutoStarted ? "starting" : "down");
+  if (el.getAttribute("data-embed") !== want) {          // rebuild ONLY on a transition (no iframe flash)
+    el.setAttribute("data-embed", want);
+    el.innerHTML = up
+      ? `<div class="runstrip" id="dash-strip">dashboard up — reading the run…</div>
+         <iframe class="embed tall" src="http://127.0.0.1:5175/" allow="clipboard-write"></iframe>`
+      : `<div class="card"><h3>Self-play dashboard ${want === "starting" ? "— starting on :5175…" : "— not running"}</h3>
+          <div class="desc">Live generations, eval feeds, the run launcher and the console. It starts automatically
+            when this tab opens; the embed appears within a few seconds. The dashboard follows the NEWEST run
+            folder under artifacts/self_play_archive by itself.</div>
+          <button class="btn" onclick="startSvc('svc_dashboard')">▶ Start the dashboard (:5175)</button></div>`;
+  }
+  if (up) refreshDashStrip();
+}
+async function refreshDashStrip() {
+  const el = $("dash-strip"); if (!el) return;
+  try {
+    const d = await (await fetch("/api/dashboard/status")).json();
+    if (!d.up) { el.textContent = "dashboard: not answering on :5175"; return; }
+    const st = d.status || {}, r = st.run || {}, u = st.update || {};
+    const age = st.updated_at ? Math.round(Date.now() / 1000 - st.updated_at) : null;
+    const live = st.live
+      ? (age != null && age > 180 ? `<span class="stale">LIVE? (stale ${age}s)</span>` : `<span class="live">LIVE</span>`)
+      : "idle";
+    const gen = r.n_generations ? `gen ${r.generation}/${r.n_generations}` : `gen ${r.generation ?? 0}`;
+    const games = r.games_total ? ` · games ${r.games_done}/${r.games_total}` : "";
+    const wr = r.running_p1_winrate != null ? ` · own win-rate ${(100 * r.running_p1_winrate).toFixed(0)}%` : "";
+    const champ = u.champion_elo != null ? ` · champion Elo ${Math.round(u.champion_elo)}` : "";
+    const verdict = r.last_verdict ? ` · last: ${esc(r.last_verdict)}` : "";
+    el.innerHTML = `run <b>${esc(d.run_name || "—")}</b> · ${live} · ${esc(r.phase || "idle")} · ${gen}${games}${wr}${champ}${verdict}` +
+      ` · <a href="http://127.0.0.1:5175/" target="_blank">open in a new browser tab ↗</a>`;
+  } catch { el.textContent = "dashboard status unavailable"; }
 }
 
 /* ── boot + poll ── */

@@ -470,30 +470,10 @@ def _subdivide_matchups(matchups, target_chunks):
     NO-OP when the pool already yields ``>= target_chunks`` pairings (multi-team / gauntlet) or when
     ``target_chunks <= 1`` (the default sequential run). Total games are preserved exactly; the (team_a,
     team_b) pair of every sub-chunk equals its parent, so per-matchup game totals are unchanged."""
-    chunks = [(a, b, n) for (a, b, n) in matchups if n > 0]
-    total = sum(n for _, _, n in chunks)
-    target = min(int(target_chunks), total)              # never more chunks than games
-    if target <= len(chunks):
-        return chunks
-    ks = [1] * len(chunks)                               # sub-chunk count per original chunk (>= 1)
-    ns = [n for _, _, n in chunks]
-    for _ in range(target - len(chunks)):               # hand out the extra splits one at a time
-        best, best_load = -1, -1.0
-        for i in range(len(chunks)):
-            if ks[i] >= ns[i]:                          # already 1 game / sub-chunk — can't split further
-                continue
-            load = ns[i] / ks[i]                        # games per current sub-chunk
-            if load > best_load:
-                best, best_load = i, load
-        if best < 0:
-            break                                        # nothing left that can be split
-        ks[best] += 1
-    out = []
-    for (a, b, n), k in zip(chunks, ks):
-        base, rem = divmod(n, k)                         # split n into k near-equal parts summing to n
-        for j in range(k):
-            out.append((a, b, base + (1 if j < rem else 0)))
-    return out
+    # 2026-09-03 (W2): ONE implementation, now in gauntlet (stdlib-pure) so the EVAL planners
+    # share it - the own-vs-own champion mirror has exactly the same single-chunk problem.
+    from v_dance.eval.gauntlet import subdivide_pairings
+    return subdivide_pairings(matchups, target_chunks)
 
 
 def _seat_sampling(sample: str, tau: float, serve_tau: float, serve_top_p: float):

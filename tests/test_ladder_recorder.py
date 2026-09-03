@@ -290,3 +290,34 @@ def test_rejection_recall_and_discard_unbook_the_logprob_accounting(tmp_path: Pa
     t = rec.finish(tag, _battle(tag, won=True), won=True)
     assert t is None                                                   # nothing left to seal
 
+
+
+def test_empty_slot_action_zero_under_an_all_zero_mask_is_recorded_as_pass(tmp_path: Path):
+    """2026-09-03: the live player encodes an EMPTY / fainted active slot as action 0 (``_select_actions``:
+    None -> 0) and its effective mask is all-zero; the schema means PASS_ACTION (the self-play rule,
+    ``game_runner.resolve_action``). The first W3b update died in ``assert_actions_legal`` on exactly
+    this ("action_s1=0 illegal under mask_s1=[0]*16"). A REAL action 0 under a legal mask stays 0."""
+    p = _player(_record_masks=True)
+    rec, _ = _recorder(tmp_path, p)
+    tag = f"battle-{FMT}-31"
+    b = _battle(tag, turn=1)
+    p._sampling_masks[(tag, "turn")] = ([1] * 16, [0] * 16)            # slot 1 empty: effective mask all-zero
+    rec.record(b, _state(1), 3, 0, 0, 0, "model", "turn")
+    st = rec._collectors[tag].last_step()
+    assert st.action_s0 == 3 and st.action_s1 == PASS_ACTION and list(st.mask_s1) == [0] * 16
+    b.turn = 2
+    p._sampling_masks[(tag, "turn")] = ([1] * 16, [1] * 16)
+    rec.record(b, _state(2), 0, 0, 0, 0, "model", "turn")              # a real action 0 (legal) stays 0
+    st = rec._collectors[tag].last_step()
+    assert st.action_s0 == 0 and st.action_s1 == 0
+    b.turn = 3                                                         # replacement: slot 0 fainted, bench exhausted
+    p._sampling_masks[(tag, "replacement")] = ([0] * 16, None)
+    rec.record(b, _state(3), 0, None, 0, 0, "forced_switch_model", "replacement")
+    st = rec._collectors[tag].last_step()
+    assert st.action_s0 == PASS_ACTION and st.action_s1 == PASS_ACTION
+    assert rec.steps == 3 and rec.failed == 0
+    t = rec.finish(tag, _battle(tag, won=True), won=True)
+    back = read_trajectories(rec.path, expected_state_dim=DIM)
+    assert [(x.action_s0, x.action_s1) for x in back[0].transitions] == [(3, PASS_ACTION), (0, 0),
+                                                                          (PASS_ACTION, PASS_ACTION)]
+    assert t.meta.sampling["turn_steps"] == 2 and t.meta.sampling["replacement_steps"] == 1

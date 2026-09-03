@@ -420,6 +420,10 @@ def test_http_panel_serves_status_and_page():
         assert st["username"] == "VictoriousDancing" and st["format"] == FMT
         assert st["teams"] == POOL and st["tally"] == {"ai": 1, "you": 2, "draw": 0}
         assert b"Victory Dance" in html_raw and b"Battle!" in html_raw
+        # 2026-09-03 (USER): the bandit arms PANEL (no bandit here -> rule None, the table still ships)
+        assert st["bandit"] is None and st["bandit_on"] is False and st["bandit_rule"] is None
+        assert b'id="arms"' in html_raw and b"function renderArms" in html_raw
+        assert "🧠 learning".encode("utf-8") in html_raw
 
     try:
         asyncio.run(main())

@@ -368,3 +368,83 @@ def test_launch_log_prefers_in_memory_path_over_glob(client):
     c.application.config["_LAUNCH_LOG"] = str(chosen)             # explicit handle wins over newest-glob
     j = c.get("/launch_log").get_json()
     assert j["path"] == chosen.name and "CHOSEN" in j["data"]
+
+
+# ── auto-find the newest run subfolder (2026-09-03) ───────────────────────────
+# A run launched with --archive artifacts/self_play_archive/<name> writes status.json into that
+# SUBFOLDER; the server's default archive dir is the ROOT, so the dashboard used to show nothing
+# unless the operator passed --archive too. resolve_run_dir() closes that gap.
+def _write_status(d, mtime=None, live=True):
+    import json
+    import os
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "status.json").write_text(json.dumps({"live": live, "run": {"generation": 1}}),
+                                   encoding="utf-8")
+    if mtime is not None:
+        os.utime(d / "status.json", (mtime, mtime))
+    return d
+
+
+def test_resolve_run_dir_prefers_the_base_when_it_has_a_status(tmp_path):
+    """An EXPLICIT --archive pointing straight at a run must be returned unchanged."""
+    from v_dance.datatools.dashboard_server import resolve_run_dir
+    _write_status(tmp_path)
+    _write_status(tmp_path / "some_run", mtime=9_000_000_000)      # newer, but base wins
+    assert resolve_run_dir(tmp_path) == tmp_path
+
+
+def test_resolve_run_dir_finds_the_newest_subfolder(tmp_path):
+    from v_dance.datatools.dashboard_server import resolve_run_dir
+    _write_status(tmp_path / "old_run", mtime=1_000_000_000)
+    newest = _write_status(tmp_path / "new_run", mtime=2_000_000_000)
+    (tmp_path / "not_a_run").mkdir()                               # no status.json -> ignored
+    assert resolve_run_dir(tmp_path) == newest
+
+
+def test_resolve_run_dir_falls_back_to_base_when_nothing_ran(tmp_path):
+    from v_dance.datatools.dashboard_server import resolve_run_dir
+    (tmp_path / "empty").mkdir()
+    assert resolve_run_dir(tmp_path) == tmp_path
+    assert resolve_run_dir(tmp_path / "does_not_exist") == tmp_path / "does_not_exist"
+
+
+def test_status_and_manifest_served_from_the_newest_subfolder(tmp_path):
+    """The whole point: point the server at the ROOT and still get the run's live feeds."""
+    import json
+    from v_dance.datatools.dashboard_server import create_app
+    run = _write_status(tmp_path / "era5b_v2_from_era2", mtime=2_000_000_000)
+    (run / "manifest.json").write_text(json.dumps({"champion_generation": 28}), encoding="utf-8")
+    _write_status(tmp_path / "older_run", mtime=1_000_000_000)
+    app = create_app(archive_dir=tmp_path)
+    c = app.test_client()
+    assert c.get("/status.json").get_json()["run"]["generation"] == 1
+    assert c.get("/manifest.json").get_json()["champion_generation"] == 28
+
+
+def test_a_newer_run_is_followed_without_restarting_the_server(tmp_path):
+    """Resolution is per REQUEST, so starting a second run switches the dashboard over."""
+    import json
+    from v_dance.datatools.dashboard_server import create_app
+    first = _write_status(tmp_path / "run_a", mtime=1_000_000_000)
+    (first / "manifest.json").write_text(json.dumps({"champion_generation": 1}), encoding="utf-8")
+    app = create_app(archive_dir=tmp_path)
+    c = app.test_client()
+    assert c.get("/manifest.json").get_json()["champion_generation"] == 1
+    second = _write_status(tmp_path / "run_b", mtime=2_000_000_000)
+    (second / "manifest.json").write_text(json.dumps({"champion_generation": 2}), encoding="utf-8")
+    assert c.get("/manifest.json").get_json()["champion_generation"] == 2   # same app object
+
+
+def test_launcher_state_stays_on_the_base_archive_dir(tmp_path):
+    """A NEW run's config / log / pid must never land inside an OLD run's folder."""
+    from v_dance.datatools.dashboard_server import create_app
+    _write_status(tmp_path / "old_run", mtime=1_000_000_000, live=False)
+    app = create_app(archive_dir=tmp_path)
+    assert app.config["ARCHIVE_DIR"] == tmp_path.resolve()
+
+
+def test_empty_archive_root_serves_the_idle_placeholders(tmp_path):
+    from v_dance.datatools.dashboard_server import create_app
+    c = create_app(archive_dir=tmp_path).test_client()
+    assert c.get("/status.json").status_code == 200
+    assert c.get("/manifest.json").status_code == 200

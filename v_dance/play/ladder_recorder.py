@@ -20,6 +20,13 @@ own distribution — a close approximation, model_io.merge_dedup_records).
 
 Zero-impact when disabled (``VD_LADDER_RECORD=0``): the hooks stay the base no-ops. Every hook is
 guarded — recording must never cost a turn.
+
+2026-09-03 (first W3b update tripped ``assert_actions_legal``: "action_s1=0 illegal under mask_s1=
+[0]*16"): the live player encodes an EMPTY / fainted active slot as action 0 (``_select_actions``:
+None -> 0, the slot passes via ``_safe_order``) and its effective mask is all-zero. Self-play maps
+that to ``PASS_ACTION`` (``game_runner.resolve_action``); this recorder wrote the raw 0 — ~10 % of
+turn steps, every arm. ``_slot_action`` mirrors the self-play rule here (torch-free), and
+``ladder_update.repair_pass_slots`` repairs the games already on disk at load time.
 """
 from __future__ import annotations
 
@@ -38,6 +45,19 @@ log = logging.getLogger(__name__)
 
 _REPO = Path(__file__).resolve().parents[2]
 LADDER_RL_DIR = _REPO / "artifacts" / "ladder_rl"
+
+
+def _slot_action(a, mask) -> int:
+    """The collector's action index for one slot — a torch-free mirror of
+    ``selfplay.game_runner.resolve_action``: ``PASS_ACTION`` when the slot made no decision
+    (``a is None``) OR has no legal action (mask absent / all-zero: an empty / fainted active
+    slot the live player encodes as 0); otherwise ``int(a)``. A real action 0 under a legal mask
+    stays 0."""
+    if a is None:
+        return PASS_ACTION
+    if mask is None or not any(mask):
+        return PASS_ACTION
+    return int(a)
 
 
 def terminal_type_for(won: Optional[bool], lost: Optional[bool]) -> str:
@@ -149,8 +169,8 @@ class LadderRecorder:
             value = (2.0 * float(wp) - 1.0) if isinstance(wp, (int, float)) else 0.0
             logprob = self._joint_logprob(tag, decision_type, lp)
             c.add_step(state=state_vec,
-                       action_s0=(PASS_ACTION if a0 is None else int(a0)),
-                       action_s1=(PASS_ACTION if a1 is None else int(a1)),
+                       action_s0=_slot_action(a0, m0),      # 2026-09-03: empty slot (all-zero mask) -> PASS
+                       action_s1=_slot_action(a1, m1),
                        gimmick_s0=int(g0 or 0), gimmick_s1=int(g1 or 0),
                        logprob=logprob, value=value, decision_type=decision_type, turn=turn,
                        mask_s0=m0, mask_s1=m1, gmask_s0=gm0, gmask_s1=gm1,

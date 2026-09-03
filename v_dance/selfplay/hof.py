@@ -29,7 +29,7 @@ async def hof_eval(candidate_path, suspects, *, team_pool, team_chooser,
                    games_per_snapshot: int = 60, matchup_seed: int = 0,
                    battle_timeout: Optional[float] = 90.0, n_workers: int = 1,
                    manage_server: bool = False, gauntlet_fn=None,
-                   live_dir=None, save_replays: bool = False):
+                   live_dir=None, save_replays: bool = False, own_team=None):
     """Play the CANDIDATE vs each HoF SUSPECT (a frozen past-champion checkpoint) for
     ``games_per_snapshot`` side-balanced battles, returning ``[(snapshot_id, wins, games), ...]``.
 
@@ -39,7 +39,8 @@ async def hof_eval(candidate_path, suspects, *, team_pool, team_chooser,
     it's already up so the caller passes ``manage_server=False``). Each suspect's checkpoint is
     pre-validated (``load_bc_policy``) so a missing/corrupt snapshot SKIPS rather than silently
     falling back to a no-model picker and FALSE-vetoing on garbage. ``gauntlet_fn`` is injectable so
-    the aggregation unit-tests offline without a server."""
+    the aggregation unit-tests offline without a server. ``own_team`` (W2): forwarded to the
+    gauntlet only when set (the candidate and the suspect both play it - ``eval_pairings``)."""
     import v_dance.play.model_io as model_io
     import v_dance.play.run_local_battle as R
     from v_dance.eval.gauntlet import _ckpt_gen        # candidate/suspect gen for 22d name salts
@@ -74,7 +75,8 @@ async def hof_eval(candidate_path, suspects, *, team_pool, team_chooser,
                 n_workers=int(n_workers), name_salt=_salt,
                 # task E: the candidate-vs-past-champion battles also save to eval/league/ named
                 # gen<N>_vs_gen<M> (M = the suspect's gen, parsed from its checkpoint path).
-                live_dir=live_dir, save_replays=save_replays)
+                live_dir=live_dir, save_replays=save_replays,
+                **({"own_team": own_team} if own_team else {}))
             wins, games = res.get("prev_best", (0, 0))
             results.append((suspect.snapshot_id, int(wins), int(games)))
     finally:

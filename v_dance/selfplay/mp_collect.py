@@ -86,18 +86,24 @@ def _spec_from_sample(sample, team_a: str, team_b: str, n: int, uid: int, gen: i
 
 def build_chunk_specs(league, team_pool, n_games: int, *, chunk_size: int = 10,
                       matchup_seed: int = 0, seed: int = 0, gen: int = 0,
-                      spawn_rooms: int = 0) -> List[ChunkSpec]:
+                      spawn_rooms: int = 0, own_team=None, own_mirror_frac: float = 0.2,
+                      opp_weights=None) -> List[ChunkSpec]:
     """Plan the collection batch as a flat list of PICKLABLE ChunkSpecs — the multiprocessing
     analogue of ``generation.build_collection_chunks``. League sampling + uid assignment happen
     HERE, in the main process (race-free), so the workers never touch league state. ``gen`` (22d)
     is stamped onto every spec so the worker account names fold in the generation (no cross-gen
-    reuse collisions). Pure w.r.t. poke-env (torch-free)."""
+    reuse collisions). Pure w.r.t. poke-env (torch-free). ``own_team`` (W2, 2026-09-03): the
+    own seat on ``team_a`` every chunk, ``own_mirror_frac`` mirrors, the opponent seat by
+    ``opp_weights`` (``gauntlet.collection_pairings``)."""
     import numpy as np
-    from v_dance.eval.gauntlet import team_matchups
+    from v_dance.eval.gauntlet import collection_pairings
     rng = np.random.default_rng(seed)
     specs: List[ChunkSpec] = []
     uid = 0
-    for team_a, team_b, n in team_matchups(team_pool, n_games, seed=matchup_seed):
+    for team_a, team_b, n in collection_pairings(team_pool, n_games, seed=matchup_seed,
+                                                 own_team=own_team,
+                                                 own_mirror_frac=own_mirror_frac,
+                                                 opp_weights=opp_weights):
         remaining = n
         while remaining > 0:
             cn = min(chunk_size, remaining)
@@ -463,7 +469,8 @@ def collect_with_pool(ac, league, n_games: int, *, team_pool, ckpt_path,
                       seed: int = 0, matchup_seed: int = 0, chunk_size: int = 10,
                       team_chooser=None, battle_timeout: Optional[float] = 90.0, status=None,
                       live_dir=None, save_replays: bool = False, generation: int = 0,
-                      ports=None, spawn_rooms: int = 0):
+                      ports=None, spawn_rooms: int = 0, own_team=None,
+                      own_mirror_frac: float = 0.2, opp_weights=None):
     """Multiprocess analogue of ``generation.collect_with_league`` (task #14b.2).
 
     Plans the batch + samples the league in the MAIN process (race-free), freezes the current
@@ -482,7 +489,8 @@ def collect_with_pool(ac, league, n_games: int, *, team_pool, ckpt_path,
     # installs it BEFORE the pool servers start; the launcher's build compiles it).
     specs = build_chunk_specs(league, team_pool, n_games, chunk_size=chunk_size,
                               matchup_seed=matchup_seed, seed=seed, gen=generation,
-                              spawn_rooms=spawn_rooms)
+                              spawn_rooms=spawn_rooms, own_team=own_team,
+                              own_mirror_frac=own_mirror_frac, opp_weights=opp_weights)
     batches = partition_specs(specs, n_procs)
     _ld = str(live_dir) if live_dir else None
     # 22f: spread the worker batches round-robin across the pool servers (batch i -> ports[i % K]);

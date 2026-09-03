@@ -44,16 +44,23 @@ class EvalSpec:
 
 
 def build_eval_specs(opponents, team_pool, battles_per_opponent: int, *, matchup_seed: int = 0,
-                     mirror_battles: Optional[int] = None, gen: int = 0) -> List[EvalSpec]:
+                     mirror_battles: Optional[int] = None, gen: int = 0,
+                     own_team=None, n_ways: int = 1) -> List[EvalSpec]:
     """Plan the gauntlet as flat picklable specs — the same descriptor set ``run_gauntlet`` builds
     (the prev_best mirror gets ``mirror_battles`` instead of the scripted count). ``gen`` (22d) is
-    stamped onto every spec so the worker account names fold in the generation. Torch-free."""
-    from v_dance.eval.gauntlet import team_matchups
+    stamped onto every spec so the worker account names fold in the generation. Torch-free.
+    ``own_team`` (W2): the own seat every chunk - ``gauntlet.eval_pairings``; the own-vs-own
+    mirror is then ONE pairing, so it is subdivided ``n_ways`` (else a 360-game mirror would
+    run in a single worker while the rest idle)."""
+    from v_dance.eval.gauntlet import eval_pairings, subdivide_pairings
     specs: List[EvalSpec] = []
     uid = 0
     for kind in opponents:
         nb = mirror_battles if (kind == "prev_best" and mirror_battles) else battles_per_opponent
-        for team_a, team_b, n in team_matchups(team_pool, nb, seed=matchup_seed):
+        pairs = eval_pairings(kind, team_pool, nb, seed=matchup_seed, own_team=own_team)
+        if own_team and n_ways > 1:
+            pairs = subdivide_pairings(pairs, int(n_ways))
+        for team_a, team_b, n in pairs:
             uid += 1
             specs.append(EvalSpec(kind, team_a, team_b, n, uid, gen))
     return specs
@@ -178,7 +185,8 @@ def eval_with_pool(candidate, *, opponents, team_pool, battles_per_opponent: int
                    submit_fn: Callable, prev_best=None, mirror_battles: Optional[int] = None,
                    matchup_seed: int = 0, battle_timeout: Optional[float] = 90.0,
                    n_procs: int = 4, async_per_proc: int = 3,
-                   live_dir=None, save_replays: bool = False, generation: int = 0, ports=None):
+                   live_dir=None, save_replays: bool = False, generation: int = 0, ports=None,
+                   own_team=None):
     """Multiprocess analogue of ``gauntlet.run_gauntlet`` (task #19). Pre-validates the candidate
     (+ prev_best) load LOUDLY in main, plans + partitions the gauntlet descriptors, ships them to
     the pool via the injected ``submit_fn`` (``pool.submit(payloads, worker_fn=eval_worker)``), and
@@ -190,7 +198,8 @@ def eval_with_pool(candidate, *, opponents, team_pool, battles_per_opponent: int
         model_io.load_bc_policy(str(prev_best))
     specs = build_eval_specs(opponents, team_pool, battles_per_opponent,
                              matchup_seed=matchup_seed, mirror_battles=mirror_battles,
-                             gen=generation)
+                             gen=generation, own_team=own_team,
+                             n_ways=max(1, int(n_procs) * int(async_per_proc)))
     batches = partition_specs(specs, n_procs)
     pb = str(prev_best) if prev_best else None
     tc = str(team_chooser) if team_chooser else None

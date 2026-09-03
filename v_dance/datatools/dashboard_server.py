@@ -5,8 +5,14 @@ feeds that the self-play loop writes to ``artifacts/self_play_archive/``:
 
     GET /                 -> dashboard.html
     GET /<file>           -> dashboard.css / dashboard.js / demo_manifest.json
-    GET /manifest.json    -> artifacts/self_play_archive/manifest.json  (live, no-cache)
-    GET /status.json      -> artifacts/self_play_archive/status.json    (live, no-cache)
+    GET /manifest.json    -> <run dir>/manifest.json  (live, no-cache)
+    GET /status.json      -> <run dir>/status.json    (live, no-cache)
+
+``<run dir>`` is the archive dir itself when it holds a status.json, else the newest run
+SUBFOLDER under it (``resolve_run_dir``) - so a run launched with
+``--archive artifacts/self_play_archive/<name>`` is picked up with no --archive here, and a
+new run is followed without restarting the server. Launcher state (launch_configs / logs /
+launched.pid) always stays on the base archive dir.
 
 The dashboard (served here) polls ``/status.json`` + ``/manifest.json`` every
 couple of seconds. Decoupled from training on purpose: the self-play process
@@ -182,6 +188,40 @@ def _kill_pid_tree(pid) -> None:
 _STALE_LIVE_SECONDS = 1800.0
 
 
+def resolve_run_dir(base) -> Path:
+    """The directory whose live feeds the dashboard should serve, given the archive ``base``.
+
+    A run started with ``--archive artifacts/self_play_archive/<name>`` writes ``status.json`` into
+    that SUBFOLDER, so a dashboard pointed at the ROOT would serve nothing. Resolution order:
+
+      1. ``base`` itself when it holds a ``status.json`` (an explicit --archive, or the legacy
+         flat layout) -> returned unchanged, so nothing about an explicit path changes;
+      2. otherwise the immediate SUBDIRECTORY with the newest ``status.json`` (the run most
+         recently written to - a live run updates it every phase, so the active run wins);
+      3. otherwise ``base`` unchanged (no run has ever written here).
+
+    Cheap enough to call per request (one ``iterdir`` over the archive), which is deliberate: the
+    dashboard then follows a NEW run into its own folder without being restarted."""
+    base = Path(base)
+    if (base / "status.json").exists():
+        return base
+    newest, newest_mtime = None, None
+    try:
+        for d in base.iterdir():
+            if not d.is_dir():
+                continue
+            st = d / "status.json"
+            try:
+                mt = st.stat().st_mtime
+            except OSError:
+                continue
+            if newest_mtime is None or mt > newest_mtime:
+                newest, newest_mtime = d, mt
+    except OSError:
+        return base
+    return newest if newest is not None else base
+
+
 def _run_is_live(archive_dir: Path) -> bool:
     """True only if status.json reports a live run AND it's still fresh (updated within
     ``_STALE_LIVE_SECONDS``). A crashed run's stale ``live:true`` reads as NOT live, so it can't
@@ -266,21 +306,51 @@ def create_app(dash_dir=_DASH_DIR, archive_dir=_ARCHIVE_DIR) -> Flask:
     app.config["_LAUNCHED"] = None        # the Popen of a run started via POST /launch
     app.config["_LAUNCH_LOG"] = None
 
+    def _run_dir() -> Path:
+        """The run whose feeds we serve: `archive_dir` itself, else its newest run subfolder.
+        Resolved PER REQUEST so the dashboard follows a new run without a restart. The LAUNCHER
+        deliberately keeps using `archive_dir` (its configs / logs / pid must not land inside an
+        old run's folder)."""
+        return resolve_run_dir(archive_dir)
+
     @app.route("/")
     def index():
         return send_from_directory(dash_dir, "dashboard.html")
 
     @app.route("/manifest.json")
     def manifest():
-        return _serve_json(archive_dir / "manifest.json", _EMPTY_MANIFEST)
+        return _serve_json(_run_dir() / "manifest.json", _EMPTY_MANIFEST)
 
     @app.route("/status.json")
     def status():
-        return _serve_json(archive_dir / "status.json", _IDLE_STATUS)
+        return _serve_json(_run_dir() / "status.json", _IDLE_STATUS)
+
+    @app.route("/run_info.json")
+    def run_info():
+        """2026-09-03 (USER: the dashboard embedded in Mission Control): the run the feeds follow + that
+        run's ``status.json`` in ONE call — MC proxies it as ``/api/dashboard/status`` for the Dashboard
+        tab's run strip (run name · LIVE/idle · phase · generation · games · win-rate · champion)."""
+        import json as _json
+        rd = _run_dir()
+        try:
+            name = rd.relative_to(archive_dir).as_posix() if rd != archive_dir else rd.name
+        except ValueError:
+            name = rd.name
+        st = None
+        sp = rd / "status.json"
+        if sp.exists():
+            try:
+                st = _json.loads(sp.read_text(encoding="utf-8"))
+            except Exception:
+                st = None
+        resp = jsonify({"run_dir": str(rd), "archive_dir": str(archive_dir), "run_name": name,
+                        "status": (st if isinstance(st, dict) else _IDLE_STATUS)})
+        resp.headers["Cache-Control"] = "no-store, max-age=0"
+        return resp
 
     @app.route("/live_log.json")
     def live_log():
-        return _serve_json(archive_dir / "live_log.json", _EMPTY_LOG)
+        return _serve_json(_run_dir() / "live_log.json", _EMPTY_LOG)
 
     @app.route("/live_battles.json")
     def live_battles():
@@ -289,7 +359,7 @@ def create_app(dash_dir=_DASH_DIR, archive_dir=_ARCHIVE_DIR) -> Flask:
         # (#18b review) so we don't rglob every saved replay ever; drop finished/stale ones.
         from v_dance.selfplay.status import read_live_battles, current_live_dir
         try:
-            battles = read_live_battles(current_live_dir(archive_dir / "live"))
+            battles = read_live_battles(current_live_dir(_run_dir() / "live"))
         except Exception:
             battles = []
         resp = jsonify({"battles": battles, "n": len(battles)})
@@ -303,7 +373,7 @@ def create_app(dash_dir=_DASH_DIR, archive_dir=_ARCHIVE_DIR) -> Flask:
         from v_dance.selfplay.status import list_saved_eval_replays
         gen = request.args.get("gen", type=int)
         try:
-            sections = list_saved_eval_replays(archive_dir / "live", gen) if gen is not None else []
+            sections = list_saved_eval_replays(_run_dir() / "live", gen) if gen is not None else []
         except Exception:
             sections = []
         resp = jsonify({"gen": gen, "sections": sections})
@@ -317,7 +387,7 @@ def create_app(dash_dir=_DASH_DIR, archive_dir=_ARCHIVE_DIR) -> Flask:
         from v_dance.selfplay.status import latest_run_dir
         if kind not in _EVAL_SECTIONS or not name.endswith(".html"):
             return ("not found", 404)
-        run = latest_run_dir(archive_dir / "live")
+        run = latest_run_dir(_run_dir() / "live")
         if run is None:
             return ("not found", 404)
         d = run / f"gen_{gen}" / "eval" / kind
@@ -345,7 +415,7 @@ def create_app(dash_dir=_DASH_DIR, archive_dir=_ARCHIVE_DIR) -> Flask:
         if not isinstance(cfg, dict):
             return jsonify({"ok": False, "error": "body must be a JSON object (the run config)"}), 400
         with _launch_lock:
-            if _run_is_live(archive_dir):
+            if _run_is_live(_run_dir()):
                 return jsonify({"ok": False,
                                 "error": "a run is already in progress (status.json live)"}), 409
             prev = app.config.get("_LAUNCHED")
@@ -484,13 +554,21 @@ def main(argv=None):
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=5175)
     ap.add_argument("--archive", default=str(_ARCHIVE_DIR),
-                    help="dir holding the live manifest.json + status.json")
+                    help="dir holding the live manifest.json + status.json - or the PARENT of "
+                         "the run folders, in which case the newest run subfolder (the one with "
+                         "the freshest status.json) is served and followed automatically")
     args = ap.parse_args(argv)
     app = create_app(archive_dir=args.archive)
     url = f"http://{args.host}:{args.port}/"
     print(f"[dashboard] serving {url}")
     print(f"[dashboard]   dashboard files: {_DASH_DIR}")
-    print(f"[dashboard]   live feeds from: {Path(args.archive)} (manifest.json + status.json)")
+    _rd = resolve_run_dir(Path(args.archive))
+    if _rd.resolve() == Path(args.archive).resolve():
+        print(f"[dashboard]   live feeds from: {_rd} (manifest.json + status.json)")
+    else:
+        print(f"[dashboard]   live feeds from: {_rd}")
+        print(f"[dashboard]   (auto-found the newest run under {Path(args.archive)}; "
+              f"re-checked each request, so a new run is picked up without a restart)")
     print(f"[dashboard]   spectate embeds the Showdown client at http://localhost:8000")
     app.run(host=args.host, port=args.port, debug=False, threaded=True)
 

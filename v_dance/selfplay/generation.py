@@ -271,20 +271,25 @@ def print_generation_report(rep: dict) -> None:
 
 
 # ── live wiring (reuses the validated runner + gauntlet; USER runs the smoke) ──
-def build_collection_chunks(league, team_pool, n_games, *, chunk_size, matchup_seed, seed):
+def build_collection_chunks(league, team_pool, n_games, *, chunk_size, matchup_seed, seed,
+                            own_team=None, own_mirror_frac: float = 0.2, opp_weights=None):
     """Plan collection as a FLAT list of independent chunk descriptors (3c.8c) — one per
     (team-matchup, league-opponent) battle group, each with a unique ``uid`` for
     collision-free account names. Built sequentially (league sampling + uid assignment are
     race-free here) so the chunks can then run with BOUNDED CONCURRENCY. With a large team
     pool ``team_matchups`` yields one battle per matchup, so each chunk is ~1 battle and the
     parallelism is ACROSS pairings (the real lever) — NOT within a single pairing. Pure (no
-    poke-env)."""
+    poke-env). ``own_team`` (W2, 2026-09-03): the own seat on ``team_a`` every chunk, with
+    ``own_mirror_frac`` mirrors and the opponent seat drawn by ``opp_weights``."""
     import numpy as np
-    from v_dance.eval.gauntlet import team_matchups
+    from v_dance.eval.gauntlet import collection_pairings
     rng = np.random.default_rng(seed)
     chunks = []
     uid = 0
-    for team_a, team_b, n in team_matchups(team_pool, n_games, seed=matchup_seed):
+    for team_a, team_b, n in collection_pairings(team_pool, n_games, seed=matchup_seed,
+                                                 own_team=own_team,
+                                                 own_mirror_frac=own_mirror_frac,
+                                                 opp_weights=opp_weights):
         remaining = n
         while remaining > 0:
             cn = min(chunk_size, remaining)
@@ -301,7 +306,8 @@ async def collect_with_league(actor_critic, league: OpponentLeague, n_games: int
                               n_workers: int = 1, stop_check=None,
                               battle_timeout: Optional[float] = 90.0, team_chooser=None,
                               status=None, live_dir=None, save_replays: bool = False,
-                              name_salt: str = ""):
+                              name_salt: str = "", own_team=None,
+                              own_mirror_frac: float = 0.2, opp_weights=None):
     """Collect ``n_games`` self-play games against LEAGUE-sampled opponents (assumes the
     Showdown server is already up — the caller manages it). Each chunk draws one opponent:
       * latest    -> SelfPlayVGCPlayer(ac) on both seats; collect BOTH trajectories (both
@@ -326,7 +332,8 @@ async def collect_with_league(actor_critic, league: OpponentLeague, n_games: int
     from v_dance.selfplay.collector import align_paired_trajectories
 
     chunks = build_collection_chunks(league, team_pool, n_games, chunk_size=chunk_size,
-                                     matchup_seed=matchup_seed, seed=seed)
+                                     matchup_seed=matchup_seed, seed=seed, own_team=own_team,
+                                     own_mirror_frac=own_mirror_frac, opp_weights=opp_weights)
     trajectories: list = []
     source_counts: Counter = Counter()
     prog = {"games": 0, "won": 0, "decided": 0}    # live progress (3c.6e-3)
@@ -421,7 +428,8 @@ def gauntlet_eval(candidate_path, *, teams, team_chooser, battles: int = 30,
                   manage_server: bool = False, n_workers: int = 1,
                   prev_best_path: Optional[str] = None,
                   mirror_battles: Optional[int] = None, stop_check=None,
-                  live_dir=None, save_replays: bool = False, name_salt: str = ""):
+                  live_dir=None, save_replays: bool = False, name_salt: str = "",
+                  own_team=None):
     """Evaluate a saved checkpoint on the scripted gauntlet (>=4 teams, side-balanced).
     Returns ``(results{opp:(wins,n)}, model_elo)``. ``n_workers`` (3c.8c) parallelises the
     eval the same way as collection so the promotion gate isn't the throughput bottleneck.
@@ -447,7 +455,8 @@ def gauntlet_eval(candidate_path, *, teams, team_chooser, battles: int = 30,
         team_chooser=Path(team_chooser), manage_server=manage_server,
         matchup_seed=matchup_seed, battle_timeout=battle_timeout, n_workers=n_workers,
         mirror_battles=mirror_battles, stop_check=stop_check,
-        live_dir=live_dir, save_replays=save_replays, name_salt=name_salt))
+        live_dir=live_dir, save_replays=save_replays, name_salt=name_salt,
+        own_team=own_team))
     return results, GA.model_elo(results)
 
 
@@ -708,7 +717,11 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                          resume_from=None, resume_gen=None, keep_snapshots: int = 25,
                          save_replays: bool = False, keep_replay_buffers: int = 200,
                          restart_server_every: int = 20, n_servers: int = 1,
-                         snapshot_path=None, max_hours=None, spawn_rooms: int = 0) -> dict:
+                         snapshot_path=None, max_hours=None, spawn_rooms: int = 0,
+                         own_team=None, own_mirror_frac: float = 0.2, opp_weights=None,
+                         register_arms: bool = False,
+                         register_prefix: str = "era5b_g",
+                         bandit_config=None) -> dict:
     """Run real generations end-to-end (collect via the league -> PPO update -> gauntlet
     eval -> promotion gate -> admit/refresh/revert), RESUMABLY (3c.4 / #20): a PER-GENERATION
     snapshot (``snap_gen{N}.pt`` in ``archive/sub_checkpoints/``) is written after every generation, so a later run
@@ -721,7 +734,12 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
     ``team_pool`` is the TRAINING pool (sec 15: draw both sides from the full archetype-rich
     set for pilot/counter exposure); ``eval_team_pool`` (default = ``team_pool``) is the
     CONTROLLED, side-balanced set the gauntlet gate judges on — so a generation's measured
-    strength isn't 'got lucky with the team draw' (sec 15)."""
+    strength isn't 'got lucky with the team draw' (sec 15).
+
+    W2 (2026-09-03, docs/w2_era5b_run_design_2026-09-03.md): ``own_team`` puts THAT team on the
+    model seat in every collection AND eval game (opponent seat still general, ``own_mirror_frac``
+    mirrors, ``opp_weights`` usage-weighted); ``register_arms`` hands every PROMOTED generation to
+    the serve-side bandit as an argmax arm so the LADDER judges it."""
     import asyncio
     import time as _time
 
@@ -853,7 +871,9 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                     team_chooser=team_chooser, status=status, live_dir=_coll_live,
                     save_replays=save_replays, generation=gen,   # 22d: gen-keyed account names
                     ports=_pool_ports,                           # 22f: spread workers across the pool
-                    spawn_rooms=_spawn)                          # W2: server-side spawner per pair
+                    spawn_rooms=_spawn,                          # W2: server-side spawner per pair
+                    own_team=own_team, own_mirror_frac=own_mirror_frac,
+                    opp_weights=opp_weights)                     # W2: own seat every game
             finally:
                 # ALWAYS drop the per-gen ckpt — even if collection raised (Ctrl-C lands inside the
                 # blocking submit) — else a full-weight file orphans each crashed gen (review fix).
@@ -868,6 +888,7 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                 seed=seed + gen * 1000, matchup_seed=gen, team_chooser=team_chooser,
                 n_workers=cw, stop_check=stop.should_stop, status=status,
                 live_dir=_gen_kind_dir(live_run_dir, gen, "replays"), save_replays=save_replays,
+                own_team=own_team, own_mirror_frac=own_mirror_frac, opp_weights=opp_weights,
                 name_salt=str(gen)))   # 22d: gen-keyed account names
         dt = _time.perf_counter() - t0
         thru["games"] += gen_cfg.n_games
@@ -909,7 +930,8 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                 n_procs=int(collect_procs), async_per_proc=int(collect_async_per_proc),
                 live_dir=_eval_live, save_replays=save_replays,
                 generation=history.generation,   # 22d: gen-keyed account names
-                ports=_pool_ports)               # 22f: spread eval workers across the pool
+                ports=_pool_ports,               # 22f: spread eval workers across the pool
+                own_team=own_team)               # W2: own seat vs the eval pool, mirror own-vs-own
             out = (results, GA.model_elo(results))
             _eval_label = f"{int(collect_procs)} procs"
         else:
@@ -918,6 +940,7 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                                 prev_best_path=prev_best_path, mirror_battles=mirror_battles,
                                 matchup_seed=seed + history.generation, stop_check=stop.should_stop,
                                 live_dir=_eval_live, save_replays=save_replays,
+                                own_team=own_team,                  # W2: own seat on the ladder
                                 name_salt=str(history.generation))   # 22d: gen-keyed account names
             _eval_label = f"{n_workers} workers"
         dt = _time.perf_counter() - t0
@@ -941,7 +964,7 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
             manage_server=False, matchup_seed=seed + history.generation,
             # task E: HoF past-champion battles spectate + save to eval/league/ too
             live_dir=_gen_kind_dir(live_run_dir, history.generation, "eval"),
-            save_replays=save_replays))
+            save_replays=save_replays, own_team=own_team))
         dt = _time.perf_counter() - t0
         n = sum(g for _i, _w, g in out)
         print(f"   HoF eval: {len(out)} past champions, {n} games in {dt:.1f}s")
@@ -1043,6 +1066,24 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                                  hof_eval_fn=(hof_run if gen_cfg.hof.enabled else None),
                                  status=status, cfg=gen_cfg)
             print_generation_report(rep)
+            if register_arms and rep.get("promoted"):
+                # W2: hand the PROMOTED snapshot to the serve-side bandit as an argmax arm, so the
+                # LADDER judges it after the next bot restart (the retire rule bounds a regression
+                # at ~40 games). NEVER fatal - a config problem must not kill a 6-hour run.
+                _gp = archive / "checkpoints" / f"gen{rep['generation']}.pt"
+                try:
+                    from v_dance.selfplay.ladder_update import (DEFAULT_BANDIT_CONFIG,
+                                                                register_arm)
+                    _cfg = bandit_config or DEFAULT_BANDIT_CONFIG   # a SMOKE points elsewhere
+                    _arm = f"{register_prefix}{rep['generation']}"
+                    register_arm(_cfg, name=_arm, battle_ckpt=_gp, tau=0.0,
+                                 note=(f"W2 era-5b: PROMOTED generation {rep['generation']} "
+                                       f"(own seat {Path(own_team).name if own_team else 'pool'}, "
+                                       f"base {Path(ckpt).parent.name}) - the ladder decides"))
+                    print(f"        bandit: registered arm {_arm} -> {_gp.name} "
+                          f"(restart the bot to serve it)")
+                except Exception as exc:
+                    print(f"        bandit: arm registration SKIPPED ({exc})")
             _hof = rep.get("hof")                   # Phase-2 HoF breadth-veto readout (P2.4)
             if _hof and _hof.get("reason") != "thin_pool_skip":
                 susp = "  ".join(f"{r['snapshot_id']}:{r['wins']}/{r['games']}"
@@ -1218,6 +1259,14 @@ def _launch_live(args):
         print("[gen] no training teams found under teams/Champions/ — add team files "
               "or pass --train-teams <names>", file=sys.stderr)
         sys.exit(2)
+    # W2 (2026-09-03): resolve the own seat against the TRAINING pool (so chunks carry one
+    # consistent team string) and build the opponent-seat weights once, at launch.
+    _own, _opp_w = args.own_team, None
+    if _own:
+        from v_dance.eval.gauntlet import canonical_own_team, observed_team_weights
+        _own = canonical_own_team(_own, train_pool)
+        if args.opp_weights == "observed":
+            _opp_w = observed_team_weights([t for t in train_pool if t != _own])
     print(f"== Live generation run: {n_gen if n_gen else 'until-stop'} gen x "
           f"{args.games} games (eval {args.eval_battles if args.eval_battles is not None else 'auto'}/opp"
           f"{f', max {args.hours}h' if args.hours else ''}) ==")
@@ -1251,6 +1300,16 @@ def _launch_live(args):
     print(f"   HoF (Phase 2): {'ON' if args.hof else 'OFF'} — not-lose to last {args.hof_champions} "
           f"past champions @ {args.hof_games} games each"
           + ("  [--hof-override: rejects logged, NOT blocking]" if args.hof_override else ""))
+    if _own:
+        _top = sorted(((v, k) for k, v in (_opp_w or {}).items()), reverse=True)[:5]
+        print(f"   W2 own seat (2026-09-03): {Path(_own).name} on the MODEL seat every game; "
+              f"collection mirror {args.own_mirror:.0%}; opponent seat = {args.opp_weights}"
+              + (f" (heaviest: {', '.join(Path(k).name for _v, k in _top)})" if _top else ""))
+        print(f"   W2 eval: own seat vs the {len(eval_pool)}-team eval pool; champion mirror + HoF "
+              f"own-vs-own. Promoted gens "
+              + (f"REGISTERED as bandit arms '{args.register_prefix}<N>' in "
+                 f"{Path(args.bandit_config).name if args.bandit_config else 'serve_bandit.json'}"
+                 if args.register_arms else "NOT registered (--register-arms is off)") + ".")
     _cw = args.collect_workers if args.collect_workers else _rb["workers"]
     print(f"   resources (sec 20): {summarize(_rb)}")
     _upd = "PPO update on GPU (VRAM capped)" if _rb["device"] == "cuda" else "CPU PPO update"
@@ -1280,6 +1339,9 @@ def _launch_live(args):
         save_replays=args.save_replays, keep_replay_buffers=args.keep_replay_buffers,
         restart_server_every=args.restart_server_every, n_servers=args.servers,
         spawn_rooms=args.spawn_rooms,
+        own_team=_own, own_mirror_frac=args.own_mirror, opp_weights=_opp_w,
+        register_arms=args.register_arms, register_prefix=args.register_prefix,
+        bandit_config=args.bandit_config,
         snapshot_path=args.snapshot, max_hours=args.hours)
 
 
@@ -1573,6 +1635,28 @@ if __name__ == "__main__":
                     help="W2 throughput (2026-09-03): with --collect-procs > 1, each worker pair plays through "
                          "the SERVER-SIDE spawner keeping this many rooms alive (rlspawn plugin) instead of the "
                          "challenge protocol. 0 = challenge path (default).")
+    ap.add_argument("--own-team", default=None,
+                    help="W2 single-team specialist (2026-09-03): play THIS team on the model seat "
+                         "in EVERY collection and eval game; the opponent seat still draws from the "
+                         "pool. Default off = the symmetric both-orientations pairing.")
+    ap.add_argument("--own-mirror", type=float, default=0.2,
+                    help="with --own-team: the share of COLLECTION games played as the own-vs-own "
+                         "MIRROR (where Trick Room / Helping Hand self-coordination is learned). "
+                         "Default 0.2. The eval mirror is --mirror-battles, unaffected.")
+    ap.add_argument("--opp-weights", default="uniform", choices=["uniform", "observed"],
+                    help="with --own-team: how the OPPONENT seat is drawn from the training pool. "
+                         "'observed' weights each team by the mean ladder usage of its six species "
+                         "(data/observed_meta_<reg>.json, floored at 3%%); 'uniform' = equal shares.")
+    ap.add_argument("--register-arms", action="store_true",
+                    help="register every PROMOTED generation in config/serve_bandit.json as a "
+                         "serve-side bandit arm (tau 0, adapt-rules off) so the LADDER judges it "
+                         "after the next bot restart. Name = --register-prefix + the gen number.")
+    ap.add_argument("--register-prefix", default="era5b_g",
+                    help="arm-name prefix for --register-arms (default 'era5b_g' -> era5b_g7).")
+    ap.add_argument("--bandit-config", default=None,
+                    help="where --register-arms writes (default config/serve_bandit.json, the "
+                         "LIVE serving config). Point a SMOKE at a throwaway copy so a promoted "
+                         "test generation never reaches the bot.")
     ap.add_argument("--collect-procs", type=int, default=1,
                     help="TRUE multiprocessing collection across this many worker PROCESSES "
                          "(14b; default 1 = single-process asyncio). >1 bypasses the GIL on model "

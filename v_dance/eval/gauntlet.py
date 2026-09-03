@@ -254,6 +254,203 @@ def team_matchups(team_pool: Sequence[str], n_battles: int,
     return [(a, b, n) for (a, b), n in counts.items() if n > 0]
 
 
+# ==============================================================================
+# W2 (2026-09-03): single-team ASYMMETRIC pairing - the OWN team on the model seat every game,
+# the opponent seat drawn from the pool (docs/w2_era5b_run_design_2026-09-03.md section 2). Pure /
+# torch-free; both the asyncio and the multiprocess collect + eval planners call these.
+# ==============================================================================
+OBSERVED_FLOOR_PCT = 3.0     # a pool team never drops below this usage weight (percent units)
+
+
+def team_key(team) -> str:
+    """The comparable identity of a pool entry: pool entries are repo-relative paths
+    (``teams/Champions/M-B/The_Big_6_v2``) while CLI flags carry bare names - compare by file name."""
+    return Path(str(team)).name.lower()
+
+
+def canonical_own_team(own_team, team_pool):
+    """The pool's own entry for ``own_team`` when it is in the pool (so chunks / replay routing see
+    one consistent string), else ``own_team`` verbatim (``resolve_team_path`` finds it by name)."""
+    k = team_key(own_team)
+    for t in team_pool or []:
+        if team_key(t) == k:
+            return t
+    return own_team
+
+
+def own_team_matchups(own_team, team_pool: Sequence[str], n_battles: int, *,
+                      mirror_frac: float = 0.2, weights: Optional[Dict[str, float]] = None,
+                      seed: int = 0) -> List[Tuple[str, str, int]]:
+    """Split ``n_battles`` with the OWN team ALWAYS on the model seat (``team_a``).
+
+    ``round(mirror_frac * n)`` games are the mirror ``(own, own, k)`` (where Trick Room / Helping
+    Hand self-coordination is learned); the rest go to the pool's OTHER teams (own excluded) in
+    proportion to ``weights`` (``{pool_entry: weight}``; None / all-zero = uniform) - floor first,
+    then the remainder by largest fractional part, ties broken by a ``seed``-shuffled order, so
+    the split is REPRODUCIBLE per seed (the same guarantee ``team_matchups`` gives the A/B) and
+    sums to exactly ``n_battles``. Opponents that round to 0 games are omitted."""
+    n = max(0, int(n_battles))
+    if n == 0:
+        return []
+    own = canonical_own_team(own_team, team_pool)
+    ok = team_key(own)
+    opps, seen = [], set()
+    for t in team_pool or []:
+        if team_key(t) != ok and team_key(t) not in seen:
+            seen.add(team_key(t))
+            opps.append(t)
+    if not opps:
+        return [(own, own, n)]
+    frac = max(0.0, min(1.0, float(mirror_frac)))
+    k = int(round(frac * n))
+    rest = n - k
+    w = [max(0.0, float((weights or {}).get(t, 0.0))) for t in opps] if weights else [1.0] * len(opps)
+    if sum(w) <= 0.0:
+        w = [1.0] * len(opps)
+    tot = sum(w)
+    exact = [rest * wi / tot for wi in w]
+    counts = [int(math.floor(e)) for e in exact]
+    rem = rest - sum(counts)
+    order = list(range(len(opps)))
+    random.Random(seed).shuffle(order)
+    order.sort(key=lambda i: -(exact[i] - counts[i]))       # stable: ties keep the seeded order
+    for i in order[:rem]:
+        counts[i] += 1
+    out: List[Tuple[str, str, int]] = [(own, own, k)] if k > 0 else []
+    out.extend((own, t, c) for t, c in zip(opps, counts) if c > 0)
+    return out
+
+
+def _species_key(name) -> str:
+    return "".join(ch for ch in str(name or "").lower() if ch.isalnum())
+
+
+def _team_file(team) -> Optional[Path]:
+    """A light resolver (no poke-env import): a path, a repo-relative path, or a bare name found
+    anywhere under teams/Champions/. None when nothing matches (the caller treats it as 0 usage)."""
+    p = Path(str(team))
+    if p.is_file():
+        return p
+    rp = _REPO_ROOT / str(team)
+    if rp.is_file():
+        return rp
+    base = _REPO_ROOT / "teams" / "Champions"
+    if base.exists():
+        hits = sorted(q for q in base.rglob(p.name) if q.is_file())
+        if hits:
+            return hits[0]
+    return None
+
+
+def default_observed_meta_path() -> Path:
+    """``data/observed_meta_<reg>.json`` for the active format (falls back to the M-B file)."""
+    try:
+        from v_dance.formats import reg_token, default_format
+        tok = reg_token(default_format()) or "regmb"
+    except Exception:
+        tok = "regmb"
+    p = _REPO_ROOT / "data" / f"observed_meta_{tok}.json"
+    return p if p.exists() else _REPO_ROOT / "data" / "observed_meta_regmb.json"
+
+
+def observed_team_weights(team_pool: Sequence[str], meta_path=None, *,
+                          floor_pct: float = OBSERVED_FLOOR_PCT) -> Dict[str, float]:
+    """``{pool_entry: weight}`` = the MEAN observed ``usage_pct`` of the team's species (the
+    ladder dossiers' ``data/observed_meta_<reg>.json``), floored at ``floor_pct`` so a rare
+    archetype keeps a minimum share of the opponent seat. Mega formes count under their base
+    species (the meta file keys base names). A team whose paste cannot be read weighs the floor."""
+    from v_dance.parser.vod_parser.team_sheet import parse_showdown_team, base_species
+    path = Path(meta_path) if meta_path else default_observed_meta_path()
+    try:
+        meta = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        meta = {}
+    usage = {_species_key(k): float((v or {}).get("usage_pct") or 0.0)
+             for k, v in (meta.get("pokemon") or {}).items()}
+    out: Dict[str, float] = {}
+    for t in team_pool or []:
+        f = _team_file(t)
+        vals: List[float] = []
+        if f is not None:
+            try:
+                mons = parse_showdown_team(f.read_text(encoding="utf-8"))
+            except Exception:
+                mons = []
+            vals = [usage.get(_species_key(base_species(m["species"])), 0.0)
+                    for m in mons if m.get("species")]
+        mean = sum(vals) / len(vals) if vals else 0.0
+        out[t] = max(float(floor_pct), mean)
+    return out
+
+
+
+
+def subdivide_pairings(matchups, target_chunks):
+    """Split ``(team_a, team_b, n)`` chunks into ~``target_chunks`` total so a SMALL pairing set can
+    still saturate the worker pool (task #13; shared with the eval planners for W2, 2026-09-03).
+
+    Each chunk may become several sub-chunks (``n_sub >= 1``, summing to ``n``); the extra splits go
+    to the chunks with the most games-per-sub-chunk (largest-load-first), so the sub-chunks come out
+    as even as possible. Motivating cases: a single-team MIRROR A/B, and the W2 own-vs-own champion
+    mirror / HoF suspect - each ONE ``(own, own, N)`` chunk that would otherwise pin a 360-game eval
+    to one sequential pairing. Each sub-chunk is later given a DISTINCT uid (distinct accounts +
+    seeds), so they are INDEPENDENT seed-streams that aggregate to the identical verdict.
+
+    NO-OP when the pool already yields ``>= target_chunks`` pairings or ``target_chunks <= 1``.
+    Total games are preserved exactly and every sub-chunk keeps its parent's (team_a, team_b)."""
+    chunks = [(a, b, n) for (a, b, n) in matchups if n > 0]
+    total = sum(n for _, _, n in chunks)
+    target = min(int(target_chunks), total)              # never more chunks than games
+    if target <= len(chunks):
+        return chunks
+    ks = [1] * len(chunks)                               # sub-chunk count per original chunk (>= 1)
+    ns = [n for _, _, n in chunks]
+    for _ in range(target - len(chunks)):                # hand out the extra splits one at a time
+        best, best_load = -1, -1.0
+        for i in range(len(chunks)):
+            if ks[i] >= ns[i]:                           # already 1 game / sub-chunk
+                continue
+            load = ns[i] / ks[i]                         # games per current sub-chunk
+            if load > best_load:
+                best, best_load = i, load
+        if best < 0:
+            break                                        # nothing left that can be split
+        ks[best] += 1
+    out = []
+    for (a, b, n), k in zip(chunks, ks):
+        base, rem = divmod(n, k)                         # k near-equal parts summing to n
+        for j in range(k):
+            out.append((a, b, base + (1 if j < rem else 0)))
+    return out
+
+
+def collection_pairings(team_pool: Sequence[str], n_games: int, *, seed: int = 0, own_team=None,
+                        own_mirror_frac: float = 0.2, opp_weights=None) -> List[Tuple[str, str, int]]:
+    """The collection batch's ``(team_a, team_b, n)`` plan: symmetric ``team_matchups`` by default;
+    with ``own_team`` the W2 own-seat split (``own_team_matchups``)."""
+    if own_team:
+        return own_team_matchups(own_team, team_pool, n_games, mirror_frac=own_mirror_frac,
+                                 weights=opp_weights, seed=seed)
+    return team_matchups(team_pool, n_games, seed=seed)
+
+
+def eval_pairings(kind: str, team_pool: Sequence[str], n_battles: int, *, seed: int = 0,
+                  own_team=None) -> List[Tuple[str, str, int]]:
+    """The gauntlet's pairing for one opponent ``kind``: symmetric ``team_matchups`` by default.
+    With ``own_team`` (W2): the scripted anchors play OWN vs each eval team (uniform, no mirror -
+    'judge what will be served'); the model-vs-model kinds (``prev_best`` = the champion mirror,
+    and the HoF suspects that reuse it) play OWN vs OWN - both specialists on the same team."""
+    if not own_team:
+        return team_matchups(team_pool, n_battles, seed=seed)
+    n = max(0, int(n_battles))
+    if n == 0:
+        return []
+    own = canonical_own_team(own_team, team_pool)
+    if kind == "prev_best":
+        return [(own, own, n)]
+    return own_team_matchups(own, team_pool, n, mirror_frac=0.0, weights=None, seed=seed)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Async orchestrator (reuses run_local_battle) — exercised by the live smoke
 # ══════════════════════════════════════════════════════════════════════════════
@@ -354,6 +551,7 @@ async def run_gauntlet(
     live_dir=None,
     save_replays: bool = False,
     name_salt: str = "",
+    own_team=None,
 ) -> Dict[str, Tuple[int, int]]:
     """Play the model vs each opponent over the rotating team pool and return
     ``{opponent_name: (model_wins, n_finished)}``.
@@ -370,7 +568,10 @@ async def run_gauntlet(
     ``name_salt`` (22d) folds the generation (and, for the HoF, the suspect) into the ``BC…`` /
     ``OP…`` account names so they don't repeat across gens — a stale server-side challenge from one
     gen can't collide with the next gen's reuse (``already a challenge between you and OPprev…``).
-    ``""`` (the standalone-CLI default) keeps the legacy ``BC{uid}`` / ``OP{kind4}{uid}`` names."""
+    ``""`` (the standalone-CLI default) keeps the legacy ``BC{uid}`` / ``OP{kind4}{uid}`` names.
+
+    ``own_team`` (W2, 2026-09-03): the model seat plays THIS team every battle - scripted kinds vs
+    each pool team, the champion mirror own-vs-own (``eval_pairings``)."""
     import v_dance.play.run_local_battle as R
     from v_dance.play import parallel_battles as PB
     server = R.start_showdown() if manage_server else None
@@ -385,8 +586,10 @@ async def run_gauntlet(
         # (the v2 gate's 70% bar needs >=200 games to be reliable; gate_sim), while the cheap
         # scripted ladder stays small — mirror_battles overrides just that opponent's count.
         nb = mirror_battles if (kind == "prev_best" and mirror_battles) else battles_per_opponent
-        for model_team_name, opp_team_name, n in team_matchups(
-                team_pool, nb, seed=matchup_seed):
+        _pairs = eval_pairings(kind, team_pool, nb, seed=matchup_seed, own_team=own_team)
+        if own_team:                    # W2: own-vs-own is ONE pairing - fill the worker slots
+            _pairs = subdivide_pairings(_pairs, max(1, int(n_workers)))
+        for model_team_name, opp_team_name, n in _pairs:
             uid += 1
             descriptors.append({"kind": kind, "mt": model_team_name,
                                 "ot": opp_team_name, "n": n, "uid": uid})
