@@ -37,6 +37,7 @@ import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
 _REPO = Path(__file__).resolve().parents[2]
@@ -75,6 +76,21 @@ def _bandit_arm_names() -> list:
         return [str(a["name"]) for a in (cfg.get("arms") or []) if a.get("name")]
     except Exception:
         return []
+
+
+def _bandit_learning_arm(path: Path = None) -> Optional[dict]:
+    """2026-09-04: the W3b chain head — the ``learning: true`` arm of config/serve_bandit.json as
+    ``{name, battle_ckpt, tau}`` (None when there is none). Shown next to ``.env VD_BATTLE_CKPT`` so the
+    USER sees whether the deployed default IS the newest PPO checkpoint (the chain card deploys it)."""
+    try:
+        cfg = json.loads((path or (_REPO / "config" / "serve_bandit.json")).read_text(encoding="utf-8"))
+        for a in cfg.get("arms") or []:
+            if a.get("learning") and a.get("name"):
+                return {"name": str(a["name"]), "battle_ckpt": str(a.get("battle_ckpt") or "default"),
+                        "tau": float(a.get("tau") or 0.0)}
+    except Exception:
+        pass
+    return None
 
 
 # well-known local services (display + start/stop for the two datatools servers)
@@ -216,6 +232,10 @@ _PANEL_PORTS = range(8777, 8787)
 _PANEL_POST_OK = {"/api/ladder/start", "/api/ladder/stop", "/api/challenge",
                   "/api/challenge/cancel", "/api/options", "/api/team", "/api/format"}
 _panel_cache = {"port": None}
+# 2026-09-04: the panel's /api/status grew with the full matchup tables (every species, sprites); 0.6 s
+# aborted the read mid-body (53 ConnectionAbortedError tracebacks in the panel, the Online tab flickering
+# "not running"). The port probe stays fast; only the body read gets this budget.
+_PANEL_STATUS_TIMEOUT_S = 3.0
 
 
 def _panel_status() -> dict:
@@ -227,7 +247,7 @@ def _panel_status() -> dict:
         if not p or not _port_open(p):
             continue
         try:
-            with urllib.request.urlopen(f"http://127.0.0.1:{p}/api/status", timeout=0.6) as r:
+            with urllib.request.urlopen(f"http://127.0.0.1:{p}/api/status", timeout=_PANEL_STATUS_TIMEOUT_S) as r:
                 js = json.loads(r.read().decode("utf-8"))
             if isinstance(js, dict) and "run" in js and "tally" in js:
                 _panel_cache["port"] = p
@@ -236,6 +256,20 @@ def _panel_status() -> dict:
             continue
     _panel_cache["port"] = None
     return {"up": False}
+
+
+def _bot_panel_up(port_8777_up: Optional[bool] = None) -> bool:
+    """Cheap 'is the online bot up' for the 3 s status poll. The panel binds the FIRST free port in 8777-8786,
+    so :8777 (already probed for the Services card — pass that result in) plus the port the Online tab last
+    found cover the real cases. No range scan here: a CLOSED localhost port costs the full 0.15 s timeout on
+    Windows (measured 2026-09-04: ten probes = 1.5 s per poll). No body fetch either — the Online tab and the
+    launch guard use _panel_status()."""
+    if port_8777_up is None:
+        port_8777_up = _port_open(_PANEL_PORTS[0])
+    if port_8777_up:
+        return True
+    cached = _panel_cache["port"]
+    return bool(cached and cached != _PANEL_PORTS[0] and _port_open(cached))
 
 
 def _dashboard_status() -> dict:
@@ -474,6 +508,47 @@ REGISTRY = [
          desc="The full self-play loop. Prefer the dashboard's launcher tab (:5175) — it has the "
               "config wizard and live console. ⚠ always set save_replays:true in run configs.",
          opts=[dict(name="wizard", type="flag", label="--wizard (interactive config)", default=True)]),
+    # 2026-09-04 (USER: "make a UI version of this command in Mission Control ... on execution have the
+    # config swap out the ppo model for the latest one in .env"). The W3b chain step the USER runs after
+    # every ~200 learning games / nightly. Defaults = the verified command of 2026-09-04:
+    #   scratch/ladder_ppo_update.py --run-gates --register --base learning --days 1 --actor-lr 1e-3 --epochs 4
+    # The script trains from the learning arm's checkpoint on its own games, runs the gates, registers
+    # arm ppo_<date> as the new learning arm (the old one benched) and deploys it to .env VD_BATTLE_CKPT.
+    # bot_down=True: refused while the online bot is up (it records the games this trains on, reads the
+    # bandit config + .env at launch, and shares the CPU) — stop it in the Online tab first.
+    dict(id="ladder_ppo", cat="train", heavy=False, bot_down=True,
+         title="W3b chain update (nightly ladder PPO)",
+         script="scratch/ladder_ppo_update.py",
+         desc="Bot DOWN first. Trains the learning arm's checkpoint on its last --days of recorded ladder "
+              "games (leashed PPO, CPU, ~20 s), runs the ruler + type-eff gates (minutes), registers "
+              "ppo_<date> as the NEW learning arm (the previous head is benched) plus its argmax TWIN "
+              "ppo_<date>_t0 (τ 0, next to era2 — judges the weights; the previous twin is benched), and "
+              "points .env VD_BATTLE_CKPT at it. Then restart ONE bot. Refused while the online bot is running.",
+         opts=[dict(name="base", type="choice", label="--base (learning = the chain head's checkpoint)",
+                    choices=["learning", "incumbent"], default="learning", omit=["incumbent"]),
+               dict(name="days", type="float", label="--days (window of recorded games)", default=1.0,
+                    min=0.05, max=60.0),
+               dict(name="actor-lr", type="float", label="--actor-lr (halve if KL-to-base > 0.05)",
+                    default=0.001, min=0.0, max=1.0),
+               dict(name="epochs", type="int", label="--epochs", default=4, min=1, max=50),
+               dict(name="min-steps", type="int", label="--min-steps (refuse below)", default=200,
+                    min=1, max=100000),
+               dict(name="run-gates", type="flag", label="--run-gates (ruler + type-eff probe)", default=True),
+               dict(name="register", type="flag",
+                    label="--register (arm ppo_<date> = the new learning arm when every gate passes)",
+                    default=True),
+               # 2026-09-04 (USER "go build it"): the argmax twin — ppo_<date>_t0 at tau 0 next to the incumbent,
+               # the previous twin benched; the only clean read of the chain's WEIGHTS (design B3)
+               dict(name="twin", type="flag",
+                    label="--twin (also register ppo_<date>_t0 = the same checkpoint at τ 0 next to era2; bench the previous twin)",
+                    default=True),
+               dict(name="dry-run", type="flag", label="--dry-run (select + report only, no training)"),
+               dict(name="no-rotate", type="flag", label="--no-rotate (keep the previous learning arm served)"),
+               dict(name="no-deploy-env", type="flag",
+                    label="--no-deploy-env (do NOT point .env VD_BATTLE_CKPT at the new checkpoint)")],
+         note="Exit 0 = candidate saved (+ registered + deployed) · 2 = refused (no trainable data / "
+              "below --min-steps) · 3 = a gate failed (candidate saved, NOT registered). Expect KL-to-base "
+              "0.01-0.04 at lr 1e-3; the per-epoch approx-KL stop (0.02) may end it early — that is fine."),
 
     # ---- DATA ----
     dict(id="scrape_pika", cat="data", heavy=True, title="Scrape Pikalytics (MANUAL only)",
@@ -579,7 +654,59 @@ _PROGRESS = {
                                ("bring exact", r"bring exact ([\d.]+)"),
                                ("lead exact", r"lead exact ([\d.]+)")]},
     "exploiter": {"mode": "exploiter"},
+    "ladder_ppo": {"mode": "ladder_ppo"},
 }
+
+# The chain script's report lines, in order — the Jobs tab shows the furthest phase reached (+ its numbers).
+_LP_PHASES = [
+    ("selected",   r"\[ladder-ppo\] selection"),
+    ("trained",    r"\[ladder-ppo\] update\s+steps"),
+    ("candidate",  r"\[ladder-ppo\] candidate ->"),
+    ("gated",      r"\[ladder-ppo\] ruler delta"),
+    ("registered", r"\[ladder-ppo\] arm registered:"),
+    ("deployed",   r"\[ladder-ppo\] \.env \S+ ->"),
+]
+
+
+def _ladder_ppo_progress(text: str) -> dict:
+    """Phase + numbers from scratch/ladder_ppo_update.py's log (see _LP_PHASES). A refusal / failed gate /
+    dry run is named as the phase so the card reads right without opening the log."""
+    phase, done = "starting", 0
+    for i, (name, rx) in enumerate(_LP_PHASES, 1):
+        if re.search(rx, text):
+            phase, done = name, i
+    if re.search(r"\[ladder-ppo\] REFUSED", text):
+        phase = "REFUSED (see log)"
+    elif re.search(r"\[ladder-ppo\] GATE FAILED|\[ladder-ppo\] NOT registered", text):
+        phase = "GATE FAILED - not registered"
+    elif re.search(r"\[ladder-ppo\] dry run", text):
+        phase = "dry run done"
+    m: dict = {}
+    g = re.search(r"games / steps\s*:\s*(\d+) / (\d+)\s*\(turn (\d+)", text)
+    if g:
+        m["games"], m["turn steps"] = g.group(1), g.group(3)
+    u = re.search(r"KL-to-base ([\d.]+)\s+EV ([-\d.]+)", text)
+    if u:
+        m["KL-to-base"], m["EV"] = u.group(1), u.group(2)
+    r = re.search(r"ruler delta (\S+) pp .*?-> (ok|FAIL)", text)
+    if r:
+        m["ruler pp"] = f"{r.group(1)} {r.group(2)}"
+    a = re.search(r"ruler vs anchor \S+: (\S+) pp .*?-> (ok|FAIL)", text)
+    if a:
+        m["vs anchor pp"] = f"{a.group(1)} {a.group(2)}"
+    t = re.search(r"type-eff (\S+) -> (ok|FAIL)", text)
+    if t:
+        m["type-eff"] = t.group(2)
+    reg = re.search(r'arm registered: \{"name": "([^"]+)"', text)
+    if reg:
+        m["arm"] = reg.group(1)
+    tw = re.search(r'twin registered: \{"name": "([^"]+)"', text)
+    if tw:
+        m["twin"] = tw.group(1)
+    dep = re.search(r"\[ladder-ppo\] \.env (\S+) -> (\S+)", text)
+    if dep:
+        m[".env " + dep.group(1)] = dep.group(2).split("/")[-2] if "/" in dep.group(2) else dep.group(2)
+    return {"label": "phase", "value": phase, "pct": round(100 * done / len(_LP_PHASES)), "metrics": m}
 
 
 def _read_tail(path: Path, nbytes: int = 90_000) -> str:
@@ -609,6 +736,8 @@ def _job_progress(entry_id: str, argv: list, log_path: Path) -> Optional[dict]:
     text = _read_tail(log_path)
     if not text:
         return None
+    if spec.get("mode") == "ladder_ppo":
+        return _ladder_ppo_progress(text)
     if spec.get("mode") == "exploiter":
         tot = re.findall(r"\(total (\d+)\)", text)
         wr = re.findall(r"trained: WR ([\d.]+)", text)
@@ -680,6 +809,8 @@ def _build_argv(entry: dict, options: dict, teams: list, ckpts: dict) -> list:
         elif typ == "choice":
             if raw not in opt["choices"]:
                 raise ValueError(f"--{name}: invalid choice {raw!r}")
+            if raw in (opt.get("omit") or ()):         # e.g. --base "incumbent" = the script's own default
+                continue
             argv += [f"--{name}", raw]
         elif typ == "team":
             if raw not in teams:
@@ -747,7 +878,24 @@ class _Jobs:
         argv = _build_argv(entry, options, teams, _ckpt_inventory())
         heavy = bool(entry.get("heavy"))
         with self._lock:
+            if entry.get("bot_down"):
+                # 2026-09-04: the chain update trains on the games the online bot RECORDS, rotates the
+                # bandit config the bot reads at launch and rewrites .env — the bot must be down.
+                live = next((j for j in self._jobs.values()
+                             if _REG_BY_ID.get(j.entry_id, {}).get("single") and j.alive), None)
+                panel = _panel_status()
+                if live is not None or panel.get("up"):
+                    where = (f"job {live.jid}" if live is not None else f"panel :{panel.get('port')}")
+                    raise ValueError(
+                        f"{entry.get('title', entry['id'])} needs the online bot DOWN (it is running - {where}). "
+                        "Stop it in the Online tab (or the Jobs tab), wait for its games to end, then launch.")
             if entry.get("single"):
+                busy_chain = next((j for j in self._jobs.values()
+                                   if _REG_BY_ID.get(j.entry_id, {}).get("bot_down") and j.alive), None)
+                if busy_chain is not None:
+                    raise ValueError(
+                        f"{_REG_BY_ID[busy_chain.entry_id].get('title', busy_chain.entry_id)} is still running "
+                        f"({busy_chain.jid}) - it rotates the bandit config + .env at the end; launch the bot after it exits.")
                 # 2026-09-03: ONE online bot at a time. Two launches 5 min apart played the SAME
                 # battles on one account (13 rejections in 14 games, a game sealed under arm None,
                 # the bandit state written by both). The bot itself also refuses (DuplicateBotError).
@@ -808,7 +956,10 @@ def _status() -> dict:
             "services": services, "exploit": _exploit_summary(), "logs": _recent_logs(),
             "jobs": _JOBS.list(), "formats_full": _known_formats_full(),
             "editable_env": list(_ENV_WRITE_KEYS),
-            "bandit_arms": _bandit_arm_names()}
+            "bandit_arms": _bandit_arm_names(),
+            # 2026-09-04: the chain head next to the deployed default (the chain card deploys it)
+            "learning_arm": _bandit_learning_arm(),
+            "bot_up": _bot_panel_up(services["bot_panel"]["up"])}
 
 
 def _registry_public() -> list:
@@ -816,7 +967,7 @@ def _registry_public() -> list:
     for e in REGISTRY:
         out.append({k: e.get(k) for k in
                     ("id", "cat", "heavy", "title", "desc", "module", "script", "raw",
-                     "fixed", "opts", "envopts", "note")})
+                     "fixed", "opts", "envopts", "note", "bot_down")})
     return out
 
 

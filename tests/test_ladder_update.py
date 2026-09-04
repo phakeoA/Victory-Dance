@@ -301,6 +301,18 @@ def test_selection_repairs_the_recorders_empty_slot_zero_into_pass(world):
         assert_actions_legal(sel_bad.trajectories[0].transitions)
 
 
+def test_same_day_second_run_gets_a_suffixed_stamp(tmp_path):
+    """2026-09-03: the evening chain update on the day ppo_20260903 was registered must not reuse its arm
+    name (register_arm refuses AFTER training + gates) or overwrite its served checkpoint folder."""
+    root = tmp_path / "ckpts"
+    root.mkdir()
+    assert LU.next_run_stamp("20260903", ["era2"], root) == "20260903"
+    assert LU.next_run_stamp("20260903", ["era2", "ppo_20260903"], root) == "20260903b"
+    (root / "checkpoints_attn_ladder_ppo_20260903b").mkdir()                 # folder taken, name free
+    assert LU.next_run_stamp("20260903", ["era2", "ppo_20260903"], root) == "20260903c"
+    assert LU.next_run_stamp("20260904", ["ppo_20260903", "ppo_20260903b"], root) == "20260904"
+
+
 def test_chain_mode_learning_base_anchor_gate_and_rotation(world, tmp_path):
     """2026-09-03 L3: ``--base learning`` trains from the ONE learning arm's checkpoint; the ruler runs
     against the ANCHOR too (absolute floor); registering flags the new arm learning and benches the old."""
@@ -346,3 +358,86 @@ def test_chain_mode_learning_base_anchor_gate_and_rotation(world, tmp_path):
     assert old["learning"] is False and "superseded as the LEARNING arm by ppo_x" in old["benched_20260904"]
     assert LU.learning_arms(LU.arm_table(cfg_p)) == ["ppo_x"]
     assert LU.rotate_learning_arm(cfg_p, keep="ppo_x", stamp="20260905") == []   # idempotent
+
+
+def test_twin_arm_registration_and_rotation(world, tmp_path):
+    """2026-09-04 (design B3, USER "go build it"): ``--twin`` registers ``ppo_<stamp>_t0`` = the new head's checkpoint
+    at τ 0 with the INCUMBENT's knobs (no adapt_rules key, not learning, retire rule applies), marked ``twin_of``;
+    one twin at a time — the previous twin is benched with a dated note; the live loader accepts the entry."""
+    import shutil
+    from v_dance.play import serve_bandit as SB
+    cfg_p = tmp_path / "twin.json"
+    shutil.copy(world.cfg, cfg_p)
+    head = LU.register_arm(cfg_p, name="ppo_20260904b", battle_ckpt=world.base, tau=0.3, note="head", learning=True)
+    tw = LU.register_twin_arm(cfg_p, head=head["name"], battle_ckpt=world.base, stamp="20260904b")
+    assert tw["name"] == "ppo_20260904b_t0" and tw["tau"] == 0.0 and tw["twin_of"] == "ppo_20260904b"
+    assert tw["battle_ckpt"] == head["battle_ckpt"] and tw["top_p"] == 1.0 and tw["tp_tie_eps"] == 1.0
+    assert "adapt_rules" not in tw and "learning" not in tw          # era2's knobs: launch default, retire rule applies
+    with pytest.raises(ValueError, match="already exists"):
+        LU.register_twin_arm(cfg_p, head="ppo_20260904b", battle_ckpt=world.base, stamp="20260904b")
+    # the LIVE loader (what the bot runs at launch) accepts the extra key and reads the twin as a plain argmax arm
+    loaded = {a.name: a for a in SB.load_arms(cfg_p, exists=lambda _p: True)}
+    t = loaded["ppo_20260904b_t0"]
+    assert t.tau == 0.0 and t.adapt_rules is None and t.learning is False and t.incumbent is False
+    assert t.adapt_rules_for(True) is True and loaded["ppo_20260904b"].adapt_rules_for(True) is False
+    assert LU.rotate_twin_arm(cfg_p, keep="ppo_20260904b_t0", stamp="20260904b") == []   # nothing to bench yet
+    # the next step: a new head + twin; the old twin is benched (record kept by name), the new one stays
+    LU.register_arm(cfg_p, name="ppo_20260905", battle_ckpt=world.base, tau=0.3, note="head 2", learning=True)
+    assert LU.rotate_learning_arm(cfg_p, keep="ppo_20260905", stamp="20260905") == ["ppo_20260904b"]
+    tw2 = LU.register_twin_arm(cfg_p, head="ppo_20260905", battle_ckpt=world.base, stamp="20260905")
+    assert LU.rotate_twin_arm(cfg_p, keep=tw2["name"], stamp="20260905") == ["ppo_20260904b_t0"]
+    cfg = json.loads(cfg_p.read_text(encoding="utf-8"))
+    names = [a["name"] for a in cfg["arms"]]
+    assert "ppo_20260905_t0" in names and "ppo_20260904b_t0" not in names and "ppo_20260904b" not in names
+    old = next(a for a in cfg["benched"] if a["name"] == "ppo_20260904b_t0")
+    assert "superseded as the argmax TWIN by ppo_20260905_t0" in old["benched_20260905"] and old["twin_of"] == "ppo_20260904b"
+    assert LU.rotate_twin_arm(cfg_p, keep=tw2["name"], stamp="20260906") == []            # idempotent
+    assert LU.learning_arms(LU.arm_table(cfg_p)) == ["ppo_20260905"]                    # the twin is never 'learning'
+
+
+def test_deploy_env_battle_ckpt_swaps_the_key_and_keeps_one_rollback_line(tmp_path):
+    """2026-09-04 (USER: "on execution have the config swap out the ppo model for the latest one in .env"):
+    a registered chain head becomes .env VD_BATTLE_CKPT in place; the old value survives as ONE commented
+    rollback line; nothing else moves; a current value is left alone; a missing key is appended."""
+    env = tmp_path / ".env"
+    env.write_text("# creds\nPS_USERNAME=bot\n# deploy defaults\n"
+                   "VD_BATTLE_CKPT=ai_train_scripts/BC_model/checkpoints_attn_era4_2b/battle_base.pt\n"
+                   "VD_TP_CKPT=tp.pt\nVD_SERVE_TAU=0\n", encoding="utf-8")
+    ck1 = LU._REPO / "ai_train_scripts" / "BC_model" / "checkpoints_attn_ladder_ppo_20260904" / "battle_base.pt"
+    r = LU.deploy_env_battle_ckpt(env, ck1, stamp="20260904", arm="ppo_20260904")
+    assert r["changed"] and r["old"].endswith("checkpoints_attn_era4_2b/battle_base.pt")
+    assert r["new"] == "ai_train_scripts/BC_model/checkpoints_attn_ladder_ppo_20260904/battle_base.pt"
+    lines = env.read_text(encoding="utf-8").splitlines()
+    assert [ln for ln in lines if ln.startswith("VD_BATTLE_CKPT=")] == ["VD_BATTLE_CKPT=" + r["new"]]
+    assert lines[:3] == ["# creds", "PS_USERNAME=bot", "# deploy defaults"]
+    assert lines[-2:] == ["VD_TP_CKPT=tp.pt", "VD_SERVE_TAU=0"]
+    assert lines.index("VD_BATTLE_CKPT=" + r["new"]) == 5          # in place: two tag lines above it
+    assert lines[4] == "# [ladder-ppo] VD_BATTLE_CKPT=" + r["old"]
+    assert lines[3].startswith("# [ladder-ppo] 20") and "ppo_20260904" in lines[3] and "ROLLBACK" in lines[3]
+    # the next night: ONE rollback line (last night's head); the older tag lines are gone
+    ck2 = LU._REPO / "ai_train_scripts" / "BC_model" / "checkpoints_attn_ladder_ppo_20260905" / "battle_base.pt"
+    r2 = LU.deploy_env_battle_ckpt(env, ck2, stamp="20260905", arm="ppo_20260905")
+    lines = env.read_text(encoding="utf-8").splitlines()
+    tags = [ln for ln in lines if ln.startswith("# [ladder-ppo]")]
+    assert r2["old"] == r["new"] and len(tags) == 2 and tags[1] == "# [ladder-ppo] VD_BATTLE_CKPT=" + r["new"]
+    assert [ln for ln in lines if ln.startswith("VD_BATTLE_CKPT=")] == ["VD_BATTLE_CKPT=" + r2["new"]]
+    assert len(lines) == 8
+    # already current: nothing written
+    before = env.read_text(encoding="utf-8")
+    assert LU.deploy_env_battle_ckpt(env, ck2)["changed"] is False
+    assert env.read_text(encoding="utf-8") == before
+    # no key at all: appended (a tag line + the key), nothing to roll back
+    env2 = tmp_path / "bare.env"
+    env2.write_text("PS_USERNAME=bot\n", encoding="utf-8")
+    r3 = LU.deploy_env_battle_ckpt(env2, ck1)
+    assert r3["old"] is None and env2.read_text(encoding="utf-8").splitlines()[-1] == "VD_BATTLE_CKPT=" + r["new"]
+    assert not any("ROLLBACK" in ln for ln in env2.read_text(encoding="utf-8").splitlines())
+    # the chain head reader (Mission Control shows it next to the .env default)
+    cfg = {"arms": [{"name": "era2", "battle_ckpt": "a.pt", "tau": 0, "incumbent": True},
+                    {"name": "ppo_20260904", "battle_ckpt": "b.pt", "tau": 0.3, "learning": True}]}
+    p = tmp_path / "c.json"
+    p.write_text(json.dumps(cfg), encoding="utf-8")
+    assert LU.learning_head(LU.arm_table(p)) == {"name": "ppo_20260904", "battle_ckpt": "b.pt", "tau": 0.3}
+    cfg["arms"][1]["learning"] = False
+    p.write_text(json.dumps(cfg), encoding="utf-8")
+    assert LU.learning_head(LU.arm_table(p)) is None

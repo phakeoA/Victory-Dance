@@ -213,6 +213,7 @@ function showTab(k) {
   if (k === "monitor" && S) renderMonitor();
   if (k === "jobs" && S) renderJobs();
   if (k === "overview" && S) renderOverview();
+  if (k === "train" && S) renderChainStatus();
 }
 
 /* ── command card rendering (generic over the registry) ── */
@@ -244,7 +245,8 @@ function optField(e, o) {
 
 function cardHTML(e) {
   const pill = e.heavy ? `<span class="pill heavy">HEAVY — run in terminal</span>`
-                       : `<span class="pill light">launchable</span>`;
+                       : `<span class="pill light">launchable</span>`
+             + (e.bot_down ? ` <span class="pill heavy">bot must be DOWN</span>` : "");
   const opts = (e.opts || []).map(o => optField(e, o)).join("");
   const envs = (e.envopts || []).map(o =>
     `<div class="chk"><input type="checkbox" id="env-${e.id}-${o.key}">
@@ -255,6 +257,7 @@ function cardHTML(e) {
   return `<div class="card" id="card-${e.id}">
     <h3>${esc(e.title)} ${pill}</h3>
     ${e.desc ? `<div class="desc">${esc(e.desc)}</div>` : ""}
+    ${e.id === "ladder_ppo" ? `<div class="desc" id="chain-status">…</div>` : ""}
     ${opts}${envs}
     <div class="row">${launch}
       <button class="btn gray" onclick="copyCmd('${e.id}')">Copy command</button></div>
@@ -273,6 +276,7 @@ function buildArgs(e) {
     if (o.type === "flag") { if (el.checked) args.push("--" + o.name); continue; }
     if (o.type === "format") continue;            // goes in the env prefix, not argv
     const v = (el.value || "").trim();
+    if (o.omit && o.omit.includes(v)) continue;   // e.g. --base incumbent = the script's own default
     if (v) args.push("--" + o.name, v);
   }
   return args;
@@ -296,6 +300,24 @@ function cmdLine(e) {
 }
 
 function refreshCmd(e) { const el = $(`cmd-${e.id}`); if (el) el.textContent = cmdLine(e); }
+
+/* 2026-09-04: the W3b chain card shows what it will act on — the learning arm (the chain head the
+   script trains from), whether .env VD_BATTLE_CKPT already IS that checkpoint (the card deploys it),
+   and whether the online bot is down (the server refuses the launch otherwise). */
+function dirOf(pth) { const parts = (pth || "").split("/"); return parts.length > 1 ? parts[parts.length - 2] : (pth || "—"); }
+function renderChainStatus() {
+  const el = $("chain-status");
+  if (!el || !S) return;
+  const la = S.learning_arm, envCk = S.env.VD_BATTLE_CKPT || "";
+  const head = la ? `<b>${esc(la.name)}</b> (τ ${la.tau}) · ${esc(dirOf(la.battle_ckpt))}` : `<span class="bad">none</span>`;
+  const sync = la && la.battle_ckpt === envCk;
+  const bot = S.bot_up ? `<span class="bad">UP — stop it first</span>` : `<span class="ok">down ✓</span>`;
+  el.innerHTML = `Learning arm (chain head): ${head}<br>` +
+    `.env VD_BATTLE_CKPT: ${esc(dirOf(envCk))} ` +
+    (la ? (sync ? `<span class="ok">= the chain head ✓</span>`
+                : `<span class="bad">≠ the chain head — the next run deploys it</span>`) : "") + `<br>` +
+    `Online bot: ${bot}`;
+}
 
 async function copyCmd(id) {
   const e = CMDS.find(c => c.id === id);
@@ -340,7 +362,8 @@ function renderCommandPages() {
       `<div class="muted">Heavy runs (marked <span class="pill heavy">heavy</span>) launch right here
        — <b>one at a time</b> (GPU/RAM), with live epoch/loss/metric progress on the
        <a href="#" onclick="showTab('jobs')">Jobs</a> tab. Prefer a terminal? "Copy command" gives
-       the exact verified one-liner instead.</div>`);
+       the exact verified one-liner instead. The <b>W3b chain update</b> card is the nightly ladder-PPO
+       step (bot DOWN → launch → restart ONE bot); it deploys the new checkpoint to .env by itself.</div>`);
   put("page-data", [["data", "Data pipeline (replays → JSONL → belief)"]],
       `<div class="muted">Replay annotation UI = the <a href="http://127.0.0.1:5174"
        target="_blank">team builder</a> (start it in Services on the Overview tab). ⚠ A belief
@@ -401,6 +424,7 @@ function renderOverview() {
   const oSig = JSON.stringify({
     svc: Object.entries(S.services).map(([k, s]) => [k, s.up]),
     par: [S.parity.battle.match, S.parity.tp.match],
+    chain: [S.learning_arm && S.learning_arm.name, S.env.VD_BATTLE_CKPT],
     fmt: S.format, team: S.env.VD_DEFAULT_TEAM, acct: S.env.PS_USERNAME,
     jobs: S.jobs.filter(j => j.alive).map(j => [j.id, j.elapsed_s, j.progress && j.progress.value]),
     exploit: [S.exploit.found, S.exploit.updated]});
@@ -448,6 +472,9 @@ function renderOverview() {
       <div class="card"><h3>Deployed models</h3>
         ${par("Battle net (VD_BATTLE_CKPT ↔ model_io)", p.battle)}
         ${par("Team preview (VD_TP_CKPT ↔ model_io)", p.tp)}
+        <div class="stat"><span>W3b chain head (learning arm) ↔ VD_BATTLE_CKPT</span>
+          <b class="${S.learning_arm && S.learning_arm.battle_ckpt === S.env.VD_BATTLE_CKPT ? "ok" : "bad"}">
+          ${S.learning_arm ? esc(S.learning_arm.name) + (S.learning_arm.battle_ckpt === S.env.VD_BATTLE_CKPT ? " ✓" : " ✗ not deployed") : "no learning arm"}</b></div>
         <div class="stat"><span>Format</span><b>${esc(S.format)}</b></div>
         <div class="stat"><span>Default team</span><b>${esc(S.env.VD_DEFAULT_TEAM || "—")}</b></div>
         <div class="stat"><span>Showdown account</span><b>${esc(S.env.PS_USERNAME || "—")}</b></div>
@@ -557,7 +584,7 @@ function renderDeploy() {
         · Era-chain: era N+1 warm-start/value base = the GATED era-N net.<br>
         · Belief parity: data/pikalytics_regmb.json must equal the deployed blend; a belief change
         ⇒ re-export.<br>
-        · Env pins (PINS.md): poke-env @a6e4f67 · Showdown @ecf39eef1.<br>
+        · Env pins (PINS.md): poke-env @a8810da (0.16.1, 2026-09-04) · Showdown @4880d36 (M-B).<br>
         · model_io rejects non-attn battle ckpts by design.</div></div>
     </div>
     <h2 class="sec">Checkpoint inventory</h2>
@@ -1311,6 +1338,7 @@ async function refresh() {
     if (curTab === "parser") renderParser();
     if (curTab === "generate") updateGenAvailability();
     if (curTab === "monitor") renderMonitor();
+    if (curTab === "train") renderChainStatus();
     fillSelects();
   } catch { $("hdrDeploy").textContent = "server unreachable?"; }
   if (curTab === "online") refreshOnline();

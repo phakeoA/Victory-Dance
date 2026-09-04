@@ -369,6 +369,21 @@ def repo_relative(p) -> str:
         return p.as_posix()
 
 
+def next_run_stamp(stamp: str, arm_names, ckpt_root=CKPT_ROOT) -> str:
+    """2026-09-03: a SECOND update on the same date must not reuse the day's arm name (``register_arm``
+    refuses a duplicate — after the training and the gates) nor its candidate folder (``save_candidate``
+    would overwrite the checkpoint the served arm is playing). Returns ``stamp`` when both
+    ``ppo_<stamp>`` and ``checkpoints_attn_ladder_ppo_<stamp>`` are free, else the first free suffixed
+    stamp: ``<stamp>b``, ``<stamp>c``, …"""
+    names = set(arm_names or ())
+    root = Path(ckpt_root)
+    for suffix in [""] + [chr(c) for c in range(ord("b"), ord("z") + 1)]:
+        cand = f"{stamp}{suffix}"
+        if f"ppo_{cand}" not in names and not (root / f"checkpoints_attn_ladder_ppo_{cand}").exists():
+            return cand
+    raise ValueError(f"no free run stamp for {stamp} (26 same-day runs?)")
+
+
 def register_arm(config_path, *, name: str, battle_ckpt, tau: float, note: str,
                  tp_ckpt: str = "default", learning: bool = False) -> dict:
     """Append arm ``name`` to the bandit config (same τ as the data, top-p 1.0, adapt-rules OFF —
@@ -410,6 +425,113 @@ def rotate_learning_arm(config_path, *, keep: str, stamp: str) -> List[str]:
     if out:
         p.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return out
+
+
+# ── the argmax TWIN (2026-09-04, design B3; USER "go build it") ───────────────────────────────
+def twin_name(head: str) -> str:
+    return f"{head}_t0"
+
+
+def register_twin_arm(config_path, *, head: str, battle_ckpt, stamp: str, tp_ckpt: str = "default") -> dict:
+    """Register ``ppo_<stamp>_t0`` = the chain head's checkpoint at τ 0 (argmax), served NEXT to the incumbent.
+    The learning arm's own ladder record always carries the τ-0.3 sampling cost (≈ −3 Elo/g), so it can never
+    say whether the WEIGHTS beat era2 — the twin can. Same knobs as the incumbent (top-p 1.0, tie-eps 1.0, TP
+    default, adapt-rules = the launch default — no key, exactly like era2's entry) so the comparison is apples
+    to apples; NOT learning (the retire rule bounds a bad twin at ``retire_min_games``); promotion stays human.
+    ``twin_of`` marks it for :func:`rotate_twin_arm` (``load_arms`` ignores unknown keys — verified 2026-09-04)."""
+    p = Path(config_path)
+    cfg = json.loads(p.read_text(encoding="utf-8"))
+    arms = cfg.setdefault("arms", [])
+    name = twin_name(f"ppo_{stamp}") if head == f"ppo_{stamp}" else twin_name(head)
+    if any(a.get("name") == name for a in arms):
+        raise ValueError(f"arm {name!r} already exists in {p}")
+    entry = {"name": name, "battle_ckpt": repo_relative(battle_ckpt), "tp_ckpt": tp_ckpt, "tau": 0.0,
+             "top_p": 1.0, "tp_tie_eps": 1.0,
+             "note": (f"argmax TWIN of {head} (W3b B3, {stamp}): the same checkpoint at tau 0 next to the incumbent "
+                      "- judges the chain's WEIGHTS on the ladder (the learning arm's record carries the tau-0.3 "
+                      "sampling cost). Retire rule applies; promotion = human (swap 'incumbent')."),
+             "twin_of": head}
+    arms.append(entry)
+    p.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return entry
+
+
+def rotate_twin_arm(config_path, *, keep: str, stamp: str) -> List[str]:
+    """One twin at a time: every OTHER arm carrying ``twin_of`` is BENCHED with a dated note (its ladder record
+    stays in the bandit state under its name, so the series of twins reads as the chain's trend). Returns the
+    benched names; [] when nothing moved."""
+    p = Path(config_path)
+    cfg = json.loads(p.read_text(encoding="utf-8"))
+    arms = cfg.setdefault("arms", [])
+    bench = cfg.setdefault("benched", [])
+    out: List[str] = []
+    for a in list(arms):
+        if a.get("twin_of") and a.get("name") != keep:
+            a[f"benched_{stamp}"] = (f"superseded as the argmax TWIN by {keep} (one twin at a time; the record "
+                                    f"of this one — head {a.get('twin_of')} — stays in artifacts/bandit)")
+            arms.remove(a)
+            bench.append(a)
+            out.append(str(a.get("name")))
+    if out:
+        p.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return out
+
+
+# ── .env deploy (2026-09-04, USER: "on execution have the config swap out the ppo model for the
+# latest one in .env") ─────────────────────────────────────────────────────────────────────────
+ENV_BATTLE_KEY = "VD_BATTLE_CKPT"
+_ENV_DEPLOY_TAG = "# [ladder-ppo]"          # every line this helper writes starts with this tag
+
+
+def deploy_env_battle_ckpt(env_path, ckpt, *, key: str = ENV_BATTLE_KEY, stamp: Optional[str] = None,
+                           arm: Optional[str] = None) -> dict:
+    """Point ``.env`` ``key`` (the deployed battle net every harness loads at launch) at ``ckpt`` — the
+    chain head that ``--register`` just made the learning arm — so the newest PPO checkpoint is ALSO the
+    ``.env`` default (bandit-off serving, the websocket ladder, the launch echo, Mission Control's
+    Deployed-models card). Bandit arms carry explicit checkpoints, so per-game serving is unchanged.
+
+    Keeps the file's own convention: the previous value survives as ONE commented rollback line right
+    above the key (older ``[ladder-ppo]`` lines are dropped, so nightly runs do not pile up). Atomic
+    tmp-replace like ``mission_control._env_write``. Returns ``{key, old, new, changed}``; a value
+    that is already current is left alone (``changed`` False, nothing written)."""
+    env_path = Path(env_path)
+    new = repo_relative(ckpt)
+    lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.is_file() else []
+    old: Optional[str] = None
+    idx: Optional[int] = None
+    for i, ln in enumerate(lines):
+        if ln.split("=", 1)[0].strip() == key and not ln.lstrip().startswith("#"):
+            old = ln.split("=", 1)[1].strip()
+            idx = i
+            break
+    if old == new:
+        return {"key": key, "old": old, "new": new, "changed": False}
+    kept = [ln for ln in lines if not ln.startswith(_ENV_DEPLOY_TAG)]      # one rollback line, not N
+    if idx is not None:
+        idx = next(i for i, ln in enumerate(kept)
+                   if ln.split("=", 1)[0].strip() == key and not ln.lstrip().startswith("#"))
+    when = time.strftime("%Y-%m-%d %H:%M")
+    head = (f"{_ENV_DEPLOY_TAG} {when}: {key} -> {arm or Path(new).parent.name}"
+            + (f" (run {stamp})" if stamp else "")
+            + (f"; ROLLBACK = the commented line below (was {old})" if old else ""))
+    block = [head] + ([f"{_ENV_DEPLOY_TAG} {key}={old}"] if old else []) + [f"{key}={new}"]
+    if idx is None:
+        kept += block
+    else:
+        kept[idx:idx + 1] = block
+    tmp = env_path.with_suffix(env_path.suffix + ".tmp")
+    tmp.write_text("\n".join(kept) + "\n", encoding="utf-8")
+    tmp.replace(env_path)
+    return {"key": key, "old": old, "new": new, "changed": True}
+
+
+def learning_head(arms: dict) -> Optional[dict]:
+    """``{name, battle_ckpt, tau}`` of the chain head (the ``learning: true`` arm), or None."""
+    names = learning_arms(arms)
+    if not names:
+        return None
+    a = arms[names[0]]
+    return {"name": names[0], "battle_ckpt": getattr(a, "battle_ckpt", None), "tau": float(getattr(a, "tau", 0.0) or 0.0)}
 
 
 # ── external gates (the ruler / type-eff probe / suite) ───────────────────────

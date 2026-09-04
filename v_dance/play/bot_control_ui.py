@@ -45,6 +45,10 @@ class DuplicateBotError(RuntimeError):
     sets SO_REUSEADDR, and on Windows that lets a second process bind the SAME port."""
 
 
+# 2026-09-04: a poller that closes the socket before the (now larger) status JSON is fully written
+_CLIENT_GONE = (ConnectionAbortedError, ConnectionResetError, BrokenPipeError)
+
+
 class _ExclusiveServer(ThreadingHTTPServer):
     allow_reuse_address = False        # a second bind on the port FAILS (Windows honours this)
 
@@ -849,13 +853,24 @@ def _make_handler(ctrl: BotController):
         def log_message(self, *a) -> None:        # silence per-request stderr noise
             pass
 
+        def handle(self) -> None:                 # a client that vanishes mid-request is not a traceback
+            try:
+                super().handle()
+            except _CLIENT_GONE:
+                pass
+
         def _json(self, obj, code=200) -> None:
             body = json.dumps(obj).encode("utf-8")
-            self.send_response(code)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except _CLIENT_GONE:
+                # 2026-09-04: the poller hung up mid-response (Mission Control's 0.6 s proxy timeout
+                # vs the bigger matchup payload: 53 tracebacks in one session). Not an error here.
+                pass
 
         def do_GET(self) -> None:                 # noqa: N802 (stdlib name)
             if self.path == "/" or self.path.startswith("/index"):

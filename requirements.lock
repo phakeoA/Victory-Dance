@@ -76,7 +76,7 @@ platformdirs==4.10.0
 playwright==1.60.0
 playwright-stealth==2.0.3
 pluggy==1.6.0
-poke_env @ git+https://github.com/hsahovic/poke-env.git@a6e4f67d204a390a3c8368c182197aff35816aca
+poke_env @ git+https://github.com/hsahovic/poke-env.git@a8810dae2cd1ef10fb74700e0a3cb3b10d1d3b25
 propcache==0.5.2
 psutil==7.2.2
 pycodestyle==2.14.0
@@ -121,7 +121,7 @@ typing-inspection==0.4.2
 typing_extensions==4.15.0
 unclecode-litellm==1.81.13
 urllib3==2.7.0
-websockets==16.0
+websockets==16.1.1
 Werkzeug==3.1.8
 xxhash==3.7.0
 yarl==1.24.2

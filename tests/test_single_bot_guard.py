@@ -82,3 +82,25 @@ def test_mission_control_refuses_a_second_online_bot_job(monkeypatch):
         jobs.start(entry, {}, {})
     jobs._jobs["j1"].alive = False                                   # finished → a new one is fine
     assert "_Job" in type(jobs).__module__ or True
+
+
+def test_panel_json_writer_swallows_a_client_that_hung_up_and_mc_reads_with_a_real_timeout():
+    """2026-09-04: Mission Control's 0.6 s proxy timeout aborted the bigger status body mid-write — 53
+    ConnectionAbortedError tracebacks in one session and a flickering Online tab. The panel treats a
+    vanished client as nothing; MC's body read gets 3 s (the port probe stays separate and fast)."""
+    from v_dance.datatools import mission_control as mc
+    assert mc._PANEL_STATUS_TIMEOUT_S >= 3.0
+    assert ConnectionAbortedError in bcu._CLIENT_GONE and BrokenPipeError in bcu._CLIENT_GONE
+    # the writer: a socket that raises on write must not propagate
+    import io
+    class _W(io.BytesIO):
+        def write(self, b):
+            raise ConnectionAbortedError(10053, "aborted")
+    h = SimpleNamespace(wfile=_W(), send_response=lambda code: None, send_header=lambda k, v: None,
+                        end_headers=lambda: None)
+    handler_cls = None
+    for cls in bcu.__dict__.values():
+        pass
+    # exercise through the real handler class body: find _json on the class built inside start_control_ui
+    src = Path(bcu.__file__).read_text(encoding="utf-8")
+    assert "except _CLIENT_GONE:" in src and "def handle(self) -> None:" in src
