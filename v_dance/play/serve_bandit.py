@@ -77,6 +77,18 @@ class Arm:
     # 2026-09-03: the ADAPTIVE / learning arm (its games are the nightly ladder-PPO data): exempt
     # from the retire rule and labelled in both UIs. Exactly the τ arm that plays the incumbent.
     learning: bool = False
+    # 2026-09-04 (USER "do this"): posterior WARM-START. A new chain head (KL ~0.01 from its predecessor) names the
+    # arm it descends from; the bandit seeds ITS THOMPSON PRIOR with min(pred.n, warm_start_games) pseudo-games at the
+    # predecessor's mean Δ/game (read from the state file — the predecessor is usually benched), instead of the wide
+    # zero prior that made every fresh arm name soak up ~half the session's games. The arm's real record, P(worse)
+    # and the retire rule never see the prior. Written by ladder_update.register_arm / register_twin_arm.
+    prior_from: Optional[str] = None
+    # 2026-09-04 B1 (USER: learning first): a FIXED share of the post-warm-up games for this arm (0.15 = 15 %).
+    # Thompson maximises rating, which is no longer the objective; fixed shares make the ladder an experiment:
+    # the learning head (its share = ``learning_share`` unless set here), the argmax twin (the instrument) and
+    # era2 (the live control in the same band). Shares summing to 1 leave Thompson nothing; above 1 they are
+    # scaled. Fixed-share arms are retire-EXEMPT (a human benches an instrument, the rule never does).
+    share: Optional[float] = None
 
     def adapt_rules_for(self, launch_default: bool) -> bool:
         if self.adapt_rules is not None:
@@ -120,7 +132,9 @@ def load_arms(path: Path, *, exists=None) -> List[Arm]:
                 tp_tie_eps=(None if raw.get("tp_tie_eps") is None else float(raw["tp_tie_eps"])),
                 incumbent=bool(raw.get("incumbent", False)), note=str(raw.get("note", "")),
                 adapt_rules=(None if raw.get("adapt_rules") is None else bool(raw["adapt_rules"])),
-                learning=bool(raw.get("learning", False)))
+                learning=bool(raw.get("learning", False)),
+                prior_from=(str(raw["prior_from"]) if raw.get("prior_from") else None),
+                share=(None if raw.get("share") is None else float(raw["share"])))
         missing = [w for w, v in (("battle", a.battle_ckpt), ("tp", a.tp_ckpt))
                    if not a.uses_default(w) and not exists(_resolve(v))]
         if missing:
@@ -136,7 +150,8 @@ def config_params(path: Path) -> dict:
     cfg = json.loads(Path(path).read_text(encoding="utf-8"))
     # 2026-09-03: ``retire_margin`` (the old Wilson win-rate rule) is ignored if still present.
     return {k: cfg[k] for k in ("prior_games", "prior_sd", "min_games", "retire_min_games",
-                                "retire_prob", "retire_margin_elo", "learning_share") if k in cfg}
+                                "retire_prob", "retire_margin_elo", "learning_share",
+                                "warm_start_games") if k in cfg}
 
 
 def _resolve(p) -> Path:
@@ -245,7 +260,8 @@ class ServeBandit:
                  applier: Optional[Callable[[Arm], None]] = None, seed: int = 0,
                  prior_games: float = 5.0, prior_sd: float = 25.0, min_games: int = 8,
                  retire_min_games: int = 40, retire_prob: float = 0.90,
-                 retire_margin_elo: float = 0.0, learning_share: float = 0.0, now=None):
+                 retire_margin_elo: float = 0.0, learning_share: float = 0.0, now=None,
+                 warm_start_games: float = 50.0):
         import numpy as np
         if not arms:
             raise ValueError("ServeBandit needs at least one arm")
@@ -264,6 +280,9 @@ class ServeBandit:
         self.retire_prob = float(retire_prob)                 # 2026-09-03: P(worse than the incumbent)
         self.retire_margin_elo = float(retire_margin_elo)     # ... by at least this many Elo per game
         self.learning_share = float(learning_share)           # 2026-09-03 L2: the learning arm's floor share
+        # 2026-09-04: cap on the pseudo-games a new arm inherits from its ``prior_from`` predecessor (0 = off)
+        self.warm_start_games = float(warm_start_games)
+        self.warm: Dict[str, tuple] = {}            # arm name -> (pseudo_n, pseudo_sum_delta), Thompson only
         self._now = now or time.time
         self.stats: Dict[str, ArmStats] = {a.name: ArmStats() for a in self.arms}
         self.pending: Optional[str] = None          # arm applied for the NEXT battle
@@ -282,10 +301,23 @@ class ServeBandit:
             d = json.loads(self.state_path.read_text(encoding="utf-8"))
         except Exception:
             return
-        for name, s in (d.get("stats") or {}).items():
+        raw_stats = d.get("stats") or {}
+        for name, s in raw_stats.items():
             if name in self.stats:
                 self.stats[name] = ArmStats(**{k: s.get(k, getattr(ArmStats(), k))
                                                for k in ArmStats.__dataclass_fields__})
+        # 2026-09-04 posterior warm-start: the predecessor's record (usually a BENCHED arm — present in the state
+        # file, absent from self.arms) becomes min(n, warm_start_games) pseudo-games at its mean, for Thompson only.
+        self.warm = {}
+        if self.warm_start_games > 0.0:
+            for a in self.arms:
+                src = getattr(a, "prior_from", None)
+                ps = raw_stats.get(src) if src else None
+                n = int((ps or {}).get("n") or 0)
+                if n <= 0:
+                    continue
+                w_n = float(min(n, self.warm_start_games))
+                self.warm[a.name] = (w_n, w_n * float(ps.get("sum_delta") or 0.0) / n)
         self.by_tag = dict(list((d.get("by_tag") or {}).items())[-200:])
         pin = d.get("pinned")                       # 2026-09-02: the frozen mode survives a restart
         self.pinned = pin if (isinstance(pin, str) and pin in self.by_name) else None
@@ -334,14 +366,15 @@ class ServeBandit:
         under = [a for a in active if played(a) < self.min_games]
         if under:                                   # warm-up: fewest games first, config order
             arm = min(under, key=lambda a: (played(a), self.arms.index(a)))
-        elif self._learning_turn(active):           # 2026-09-03 L2: the learning arm's floor share
-            arm = min((a for a in active if a.learning), key=lambda a: (played(a), self.arms.index(a)))
+        elif (fixed := self._floor_turn(active, played)) is not None:   # L2 floor + 2026-09-04 fixed shares
+            arm = fixed
         else:                                       # Thompson over mean per-game rating delta
             best, best_s = None, -math.inf
             for a in active:
                 s = self.stats[a.name]
-                n_eff = self.prior_games + s.n
-                mean = s.sum_delta / n_eff
+                w_n, w_sum = self.warm.get(a.name, (0.0, 0.0))     # 2026-09-04: inherited pseudo-games
+                n_eff = self.prior_games + s.n + w_n
+                mean = (s.sum_delta + w_sum) / n_eff
                 sd = self.prior_sd / math.sqrt(n_eff)
                 sample = float(self.rng.normal(mean, sd))
                 if sample > best_s:
@@ -350,13 +383,34 @@ class ServeBandit:
         self.pending = arm.name
         return arm
 
-    def _learning_turn(self, active) -> bool:
-        """L2: with probability ``learning_share`` the next game goes to a learning arm (after the
-        warm-up, never under a pin). False when there is no active learning arm or the share is 0 —
-        then the RNG is not consumed and the Thompson sequence is unchanged."""
-        if self.learning_share <= 0.0 or not any(a.learning for a in active):
-            return False
-        return float(self.rng.random()) < self.learning_share
+    def _floor_groups(self, active) -> list:
+        """2026-09-04 B1: the fixed-share allocation as ``[(arms, share)]``. Every active arm with an explicit
+        ``share`` is its own group; the learning arms WITHOUT one share ``learning_share`` as a group (the
+        2026-09-03 L2 floor). Shares summing above 1 are scaled down proportionally; whatever is left below 1
+        is Thompson's."""
+        groups = [([a], float(a.share)) for a in active if a.share is not None and a.share > 0.0]
+        learn = [a for a in active if a.learning and a.share is None]
+        if learn and self.learning_share > 0.0:
+            groups.append((learn, float(self.learning_share)))
+        total = sum(s for _, s in groups)
+        if total > 1.0:
+            groups = [(g, s / total) for g, s in groups]
+        return groups
+
+    def _floor_turn(self, active, played):
+        """The arm that takes the next game by its fixed share, or None → Thompson. With no floors at all the
+        RNG is NOT consumed (the Thompson sequence is unchanged — the pre-L2 contract). Inside a group the
+        arm with the fewest games goes first."""
+        groups = self._floor_groups(active)
+        if not groups:
+            return None
+        u = float(self.rng.random())
+        acc = 0.0
+        for arms, share in groups:
+            acc += share
+            if u < acc:
+                return min(arms, key=lambda a: (played(a), self.arms.index(a)))
+        return None
 
     def apply_pending(self) -> Optional[Arm]:
         """Apply the pending arm to the served player (via ``applier``); no-op without one."""
@@ -464,7 +518,8 @@ class ServeBandit:
             return                                  # nothing to compare against yet
         for a in self.arms:
             s = self.stats[a.name]
-            if a.incumbent or a.learning or s.retired:
+            # 2026-09-04 B1: a fixed-share arm is an instrument (the twin) or the control (era2) — exempt too
+            if a.incumbent or a.learning or a.share is not None or s.retired:
                 continue
             if s.n < self.retire_min_games:
                 continue
@@ -481,7 +536,10 @@ class ServeBandit:
                 "retire_prob": self.retire_prob, "retire_margin_elo": self.retire_margin_elo,
                 "incumbent": self.incumbent.name,
                 "learning": [a.name for a in self.arms if a.learning],
-                "learning_share": self.learning_share}
+                "learning_share": self.learning_share,
+                "warm_start_games": self.warm_start_games,
+                # 2026-09-04 B1: the fixed shares (name -> fraction), for the UIs
+                "shares": {a.name: a.share for a in self.arms if a.share is not None}}
 
     # -- reporting --
     def summary(self) -> List[dict]:
@@ -499,6 +557,10 @@ class ServeBandit:
                         # 2026-09-03: the learning label + the retire rule's number per arm
                         "learning": a.learning,
                         "p_worse": (None if (p := self.p_worse(a.name)) is None else round(p, 3)),
+                        # 2026-09-04: the inherited Thompson prior (pseudo-games), never part of the record above
+                        "prior_from": a.prior_from,
+                        "warm_games": int(round(self.warm.get(a.name, (0.0, 0.0))[0])),
+                        "share": a.share,
                         "tau": a.tau, "tp_tie_eps": a.tp_tie_eps, "note": a.note})
         return out
 
@@ -508,9 +570,15 @@ class ServeBandit:
         learn = [a.name for a in self.arms if a.learning]
         exempt = (f" (learning arm(s) exempt: {', '.join(learn)}"
                   + (f", floor share {self.learning_share:.0%}" if self.learning_share > 0 else "") + ")") if learn else ""
+        fixed = [a for a in self.arms if a.share is not None]
+        shares = ("; fixed shares: " + ", ".join(f"{a.name} {a.share:.0%}" for a in fixed)
+                  + " (retire-exempt)") if fixed else ""
+        warm = "; prior warm-start: " + ", ".join(
+            f"{n} ({w_n:.0f} g @ {w_sum / w_n:+.1f}/g from {self.by_name[n].prior_from})"
+            for n, (w_n, w_sum) in self.warm.items() if w_n > 0) if self.warm else ""
         return (f"[online] serve BANDIT ACTIVE — {len(active)} arm(s), incumbent {self.incumbent.name}: "
                 f"{', '.join(active)}; warm-up {self.min_games} g/arm, retire at ≥{self.retire_min_games} g "
-                f"if P(worse than the incumbent) ≥ {self.retire_prob:.2f}{exempt}; state {self.state_path.name}{pin}")
+                f"if P(worse than the incumbent) ≥ {self.retire_prob:.2f}{exempt}{shares}{warm}; state {self.state_path.name}{pin}")
 
 
 # ── launch-time pin from the environment (VD_BANDIT_PIN) ─────────────────────

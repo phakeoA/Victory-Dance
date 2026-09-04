@@ -1103,6 +1103,9 @@ function armBadges(a) {
   if (a.learning) b.push(`<span class="ab learn" title="the adaptive arm: its games feed the nightly ladder-PPO update (scratch/ladder_ppo_update.py); exempt from the retire rule">🧠 learning</span>`);
   b.push(a.retired ? `<span class="ab ret" title="${esc(a.reason || "")}">⛔ retired</span>`
                    : `<span class="ab act" title="in the Thompson rotation">active</span>`);
+  // 2026-09-04 B1 / warm-start: the fixed share (retire-exempt) and the inherited Thompson prior
+  if (a.share != null) b.push(`<span class="ab" title="fixed share of the post-warm-up games (retire-exempt; the remainder is Thompson's)">📊 ${Math.round(a.share * 100)}%</span>`);
+  if (a.warm_games) b.push(`<span class="ab" title="Thompson prior warm-started from ${esc(a.prior_from || "")} (pseudo-games; not in the record)">🔥 prior ${a.warm_games} g</span>`);
   if (a.in_flight) b.push(`<span class="ab" title="games bound but not yet rewarded">${a.in_flight} in flight</span>`);
   return b.join(" ");
 }

@@ -223,13 +223,30 @@ class PPOTrainer:
         return len(txns)
 
     # ── full PPO update ───────────────────────────────────────────────────────
-    def ppo_update(self, trajectories) -> Dict[str, float]:
+    def ppo_update(self, trajectories, traj_weights=None) -> Dict[str, float]:
         """``ppo_epochs`` passes of shuffled minibatches (clip + value + entropy +
         KL-to-BC), both optimisers stepped, grad-norm clipped. Early-halts on the
-        collapse guards; always reports explained variance + ``halted``/``halt_reason``."""
+        collapse guards; always reports explained variance + ``halted``/``halt_reason``.
+
+        ``traj_weights`` (2026-09-04 W3b B2, one float per trajectory, same order): the advantages of every
+        transition of trajectory i are multiplied by ``traj_weights[i]`` BEFORE the loss (returns untouched —
+        the critic still regresses the true outcome). The ladder update weights games by the opponent's
+        rating so a tanked band does not train the policy on beating weak players. The per-minibatch
+        advantage standardisation keeps the RELATIVE weights and removes any overall scale."""
         txns, adv, ret = self._flatten(trajectories)
         if not txns:
             return {"halted": False, "halt_reason": "empty batch", "n_steps": 0}
+        w_stats: Dict[str, float] = {}
+        if traj_weights is not None:
+            if len(traj_weights) != len(trajectories):
+                raise ValueError(f"traj_weights: {len(traj_weights)} weights for {len(trajectories)} trajectories")
+            w = np.concatenate([np.full(len(tr.transitions), float(wi), dtype=np.float32)
+                                for tr, wi in zip(trajectories, traj_weights)])
+            assert len(w) == len(adv), "traj_weights: transition count mismatch"
+            adv = adv * w
+            w_stats = {"traj_weight_mean": float(np.mean(traj_weights)),
+                       "traj_weight_min": float(np.min(traj_weights)),
+                       "traj_weight_max": float(np.max(traj_weights))}
         agg: List[Dict[str, float]] = []
         halted, reason = False, None
         nonfinite_skips = 0     # defensive: minibatches dropped for a NaN/inf loss or grad (never step them)
@@ -280,6 +297,7 @@ class PPOTrainer:
         self.updates += 1
 
         stats = _mean_stats(agg)
+        stats.update(w_stats)
         ev = self._critic_ev(txns, ret)
         stats["explained_variance"] = ev
         stats["n_steps"] = len(txns)

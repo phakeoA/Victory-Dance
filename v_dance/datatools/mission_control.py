@@ -533,6 +533,18 @@ REGISTRY = [
                dict(name="epochs", type="int", label="--epochs", default=4, min=1, max=50),
                dict(name="min-steps", type="int", label="--min-steps (refuse below)", default=200,
                     min=1, max=100000),
+               # 2026-09-04 B3: the leash + the ruler floors as fields (recipe defaults; loosen to 0.03 / -1.0 / -2.0
+               # once the data per step has doubled — a bigger batch justifies a bigger step, the ruler is a
+               # collapse alarm, not the objective). B2: the opponent-rating weighting knob.
+               dict(name="approx-kl-stop", type="float", label="--approx-kl-stop (per-epoch early stop; recipe 0.02)",
+                    default=0.02, min=0.0, max=1.0),
+               dict(name="ruler-floor-pp", type="float", label="--ruler-floor-pp (ruler vs the base, pp; recipe -0.5)",
+                    default=-0.5, min=-20.0, max=20.0),
+               dict(name="ruler-abs-floor-pp", type="float",
+                    label="--ruler-abs-floor-pp (ruler vs era2, pp; recipe -1.0)", default=-1.0, min=-20.0, max=20.0),
+               dict(name="opp-weight-scale", type="float",
+                    label="--opp-weight-scale (Elo per doubling of a game's weight vs the batch mean; 0 = off)",
+                    default=400.0, min=0.0, max=5000.0),
                dict(name="run-gates", type="flag", label="--run-gates (ruler + type-eff probe)", default=True),
                dict(name="register", type="flag",
                     label="--register (arm ppo_<date> = the new learning arm when every gate passes)",
@@ -549,6 +561,29 @@ REGISTRY = [
          note="Exit 0 = candidate saved (+ registered + deployed) · 2 = refused (no trainable data / "
               "below --min-steps) · 3 = a gate failed (candidate saved, NOT registered). Expect KL-to-base "
               "0.01-0.04 at lr 1e-3; the per-epoch approx-KL stop (0.02) may end it early — that is fine."),
+
+    # 2026-09-04 B4 (USER: learning first): the VOLUME complement to the nightly PPO — every rated ladder game's winning
+    # perspective (Type-C) into the era-2 lineage BC fine-tune of the chain head; GPU ~1.5 h; the bot may stay up.
+    dict(id="bc_finetune", cat="train", heavy=True,
+         title="B4 ladder-wins BC fine-tune (Type-C → train_bc)",
+         script="scratch/ladder_bc_finetune.py",
+         desc="Exports every rated ladder game's WINNING perspective (Type-C, two passes: rated + hand-approved), "
+              "fine-tunes the chain head on the era-2 lineage recipe (HF corpus + Type-C, exp advantage + rating "
+              "weighting; GPU ~1.5 h), runs the ruler (vs base, vs era2) + type-eff gates, registers bcft_<date> as an "
+              "argmax candidate with a fixed share. The bot may stay UP (the GPU is idle otherwise). Design §12 B4.",
+         opts=[dict(name="base", type="choice", label="--base (learning = the chain head; incumbent = era2)",
+                    choices=["learning", "incumbent"], default="learning"),
+               dict(name="epochs", type="int", label="--epochs", default=8, min=1, max=60),
+               dict(name="lr", type="float", label="--lr", default=0.001, min=0.0, max=1.0),
+               dict(name="patience", type="int", label="--patience (epochs without val gain)", default=3, min=0, max=20),
+               dict(name="share", type="float", label="--share (fixed bandit share for the new arm; shares above 1 are scaled)",
+                    default=0.15, min=0.0, max=1.0),
+               dict(name="run-gates", type="flag", label="--run-gates (ruler vs base + vs era2, type-eff)", default=True),
+               dict(name="register", type="flag", label="--register (arm bcft_<date> when every gate passes)", default=True),
+               dict(name="no-export", type="flag", label="--no-export (reuse the current Jsonl_TypeC folder)"),
+               dict(name="dry-run", type="flag", label="--dry-run (counts + the exact commands; nothing runs)")],
+         note="Exit 0 ok · 2 refused · 3 a gate failed (candidate saved, NOT registered) · 4 training failed. Terminal-only "
+              "plumbing check: `scratch/ladder_bc_finetune.py --smoke` (CPU, ~2 min)."),
 
     # ---- DATA ----
     dict(id="scrape_pika", cat="data", heavy=True, title="Scrape Pikalytics (MANUAL only)",
@@ -655,6 +690,11 @@ _PROGRESS = {
                                ("lead exact", r"lead exact ([\d.]+)")]},
     "exploiter": {"mode": "exploiter"},
     "ladder_ppo": {"mode": "ladder_ppo"},
+    # 2026-09-04 B4: the script streams train_bc's output, so the epoch/loss/top-1 parser applies as is
+    "bc_finetune": {"epoch_re": _EPOCH_RE, "total_arg": "--epochs",
+                    "metrics": [("val top1", r"val loss [\d.]+ top1 ([\d.]+)"),
+                                ("train loss", r"train loss ([\d.]+)"),
+                                ("gim recall", r"gim recall ([\d.]+)")]},
 }
 
 # The chain script's report lines, in order — the Jobs tab shows the furthest phase reached (+ its numbers).
@@ -703,6 +743,9 @@ def _ladder_ppo_progress(text: str) -> dict:
     tw = re.search(r'twin registered: \{"name": "([^"]+)"', text)
     if tw:
         m["twin"] = tw.group(1)
+    ow = re.search(r"opp-rating weights\s+scale (\S+)\s+known (\d+)/(\d+)\s+mean opp (\S+)", text)
+    if ow:
+        m["opp weights"] = f"{ow.group(2)}/{ow.group(3)} known, mean opp {ow.group(4)}, scale {ow.group(1)}"
     dep = re.search(r"\[ladder-ppo\] \.env (\S+) -> (\S+)", text)
     if dep:
         m[".env " + dep.group(1)] = dep.group(2).split("/")[-2] if "/" in dep.group(2) else dep.group(2)
@@ -794,7 +837,9 @@ def _build_argv(entry: dict, options: dict, teams: list, ckpts: dict) -> list:
         if raw is None and "default" in opt:      # apply the registry default SERVER-SIDE so a
             raw = opt["default"]                    # launch is robust even if the client omits it
         raw = raw.strip() if isinstance(raw, str) else raw
-        if raw in ("", None, False):
+        # 2026-09-04: a numeric 0 is a VALUE (e.g. --opp-weight-scale 0 = off) — the old `raw in ("", None,
+        # False)` dropped it because 0 == False in Python; only blank / missing / an unticked flag skip.
+        if raw is None or raw == "" or (typ == "flag" and raw is False):
             if opt.get("required"):
                 raise ValueError(f"--{name} is required")
             continue                                # flag default True falls through to the flag branch

@@ -393,6 +393,55 @@ def test_twin_arm_registration_and_rotation(world, tmp_path):
     assert "superseded as the argmax TWIN by ppo_20260905_t0" in old["benched_20260905"] and old["twin_of"] == "ppo_20260904b"
     assert LU.rotate_twin_arm(cfg_p, keep=tw2["name"], stamp="20260906") == []            # idempotent
     assert LU.learning_arms(LU.arm_table(cfg_p)) == ["ppo_20260905"]                    # the twin is never 'learning'
+    # 2026-09-04 posterior warm-start: the 2nd twin inherits the 1st as its Thompson prior; the 1st had no predecessor
+    assert "prior_from" not in tw and tw2["prior_from"] == "ppo_20260904b_t0" and "warm-started" in tw2["note"]
+    h3 = LU.register_arm(cfg_p, name="ppo_20260906", battle_ckpt=world.base, tau=0.3, note="head 3", learning=True,
+                         prior_from="ppo_20260905")
+    assert h3["prior_from"] == "ppo_20260905" and h3["note"].startswith("head 3") and "warm-started" in h3["note"]
+    loaded = {a.name: a for a in SB.load_arms(cfg_p, exists=lambda _p: True)}
+    assert loaded["ppo_20260906"].prior_from == "ppo_20260905" and loaded["ppo_20260905_t0"].prior_from == "ppo_20260904b_t0"
+    assert loaded["inc"].prior_from is None and loaded["ppo_20260905"].prior_from is None
+    explicit = LU.register_twin_arm(cfg_p, head="ppo_20260906", battle_ckpt=world.base, stamp="20260906", prior_from=None)
+    assert "prior_from" not in explicit                                                   # opt-out honoured
+
+
+def test_opp_rating_weights_scale_the_advantages_per_game(world):
+    """2026-09-04 B2 (USER: learning first): one weight per game from the opponent's pre-game rating, centred on
+    the batch mean, clipped to [0.5, 2]; unknown = 1; scale 0 = off. run_update threads them into the trainer,
+    which multiplies each game's advantages (returns untouched) and reports the weight stats; a length mismatch
+    is refused."""
+    arms = LU.arm_table(world.cfg)
+    sel = LU.select_trajectories([world.dir / "s1.jsonl"], base=world.base, arms=["tau03"], arm_table=arms,
+                                 days=1.0, now=NOW + 60, expected_state_dim=S)
+    assert sel.n_games == 6
+    rs = [1300, 1500, 1700, 1500, None, 1900]
+    for tr, r in zip(sel.trajectories, rs):
+        tr.meta.sampling = dict(tr.meta.sampling or {})
+        if r is None:
+            tr.meta.sampling.pop("opp_rating_before", None)
+        else:
+            tr.meta.sampling["opp_rating_before"] = r
+    w, info = LU.opp_rating_weights(sel, scale=400.0)
+    mean = (1300 + 1500 + 1700 + 1500 + 1900) / 5                     # 1580, over the KNOWN ratings only
+    exp = [(min(2.0, max(0.5, 2 ** ((r - mean) / 400))) if r is not None else 1.0) for r in rs]
+    assert w == pytest.approx(exp) and w[4] == 1.0
+    assert w[5] > w[2] > w[1] > w[0] and 0.5 <= min(w) and max(w) <= 2.0
+    assert info["n_known"] == 5 and info["n_unknown"] == 1 and info["mean_opp_rating"] == 1580.0
+    assert LU.opp_rating_weights(sel, scale=0.0)[0] == [1.0] * 6      # off
+    assert LU.opp_rating_weights(sel, scale=100.0)[0][5] == 2.0       # the clip bites at a steep scale
+    ppo, train = LU.build_configs(sel, epochs=1, minibatch=0, approx_kl_stop=None)
+    ac, report = LU.run_update(world.base, sel, ppo, train, seed=1, traj_weights=w)
+    u = report["update"]
+    assert u["traj_weight_mean"] == pytest.approx(sum(w) / 6) and u["traj_weight_max"] == pytest.approx(max(w))
+    assert np.isfinite(report["kl_to_base_after"]) and report["n_games"] == 6
+    from v_dance.selfplay.trainer import PPOTrainer
+    with pytest.raises(ValueError, match="traj_weights"):
+        PPOTrainer(ac, ppo, train, seed=1).ppo_update(sel.trajectories, traj_weights=[1.0])
+    # register_arm: adapt_rules None = no key (an argmax candidate follows the launch default, like era2)
+    e = LU.register_arm(world.cfg, name="bcft_test", battle_ckpt=world.base, tau=0.0, note="B4", adapt_rules=None)
+    assert "adapt_rules" not in e and e["tau"] == 0.0
+    e2 = LU.register_arm(world.cfg, name="tau_test", battle_ckpt=world.base, tau=0.3, note="x")
+    assert e2["adapt_rules"] is False                                   # the τ-arm default is unchanged
 
 
 def test_deploy_env_battle_ckpt_swaps_the_key_and_keeps_one_rollback_line(tmp_path):

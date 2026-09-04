@@ -180,6 +180,7 @@ def test_mission_control_exposes_the_pin_env_keys_and_the_arm_names():
     names = mc._bandit_arm_names()
     assert isinstance(names, list)
     if names:                                       # config/ is gitignored → may be absent on CI
-        assert "era4_2b" in names
+        # 2026-09-04: the roster rotates nightly (chain heads, benched frozen arms) — assert the shape, not a name
+        assert all(isinstance(n, str) and n for n in names) and len(set(names)) == len(names)
     with pytest.raises(ValueError):                 # the whitelist still rejects everything else
         mc._env_write("PS_PASSWORD", "x")

@@ -66,8 +66,10 @@ def test_repo_config_loads_and_names_real_checkpoints():
         pytest.skip("config/serve_bandit.json is a local (gitignored) file — not on this machine")
     arms = SB.load_arms(SB.DEFAULT_CONFIG, exists=lambda p: True)
     names = [a.name for a in arms]
-    assert "era4_2b" in names and any(a.incumbent for a in arms)
-    assert any(a.tau > 0 for a in arms)            # the W3a exploration arms are present
+    # 2026-09-04: the live roster changes nightly (chain heads rotate, frozen arms get benched) — assert the
+    # SHAPE the bot relies on, not a name: an incumbent, at least one tau > 0 (learning) arm, unique names.
+    assert names and len(set(names)) == len(names) and any(a.incumbent for a in arms)
+    assert any(a.tau > 0 for a in arms)            # the learning / exploration arm is present
 
 
 # ── allocation ───────────────────────────────────────────────────────────────
@@ -154,7 +156,9 @@ def test_retire_rule_kills_a_clearly_worse_arm_but_never_the_incumbent_or_the_le
     assert rows["learn"]["learning"] is True and rows["a"]["learning"] is False
     assert rows["inc"]["p_worse"] is None and rows["a"]["p_worse"] > 0.99
     assert b.rule() == {"min_games": 2, "retire_min_games": 40, "retire_prob": 0.9, "retire_margin_elo": 0.0,
-                        "incumbent": "inc", "learning": ["learn"], "learning_share": 0.0}
+                        "incumbent": "inc", "learning": ["learn"], "learning_share": 0.0,
+                        "warm_start_games": 50.0,                    # 2026-09-04 posterior warm-start cap
+                        "shares": {}}                                # 2026-09-04 B1 fixed shares (none here)
     assert "P(worse than the incumbent) ≥ 0.90" in b.banner() and "learning arm(s) exempt: learn" in b.banner()
     # a margin in Elo/game makes the rule stricter: 'a' is 10/g under the incumbent, so 12/g never retires it
     b2 = SB.ServeBandit(arms, fmt=FMT, state_path=tmp_path / "state2.json", seed=1, now=lambda: 1000.0,
@@ -379,3 +383,118 @@ def _cfg_with(tmp_path: Path, extra: dict) -> Path:
     p = tmp_path / "share.json"
     p.write_text(json.dumps({**extra, "arms": [{"name": "inc"}]}), encoding="utf-8")
     return p
+
+
+def test_posterior_warm_start_inherits_the_predecessors_record_as_a_prior_only(tmp_path: Path):
+    """2026-09-04 (USER 'do this'): a new chain head names its predecessor in ``prior_from``; the bandit seeds
+    ITS THOMPSON PRIOR with min(pred.n, warm_start_games) pseudo-games at the predecessor's mean (read from the
+    state file - the predecessor is usually benched), so a fresh arm name no longer restarts exploration from the
+    wide prior. The arm's REAL record, P(worse) and the retire rule see none of it."""
+    import json as _json
+    state = tmp_path / "state.json"
+    state.write_text(_json.dumps({"fmt": FMT, "stats": {
+        "inc": {"n": 500, "wins": 270, "losses": 230, "sum_delta": 650.0, "sumsq_delta": 500 * 400.0},
+        "old_head": {"n": 200, "wins": 95, "losses": 105, "sum_delta": -240.0, "sumsq_delta": 200 * 400.0}}}),
+        encoding="utf-8")
+
+    def shares(prior_from, warm):
+        arms = [SB.Arm(name="inc", incumbent=True), SB.Arm(name="new", prior_from=prior_from, learning=True)]
+        b = SB.ServeBandit(arms, fmt=FMT, state_path=state, seed=3, min_games=0, learning_share=0.0,
+                           warm_start_games=warm, now=lambda: 1000.0)
+        picks = []
+        for _ in range(3000):
+            b.pending = None
+            picks.append(b.choose().name)
+        return b, picks.count("new") / 3000.0
+
+    b_cold, cold = shares(None, 50.0)
+    b_warm, warm = shares("old_head", 50.0)
+    assert b_cold.warm == {} and b_warm.warm["new"] == (50.0, pytest.approx(-60.0))   # 50 pseudo-games at -1.2/g
+    assert cold > 0.38 and warm < 0.30 and warm < cold - 0.10                          # exploration cut, not killed
+    # the real record is untouched: no games, no P(worse), nothing for the retire rule to see
+    s = b_warm.stats["new"]
+    assert s.n == 0 and s.sum_delta == 0.0 and b_warm.p_worse("new") is None
+    row = next(r for r in b_warm.summary() if r["name"] == "new")
+    assert row["prior_from"] == "old_head" and row["warm_games"] == 50 and row["n"] == 0
+    assert "prior warm-start" in b_warm.banner() and "old_head" in b_warm.banner()
+    assert b_warm.rule()["warm_start_games"] == 50.0
+    # a predecessor with fewer games than the cap lends only what it has; an unknown one lends nothing
+    state.write_text(_json.dumps({"fmt": FMT, "stats": {"old_head": {"n": 12, "sum_delta": 24.0}}}), encoding="utf-8")
+    b_small, _ = shares("old_head", 50.0)
+    assert b_small.warm["new"] == (12.0, pytest.approx(24.0))
+    b_none, _ = shares("never_played", 50.0)
+    assert b_none.warm == {} and next(r for r in b_none.summary() if r["name"] == "new")["warm_games"] == 0
+    # warm_start_games 0 disables it; the config reader passes the key through; load_arms reads prior_from
+    b_off, _ = shares("old_head", 0.0)
+    assert b_off.warm == {} and "prior warm-start" not in b_off.banner()
+    cfg = tmp_path / "cfg.json"
+    cfg.write_text(_json.dumps({"prior_games": 5, "warm_start_games": 40,
+                                "arms": [{"name": "x", "prior_from": "y"}, {"name": "z"}]}), encoding="utf-8")
+    assert SB.config_params(cfg)["warm_start_games"] == 40
+    loaded = SB.load_arms(cfg, exists=lambda _p: True)
+    assert loaded[0].prior_from == "y" and loaded[1].prior_from is None
+
+
+def test_fixed_per_arm_shares_allocate_games_and_exempt_the_instrument_arms(tmp_path: Path):
+    """2026-09-04 B1 (USER: learning first): an arm with an explicit ``share`` takes that fraction of the
+    post-warm-up games (the learning arm's floor is ``learning_share`` unless it has its own share); shares
+    above 1 are scaled; the remainder is Thompson's; fixed-share arms are retire-EXEMPT (the twin is an
+    instrument, era2 the control); the fields reach the UIs and the loader reads the key."""
+    from collections import Counter
+    import json as _json
+
+    def picks(b, n=2000):
+        c = Counter()
+        for _ in range(n):
+            b.pending = None
+            c[b.choose().name] += 1
+        return c
+    arms = [SB.Arm(name="inc", incumbent=True, share=0.15), SB.Arm(name="twin", share=0.15),
+            SB.Arm(name="learn", tau=0.3, learning=True), SB.Arm(name="frozen")]
+    b = SB.ServeBandit(arms, fmt=FMT, state_path=tmp_path / "s.json", seed=2, now=lambda: 1000.0,
+                       min_games=0, learning_share=0.7)
+    c = picks(b)
+    assert 1300 <= c["learn"] <= 1500 and 240 <= c["twin"] <= 360 and 240 <= c["inc"] <= 360
+    assert c["frozen"] == 0                                           # shares sum to 1: Thompson gets nothing
+    assert b.rule()["shares"] == {"inc": 0.15, "twin": 0.15} and b.rule()["learning_share"] == 0.7
+    rows = {r["name"]: r for r in b.summary()}
+    assert rows["twin"]["share"] == 0.15 and rows["learn"]["share"] is None
+    assert "fixed shares: inc 15%, twin 15% (retire-exempt)" in b.banner()
+    # room left below 1 -> Thompson allocates the remainder (equal priors here: about a third each)
+    arms2 = [SB.Arm(name="inc", incumbent=True), SB.Arm(name="twin", share=0.2),
+             SB.Arm(name="learn", tau=0.3, learning=True)]
+    b2 = SB.ServeBandit(arms2, fmt=FMT, state_path=tmp_path / "s2.json", seed=2, now=lambda: 1000.0,
+                        min_games=0, learning_share=0.5)
+    c2 = picks(b2)
+    assert 130 <= c2["inc"] <= 280 and c2["twin"] >= 480 and c2["learn"] >= 1100
+    # the learning arm's OWN share overrides learning_share; shares above 1 are scaled proportionally
+    arms3 = [SB.Arm(name="inc", incumbent=True, share=0.6), SB.Arm(name="learn", tau=0.3, learning=True, share=0.6),
+             SB.Arm(name="other")]
+    b3 = SB.ServeBandit(arms3, fmt=FMT, state_path=tmp_path / "s3.json", seed=2, now=lambda: 1000.0,
+                        min_games=0, learning_share=0.1)
+    c3 = picks(b3)
+    assert 900 <= c3["inc"] <= 1100 and 900 <= c3["learn"] <= 1100 and c3["other"] == 0
+    # no floors at all -> the RNG is not consumed (the pre-L2 Thompson sequence is byte-identical)
+    arms4 = [SB.Arm(name="inc", incumbent=True), SB.Arm(name="x")]
+    seq_a = picks(SB.ServeBandit(arms4, fmt=FMT, state_path=tmp_path / "s4.json", seed=7, now=lambda: 1000.0,
+                                 min_games=0, learning_share=0.0), 50)
+    seq_b = picks(SB.ServeBandit(arms4, fmt=FMT, state_path=tmp_path / "s5.json", seed=7, now=lambda: 1000.0,
+                                 min_games=0, learning_share=0.3), 50)   # a share but no learning arm
+    assert seq_a == seq_b
+    # retire rule: the fixed-share arm with a terrible record survives, the free arm with the same record dies
+    arms5 = [SB.Arm(name="inc", incumbent=True, share=0.2), SB.Arm(name="twin", share=0.2), SB.Arm(name="free")]
+    b5 = SB.ServeBandit(arms5, fmt=FMT, state_path=tmp_path / "s6.json", seed=1, now=lambda: 1000.0,
+                        min_games=2, retire_min_games=40, retire_prob=0.90)
+    k = 0
+    for name, wins, losses in (("inc", 30, 10), ("twin", 10, 30), ("free", 10, 30)):
+        for d in [+10] * wins + [-10] * losses:
+            b5.pending = name
+            b5.bind(_tag(k))
+            b5.observe(_tag(k), d)
+            k += 1
+    assert b5.stats["free"].retired and not b5.stats["twin"].retired and b5.p_worse("twin") > 0.99
+    # config plumbing: load_arms reads share; a missing key stays None
+    cfg = tmp_path / "cfg.json"
+    cfg.write_text(_json.dumps({"arms": [{"name": "a", "share": 0.15}, {"name": "b"}]}), encoding="utf-8")
+    loaded = SB.load_arms(cfg, exists=lambda _p: True)
+    assert loaded[0].share == 0.15 and loaded[1].share is None

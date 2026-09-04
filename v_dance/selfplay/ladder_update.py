@@ -45,6 +45,9 @@ RECIPE = {
     "actor_lr": 3e-5, "critic_lr": 1e-3, "backbone_lr_scale": 0.1, "weight_decay": 1e-2,
     "epochs": 2, "minibatch": 256, "max_grad_norm": 0.5, "gamma": 0.997, "lam": 0.95,
     "warmup_updates": 1,
+    # 2026-09-04 B2: Elo per DOUBLING of a game's advantage weight, centred on the batch's mean opponent
+    # rating (see opp_rating_weights); 0 = every game weighs 1.
+    "opp_weight_scale": 400.0,
 }
 GATES = {"max_kl": 0.15, "min_ev": 0.0, "ruler_floor_pp": -0.5, "max_pair_flips": 0.05,
          # 2026-09-03 L3 (chain mode): the ruler vs the ANCHOR (the incumbent) — an absolute floor so a
@@ -284,11 +287,43 @@ def build_configs(sel: Selection, **over):
     return ppo, train
 
 
+# ── B2: opponent-rating weights (2026-09-04, USER: learning first) ───────────
+def opp_rating_weights(sel: Selection, *, scale: float = RECIPE["opp_weight_scale"], lo: float = 0.5,
+                       hi: float = 2.0):
+    """One advantage weight per selected game from the OPPONENT's pre-game rating (the recorder's
+    ``sampling.opp_rating_before``): ``2 ** ((opp - mean_opp) / scale)`` clipped to ``[lo, hi]``, centred on
+    the batch mean so the weights average about 1 (no change to the effective learning rate). Why: with the
+    learning arm at 70 % of the games the rating sits in a low band, and a policy trained on beating 1300s is
+    not trained to beat 1700s — games against stronger opponents should count more. Unknown ratings weigh 1;
+    ``scale`` <= 0 = off (all ones). Returns ``(weights, info)``."""
+    ratings = []
+    for tr in sel.trajectories:
+        r = (tr.meta.sampling or {}).get("opp_rating_before")
+        try:
+            ratings.append(None if r is None else float(r))
+        except (TypeError, ValueError):
+            ratings.append(None)
+    known = [r for r in ratings if r is not None]
+    info = {"scale": float(scale or 0.0), "lo": lo, "hi": hi, "n_known": len(known),
+            "n_unknown": len(ratings) - len(known),
+            "mean_opp_rating": (round(float(np.mean(known)), 1) if known else None)}
+    if not scale or float(scale) <= 0.0 or not known:
+        w = [1.0] * len(ratings)
+    else:
+        m = float(np.mean(known))
+        w = [1.0 if r is None else float(min(hi, max(lo, 2.0 ** ((r - m) / float(scale))))) for r in ratings]
+    if w:
+        info.update({"w_mean": round(float(np.mean(w)), 3), "w_min": round(float(min(w)), 3),
+                     "w_max": round(float(max(w)), 3)})
+    return w, info
+
+
 # ── the update ────────────────────────────────────────────────────────────────
 def run_update(base, sel: Selection, ppo_cfg, train_cfg, *, device: str = "cpu", seed: int = 0,
-               warmup_updates: int = 1):
+               warmup_updates: int = 1, traj_weights=None):
     """Warm-start from ``base``, warm the critic, rebase the stored values, ONE leashed PPO update.
-    Returns ``(actor_critic, report)``; the report carries every number the gates read."""
+    Returns ``(actor_critic, report)``; the report carries every number the gates read.
+    ``traj_weights`` (B2): one advantage weight per selected trajectory, see :func:`opp_rating_weights`."""
     from v_dance.selfplay.actor_critic import ActorCritic
     from v_dance.selfplay.policy_eval import assert_actions_legal
     from v_dance.selfplay.trainer import PPOTrainer
@@ -302,7 +337,7 @@ def run_update(base, sel: Selection, ppo_cfg, train_cfg, *, device: str = "cpu",
     kl_init = trainer._kl_from_bc(txns) if txns else float("nan")
     warm = trainer.warmup_critic(trajs, n_updates=int(warmup_updates))
     rebased = trainer.rebase_values(trajs)
-    stats = trainer.ppo_update(trajs)
+    stats = trainer.ppo_update(trajs, traj_weights=traj_weights)
     kl_after = trainer._kl_from_bc(txns) if txns else float("nan")
     report = {
         "base": str(base), "device": device, "seed": int(seed),
@@ -384,20 +419,34 @@ def next_run_stamp(stamp: str, arm_names, ckpt_root=CKPT_ROOT) -> str:
     raise ValueError(f"no free run stamp for {stamp} (26 same-day runs?)")
 
 
+_WARM_NOTE = (" Bandit prior warm-started from {src} (min(its games, warm_start_games) pseudo-games at its mean, "
+              "Thompson only; the record itself starts at 0).")
+
+
 def register_arm(config_path, *, name: str, battle_ckpt, tau: float, note: str,
-                 tp_ckpt: str = "default", learning: bool = False) -> dict:
+                 tp_ckpt: str = "default", learning: bool = False, prior_from: Optional[str] = None,
+                 adapt_rules: Optional[bool] = False, share: Optional[float] = None) -> dict:
     """Append arm ``name`` to the bandit config (same τ as the data, top-p 1.0, adapt-rules OFF —
     the next night's data from it stays clean). Refuses a duplicate name. ``learning=True`` (L3 chain
-    mode) flags it as the learning arm: retire-exempt, the L2 floor share, tomorrow's ``--base learning``."""
+    mode) flags it as the learning arm: retire-exempt, the L2 floor share, tomorrow's ``--base learning``.
+    ``prior_from`` (2026-09-04) names the predecessor whose ladder record seeds this arm's Thompson prior
+    (``serve_bandit.Arm.prior_from``) — in chain mode the head it was trained from."""
     p = Path(config_path)
     cfg = json.loads(p.read_text(encoding="utf-8"))
     arms = cfg.setdefault("arms", [])
     if any(a.get("name") == name for a in arms):
         raise ValueError(f"arm {name!r} already exists in {p}")
     entry = {"name": name, "battle_ckpt": repo_relative(battle_ckpt), "tp_ckpt": tp_ckpt,
-             "tau": float(tau), "top_p": 1.0, "tp_tie_eps": 1.0, "adapt_rules": False, "note": note}
+             "tau": float(tau), "top_p": 1.0, "tp_tie_eps": 1.0, "note": note}
+    if adapt_rules is not None:                 # None (B4 argmax candidates) = the launch default, like era2
+        entry["adapt_rules"] = bool(adapt_rules)
+    if share is not None:                       # B1 fixed share (a B4 candidate needs one to get games at all)
+        entry["share"] = float(share)
     if learning:
         entry["learning"] = True
+    if prior_from:
+        entry["prior_from"] = str(prior_from)
+        entry["note"] = note + _WARM_NOTE.format(src=prior_from)
     arms.append(entry)
     p.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return entry
@@ -432,25 +481,34 @@ def twin_name(head: str) -> str:
     return f"{head}_t0"
 
 
-def register_twin_arm(config_path, *, head: str, battle_ckpt, stamp: str, tp_ckpt: str = "default") -> dict:
+def register_twin_arm(config_path, *, head: str, battle_ckpt, stamp: str, tp_ckpt: str = "default",
+                      prior_from: Optional[str] = "auto") -> dict:
     """Register ``ppo_<stamp>_t0`` = the chain head's checkpoint at τ 0 (argmax), served NEXT to the incumbent.
     The learning arm's own ladder record always carries the τ-0.3 sampling cost (≈ −3 Elo/g), so it can never
     say whether the WEIGHTS beat era2 — the twin can. Same knobs as the incumbent (top-p 1.0, tie-eps 1.0, TP
     default, adapt-rules = the launch default — no key, exactly like era2's entry) so the comparison is apples
     to apples; NOT learning (the retire rule bounds a bad twin at ``retire_min_games``); promotion stays human.
-    ``twin_of`` marks it for :func:`rotate_twin_arm` (``load_arms`` ignores unknown keys — verified 2026-09-04)."""
+    ``twin_of`` marks it for :func:`rotate_twin_arm` (``load_arms`` ignores unknown keys — verified 2026-09-04).
+    ``prior_from`` "auto" (default) = the twin currently served (the one :func:`rotate_twin_arm` will bench) seeds the
+    new twin's Thompson prior; None = no warm-start; a name = that arm."""
     p = Path(config_path)
     cfg = json.loads(p.read_text(encoding="utf-8"))
     arms = cfg.setdefault("arms", [])
     name = twin_name(f"ppo_{stamp}") if head == f"ppo_{stamp}" else twin_name(head)
     if any(a.get("name") == name for a in arms):
         raise ValueError(f"arm {name!r} already exists in {p}")
+    if prior_from == "auto":
+        prev = [a.get("name") for a in arms if a.get("twin_of") and a.get("name") != name]
+        prior_from = prev[-1] if prev else None
     entry = {"name": name, "battle_ckpt": repo_relative(battle_ckpt), "tp_ckpt": tp_ckpt, "tau": 0.0,
              "top_p": 1.0, "tp_tie_eps": 1.0,
              "note": (f"argmax TWIN of {head} (W3b B3, {stamp}): the same checkpoint at tau 0 next to the incumbent "
                       "- judges the chain's WEIGHTS on the ladder (the learning arm's record carries the tau-0.3 "
                       "sampling cost). Retire rule applies; promotion = human (swap 'incumbent')."),
              "twin_of": head}
+    if prior_from:
+        entry["prior_from"] = str(prior_from)
+        entry["note"] += _WARM_NOTE.format(src=prior_from)
     arms.append(entry)
     p.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return entry

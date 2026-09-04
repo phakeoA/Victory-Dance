@@ -34,13 +34,19 @@ def test_card_defaults_build_the_verified_command_and_the_choices_map_to_flags()
     # == .venv/Scripts/python.exe scratch/ladder_ppo_update.py --run-gates --register --base learning
     #    --days 1 --actor-lr 1e-3 --epochs 4   (the USER's 2026-09-04 command; --min-steps 200 = the default)
     #    + --twin (2026-09-04 "go build it": the argmax twin ppo_<date>_t0 registered with every step)
+    #    + B3 fields (the recipe's own defaults, passed explicitly) + the B2 opp-weight knob
     assert argv[5:] == ["--base", "learning", "--days", "1.0", "--actor-lr", "0.001", "--epochs", "4",
-                        "--min-steps", "200", "--run-gates", "--register", "--twin"]
+                        "--min-steps", "200", "--approx-kl-stop", "0.02", "--ruler-floor-pp", "-0.5",
+                        "--ruler-abs-floor-pp", "-1.0", "--opp-weight-scale", "400.0",
+                        "--run-gates", "--register", "--twin"]
     # 'incumbent' = the script's own default -> the flag is OMITTED; the optional flags appear when ticked
     argv = mc._build_argv(e, {"base": "incumbent", "register": False, "twin": False, "dry-run": True,
-                              "no-deploy-env": True, "actor-lr": "0.0005", "days": "2"}, [], _NO_CKPTS)
+                              "no-deploy-env": True, "actor-lr": "0.0005", "days": "2",
+                              "opp-weight-scale": "0", "ruler-abs-floor-pp": "-2"}, [], _NO_CKPTS)
     tail = argv[5:]
     assert "--base" not in tail and "--register" not in tail and "--twin" not in tail
+    assert tail[tail.index("--opp-weight-scale") + 1] == "0.0"          # 0 is a value (off), not "unset"
+    assert tail[tail.index("--ruler-abs-floor-pp") + 1] == "-2.0"      # negative floors survive the clamp
     assert tail[:4] == ["--days", "2.0", "--actor-lr", "0.0005"]
     assert "--dry-run" in tail and "--no-deploy-env" in tail and "--run-gates" in tail
     with pytest.raises(ValueError, match="invalid choice"):
@@ -112,6 +118,7 @@ _LOG_OK = """[ladder-ppo] chain mode: base = the learning arm ppo_20260903b's ch
   tau              : 0.3   candidates (tau: turn steps) 0.3: 1386
   games / steps    : 221 / 1782  (turn 1386, replacement 396, dedup-inexact 0, empty-slot->PASS repaired 0)
 [ladder-ppo] recipe  {"tau": 0.3}
+[ladder-ppo] opp-rating weights  scale 400  known 219/221  mean opp 1402.5  w mean/min/max 1.012/0.5/2.0
 [ladder-ppo] update  steps 1782  epochs 3  loss -0.0123  ratio 1.000  approx_kl 0.0208  KL-to-base 0.0157  EV 0.845  pair_flips 0.01  halted True (approx_kl 0.0277 > 0.02 after epoch 3)  17.5 s
 [ladder-ppo] candidate -> E:\\repo\\ai_train_scripts\\BC_model\\checkpoints_attn_ladder_ppo_20260904\\battle_base.pt
 [ladder-ppo] warning: early stop: approx_kl 0.0277 > 0.02 after epoch 3
@@ -139,6 +146,7 @@ def test_jobs_tab_progress_parses_the_scripts_report_lines(tmp_path):
     assert m["ruler pp"] == "-0.02 ok" and m["vs anchor pp"] == "0.1 ok" and m["type-eff"] == "ok"
     assert m["arm"] == "ppo_20260904" and m[".env VD_BATTLE_CKPT"] == "checkpoints_attn_ladder_ppo_20260904"
     assert m["twin"] == "ppo_20260904_t0"
+    assert m["opp weights"] == "219/221 known, mean opp 1402.5, scale 400"
     # mid-run: the furthest phase reached, a partial pct
     log.write_text(_LOG_OK.split("[ladder-ppo] candidate")[0], encoding="utf-8")
     p = mc._job_progress("ladder_ppo", [], log)
@@ -184,3 +192,7 @@ def test_page_ships_the_card_hooks():
     assert "bot must be DOWN" in html and "W3b chain head (learning arm)" in html
     assert 'if (curTab === "train") renderChainStatus();' in html   # kept live by the 3 s poll
     assert "poke-env @a8810da" in html                              # the Deploy card's env pins line
+    # 2026-09-04 B1 / warm-start badges in BOTH arms panels (MC + the :8777 panel template)
+    assert "📊 ${Math.round(a.share * 100)}%" in html and "🔥 prior ${a.warm_games} g" in html
+    panel_src = (mc._REPO / "v_dance" / "play" / "bot_control_ui.py").read_text(encoding="utf-8")
+    assert "📊 ${Math.round(a.share * 100)}%" in panel_src and "🔥 prior ${a.warm_games} g" in panel_src
