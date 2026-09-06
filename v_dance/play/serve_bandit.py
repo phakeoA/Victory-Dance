@@ -283,6 +283,10 @@ class ServeBandit:
         # 2026-09-04: cap on the pseudo-games a new arm inherits from its ``prior_from`` predecessor (0 = off)
         self.warm_start_games = float(warm_start_games)
         self.warm: Dict[str, tuple] = {}            # arm name -> (pseudo_n, pseudo_sum_delta), Thompson only
+        # 2026-09-04: records of arms NOT in the current roster (benched frozen arms, rotated chain heads, retired
+        # twins) — kept verbatim and written back by save(). Before this, the first save after a roster change
+        # DROPPED them: ppo_20260904c lost its 13:51 session, and a warm-start predecessor vanished one restart later.
+        self.extra_stats: Dict[str, dict] = {}
         self._now = now or time.time
         self.stats: Dict[str, ArmStats] = {a.name: ArmStats() for a in self.arms}
         self.pending: Optional[str] = None          # arm applied for the NEXT battle
@@ -306,8 +310,14 @@ class ServeBandit:
             if name in self.stats:
                 self.stats[name] = ArmStats(**{k: s.get(k, getattr(ArmStats(), k))
                                                for k in ArmStats.__dataclass_fields__})
+        self.extra_stats = {name: s for name, s in raw_stats.items()
+                            if name not in self.stats and isinstance(s, dict)}
         # 2026-09-04 posterior warm-start: the predecessor's record (usually a BENCHED arm — present in the state
-        # file, absent from self.arms) becomes min(n, warm_start_games) pseudo-games at its mean, for Thompson only.
+        # file, absent from self.arms) LENDS min(n, warm_start_games) pseudo-games at its mean, for Thompson only.
+        # 2026-09-05 (USER: "the 🔥 prior 50 g tag hasn't disappeared at 100 games"): the lent pseudo-games are a
+        # STAND-IN for the games the arm has not played yet, not extra evidence — each real game displaces one
+        # (``warm_prior``), so the prior is gone at warm_start_games real games. ``self.warm`` = the lent amount
+        # (cap, cap × predecessor mean); what is LEFT comes from ``warm_prior(name)``.
         self.warm = {}
         if self.warm_start_games > 0.0:
             for a in self.arms:
@@ -328,7 +338,8 @@ class ServeBandit:
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.state_path.with_suffix(".tmp")
             tmp.write_text(json.dumps({"fmt": self.fmt, "saved": self._now(),
-                                       "stats": {k: asdict(v) for k, v in self.stats.items()},
+                                       # off-roster records first, the live roster's on top (2026-09-04)
+                                       "stats": {**self.extra_stats, **{k: asdict(v) for k, v in self.stats.items()}},
                                        "by_tag": dict(list(self.by_tag.items())[-200:]),
                                        "pinned": self.pinned,
                                        "pinned_tags": self.pinned_tags[-200:]},
@@ -372,7 +383,7 @@ class ServeBandit:
             best, best_s = None, -math.inf
             for a in active:
                 s = self.stats[a.name]
-                w_n, w_sum = self.warm.get(a.name, (0.0, 0.0))     # 2026-09-04: inherited pseudo-games
+                w_n, w_sum = self.warm_prior(a.name)               # 2026-09-04/05: pseudo-games still lent
                 n_eff = self.prior_games + s.n + w_n
                 mean = (s.sum_delta + w_sum) / n_eff
                 sd = self.prior_sd / math.sqrt(n_eff)
@@ -530,6 +541,21 @@ class ServeBandit:
                                     f"{self.retire_prob:.2f} after {s.n} games "
                                     f"({s.mean_delta():+.1f}/g vs {inc.mean_delta():+.1f}/g)")
 
+    def warm_prior(self, name: str) -> tuple:
+        """2026-09-05: the pseudo-games STILL in ``name``'s Thompson prior as ``(w_n, w_sum)`` — the lent amount
+        (``self.warm``) minus one per real game the arm has played, never negative. The predecessor's record stands
+        in for games not yet played; once the arm has ``warm_start_games`` games of its own the prior is gone."""
+        cap, cap_sum = self.warm.get(name, (0.0, 0.0))
+        if cap <= 0.0:
+            return 0.0, 0.0
+        left = max(0.0, cap - float(self.stats[name].n if name in self.stats else 0))
+        return left, cap_sum * left / cap
+
+    def thompson_share(self) -> float:
+        """2026-09-05: the fraction of the post-warm-up games Thompson allocates (1 − the fixed / floor shares of the
+        active arms). 0 = the fixed shares take every game and the sampler, warm-start priors included, is idle."""
+        return max(0.0, 1.0 - sum(s for _, s in self._floor_groups(self.active_arms())))
+
     def rule(self) -> dict:
         """The allocation / retire parameters + the learning arms, for the UIs' arms panel."""
         return {"min_games": self.min_games, "retire_min_games": self.retire_min_games,
@@ -539,7 +565,9 @@ class ServeBandit:
                 "learning_share": self.learning_share,
                 "warm_start_games": self.warm_start_games,
                 # 2026-09-04 B1: the fixed shares (name -> fraction), for the UIs
-                "shares": {a.name: a.share for a in self.arms if a.share is not None}}
+                "shares": {a.name: a.share for a in self.arms if a.share is not None},
+                # 2026-09-05: what is left for the sampler (0 = idle: fixed shares sum to 1)
+                "thompson_share": round(self.thompson_share(), 3)}
 
     # -- reporting --
     def summary(self) -> List[dict]:
@@ -557,9 +585,12 @@ class ServeBandit:
                         # 2026-09-03: the learning label + the retire rule's number per arm
                         "learning": a.learning,
                         "p_worse": (None if (p := self.p_worse(a.name)) is None else round(p, 3)),
-                        # 2026-09-04: the inherited Thompson prior (pseudo-games), never part of the record above
+                        # 2026-09-04: the inherited Thompson prior (pseudo-games), never part of the record above;
+                        # 2026-09-05: ``warm_games`` = what is LEFT (one leaves per real game; 0 hides the badge),
+                        # ``warm_cap`` = what was lent at registration
                         "prior_from": a.prior_from,
-                        "warm_games": int(round(self.warm.get(a.name, (0.0, 0.0))[0])),
+                        "warm_games": int(round(self.warm_prior(a.name)[0])),
+                        "warm_cap": int(round(self.warm.get(a.name, (0.0, 0.0))[0])),
                         "share": a.share,
                         "tau": a.tau, "tp_tie_eps": a.tp_tie_eps, "note": a.note})
         return out
@@ -573,12 +604,18 @@ class ServeBandit:
         fixed = [a for a in self.arms if a.share is not None]
         shares = ("; fixed shares: " + ", ".join(f"{a.name} {a.share:.0%}" for a in fixed)
                   + " (retire-exempt)") if fixed else ""
-        warm = "; prior warm-start: " + ", ".join(
-            f"{n} ({w_n:.0f} g @ {w_sum / w_n:+.1f}/g from {self.by_name[n].prior_from})"
-            for n, (w_n, w_sum) in self.warm.items() if w_n > 0) if self.warm else ""
+        # 2026-09-05: the sampler's own share (0 % = fixed shares take every game, priors idle) + what is LEFT of each prior
+        groups = self._floor_groups(self.active_arms())
+        thompson = (f"; Thompson's share {self.thompson_share():.0%}"
+                    + (" (fixed shares take every game: the sampler and its priors are idle)"
+                       if self.thompson_share() <= 1e-9 else "")) if groups else ""
+        warm = ("; prior warm-start (a real game displaces a pseudo-game): " + ", ".join(
+            f"{n} ({self.warm_prior(n)[0]:.0f}/{w_n:.0f} g left @ {w_sum / w_n:+.1f}/g from {self.by_name[n].prior_from})"
+            for n, (w_n, w_sum) in self.warm.items() if w_n > 0)) if self.warm else ""
         return (f"[online] serve BANDIT ACTIVE — {len(active)} arm(s), incumbent {self.incumbent.name}: "
                 f"{', '.join(active)}; warm-up {self.min_games} g/arm, retire at ≥{self.retire_min_games} g "
-                f"if P(worse than the incumbent) ≥ {self.retire_prob:.2f}{exempt}{shares}{warm}; state {self.state_path.name}{pin}")
+                f"if P(worse than the incumbent) ≥ {self.retire_prob:.2f}{exempt}{shares}{thompson}{warm}; "
+                f"state {self.state_path.name}{pin}")
 
 
 # ── launch-time pin from the environment (VD_BANDIT_PIN) ─────────────────────

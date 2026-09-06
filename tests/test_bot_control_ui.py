@@ -319,7 +319,7 @@ def test_auto_close_leaves_the_full_suffixed_room_after_confirm():
         _rate(c, suffixed)
         await asyncio.sleep(0.05)
         leaves = [(js, arg) for js, arg in page.sent if "leaveRoom" in js]
-        assert leaves and leaves[0][1] == suffixed    # closes the FULL roomid, not the base
+        assert leaves and leaves[0][1] == {"base": bare, "full": suffixed}    # 2026-09-06: every id form, the FULL one included
         # toggle honoured: a second battle with auto-close OFF stays open
         c.set_auto_close(False)
         assert c.status()["auto_close"] is False

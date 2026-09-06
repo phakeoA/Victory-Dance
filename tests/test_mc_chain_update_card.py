@@ -192,7 +192,15 @@ def test_page_ships_the_card_hooks():
     assert "bot must be DOWN" in html and "W3b chain head (learning arm)" in html
     assert 'if (curTab === "train") renderChainStatus();' in html   # kept live by the 3 s poll
     assert "poke-env @a8810da" in html                              # the Deploy card's env pins line
-    # 2026-09-04 B1 / warm-start badges in BOTH arms panels (MC + the :8777 panel template)
-    assert "📊 ${Math.round(a.share * 100)}%" in html and "🔥 prior ${a.warm_games} g" in html
+    # 2026-09-04 B1 / warm-start badges in BOTH arms panels (MC + the :8777 panel template);
+    # 2026-09-05: the prior badge counts DOWN (left/cap) and both footers show Thompson's share
+    badge = "🔥 prior ${a.warm_games}/${a.warm_cap || a.warm_games} g left"
+    assert "📊 ${Math.round(a.share * 100)}%" in html and badge in html
+    assert "rule.thompson_share" in html and "one displaced per real game" in html
     panel_src = (mc._REPO / "v_dance" / "play" / "bot_control_ui.py").read_text(encoding="utf-8")
-    assert "📊 ${Math.round(a.share * 100)}%" in panel_src and "🔥 prior ${a.warm_games} g" in panel_src
+    assert "📊 ${Math.round(a.share * 100)}%" in panel_src and badge in panel_src
+    assert "rule.thompson_share" in panel_src and "one displaced per real game" in panel_src
+    # 2026-09-05 (USER: "6 in flight with 5 lanes"): both headers say live L/lanes and how many await their rating
+    hdr = " awaiting rating` : "
+    assert hdr in html and "` · live ${live}/${lanes}`" in html
+    assert hdr in panel_src and "` · live ${live}/${lanes}`" in panel_src

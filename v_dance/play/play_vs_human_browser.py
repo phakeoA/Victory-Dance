@@ -28,6 +28,7 @@ from pathlib import Path
 import v_dance  # noqa: F401  (Selector policy for poke-env's POKE_LOOP, on its own thread)
 from poke_env.concurrency import POKE_LOOP
 from v_dance.play.browser.battle_host import BattleHost
+from v_dance.play.send_gate import SendGate
 from v_dance.play.run_local_battle import (
     BATTLE_FORMAT, SHOWDOWN_HOST, SHOWDOWN_PORT, discover_teams, load_team,
     resolve_team_path, start_showdown, stop_showdown,
@@ -44,6 +45,9 @@ _OPP_TIMER_S = 30.0    # opponent think-time before the consumer sends /timer on
 # (team preview included), so an opponent who walks away at preview can never hold a lane. Runtime
 # toggle in the control panel / Mission Control; launch default VD_TIMER_IMMEDIATE (online harness).
 TIMER_IMMEDIATE = False
+# 2026-09-04: the consumer's outgoing pacing gate (send_gate.SendGate), published here so the control panel can
+# show its counters (sent / deferred / queued / server throttle notices). [None] until a consumer runs.
+SEND_GATE: list = [None]
 # 2026-09-03 (USER): OPEN TEAM SHEETS. poke-env answers the server's team-preview offer at |init| with
 # /rejectopenteamsheets (its own accept mode would also DEFER our team-preview pick until both |showteam|
 # lines arrive — a hang whenever the opponent declines, so it stays off). True = the consumer ships
@@ -257,6 +261,12 @@ AUTO_ACCEPT = True
 LINK_TICK = None
 ROOM_GONE_HOOK = None
 REJOINING: set = set()
+# 2026-09-06 (USER: a game vs Rena Valentine played itself on the timer and its tab stayed open): only THIS
+# |noinit| reason means the room is gone. Every other one (``namerequired`` = our rejoin reached the server before
+# the reload's login did; ``joinfailed``, ``rename``…) means the room EXISTS and the join was refused — the tag is
+# kept (REJOIN_REFUSED: tag → reason) and the link watchdog retries the join once the login has settled.
+ROOM_GONE_REASONS = ("nonexistent",)
+REJOIN_REFUSED: dict = {}
 
 # 2026-09-01 (rating reflector): the server's rating line reads "NAME's rating: OLD &rarr;
 # <strong>NEW</strong>". RATING_HOOK receives the PRE-battle number (poke-env's parse, which
@@ -272,6 +282,18 @@ _RATING_CHANGE_RE = re.compile(r"'s rating: (\d+)\D+?(\d+)")
 # ``host.player._battles`` (opponent mons seen / items / abilities / result). The control panel
 # chains onto it (prev-hook pattern). None = off; the local harness never sets it.
 GAME_DONE_HOOK = None
+
+
+PAGE_CALL_TIMEOUT_S = 10.0     # 2026-09-06: a page call that does not answer in this long is a dead renderer
+
+
+async def page_eval(page, js: str, arg=None, timeout_s: Optional[float] = None):
+    """``page.evaluate`` with a hard timeout (2026-09-06, the "Aw, Snap!" pause): Chromium's renderer crash does not
+    always reject pending Playwright calls — on 2026-09-06 08:41 ``page.evaluate`` simply never returned, the
+    consumer and the control panel sat inside it for 38 minutes and the link watchdog, driven from the consumer's
+    idle branch, never ticked. A hang now raises ``asyncio.TimeoutError`` after ``PAGE_CALL_TIMEOUT_S``; the callers
+    already treat a failed call as non-fatal, and the watchdog treats it as a dead link."""
+    return await asyncio.wait_for(page.evaluate(js, arg), timeout=(timeout_s or PAGE_CALL_TIMEOUT_S))
 
 
 def _parse_rating_changes(payload: str) -> list:
@@ -377,13 +399,22 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
     timer_sent: set = set()      # battles we already sent /timer on for (once per battle)
     t0_tag = None                # ladder battles ARRIVE without an accept (the Battle! queue), so
                                  # busy_since was never set → stamp it on a battle's FIRST frame
+    # 2026-09-04 (USER: "a message in the team picker said it couldn't be sent, typed too quickly, and it
+    # didn't pick any Pokémon"): EVERY room command goes through ONE pacing gate — the server drops chat
+    # commands beyond 6 per 600 ms per connection, and five lanes at team preview ship up to 15 at once
+    # (timer + OTS answer + team choice per room). See send_gate.py. Inline while tokens remain.
+    # 2026-09-06 (USER: an "Aw, Snap!" page paused the session 38 min): every page call carries a hard timeout —
+    # a crashed renderer made page.evaluate HANG (no exception), parking the consumer AND the panel inside it, so
+    # the watchdog (then driven from this loop's idle branch) never ran. A hang is now a TimeoutError in 10 s.
+    gate = SendGate(lambda r, m: page_eval(page, "(d) => app.socket.send(d.r + '|' + d.m)", {"r": r, "m": m}))
+    SEND_GATE[0] = gate
 
     async def _timer_on(tag: str, why: str) -> None:
         """``/timer on`` for ONE room, once per battle (a failure is logged, never retried: every
         ship goes through the same page, so a dead page fails everything anyway)."""
         timer_sent.add(tag)
         try:
-            await page.evaluate("(d) => app.socket.send(d.r + '|' + d.m)", {"r": tag, "m": "/timer on"})
+            await gate.send(tag, "/timer on")
             print(f"[ai] {why} — /timer on ({tag})")
         except Exception as exc:
             print(f"[ai] timer-on failed (non-fatal): {exc!r}")
@@ -444,8 +475,8 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
                 host.player.update_team(ai_team)                     # decision core uses this team
                 host.player._team_name = ai_name                     # bench-row ai_team stamp
                 packed = host.player._team.yield_team()
-                await page.evaluate("(t) => app.socket.send('|/utm ' + t)", packed)
-                await page.evaluate("(u) => app.socket.send('|/accept ' + u)", _toid(challenger))
+                await gate.send("", "/utm " + packed)                  # same wire bytes: '' + '|' + '/utm …'
+                await gate.send("", "/accept " + _toid(challenger))
                 print(f"[ai] accepted challenge from {challenger} (AI team: {ai_name} [{src}])")
             except Exception as exc:                                 # accept failed → don't latch busy
                 busy, active_tag = False, None
@@ -504,6 +535,7 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
             # 2) battle frame → host decides → ship its commands back into the tab
             elif payload.startswith(">battle"):
                 active_tag = payload.split("\n", 1)[0].lstrip(">")
+                gate.note_frame(payload, active_tag)                 # a server throttle notice = a dropped command
                 # 2026-09-01: the room is GONE server-side — ``|noinit|nonexistent|`` answers a
                 # reconnect rejoin after the game was decided while the link was down (or a stale
                 # /join). poke-env raises on the event (or, for a forgotten tag, would block forever
@@ -511,11 +543,22 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
                 _second = payload.split("\n", 2)[1] if "\n" in payload else ""
                 if _second.startswith("|noinit|"):
                     why = _second[len("|noinit|"):].split("|", 1)[0] or "?"
+                    if why not in ROOM_GONE_REASONS:
+                        # 2026-09-06: the room exists, the join was refused (a login race after a reload).
+                        # Abandoning it here (the old path) dropped the battle while the client then rejoined
+                        # the room on its own: every turn went to the timer and the panel, told "room gone",
+                        # never closed the tab. Keep it; the watchdog retries the join (LinkWatch).
+                        print(f"[ai] room join refused ({why}): {active_tag} — kept; the rejoin is retried")
+                        REJOIN_REFUSED[active_tag] = why
+                        busy, active_tag = False, None
+                        errors = 0
+                        continue
                     print(f"[ai] room gone ({why}): {active_tag} — abandoning it")
                     abandon = getattr(host, "abandon_battle", None)
                     if callable(abandon) and active_tag not in host._ended:
                         abandon(active_tag)
                     REJOINING.discard(active_tag)
+                    REJOIN_REFUSED.pop(active_tag, None)
                     if ROOM_GONE_HOOK is not None:
                         try:
                             ROOM_GONE_HOOK(active_tag)
@@ -593,14 +636,16 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
                                 # replayed |init| — stale mid-battle, the server would only error.
                                 print(f"[ai] (rejoin: stale {msg} not shipped for {r})")
                                 continue
-                            await page.evaluate("(d) => app.socket.send(d.r + '|' + d.m)", {"r": r, "m": msg})
-                            if msg.startswith(("/choose", "/team")):
-                                # the opponent's think-clock starts now — for THIS room (lanes)
-                                last_ship[r or active_tag] = loop.time()
+                            # through the pacing gate (2026-09-04); the opponent's think-clock for THIS
+                            # room starts when the decision actually LEAVES, so the stamp rides on_sent.
+                            _stamp_room = r or active_tag
+                            await gate.send(r, msg, on_sent=((lambda _rm=_stamp_room: last_ship.__setitem__(_rm, loop.time()))
+                                                             if msg.startswith(("/choose", "/team")) else None))
                         elif r:
                             print(f"[ai] (battle command not shipped: {msg[:30]})")
                     if REJOINING and active_tag in REJOINING and "\n|request|" in payload:
                         REJOINING.discard(active_tag)            # live request received: rejoin complete
+                        REJOIN_REFUSED.pop(active_tag, None)
                 finally:
                     # Battle ended → tally + free up + reclaim state, EVEN IF the feed/ship raised.
                     # Guard on host._ended: Showdown re-sends a room's full log (incl. |win|) on

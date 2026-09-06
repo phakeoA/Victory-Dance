@@ -51,7 +51,7 @@ import numpy as np
 # no matter which local module bootstraps first or how the script is launched.
 _HERE = Path(__file__).resolve().parent
 _REPO_ROOT = _HERE.parent
-from poke_env.battle import DoubleBattle
+from poke_env.battle import DoubleBattle, Move
 from poke_env.player import Player
 from poke_env.player.battle_order import (
     DefaultBattleOrder, DoubleBattleOrder, ForfeitBattleOrder, PassBattleOrder,
@@ -117,6 +117,41 @@ def _display_species(mon) -> Optional[str]:
     if entry and entry.get("name"):
         return entry["name"]
     return sid  # last-resort: the id itself (matches if no forme suffix)
+
+
+_FROM_MOVE_TAG = "[from] move: "
+
+
+def guard_from_move_tags(battle, split_messages):
+    """2026-09-06 (USER: "Round strategy, although rare, is still used"): Showdown marks a chained Round as
+    ``|move|p1b: Sylveon|Round|p2a: Floette|[from] move: Round``. poke-env 0.16.1 reads EVERY ``[from] move: X`` as
+    an override in the Sleep Talk / Copycat sense and indexes ``mover.moves[X]`` (abstract_battle line 725) — Round
+    names ITSELF and Instruct names ANOTHER mon's move, so for an opponent (moves known only once revealed) that is a
+    ``KeyError``; the ps_client swallows it and the REST OF THE FRAME (damage, faints, the next moves) is never parsed
+    → the opponent's state desyncs for the game (16 tracebacks on 2026-09-05). Strip the tag when the mover does not
+    know X, so the line parses as a plain move (registered once, PP once); the real overrides (poke-env pre-deduces
+    Sleep Talk & co. into the moveset first) are untouched. Pure: returns the SAME list when nothing changes, a copy
+    otherwise; never raises."""
+    if battle is None or not split_messages:
+        return split_messages
+    out = split_messages
+    for i, m in enumerate(split_messages):
+        if not isinstance(m, (list, tuple)) or len(m) < 5 or m[1] != "move":
+            continue
+        k = next((j for j in range(4, len(m)) if isinstance(m[j], str)
+                  and m[j].replace("[from]", "", 1).strip().startswith("move: ")), None)
+        if k is None:
+            continue
+        try:
+            name = m[k].replace("[from]", "", 1).strip()[len("move: "):]
+            known = Move.retrieve_id(name) in battle.get_pokemon(m[2]).moves
+        except Exception:                         # an odd identifier: leave the line to poke-env
+            continue
+        if not known:
+            if out is split_messages:
+                out = list(split_messages)
+            out[i] = list(m[:k]) + list(m[k + 1:])
+    return out
 
 
 class SplicingVGCPlayerBase(_RootVGCPlayerBase):
@@ -245,6 +280,14 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
                         buf.append("|".join(sm))
         except Exception:
             log.debug("proto capture failed (non-fatal)", exc_info=True)
+        # 2026-09-06: Round's chain tag / Instruct — strip a ``[from] move: X`` the mover does not know (see the guard)
+        try:
+            if split_messages and split_messages[0]:
+                b = self._battles.get(str(split_messages[0][0]).lstrip(">"))   # poke-env's key = the room token
+                if b is not None:
+                    split_messages = guard_from_move_tags(b, split_messages)
+        except Exception:
+            log.debug("from-move guard failed (non-fatal)", exc_info=True)
         return await super()._handle_battle_message(split_messages)
 
     def _memory_stack(self, battle, state_vec, decision_type: str):

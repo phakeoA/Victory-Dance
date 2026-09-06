@@ -420,7 +420,8 @@ def next_run_stamp(stamp: str, arm_names, ckpt_root=CKPT_ROOT) -> str:
 
 
 _WARM_NOTE = (" Bandit prior warm-started from {src} (min(its games, warm_start_games) pseudo-games at its mean, "
-              "Thompson only; the record itself starts at 0).")
+              "Thompson only; each real game displaces one, so the prior is gone at warm_start_games games; "
+              "the record itself starts at 0).")
 
 
 def register_arm(config_path, *, name: str, battle_ckpt, tau: float, note: str,
@@ -482,30 +483,43 @@ def twin_name(head: str) -> str:
 
 
 def register_twin_arm(config_path, *, head: str, battle_ckpt, stamp: str, tp_ckpt: str = "default",
-                      prior_from: Optional[str] = "auto") -> dict:
+                      prior_from: Optional[str] = "auto", share="auto") -> dict:
     """Register ``ppo_<stamp>_t0`` = the chain head's checkpoint at τ 0 (argmax), served NEXT to the incumbent.
     The learning arm's own ladder record always carries the τ-0.3 sampling cost (≈ −3 Elo/g), so it can never
     say whether the WEIGHTS beat era2 — the twin can. Same knobs as the incumbent (top-p 1.0, tie-eps 1.0, TP
     default, adapt-rules = the launch default — no key, exactly like era2's entry) so the comparison is apples
-    to apples; NOT learning (the retire rule bounds a bad twin at ``retire_min_games``); promotion stays human.
+    to apples; NOT learning; promotion stays human.
     ``twin_of`` marks it for :func:`rotate_twin_arm` (``load_arms`` ignores unknown keys — verified 2026-09-04).
     ``prior_from`` "auto" (default) = the twin currently served (the one :func:`rotate_twin_arm` will bench) seeds the
-    new twin's Thompson prior; None = no warm-start; a name = that arm."""
+    new twin's Thompson prior; None = no warm-start; a name = that arm.
+    ``share`` (2026-09-05) "auto" (default) = the FIXED share of the twin being replaced, else the config's
+    ``twin_share``; a number sets it; None = no fixed share. The 09-05 twin was registered without one while the
+    other shares summed to 1 (Thompson's share 0 %), so it played its 8 warm-up games and never again — the 200-g
+    read needs the share, which also makes the twin retire-EXEMPT (B1: a human benches a bad instrument)."""
     p = Path(config_path)
     cfg = json.loads(p.read_text(encoding="utf-8"))
     arms = cfg.setdefault("arms", [])
     name = twin_name(f"ppo_{stamp}") if head == f"ppo_{stamp}" else twin_name(head)
     if any(a.get("name") == name for a in arms):
         raise ValueError(f"arm {name!r} already exists in {p}")
+    prev_twins = [a for a in arms if a.get("twin_of") and a.get("name") != name]
     if prior_from == "auto":
-        prev = [a.get("name") for a in arms if a.get("twin_of") and a.get("name") != name]
-        prior_from = prev[-1] if prev else None
+        prior_from = prev_twins[-1].get("name") if prev_twins else None
+    if share == "auto":
+        inherited = prev_twins[-1].get("share") if prev_twins else None
+        share = inherited if inherited is not None else cfg.get("twin_share")
     entry = {"name": name, "battle_ckpt": repo_relative(battle_ckpt), "tp_ckpt": tp_ckpt, "tau": 0.0,
              "top_p": 1.0, "tp_tie_eps": 1.0,
              "note": (f"argmax TWIN of {head} (W3b B3, {stamp}): the same checkpoint at tau 0 next to the incumbent "
                       "- judges the chain's WEIGHTS on the ladder (the learning arm's record carries the tau-0.3 "
-                      "sampling cost). Retire rule applies; promotion = human (swap 'incumbent')."),
+                      "sampling cost). Promotion = human (swap 'incumbent')."),
              "twin_of": head}
+    if share is not None:
+        entry["share"] = float(share)
+        entry["note"] += (f" Fixed share {float(share):.0%} (retire-exempt, B1) so the 200-g read happens even when "
+                          "the other shares sum to 1; a human benches a bad twin.")
+    else:
+        entry["note"] += " Retire rule applies."
     if prior_from:
         entry["prior_from"] = str(prior_from)
         entry["note"] += _WARM_NOTE.format(src=prior_from)
@@ -637,10 +651,22 @@ def external_ok(ext: dict) -> bool:
     return ok
 
 
+_OOM_SIGNS = ("Unable to allocate", "_ArrayMemoryError", "MemoryError", "CUDA out of memory", "out of memory")
+GATE_OOM_RETRY_WAIT_S = 20.0
+
+
+def looks_like_oom(text: str) -> bool:
+    """2026-09-05: the era2 anchor gate's val-report died on a 199 MiB numpy allocation (the box at its commit limit
+    while the training process still held its CUDA context) — a crash, not a verdict."""
+    t = text or ""
+    return any(s in t for s in _OOM_SIGNS)
+
+
 def run_external_gates(base, candidate, out_dir, *, py: Optional[str] = None,
                        ruler_floor_pp: float = GATES["ruler_floor_pp"], run=None,
                        which: Optional[Sequence[str]] = None, anchor=None,
-                       ruler_abs_floor_pp: float = GATES["ruler_abs_floor_pp"]) -> dict:
+                       ruler_abs_floor_pp: float = GATES["ruler_abs_floor_pp"],
+                       oom_retries: int = 1, sleep=None, log=print) -> dict:
     """Run the external gates (minutes each), keep their output under ``<out_dir>/gates/``, parse
     the verdicts. ``run`` is injectable (tests). Returns a dict with per-gate ok flags.
 
@@ -658,9 +684,22 @@ def run_external_gates(base, candidate, out_dir, *, py: Optional[str] = None,
     run = run or (lambda cmd: subprocess.run(cmd, shell=True, cwd=str(_REPO), capture_output=True,
                                              text=True, encoding="utf-8", errors="replace"))
     out: dict = {"commands": cmds}
+    sleep = sleep or time.sleep
     for name in which:
         r = run(exec_cmds[name])
         text = (getattr(r, "stdout", "") or "") + "\n" + (getattr(r, "stderr", "") or "")
+        # 2026-09-05: a gate that CRASHED out of memory is re-run after a pause (the previous gate's process and the
+        # trainer's tensors release their commit charge slowly on Windows) — never a gate that ran and printed a verdict
+        tries = 0
+        while tries < oom_retries and int(getattr(r, "returncode", 0) or 0) != 0 and looks_like_oom(text):
+            tries += 1
+            log(f"[ladder-ppo] gate {name}: out of memory (rc {getattr(r, 'returncode', '?')}) — retry {tries}/{oom_retries} "
+                f"in {GATE_OOM_RETRY_WAIT_S:.0f} s")
+            sleep(GATE_OOM_RETRY_WAIT_S)
+            r = run(exec_cmds[name])
+            text = (getattr(r, "stdout", "") or "") + "\n" + (getattr(r, "stderr", "") or "")
+        if tries:
+            out[f"{name}_retries"] = tries
         (gdir / f"{name}.txt").write_text(text, encoding="utf-8")
         parsed = None
         if name == "ruler":

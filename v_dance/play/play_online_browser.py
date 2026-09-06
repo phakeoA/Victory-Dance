@@ -305,12 +305,27 @@ class LinkWatch:
     def __init__(self, *, page, host, username: str, password: str, loop, log,
                  probe_s: float = 15.0, dead_s: float = 25.0, cooldown_s: float = 20.0,
                  reconnect: bool = True, prefs: dict | None = None, ctrl_ref: dict | None = None,
-                 now=None):
+                 now=None, client_url: str | None = None):
         self.page, self.host = page, host
         self.username, self.password = username, password
         self._uid = "".join(c for c in username.lower() if c.isalnum())
         self.log = log
         self._now = now or (loop.time if loop is not None else time.monotonic)
+        # 2026-09-06 (USER: an "Aw, Snap!" page paused the session 38 min): a crashed renderer needs a NAVIGATION,
+        # not a reload, and Playwright's page calls may HANG rather than throw → the watchdog also runs as its
+        # own task (``start``) instead of only from the consumer's idle branch, and every probe has a timeout.
+        self.client_url = client_url
+        self.crashed = False
+        self.page_crashes = 0
+        self._task = None
+        # 2026-09-06 (the Rena Valentine game): a rejoin the server refused (|noinit|namerequired| — the join beat
+        # the reload's login) is retried every ``rejoin_retry_s`` while the tag still awaits its live |request|,
+        # ``rejoin_retries`` times; only then is the room treated as gone (the old, immediate behaviour).
+        self.rejoin_retry_s = 8.0
+        self.rejoin_retries = 4
+        self._last_rejoin_retry_at = -1e9
+        self._rejoin_tries: dict = {}
+        self.rejoin_retries_sent = 0
         self.probe_s = max(5.0, float(probe_s))
         self.dead_s = max(self.probe_s + 5.0, float(dead_s))
         self.cooldown_s = float(cooldown_s)
@@ -348,14 +363,72 @@ class LinkWatch:
     def on_ws_error(self, err=None) -> None:
         self.log(f"[online] websocket error: {str(err)[:120]}")
 
-    # ── the tick (runs from the consumer's idle branch, ~1 s cadence) ─────────
+    def on_page_crash(self, *_a) -> None:
+        """Playwright's ``page.on("crash")`` — Chromium's renderer died (the "Aw, Snap!" tab). Every page call
+        throws or hangs from here on; only a navigation revives the tab (``_reconnect`` uses ``page.goto``)."""
+        self.page_crashes += 1
+        self.crashed = True
+        if self.closed_at is None:
+            self.closed_at = self._now()
+        self.log(f"[online] PAGE CRASHED (Chromium 'Aw, Snap!' — the tab's renderer died; #{self.page_crashes}) "
+                 "— navigating back to the client on the next tick")
+
+    async def _eval(self, js: str, arg=None):
+        """A page call with the hard timeout (a crashed renderer once made page.evaluate hang for 38 min)."""
+        return await asyncio.wait_for(self.page.evaluate(js, arg), timeout=_pvhb.PAGE_CALL_TIMEOUT_S)
+
+    async def _retry_refused_rejoins(self, now: float) -> None:
+        """2026-09-06: re-send the join for rooms whose rejoin the server refused, once the tab is logged in;
+        give up (room treated as gone: host abandon + panel bookkeeping) after ``rejoin_retries`` attempts."""
+        refused = [t for t in list(_pvhb.REJOIN_REFUSED) if t in _pvhb.REJOINING]
+        for t in list(_pvhb.REJOIN_REFUSED):
+            if t not in _pvhb.REJOINING:            # the live |request| landed (or the room was reclaimed) meanwhile
+                _pvhb.REJOIN_REFUSED.pop(t, None)
+                self._rejoin_tries.pop(t, None)
+        if not refused or now - self._last_rejoin_retry_at < self.rejoin_retry_s:
+            return
+        self._last_rejoin_retry_at = now
+        try:
+            named = bool(await self._eval(_LINK_NAMED_JS, self._uid))
+        except Exception as exc:
+            self.log(f"[online] rejoin retry: login check failed ({type(exc).__name__}) — waiting")
+            return
+        if not named:
+            self.log(f"[online] rejoin retry for {len(refused)} room(s) waits — the tab is not logged in yet")
+            return
+        for t in refused:
+            n = self._rejoin_tries.get(t, 0) + 1
+            self._rejoin_tries[t] = n
+            if n > self.rejoin_retries:
+                why = _pvhb.REJOIN_REFUSED.pop(t, "?")
+                self._rejoin_tries.pop(t, None)
+                _pvhb.REJOINING.discard(t)
+                self.log(f"[online] rejoin {t} still refused after {n - 1} retries ({why}) — giving up, room treated as gone")
+                try:
+                    abandon = getattr(self.host, "abandon_battle", None)
+                    if callable(abandon) and t not in getattr(self.host, "_ended", set()):
+                        abandon(t)
+                except Exception as exc:
+                    self.log(f"[online] abandon_battle({t}) failed (non-fatal): {exc!r}")
+                self.room_gone(t)
+                continue
+            try:
+                await self._eval(_LINK_REJOIN_JS, t)
+                self.rejoin_retries_sent += 1
+                self.log(f"[online] rejoin retry #{n}/{self.rejoin_retries} sent for {t}")
+            except Exception as exc:
+                self.log(f"[online] rejoin retry #{n} for {t} failed (non-fatal): {exc!r}")
+
+    # ── the tick (its own task via ``start``; the consumer's idle branch calls it too) ──
     async def tick(self) -> None:
         if self._busy:
             return
         now = self._now()
         if self.closed_at is not None:
-            await self._reconnect("socket closed")
+            await self._reconnect("page crashed" if self.crashed else "socket closed")
             return
+        if _pvhb.REJOIN_REFUSED:
+            await self._retry_refused_rejoins(now)
         idle = now - self.last_rx
         if idle < self.probe_s:
             return
@@ -365,7 +438,7 @@ class LinkWatch:
             return
         # first silence past probe_s: ask the socket itself, then ping the server
         try:
-            state = await self.page.evaluate(_LINK_STATE_JS)
+            state = await self._eval(_LINK_STATE_JS)
         except Exception as exc:
             self.log(f"[online] link probe: page.evaluate failed ({type(exc).__name__}) — waiting")
             self.probe_sent_at = now
@@ -374,11 +447,31 @@ class LinkWatch:
             await self._reconnect(f"socket readyState={state}")
             return
         try:
-            await self.page.evaluate(_LINK_PROBE_JS, self.username)
+            await self._eval(_LINK_PROBE_JS, self.username)
         except Exception as exc:
             self.log(f"[online] link probe send failed ({type(exc).__name__}) — waiting")
         self.probe_sent_at = now
         self.probes += 1
+
+    async def run(self, interval_s: float = 2.0, stop=None, sleep=asyncio.sleep) -> None:
+        """2026-09-06: the standalone watchdog loop. Before this the tick ran ONLY from the consumer's idle branch,
+        so a consumer parked inside a hung page call (the "Aw, Snap!" case) also silenced the watchdog. A tick's
+        exception is logged, never fatal."""
+        while stop is None or not stop.is_set():
+            await sleep(interval_s)
+            try:
+                await self.tick()
+            except Exception as exc:              # noqa: BLE001
+                self.log(f"[online] link watchdog task error (non-fatal): {exc!r}")
+
+    def start(self, loop, interval_s: float = 2.0):
+        if self._task is None or self._task.done():
+            self._task = loop.create_task(self.run(interval_s))
+        return self._task
+
+    def stop(self) -> None:
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
 
     def _live_tags(self) -> list:
         ended = getattr(self.host, "_ended", set())
@@ -424,11 +517,12 @@ class LinkWatch:
             _pvhb.REJOINING.add(t)
         ok, named = False, False
         try:
-            await self.page.reload(wait_until="domcontentloaded", timeout=25000)
+            await self._navigate_back()
             await self.page.wait_for_function(_LINK_OPEN_JS, timeout=25000)
             self.last_rx = self._now()
             self.closed_at = None
             self.probe_sent_at = None
+            self.crashed = False
             named = await self._ensure_named()
             if self.prefs:
                 try:
@@ -441,7 +535,7 @@ class LinkWatch:
                 pass
             for t in live:                      # the client re-joins live games itself; this is the belt
                 try:
-                    await self.page.evaluate(_LINK_REJOIN_JS, t)
+                    await self._eval(_LINK_REJOIN_JS, t)
                 except Exception as exc:
                     self.log(f"[online] rejoin {t} failed (non-fatal): {exc!r}")
             ok = True
@@ -461,6 +555,22 @@ class LinkWatch:
                 except Exception as exc:
                     self.log(f"[online] panel on_reconnected failed (non-fatal): {exc!r}")
 
+    async def _navigate_back(self) -> None:
+        """Bring the tab back: a plain reload for a dead socket; a NAVIGATION to the client URL after a renderer
+        crash (a crashed tab has no document to reload — what the USER's manual refresh did on 2026-09-06), and
+        the same navigation as the fallback when the reload itself fails. Without a ``client_url`` (old callers,
+        tests) the reload's error propagates as before."""
+        if self.crashed and self.client_url:
+            await self.page.goto(self.client_url, wait_until="domcontentloaded", timeout=25000)
+            return
+        try:
+            await self.page.reload(wait_until="domcontentloaded", timeout=25000)
+        except Exception as exc:
+            if not self.client_url:
+                raise
+            self.log(f"[online] reload failed ({type(exc).__name__}) — navigating to the client instead")
+            await self.page.goto(self.client_url, wait_until="domcontentloaded", timeout=25000)
+
     def room_gone(self, tag: str) -> None:
         """Consumer hook: a rejoined room no longer exists → tell the panel (run bookkeeping)."""
         c = (self.ctrl_ref or {}).get("c")
@@ -469,13 +579,17 @@ class LinkWatch:
 
     def banner(self) -> str:
         return (f"[online] link watchdog ACTIVE — probe after {self.probe_s:.0f}s idle, reconnect on "
-                f"socket close or after {self.dead_s:.0f}s silence; auto-reconnect "
+                f"socket close, page crash ('Aw, Snap!') or after {self.dead_s:.0f}s silence; own task"
+                f"{' + ' if self._task is not None else ' (not started) + '}the consumer's idle tick; page calls time out "
+                f"at {_pvhb.PAGE_CALL_TIMEOUT_S:.0f}s; auto-reconnect "
                 f"{'ON' if self.reconnect_enabled else 'OFF (detect + log only, VD_LINK_RECONNECT=0)'}")
 
     def status(self) -> dict:
         return {"enabled": self.reconnect_enabled, "down": self.closed_at is not None,
                 "idle_s": round(max(0.0, self._now() - self.last_rx), 1),
-                "reconnects": self.reconnects, "probes": self.probes, "frames": self.frames}
+                "reconnects": self.reconnects, "probes": self.probes, "frames": self.frames,
+                "page_crashes": self.page_crashes, "rejoin_retries": self.rejoin_retries_sent,
+                "rejoin_refused": sorted(_pvhb.REJOIN_REFUSED)}
 
 
 def _write_session_summary(session_log: Path, note: str, tally: dict) -> None:
@@ -502,6 +616,32 @@ def _write_session_summary(session_log: Path, note: str, tally: dict) -> None:
         _slog(session_log, f"(session summary failed: {exc!r})")
 
 
+def player_ratings_from_battle(b, username: str):
+    """2026-09-05 (B2's opponent-rating weights were inert — 'known 0/289'): the PRE-battle ratings of both players,
+    read from poke-env's ``|player|`` parse (``battle._players``: username / player / avatar / rating, the rating a
+    string). On the browser transport the post-battle ``|raw|`` rating lines never reach poke-env (the ended-tag guard
+    drops them), so ``battle.rating`` / ``opponent_rating`` stay None — they remain the fallback. Returns
+    ``(ours, theirs)``; None when unknown (an unrated game has no rating in its player lines)."""
+    ours = theirs = None
+    me = _pvhb._toid(username or "")
+    for p in (getattr(b, "_players", None) or []):
+        if not isinstance(p, dict):
+            continue
+        try:
+            r = int(str(p.get("rating") or "").strip()[:4])
+        except (TypeError, ValueError):
+            continue
+        if me and _pvhb._toid(str(p.get("username") or "")) == me:
+            ours = r
+        else:
+            theirs = r
+    if ours is None:
+        ours = getattr(b, "rating", None)
+    if theirs is None:
+        theirs = getattr(b, "opponent_rating", None)
+    return ours, theirs
+
+
 def _wrap_bench_recording(host: BattleHost, session_id: str, note: str,
                           ckpt: Path, tp_ckpt: Path, arm_of=None, recorder=None) -> None:
     """Append a bench-JSONL row for every finished battle. Hook = host.end_battle (the consumer
@@ -516,14 +656,17 @@ def _wrap_bench_recording(host: BattleHost, session_id: str, note: str,
             if b is not None and getattr(b, "finished", False):
                 state["n"] += 1
                 won = getattr(b, "won", None)
+                # 2026-09-05 (B2 was inert — 'known 0/289'): both PRE-battle ratings from the |player| lines
+                rating_before, opp_rating_before = player_ratings_from_battle(
+                    b, getattr(host.player, "username", None) or "")
                 if recorder is not None:           # W3b-0: seal this game's RL trajectory (±1 terminal)
                     try:
                         lost = getattr(b, "lost", None)
                         recorder.finish(tag, b, won=(None if won is None else bool(won)),
                                         lost=(None if lost is None else bool(lost)),
                                         opponent=getattr(b, "opponent_username", None),
-                                        rating_before=getattr(b, "rating", None),
-                                        opp_rating_before=getattr(b, "opponent_rating", None),
+                                        rating_before=rating_before,
+                                        opp_rating_before=opp_rating_before,
                                         turn=getattr(b, "turn", None))
                     except Exception as exc:
                         print(f"[online] ladder record finish failed (non-fatal): {exc!r}")
@@ -541,8 +684,8 @@ def _wrap_bench_recording(host: BattleHost, session_id: str, note: str,
                        "opponent": getattr(b, "opponent_username", None),
                        "result": "ai" if won else ("draw" if won is None else "human"),
                        "turns": getattr(b, "turn", None),
-                       "rating": getattr(b, "rating", None),
-                       "opponent_rating": getattr(b, "opponent_rating", None),
+                       "rating": rating_before,                 # 2026-09-05: from the |player| lines (was None)
+                       "opponent_rating": opp_rating_before,
                        "ckpt": str(ckpt), "tp_ckpt": str(tp_ckpt),
                        # 2026-09-01 (era-5 W0): which bandit arm played this game (None = no bandit)
                        "arm": arm_name}
@@ -779,7 +922,7 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
                              probe_s=float(os.environ.get("VD_LINK_PROBE_S") or 15.0),
                              dead_s=float(os.environ.get("VD_LINK_DEAD_S") or 25.0),
                              reconnect=(os.environ.get("VD_LINK_RECONNECT", "1").strip() != "0"),
-                             prefs=_prefs, ctrl_ref=ctrl_ref)
+                             prefs=_prefs, ctrl_ref=ctrl_ref, client_url=args.client_url)
 
             def _on_frame(p) -> None:              # incoming: SockJS unwrap → consumer feed
                 link.on_raw_frame(p)               # RAW clock first: SockJS heartbeats count here
@@ -799,6 +942,7 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
                 ws.on("framesent", _sync_avatar_from_send)
 
             page.on("websocket", _on_ws)
+            page.on("crash", link.on_page_crash)   # 2026-09-06: the "Aw, Snap!" tab → navigate back (LinkWatch)
             await page.goto(args.client_url, wait_until="domcontentloaded")
             await page.wait_for_function(
                 "() => window.app && app.socket && app.socket.readyState === 1", timeout=30000)
@@ -822,6 +966,7 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
             # consumer's idle branch; verify-flag-uptake rule: the banner is the launch echo).
             _pvhb.LINK_TICK = link.tick
             _pvhb.ROOM_GONE_HOOK = link.room_gone
+            link.start(asyncio.get_running_loop())   # 2026-09-06: the watchdog's OWN task (a parked consumer no longer silences it)
             print(link.banner())
             _slog(session_log, "    " + link.banner())
             # 2026-09-02 (USER): battle-timer mode — immediate vs the per-room grace (launch echo)

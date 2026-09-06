@@ -234,6 +234,23 @@ def test_external_gate_parsing_and_runner(tmp_path):
                                                                  returncode=1))
     assert dead["ruler_delta_pp"] is None and dead["ruler_ok"] is False and dead["type_eff_ok"] is False
     assert "not recognized" in dead["ruler_note"] and "rc 1" in dead["type_eff_note"]
+    # 2026-09-05: a gate that CRASHED out of memory (the era2 anchor gate's val-report, 199 MiB, the box at its commit
+    # limit) is re-run once after a pause; a gate that printed a verdict, or crashed for another reason, is not
+    seq = [SimpleNamespace(stdout="", returncode=1,
+                           stderr="numpy._core._exceptions._ArrayMemoryError: Unable to allocate 199. MiB for an array"),
+           SimpleNamespace(stdout=ruler, stderr="", returncode=0)]
+    naps, logs = [], []
+    oom = LU.run_external_gates("base.pt", "cand.pt", tmp_path, ruler_floor_pp=-0.5, which=("ruler",),
+                                run=lambda cmd: seq.pop(0), sleep=naps.append, log=logs.append)
+    assert oom["ruler_ok"] and oom["ruler_retries"] == 1 and naps == [LU.GATE_OOM_RETRY_WAIT_S] and not seq
+    assert any("out of memory" in s and "retry 1/1" in s for s in logs)
+    assert "Unable to allocate" not in (tmp_path / "gates" / "ruler.txt").read_text(encoding="utf-8")   # the good run kept
+    still = LU.run_external_gates("base.pt", "cand.pt", tmp_path, ruler_floor_pp=-0.5, which=("ruler",),
+                                  run=lambda cmd: SimpleNamespace(stdout="", stderr="MemoryError", returncode=1),
+                                  sleep=naps.append, log=logs.append)
+    assert still["ruler_ok"] is False and still["ruler_retries"] == 1 and len(naps) == 2 and "rc 1" in still["ruler_note"]
+    assert "ruler_retries" not in dead                                     # a non-OOM crash is not retried
+    assert LU.looks_like_oom("CUDA out of memory") and not LU.looks_like_oom("'.venv' is not recognized")
 
 
 # ── the trainer's recipe options ──────────────────────────────────────────────
@@ -403,6 +420,31 @@ def test_twin_arm_registration_and_rotation(world, tmp_path):
     assert loaded["inc"].prior_from is None and loaded["ppo_20260905"].prior_from is None
     explicit = LU.register_twin_arm(cfg_p, head="ppo_20260906", battle_ckpt=world.base, stamp="20260906", prior_from=None)
     assert "prior_from" not in explicit                                                   # opt-out honoured
+    # 2026-09-05 (the 09-05 twin registered with NO share and starved at its 8 warm-up games under Thompson's 0 %):
+    # a new twin INHERITS the share of the twin it replaces, else the config's twin_share; None opts out; a number sets it
+    assert "share" not in tw2 and "share" not in explicit and "Retire rule applies" in explicit["note"]   # nothing to inherit yet
+    cfg = json.loads(cfg_p.read_text(encoding="utf-8"))
+    next(a for a in cfg["arms"] if a["name"] == "ppo_20260906_t0")["share"] = 0.15        # hand-set, as on 2026-09-04
+    cfg_p.write_text(json.dumps(cfg), encoding="utf-8")
+    tw4 = LU.register_twin_arm(cfg_p, head="ppo_20260907", battle_ckpt=world.base, stamp="20260907")
+    assert tw4["share"] == 0.15 and "Fixed share 15%" in tw4["note"] and "retire-exempt" in tw4["note"]
+    assert "Retire rule applies" not in tw4["note"] and tw4["prior_from"] == "ppo_20260906_t0"
+    assert sorted(LU.rotate_twin_arm(cfg_p, keep=tw4["name"], stamp="20260907")) == ["ppo_20260905_t0", "ppo_20260906_t0"]
+    cfg = json.loads(cfg_p.read_text(encoding="utf-8"))
+    for a in cfg["arms"]:
+        if a.get("twin_of"):
+            a.pop("share", None)                                                          # no twin carries one any more
+    cfg["twin_share"] = 0.2
+    cfg_p.write_text(json.dumps(cfg), encoding="utf-8")
+    tw5 = LU.register_twin_arm(cfg_p, head="ppo_20260908", battle_ckpt=world.base, stamp="20260908")
+    assert tw5["share"] == 0.2                                                            # the config fallback
+    tw6 = LU.register_twin_arm(cfg_p, head="ppo_20260909", battle_ckpt=world.base, stamp="20260909", share=None)
+    assert "share" not in tw6 and "Retire rule applies" in tw6["note"]                    # explicit opt-out
+    tw7 = LU.register_twin_arm(cfg_p, head="ppo_20260910", battle_ckpt=world.base, stamp="20260910", share=0.1)
+    assert tw7["share"] == 0.1
+    loaded = {a.name: a for a in SB.load_arms(cfg_p, exists=lambda _p: True)}
+    assert loaded["ppo_20260908_t0"].share == 0.2 and loaded["ppo_20260910_t0"].share == 0.1
+    assert loaded["ppo_20260909_t0"].share is None and loaded["ppo_20260907_t0"].share is None   # popped above
 
 
 def test_opp_rating_weights_scale_the_advantages_per_game(world):

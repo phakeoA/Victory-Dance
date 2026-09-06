@@ -100,6 +100,10 @@ async def _drive(frames, *, total_s: float, page=None, host=None):
 def _fast_grace(monkeypatch):
     monkeypatch.setattr(_pvhb, "_OPP_TIMER_S", 0.4)     # the 30 s grace, shrunk for the test clock
     monkeypatch.setattr(_pvhb, "TIMER_IMMEDIATE", False)
+    # 2026-09-04: these scenarios stream a decision every 50 ms (20/s — the real server refuses that too), so the
+    # outgoing pacing gate would rightly hold the lower-priority /timer on past the test window. The gate has its
+    # own timing tests (test_send_gate*.py); here it must not be the clock.
+    monkeypatch.setattr(_pvhb.SendGate, "REFILL_S", 0.01)
     _pvhb.REJOINING.clear()
     yield
     _pvhb.REJOINING.clear()

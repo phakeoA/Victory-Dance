@@ -158,7 +158,8 @@ def test_retire_rule_kills_a_clearly_worse_arm_but_never_the_incumbent_or_the_le
     assert b.rule() == {"min_games": 2, "retire_min_games": 40, "retire_prob": 0.9, "retire_margin_elo": 0.0,
                         "incumbent": "inc", "learning": ["learn"], "learning_share": 0.0,
                         "warm_start_games": 50.0,                    # 2026-09-04 posterior warm-start cap
-                        "shares": {}}                                # 2026-09-04 B1 fixed shares (none here)
+                        "shares": {},                                # 2026-09-04 B1 fixed shares (none here)
+                        "thompson_share": 1.0}                       # 2026-09-05: no floors → all Thompson's
     assert "P(worse than the incumbent) ≥ 0.90" in b.banner() and "learning arm(s) exempt: learn" in b.banner()
     # a margin in Elo/game makes the rule stricter: 'a' is 10/g under the incumbent, so 12/g never retires it
     b2 = SB.ServeBandit(arms, fmt=FMT, state_path=tmp_path / "state2.json", seed=1, now=lambda: 1000.0,
@@ -418,6 +419,31 @@ def test_posterior_warm_start_inherits_the_predecessors_record_as_a_prior_only(t
     assert row["prior_from"] == "old_head" and row["warm_games"] == 50 and row["n"] == 0
     assert "prior warm-start" in b_warm.banner() and "old_head" in b_warm.banner()
     assert b_warm.rule()["warm_start_games"] == 50.0
+    assert b_warm.rule()["thompson_share"] == 1.0                                    # no floors: the sampler has it all
+    # 2026-09-05 (USER: "the 🔥 prior 50 g tag hasn't disappeared at 100 games"): the lent pseudo-games are a STAND-IN
+    # for games not yet played — each real game displaces one, the prior is gone at the cap, the badge counts down
+    b_disp = shares("old_head", 50.0)[0]
+    assert b_disp.warm_prior("new") == (50.0, pytest.approx(-60.0))
+    for i in range(30):
+        b_disp.pending = "new"
+        b_disp.bind(_tag(100 + i))
+        b_disp.observe(_tag(100 + i), +2.0)
+    assert b_disp.warm_prior("new") == (20.0, pytest.approx(-24.0))            # 30 real games displaced 30 pseudo-games
+    row = next(r for r in b_disp.summary() if r["name"] == "new")
+    assert row["warm_games"] == 20 and row["warm_cap"] == 50 and row["n"] == 30
+    assert "20/50 g left" in b_disp.banner() and "displaces" in b_disp.banner()
+    for i in range(30, 55):
+        b_disp.pending = "new"
+        b_disp.bind(_tag(100 + i))
+        b_disp.observe(_tag(100 + i), +2.0)
+    assert b_disp.warm_prior("new") == (0.0, 0.0) and b_disp.warm["new"][0] == 50.0   # gone at the cap; the loan is remembered
+    assert next(r for r in b_disp.summary() if r["name"] == "new")["warm_games"] == 0   # 0 = the badge is hidden
+    # a fresh load at n >= cap starts with nothing lent, and the sampler judges the arm on ITS record alone:
+    # 55 g at +2.0/g vs the incumbent's +1.3/g → the new arm is favoured (~56 %); with the -1.2/g predecessor
+    # still glued on (the pre-fix additive prior) it would sit near 38 %
+    b_late, late = shares("old_head", 50.0)                                             # the state now holds new.n = 55
+    assert b_late.stats["new"].n == 55 and b_late.warm_prior("new") == (0.0, 0.0) and b_late.warm["new"][0] == 50.0
+    assert 0.50 < late < 0.63
     # a predecessor with fewer games than the cap lends only what it has; an unknown one lends nothing
     state.write_text(_json.dumps({"fmt": FMT, "stats": {"old_head": {"n": 12, "sum_delta": 24.0}}}), encoding="utf-8")
     b_small, _ = shares("old_head", 50.0)
@@ -498,3 +524,31 @@ def test_fixed_per_arm_shares_allocate_games_and_exempt_the_instrument_arms(tmp_
     cfg.write_text(_json.dumps({"arms": [{"name": "a", "share": 0.15}, {"name": "b"}]}), encoding="utf-8")
     loaded = SB.load_arms(cfg, exists=lambda _p: True)
     assert loaded[0].share == 0.15 and loaded[1].share is None
+
+
+def test_records_of_arms_no_longer_in_the_roster_survive_a_save(tmp_path: Path):
+    """2026-09-04: benched / rotated / retired arms keep their ladder record in the state file across restarts (the
+    warm-start reads a benched predecessor; the twin series is the chain's trend line). Before this, the first save
+    after a roster change silently dropped every arm not in the current config (ppo_20260904c lost its session)."""
+    import json as _json
+    state = tmp_path / "state.json"
+    state.write_text(_json.dumps({"fmt": FMT, "stats": {
+        "inc": {"n": 10, "wins": 6, "losses": 4, "sum_delta": 20.0},
+        "old_head": {"n": 200, "wins": 95, "losses": 105, "sum_delta": -240.0, "retired": True,
+                     "retired_reason": "old rule"}}}), encoding="utf-8")
+    arms = [SB.Arm(name="inc", incumbent=True), SB.Arm(name="new", prior_from="old_head", learning=True)]
+    b = SB.ServeBandit(arms, fmt=FMT, state_path=state, seed=1, min_games=0, now=lambda: 1000.0)
+    assert b.warm["new"][0] == 50.0 and b.extra_stats["old_head"]["n"] == 200
+    b.pending = "new"
+    b.bind(_tag(1))
+    b.observe(_tag(1), +7)                                             # triggers a save
+    saved = _json.loads(state.read_text(encoding="utf-8"))["stats"]
+    assert saved["old_head"]["n"] == 200 and saved["old_head"]["retired"] is True     # kept verbatim
+    assert saved["new"]["n"] == 1 and saved["inc"]["n"] == 10
+    b2 = SB.ServeBandit(arms, fmt=FMT, state_path=state, seed=1, min_games=0, now=lambda: 1000.0)
+    assert b2.warm["new"][0] == 50.0 and b2.stats["new"].n == 1        # the prior survives the restart
+    assert b2.warm_prior("new")[0] == 49.0                             # 2026-09-05: minus the one real game
+    # a roster that re-adopts an off-roster arm reads its record back as a live ArmStats
+    b3 = SB.ServeBandit([SB.Arm(name="inc", incumbent=True), SB.Arm(name="old_head")], fmt=FMT, state_path=state,
+                        seed=1, min_games=0, now=lambda: 1000.0)
+    assert b3.stats["old_head"].n == 200 and b3.stats["old_head"].retired is True and "new" in b3.extra_stats

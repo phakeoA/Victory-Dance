@@ -370,8 +370,10 @@ class BotController:
             self.run_active = False
             self.log(f"ladder run COMPLETE — {self.run_done}/{self.run_target} games played.")
         else:
-            self.log(f"ladder run {self.run_done}/{self.run_target} — next search once the "
-                     f"rating exchange confirms…")
+            # 2026-09-05: under lanes the freed lane refills at once; only the one-lane contract waits for the exchange
+            self.log(f"ladder run {self.run_done}/{self.run_target} — "
+                     + ("the lane refills now; the rating exchange confirms in a few seconds…" if self.lanes > 1
+                        else "next search once the rating exchange confirms…"))
             self._schedule_resume(_RESEARCH_DELAY_S)
 
     def _on_rating(self, tag: str, user: str, rating) -> None:
@@ -458,8 +460,25 @@ class BotController:
         full = self._full_tags.get(base, base)
 
         async def _leave():
-            await self.page.evaluate("(r) => { if (app.rooms[r]) app.leaveRoom(r); }", full)
-            self.log(f"closed battle tab {full}")
+            # 2026-09-06: a hard timeout — a crashed renderer once made this call hang and parked the panel's loop.
+            # The room is left under EVERY id form the client may hold it as (bare, the suffixed private id we
+            # remember, or a re-joined variant) — a lone `app.rooms[full]` miss used to log "closed" while the
+            # tab stayed open (the Rena Valentine game). Returns how many rooms were actually left.
+            n = await _pvhb.page_eval(
+                self.page,
+                "(d) => { let n = 0; for (const id of Object.keys((window.app && app.rooms) || {})) "
+                "{ if (id === d.base || id === d.full || id.startsWith(d.base + '-')) { app.leaveRoom(id); n++; } } "
+                "return n; }",
+                {"base": base, "full": full})
+            # 2026-09-05: the client ships ``|/noreply /leave`` itself — it counts against the same server throttle
+            # as the rooms' decisions, so the consumer's gate must know (every 09-05 notice followed such a burst)
+            gate = _pvhb.SEND_GATE[0]
+            if gate is not None and n != 0:
+                gate.debit("/noreply /leave", full)
+            if n == 0:
+                self.log(f"battle tab {base} not found in the client (already closed?)")
+            else:
+                self.log(f"closed battle tab {full}")
 
         self.loop.create_task(self._guarded(_leave()))
 
@@ -578,8 +597,20 @@ class BotController:
         self.host.player.update_team(team)
         self.host.player._team_name = name
         packed = self.host.player._team.yield_team()
-        await self.page.evaluate("(t) => app.socket.send('|/utm ' + t)", packed)
+        await self._send_global("/utm " + packed, "(t) => app.socket.send('|/utm ' + t)", packed)
         return name, src
+
+    async def _send_global(self, msg: str, js: str, arg=None) -> None:
+        """2026-09-05: a room-less command (``/utm``, ``/search``, ``/cancelsearch``, ``/challenge``…) goes through
+        the consumer's SendGate when one is installed, so the panel's own sends count against the SAME server
+        throttle as the rooms' decisions — every 09-05 throttle notice followed an un-gated leave + utm + search
+        burst at a battle's end, and the dropped message was a live room's decision. Without a gate (tests, local
+        play) the exact pre-gate ``page.evaluate`` is kept."""
+        gate = _pvhb.SEND_GATE[0]
+        if gate is not None:
+            await gate.send("", msg)
+        else:
+            await _pvhb.page_eval(self.page, js, arg)          # 2026-09-06: never hang on a dead renderer
 
     def _load_scoped_team(self, scoped):           # seam: tests stub the filesystem load
         return load_team(resolve_team_path(scoped))
@@ -591,7 +622,7 @@ class BotController:
                 self._schedule_resume(_LIVE_RETRY_S)
             return
         name, src = await self._utm_current_team()
-        await self.page.evaluate("(f) => app.socket.send('|/search ' + f)", self.fmt)
+        await self._send_global(f"/search {self.fmt}", "(f) => app.socket.send('|/search ' + f)", self.fmt)
         self._search_outstanding = True
         self._search_sent_at = self.loop.time()
         self._search_times.append(self._search_sent_at)   # prep-rate guard (lanes)
@@ -618,7 +649,7 @@ class BotController:
         was = self.run_active
         self.run_active = False
         if self.searching or self._search_outstanding:
-            await self.page.evaluate("() => app.socket.send('|/cancelsearch')")
+            await self._send_global("/cancelsearch", "() => app.socket.send('|/cancelsearch')")
             self._search_outstanding = False
         self.log("ladder run stopped." if was else "search cancelled.")
 
@@ -628,8 +659,8 @@ class BotController:
             raise ValueError("empty username")
         self.set_team(team)
         name, src = await self._utm_current_team()
-        await self.page.evaluate("(a) => app.socket.send('|/challenge ' + a)",
-                                 f"{user}, {self.fmt}")
+        await self._send_global(f"/challenge {user}, {self.fmt}", "(a) => app.socket.send('|/challenge ' + a)",
+                                f"{user}, {self.fmt}")
         self.challenge_out = user
         self.log(f"challenge sent to {user!r} ({self.fmt}) with team {name!r} [{src}]")
 
@@ -637,8 +668,8 @@ class BotController:
         if not self.challenge_out:
             self.log("no outgoing challenge to cancel.")
             return
-        await self.page.evaluate("(u) => app.socket.send('|/cancelchallenge ' + u)",
-                                 _pvhb._toid(self.challenge_out))
+        await self._send_global(f"/cancelchallenge {_pvhb._toid(self.challenge_out)}",
+                                "(u) => app.socket.send('|/cancelchallenge ' + u)", _pvhb._toid(self.challenge_out))
         self.log(f"challenge to {self.challenge_out!r} cancelled.")
         self.challenge_out = None
 
@@ -832,6 +863,8 @@ class BotController:
             "lanes": self.lanes, "max_lanes": _MAX_LANES,
             # 2026-09-02 W3b-0: the ladder trajectory recorder (None = off)
             "recorder": (self.recorder.summary() if getattr(self, "recorder", None) is not None else None),
+            # 2026-09-04: the outgoing pacing gate (sent / deferred / queued / server throttle notices — should be 0)
+            "send_gate": (_g.stats() if (_g := (getattr(_pvhb, "SEND_GATE", None) or [None])[0]) is not None else None),
             # 2026-09-02 (USER): matchup tables (session + all-time per team) and the thought feed
             "matchups": self.matchup_status(),
             "thoughts": (self.thoughts.summary(live_tags=self._live)
@@ -1177,8 +1210,9 @@ _PANEL_HTML = """<!DOCTYPE html>
       <select id="lanes"><option value="1">1</option><option value="2">2</option><option value="3">3</option>
         <option value="4">4</option><option value="5">5</option></select>
       <div class="muted">Games finished while a run is active count toward its target —
-        turn auto-accept off for an exact rated-only count. Tabs close (and the next search
-        starts) only after the rating exchange confirms the battle is done.</div>
+        turn auto-accept off for an exact rated-only count. Tabs close after the rating exchange
+        confirms the battle is done; with one lane the next search waits for it too, with several
+        lanes a freed lane refills at once (so an arm's 'in flight' can briefly exceed the lane count).</div>
       <div class="stat" style="margin-top:10px">
         <span>Rating: <b id="rating">—</b></span>
         <span>Session peak: <b id="peak">—</b></span>
@@ -1385,7 +1419,8 @@ function armBadges(a) {
                    : '<span class="ab" title="in the Thompson rotation">active</span>');
   // 2026-09-04 B1 / warm-start: the fixed share (retire-exempt) and the inherited Thompson prior
   if (a.share != null) b.push(`<span class="ab" title="fixed share of the post-warm-up games (retire-exempt; the remainder is Thompson's)">📊 ${Math.round(a.share * 100)}%</span>`);
-  if (a.warm_games) b.push(`<span class="ab" title="Thompson prior warm-started from ${esc(a.prior_from || '')} (pseudo-games; not in the record)">🔥 prior ${a.warm_games} g</span>`);
+  // 2026-09-05: the badge counts DOWN — each real game displaces one borrowed pseudo-game; it vanishes at the cap
+  if (a.warm_games) b.push(`<span class="ab" title="Thompson prior warm-started from ${esc(a.prior_from || '')}: ${a.warm_games} of ${a.warm_cap || a.warm_games} borrowed pseudo-games still in the sampler (one leaves per real game; never in the record)">🔥 prior ${a.warm_games}/${a.warm_cap || a.warm_games} g left</span>`);
   if (a.in_flight) b.push(`<span class="ab" title="games bound but not yet rewarded">${a.in_flight} in flight</span>`);
   return b.join(' ');
 }
@@ -1397,8 +1432,14 @@ function renderArms(s) {
     hdr.textContent = '(bandit OFF — VD_BANDIT=0 / no config: the .env stack plays every game)';
     body.innerHTML = ''; note.textContent = ''; return;
   }
+  // 2026-09-05: 'in flight' = bound to an arm but not yet REWARDED; a finished game stays in flight until its rating
+  // exchange arrives (seconds after |win|), while its lane refills at once — so the badges can sum above the lane count
+  const live = (s.live || []).length, lanes = s.lanes || 0;
+  const awaiting = Math.max(0, arms.reduce((n, a) => n + (a.in_flight || 0), 0) - live);
   hdr.textContent = `· ${arms.length} arm(s) · ${arms.filter(a => !a.retired).length} active` +
-      (s.bandit_pin ? ` · FROZEN on ${esc(s.bandit_pin)}` : ' · exploring');
+      (s.bandit_pin ? ` · FROZEN on ${esc(s.bandit_pin)}` : ' · exploring') +
+      (lanes ? ` · live ${live}/${lanes}` : '') + (awaiting ? ` · ${awaiting} awaiting rating` : '');
+  hdr.title = 'in flight = bound to an arm, not yet rewarded; a finished game stays in flight until its rating exchange arrives (seconds), while its lane refills at once';
   body.innerHTML = arms.map(a => {
     const d = (a.wins || 0) + (a.losses || 0), wr = d ? (100 * a.wins / d) : null;
     const cls = a.retired ? 'retired' : (a.learning ? 'learning' : '');
@@ -1416,6 +1457,10 @@ function renderArms(s) {
       (rule.retire_margin_elo ? ` (by ≥ ${rule.retire_margin_elo} Elo/game)` : '') +
       ((rule.learning || []).length ? ` · learning arm(s) exempt: ${rule.learning.join(', ')}` : ' · no learning arm') +
       (rule.learning_share ? ` · learning-arm floor share ${Math.round(100 * rule.learning_share)}% of games` : '') +
+      // 2026-09-05: say when the sampler is idle (fixed shares sum to 1) and how the 🔥 priors expire
+      (rule.thompson_share != null ? ` · Thompson's share ${Math.round(100 * rule.thompson_share)}%` +
+        (rule.thompson_share > 0 ? '' : ' (the fixed shares take every game: the sampler and its 🔥 priors are idle)') : '') +
+      (rule.warm_start_games ? ` · 🔥 prior = up to ${rule.warm_start_games} pseudo-games borrowed from the predecessor, one displaced per real game` : '') +
       ' · the incumbent is never retired by the rule; promotion is a human call at ≥ 200 games.'
     : '';
 }

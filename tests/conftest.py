@@ -40,6 +40,23 @@ def _hermetic_serve_env(monkeypatch):
         monkeypatch.delenv(k, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _reset_send_gate():
+    """2026-09-05: the real consumer (timer / link / send-gate consumer tests) installs its SendGate into the
+    module-level ``play_vs_human_browser.SEND_GATE[0]`` and never clears it; the control panel now routes its own
+    ``/utm`` + ``/search`` through that slot when set, so a stale gate from an earlier test would swallow a later
+    panel test's sends. Clear the slot around every test (only if the module is already imported — never import
+    it here)."""
+    import sys
+    m = sys.modules.get("v_dance.play.play_vs_human_browser")
+    if m is not None and isinstance(getattr(m, "SEND_GATE", None), list) and m.SEND_GATE:
+        m.SEND_GATE[0] = None
+    yield
+    m = sys.modules.get("v_dance.play.play_vs_human_browser")
+    if m is not None and isinstance(getattr(m, "SEND_GATE", None), list) and m.SEND_GATE:
+        m.SEND_GATE[0] = None
+
+
 @pytest.fixture(scope="session")
 def vod_html() -> str:
     if not VOD_PATH.exists():   # vods are local-only (not in the published repo) — skip on CI
