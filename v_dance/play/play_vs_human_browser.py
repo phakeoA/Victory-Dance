@@ -296,6 +296,19 @@ async def page_eval(page, js: str, arg=None, timeout_s: Optional[float] = None):
     return await asyncio.wait_for(page.evaluate(js, arg), timeout=(timeout_s or PAGE_CALL_TIMEOUT_S))
 
 
+def _preview_over(host, room: str, payload: str) -> bool:
+    """2026-09-06: is ``room``'s team preview already over — the replayed log (or the battle object) shows the
+    battle under way? True when the frame carries ``|start|`` / ``|turn|`` or the battle's turn is ≥ 1."""
+    if "\n|start|" in (payload or "") or "\n|turn|" in (payload or ""):
+        return True
+    try:
+        battles = getattr(getattr(host, "player", None), "_battles", None) or {}
+        b = battles.get(room) or battles.get((room or "").lstrip(">"))
+        return int(getattr(b, "turn", 0) or 0) >= 1
+    except Exception:
+        return False
+
+
 def _parse_rating_changes(payload: str) -> list:
     """[(username, old, new)] for every ``|raw|…'s rating: OLD &rarr; <strong>NEW</strong>…``
     line in the frame. A line with only one number (unexpected) is skipped."""
@@ -635,6 +648,13 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
                                 # reconnect rejoin: poke-env re-answers open team sheets from the
                                 # replayed |init| — stale mid-battle, the server would only error.
                                 print(f"[ai] (rejoin: stale {msg} not shipped for {r})")
+                                continue
+                            if r in REJOINING and msg.startswith("/team") and _preview_over(host, r, payload):
+                                # 2026-09-06 (the juanrava game): poke-env re-emits the team-preview pick from the
+                                # replayed |teampreview| too; once the replay shows the battle under way the preview
+                                # is over — the server only answers "[Invalid choice] Can't choose for Team Preview"
+                                # and re-sends the turn's request (see live_vgc_base's retry guard).
+                                print(f"[ai] (rejoin: stale /team not shipped for {r} — the preview is over)")
                                 continue
                             # through the pacing gate (2026-09-04); the opponent's think-clock for THIS
                             # room starts when the decision actually LEAVES, so the stamp rides on_sent.

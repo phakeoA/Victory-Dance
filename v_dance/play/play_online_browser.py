@@ -107,6 +107,7 @@ import json                                        # noqa: E402
 import logging                                     # noqa: E402
 import sys                                         # noqa: E402
 import time                                        # noqa: E402
+from collections import deque                    # noqa: E402
 
 import v_dance                                     # noqa: F401,E402  (Selector policy for POKE_LOOP)
 import v_dance.play.play_vs_human_browser as _pvhb  # noqa: E402  (the reused local transport)
@@ -279,6 +280,13 @@ _LINK_STATE_JS = "() => (window.app && app.socket) ? app.socket.readyState : -1"
 _LINK_OPEN_JS = "() => !!(window.app && app.socket && app.socket.readyState === 1)"
 _LINK_PROBE_JS = "(u) => app.socket.send('|/cmd userdetails ' + u)"
 _LINK_REJOIN_JS = "(r) => { if (window.app && app.joinRoom && !app.rooms[r]) app.joinRoom(r, 'battle'); }"
+# 2026-09-06 (8 socket closes in a day, cause unknown): remember the SockJS close code / reason on the page so the
+# reconnect can log WHY the socket closed (1000 = a clean close by the server, 1006 = the network dropped it…).
+_LINK_CLOSE_HOOK_JS = ("() => { const s = window.app && app.socket; if (!s) return false; if (s.__vd_hooked) return true; "
+                       "s.__vd_hooked = true; const prev = s.onclose; s.onclose = function (e) { try { window.__vd_last_close = "
+                       "{ code: e && e.code, reason: e && e.reason, wasClean: e && e.wasClean, t: Date.now() }; } catch (_) {} "
+                       "return prev ? prev.apply(this, arguments) : undefined; }; return true; }")
+_LINK_LAST_CLOSE_JS = "() => (window.__vd_last_close || null)"
 
 
 class LinkWatch:
@@ -326,6 +334,10 @@ class LinkWatch:
         self._last_rejoin_retry_at = -1e9
         self._rejoin_tries: dict = {}
         self.rejoin_retries_sent = 0
+        # 2026-09-06 close diagnostics: the socket's URL on open, its close code / reason (page hook), the last frames
+        self._loop = loop
+        self._recent_frames: deque = deque(maxlen=4)
+        self.last_close: dict | None = None
         self.probe_s = max(5.0, float(probe_s))
         self.dead_s = max(self.probe_s + 5.0, float(dead_s))
         self.cooldown_s = float(cooldown_s)
@@ -347,11 +359,38 @@ class LinkWatch:
         self.ws = ws
         self.closed_at = None
         self.last_rx = self._now()
-        self.log(f"[online] websocket opened{' (reconnect #%d)' % self.reconnects if self.reconnects else ''}")
+        url = str(getattr(ws, "url", "") or "")
+        self.log(f"[online] websocket opened{' (reconnect #%d)' % self.reconnects if self.reconnects else ''}"
+                 + (f" — {url[:100]}" if url else ""))
+        if self._loop is not None:                      # 2026-09-06: remember the close code / reason on the page
+            try:
+                self._loop.create_task(self._install_close_hook())
+            except Exception:
+                pass
+
+    async def _install_close_hook(self) -> None:
+        try:
+            await self._eval(_LINK_CLOSE_HOOK_JS)
+        except Exception as exc:                        # noqa: BLE001 — diagnostics only
+            self.log(f"[online] close-hook install failed (non-fatal): {type(exc).__name__}")
+
+    async def _read_close_detail(self) -> None:
+        """Log why the socket closed (the page hook's code / reason) and the last frames seen — BEFORE the reload wipes them."""
+        try:
+            d = await self._eval(_LINK_LAST_CLOSE_JS)
+        except Exception as exc:                        # noqa: BLE001
+            d = {"error": type(exc).__name__}
+        self.last_close = d if isinstance(d, dict) else None
+        frames = " | ".join(f.replace("\n", "⏎")[:70] for f in self._recent_frames) or "-"
+        self.log(f"[online] socket close detail: {d if d else 'no hook data'}; last frames: {frames}")
 
     def on_raw_frame(self, _payload) -> None:
         self.frames += 1
         self.last_rx = self._now()
+        try:
+            self._recent_frames.append(str(_payload)[:90])
+        except Exception:
+            pass
 
     def on_ws_close(self, ws=None) -> None:
         if ws is not None and self.ws is not None and ws is not self.ws:
@@ -516,6 +555,8 @@ class LinkWatch:
                 self.log(f"[online] forget_battle({t}) failed (non-fatal): {exc!r}")
             _pvhb.REJOINING.add(t)
         ok, named = False, False
+        if not self.crashed:                            # 2026-09-06: why did it close? (a crashed tab cannot answer)
+            await self._read_close_detail()
         try:
             await self._navigate_back()
             await self.page.wait_for_function(_LINK_OPEN_JS, timeout=25000)
@@ -589,7 +630,7 @@ class LinkWatch:
                 "idle_s": round(max(0.0, self._now() - self.last_rx), 1),
                 "reconnects": self.reconnects, "probes": self.probes, "frames": self.frames,
                 "page_crashes": self.page_crashes, "rejoin_retries": self.rejoin_retries_sent,
-                "rejoin_refused": sorted(_pvhb.REJOIN_REFUSED)}
+                "rejoin_refused": sorted(_pvhb.REJOIN_REFUSED), "last_close": self.last_close}
 
 
 def _write_session_summary(session_log: Path, note: str, tally: dict) -> None:

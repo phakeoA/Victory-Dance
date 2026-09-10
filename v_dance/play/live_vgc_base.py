@@ -258,6 +258,12 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
         # "trapped", "Invalid choice", …) instead of an opaque "REJECTED".
         self._last_error: Dict[str, str] = {}
 
+    @staticmethod
+    def _is_team_preview_error(err) -> bool:
+        """A Showdown ``|error|`` that answers a ``/team`` outside the preview phase (2026-09-06) — never a verdict
+        on a ``/choose`` order."""
+        return bool(err) and "team preview" in str(err).lower()
+
     # ── Protocol capture ───────────────────────────────────────────────────────
     async def _handle_battle_message(self, split_messages):  # type: ignore[override]
         """Accumulate the public protocol per battle, then defer to poke-env.
@@ -424,7 +430,18 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
         if key not in self._tried_actions:           # new turn → forget old keys
             self._tried_actions = {key: {0: set(), 1: set(), "n": 0}}
         tried = self._tried_actions[key]
-        if action_s0 in tried[0] and action_s1 in tried[1] and (tried[0] or tried[1]):
+        # 2026-09-06 (the juanrava game): a repeated request is NOT a rejection of the net's ORDER when the room's
+        # last server error is about Team Preview ("[Invalid choice] Can't choose for Team Preview: You're not in a
+        # Team Preview phase") — that answered a stale /team shipped after a reconnect rejoin, and Showdown re-sends
+        # the turn's request afterwards. Perturbing here replaced the net's real turn-1 pick with a random legal
+        # action. Re-send the same order and forget that error instead.
+        if (action_s0 in tried[0] and action_s1 in tried[1]
+                and self._is_team_preview_error(self._last_error.get(battle.battle_tag))):
+            self._last_error.pop(battle.battle_tag, None)
+            self._source_counts["resend_after_tp_error"] = self._source_counts.get("resend_after_tp_error", 0) + 1
+            log.info("Turn %d [%s] request repeated after a Team-Preview error (a stale /team from a rejoin) — "
+                     "re-sending the net's order unchanged; not a rejection", battle.turn, battle.battle_tag)
+        elif action_s0 in tried[0] and action_s1 in tried[1] and (tried[0] or tried[1]):
             tried["n"] += 1
             # If every legal action for BOTH slots has already been tried + rejected,
             # or we've perturbed too many times, our mask is out of sync with the real

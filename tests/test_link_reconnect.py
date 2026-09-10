@@ -41,6 +41,8 @@ class FakePage:
             return self.state
         if "named" in js:                                 # the login check (_LINK_NAMED_JS)
             return self.named
+        if "__vd_last_close" in js and "onclose" not in js:   # the close-detail read (2026-09-06)
+            return {"code": 1006, "reason": "", "wasClean": False}
         return None
 
     async def reload(self, **_kw):
@@ -624,4 +626,37 @@ def test_close_room_leaves_every_id_form_and_reports_a_missing_tab(monkeypatch):
         assert any("not found in the client" in e for e in c.events)         # no silent "closed" any more
         return c
 
+    asyncio.run(main())
+
+
+# ── 2026-09-06: the juanrava game — a stale /team after a rejoin must not become a random turn-1 move ──────────────
+def test_team_preview_error_is_recognised_and_preview_over_reads_the_replay():
+    from v_dance.play.live_vgc_base import SplicingVGCPlayerBase as P
+    assert P._is_team_preview_error("[Invalid choice] Can't choose for Team Preview: You're not in a Team Preview phase")
+    assert not P._is_team_preview_error("[Unavailable choice] Can't move: Garchomp's Earthquake is disabled")
+    assert not P._is_team_preview_error(None) and not P._is_team_preview_error("")
+    host = FakeHost(live=[TAG])
+    host.player._battles[TAG].turn = 0
+    assert _pvhb._preview_over(host, TAG, ">x\n|teampreview") is False              # still in preview: ship /team
+    assert _pvhb._preview_over(host, TAG, ">x\n|start|\n|switch|p1a: X|X|100/100") is True   # the replay shows the start
+    assert _pvhb._preview_over(host, TAG, ">x\n|turn|3") is True
+    host.player._battles[TAG].turn = 1
+    assert _pvhb._preview_over(host, TAG, ">x\n|request|{}") is True                # the battle object already at turn 1
+    assert _pvhb._preview_over(FakeHost(), TAG, ">x\n|request|{}") is False           # unknown room: leave it to the server
+
+
+def test_reconnect_logs_the_socket_close_detail_and_the_open_url():
+    async def main():
+        w, page, host, clock, logs = _watch(client_url=CLIENT)
+        ws = type("WS", (), {"url": "wss://sim3.psim.us/showdown/123/abc/websocket"})()
+        w.on_ws_open(ws)
+        assert any("websocket opened" in s and "wss://sim3.psim.us" in s for s in logs)
+        w.on_raw_frame("a[\"|updatesearch|{}\"]")
+        w.on_raw_frame("h")
+        w.on_ws_close(ws)
+        await w.tick()
+        assert w.last_close == {"code": 1006, "reason": "", "wasClean": False}
+        detail = [s for s in logs if "socket close detail" in s]
+        assert detail and "1006" in detail[0] and "updatesearch" in detail[0] and "| h" in detail[0]
+        assert w.status()["last_close"]["code"] == 1006 and page.reloads == 1
     asyncio.run(main())

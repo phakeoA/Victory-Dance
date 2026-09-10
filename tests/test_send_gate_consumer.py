@@ -56,3 +56,25 @@ def test_panel_status_carries_the_gate_counters():
     src = (bcu.__file__)
     text = open(src, encoding="utf-8").read()
     assert '"send_gate"' in text and "SEND_GATE" in text
+
+
+def test_a_stale_team_choice_after_a_rejoin_is_not_shipped_once_the_battle_is_under_way(monkeypatch):
+    """2026-09-06 (the juanrava game): on a reconnect rejoin poke-env re-emits the team-preview pick from the replayed
+    |teampreview|; when the replay already shows |start| / |turn| the preview is over and the server only answers
+    "[Invalid choice] Can't choose for Team Preview" (which then made the retry guard perturb the real turn-1 move).
+    The consumer drops that /team; a fresh room's /team still ships; the live |request| completes the rejoin."""
+    monkeypatch.setattr(_pvhb, "TIMER_IMMEDIATE", False)
+    monkeypatch.setattr(SendGate, "REFILL_S", 0.01)
+    rejoined, fresh = ROOMS[0], ROOMS[1]
+    _pvhb.REJOINING.add(rejoined)
+    try:
+        frames = [(0.0, f">{rejoined}\n|init|battle"),
+                  (0.0, f">{rejoined}\n|start|\n|turn|1\n|request|{{}}"),          # the replay: preview long over
+                  (0.0, f">{fresh}\n|init|battle"),
+                  (0.0, f">{fresh}\n|request|{{\"teamPreview\":true}}")]
+        page, _host = asyncio.run(T._drive(frames, total_s=0.5))
+        msgs = [(a["r"], a["m"]) for _, a in page.evals if isinstance(a, dict) and "m" in a]
+        assert (fresh, "/team 1234") in msgs and (rejoined, "/team 1234") not in msgs
+        assert rejoined not in _pvhb.REJOINING                              # the live |request| completed the rejoin
+    finally:
+        _pvhb.REJOINING.clear()
