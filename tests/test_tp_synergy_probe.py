@@ -16,12 +16,7 @@ import pytest
 pytest.importorskip("torch")
 import numpy as np  # noqa: E402
 
-_REPO = Path(__file__).resolve().parents[1]
-if str(_REPO / "scratch") not in sys.path:
-    sys.path.insert(0, str(_REPO / "scratch"))
-# scratch/ is a local-only dev-harness dir (gitignored) — skip cleanly where it's absent (CI)
-P = pytest.importorskip("tp_synergy_probe",
-                        reason="scratch/ probe harness is local-only, not in the published repo")
+from v_dance.eval import tp_synergy_probe as P   # a package module since 2026-09-10 (was scratch/, CI-skipped)
 
 _FILL = ["Aaa", "Bbb", "Ccc", "Ddd"]
 _OPP = ["Ooo"] * 6

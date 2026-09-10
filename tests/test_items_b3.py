@@ -3,7 +3,7 @@
 AV onModifySpD ×1.5 → incoming special ×2/3 · Eviolite onModifyDef+SpD ×1.5 (NFE holder) → both sides ×2/3
 (both in the shared _situational_damage_mult). Expert Belt ×1.2 on a super-effective hit · type-boost items
 ×1.2 on a matching-type move (attacker, move-writer band). B3b gap-scan: resist berry ×0.5 on a SE hit of its
-type (Chilan = all Normal). VALUE-only, no layout. Design: scratch/v11_b3* (wf_5e1ca4d3).
+type (Chilan = all Normal). VALUE-only, no layout. Design: scratch/archive/v11/v11_b3* (wf_5e1ca4d3).
 """
 from __future__ import annotations
 

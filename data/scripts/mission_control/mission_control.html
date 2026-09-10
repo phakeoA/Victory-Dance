@@ -1100,7 +1100,7 @@ function armBadges(a) {
   if (a.current) b.push(`<span class="ab play" title="bound to a live game / the next game">◀ playing</span>`);
   if (a.incumbent) b.push(`<span class="ab inc" title="the incumbent: the retire rule's reference; never retired by the rule">★ incumbent</span>`);
   if (a.pinned) b.push(`<span class="ab pin" title="frozen mode: this arm plays every game until unpinned">📌 pinned</span>`);
-  if (a.learning) b.push(`<span class="ab learn" title="the adaptive arm: its games feed the nightly ladder-PPO update (scratch/ladder_ppo_update.py); exempt from the retire rule">🧠 learning</span>`);
+  if (a.learning) b.push(`<span class="ab learn" title="the adaptive arm: its games feed the nightly ladder-PPO update (python -m v_dance.ladder.ppo_update); exempt from the retire rule">🧠 learning</span>`);
   b.push(a.retired ? `<span class="ab ret" title="${esc(a.reason || "")}">⛔ retired</span>`
                    : `<span class="ab act" title="in the Thompson rotation">active</span>`);
   // 2026-09-04 B1 / warm-start: the fixed share (retire-exempt) and the inherited Thompson prior

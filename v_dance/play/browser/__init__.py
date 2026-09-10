@@ -8,5 +8,5 @@ Reusable building blocks (used by BOTH the LOCAL browser mode and the future ONL
   * ``battle_host.BattleHost`` — drives the production ``VGCPlayer`` decision pipeline from RAW protocol
     frames with NO live websocket (transport supplies frames, ships the captured ``/choose``).
 
-See ``scratch/play_vs_human_browser_plan.md`` (local) and ``scratch/online_multitransport_plan.md`` (online).
+See ``scratch/archive/browser/play_vs_human_browser_plan.md`` (local) and ``scratch/archive/browser/online_multitransport_plan.md`` (online).
 """

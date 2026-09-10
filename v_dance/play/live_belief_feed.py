@@ -12,7 +12,7 @@ Design notes (grounded):
     already imports + uses for its move-feature block (USER decision 2026-06-30): no poke-env
     mutation, and consistent with how opp stats are derived everywhere (from the BeliefState, not
     poke-env, whose opp ``.stats`` are ``None``). This mirrors the proven offline probe
-    (``scratch/levelC_a2_damage_probe.py``) exactly — same full-HP gate, same ``_damage_band`` +
+    (``scratch/archive/levelC/levelC_a2_damage_probe.py``) exactly — same full-HP gate, same ``_damage_band`` +
     ``damage_main_term`` reference, same both-direction logic.
   * One side of every constraint is OUR exact mon: its real stats come from the live poke-env team
     (passed in as ``our_stats``); the opponent is referenced against its modal Pikalytics spread and

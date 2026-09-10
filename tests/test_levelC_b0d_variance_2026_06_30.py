@@ -15,11 +15,7 @@ from v_dance.encoders import white_box_sim as W
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-# scratch/ is a local-only dev-harness dir (gitignored) — skip cleanly where it's absent (CI)
-pytest.importorskip("scratch.levelC_b0_validation_probe",
-                    reason="scratch/ probe harness is local-only, not in the published repo")
-from scratch.levelC_b0_validation_probe import _p_ko  # noqa: E402
+from v_dance.eval.white_box_validation import _p_ko   # a package module since 2026-09-10 (was scratch/, CI-skipped)
 
 
 def _mon(species, hp=100.0, spa=130, atk=130, spe=100, hp_stat=300, defn=130, item=None):

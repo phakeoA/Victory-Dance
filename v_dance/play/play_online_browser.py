@@ -168,7 +168,7 @@ _CLIENT_PREFS_JS = (
 
 
 # Same team-import JS as the local _setup_client (see its ⚠ packTeam/capacity:6 comments —
-# verified live in scratch/browser_team_import_probe.py / browser_capacity_probe.py).
+# verified live in scratch/archive/browser/browser_team_import_probe.py / browser_capacity_probe.py).
 _IMPORT_TEAMS_JS = (
     "(args) => { const [fmt, pastes] = args; const failed = [];"
     "  for (const [nm, paste] of pastes) {"

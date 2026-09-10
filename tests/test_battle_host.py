@@ -5,7 +5,7 @@ These validate the TRANSPORT PLUMBING with NO Showdown server and NO model (mode
 fallback): the host builds a real VGCPlayer that never opens a socket, routes raw protocol frames
 through poke-env's own parser, creates the battle, accumulates the gap-#6 _proto_log, and CAPTURES the
 commands poke-env would have websocket-sent (so the transport can ship them into the tab). The full
-request→/choose decision parity is exercised by the live spike scratch/browser_battlehost_spike.py
+request→/choose decision parity is exercised by the live spike scratch/archive/browser/browser_battlehost_spike.py
 (needs a real battle), not here."""
 from __future__ import annotations
 

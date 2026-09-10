@@ -6,7 +6,6 @@ stamp; the card's defaults build the verified command; the CLI answers --help an
 The real training smoke (`--smoke`, CPU, minutes) is opt-in: VD_BCFT_SMOKE=1."""
 from __future__ import annotations
 
-import importlib.util
 import os
 import subprocess
 import sys
@@ -17,14 +16,11 @@ import pytest
 pytest.importorskip("torch")
 
 _REPO = Path(__file__).resolve().parents[1]
-_SCRIPT = _REPO / "scratch" / "ladder_bc_finetune.py"
 _NO_CKPTS = {"battle": [], "tp": []}
 
 
 def _mod():
-    spec = importlib.util.spec_from_file_location("ladder_bc_finetune", _SCRIPT)
-    m = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(m)
+    from v_dance.ladder import bc_finetune as m        # a package module since 2026-09-10
     return m
 
 
@@ -75,24 +71,24 @@ def test_export_is_the_two_pass_type_c_pipeline_and_the_folder_follows_the_forma
 def test_mission_control_card_defaults_and_progress_spec():
     from v_dance.datatools import mission_control as mc
     e = mc._REG_BY_ID["bc_finetune"]
-    assert e["heavy"] is True and not e.get("bot_down") and (_REPO / e["script"]).is_file()
+    assert e["heavy"] is True and not e.get("bot_down") and e["module"] == "v_dance.ladder.bc_finetune"
     argv = mc._build_argv(e, {}, [], _NO_CKPTS)
-    assert argv[4].endswith("ladder_bc_finetune.py")
-    assert argv[5:] == ["--base", "learning", "--epochs", "8", "--lr", "0.001", "--patience", "3", "--share", "0.15",
+    assert argv[4:6] == ["-m", "v_dance.ladder.bc_finetune"]
+    assert argv[6:] == ["--base", "learning", "--epochs", "8", "--lr", "0.001", "--patience", "3", "--share", "0.15",
                         "--run-gates", "--register"]
     argv = mc._build_argv(e, {"base": "incumbent", "no-export": True, "dry-run": True, "register": False}, [], _NO_CKPTS)
-    assert argv[5:7] == ["--base", "incumbent"] and "--no-export" in argv and "--dry-run" in argv and "--register" not in argv
+    assert argv[6:8] == ["--base", "incumbent"] and "--no-export" in argv and "--dry-run" in argv and "--register" not in argv
     spec = mc._PROGRESS["bc_finetune"]
     assert spec["total_arg"] == "--epochs" and any(lbl == "val top1" for lbl, _ in spec["metrics"])
 
 
 def test_cli_help_and_dry_run_are_clean():
-    r = subprocess.run([sys.executable, str(_SCRIPT), "--help"], capture_output=True, text=True, encoding="utf-8",
+    r = subprocess.run([sys.executable, "-m", "v_dance.ladder.bc_finetune", "--help"], capture_output=True, text=True, encoding="utf-8",
                        errors="replace", cwd=str(_REPO), timeout=300)
     assert r.returncode == 0 and "--smoke" in r.stdout and "--run-gates" in r.stdout, r.stderr[-800:]
     if not (_REPO / "config" / "serve_bandit.json").is_file():
         pytest.skip("config/serve_bandit.json is local (gitignored)")
-    r = subprocess.run([sys.executable, str(_SCRIPT), "--dry-run"], capture_output=True, text=True, encoding="utf-8",
+    r = subprocess.run([sys.executable, "-m", "v_dance.ladder.bc_finetune", "--dry-run"], capture_output=True, text=True, encoding="utf-8",
                        errors="replace", cwd=str(_REPO), timeout=600)
     assert r.returncode == 0, r.stdout[-1500:] + r.stderr[-800:]
     assert "[bcft] plan (dry run" in r.stdout and "export main:" in r.stdout and "train:" in r.stdout
@@ -101,7 +97,7 @@ def test_cli_help_and_dry_run_are_clean():
 
 @pytest.mark.skipif(os.environ.get("VD_BCFT_SMOKE") != "1", reason="opt-in: VD_BCFT_SMOKE=1 trains 1 CPU epoch on 40 files")
 def test_smoke_trains_one_cpu_epoch_and_the_candidate_loads():
-    r = subprocess.run([sys.executable, str(_SCRIPT), "--smoke"], capture_output=True, text=True, encoding="utf-8",
+    r = subprocess.run([sys.executable, "-m", "v_dance.ladder.bc_finetune", "--smoke"], capture_output=True, text=True, encoding="utf-8",
                        errors="replace", cwd=str(_REPO), timeout=1800)
     assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-1500:]
     assert "[bcft] SMOKE OK" in r.stdout and "[bcft] candidate ->" in r.stdout

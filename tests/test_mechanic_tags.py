@@ -89,7 +89,7 @@ def test_status_hazards_restrict_heal():
 
 
 def test_counts_match_parse_ballpark():
-    # vs scratch/verify_mechanic_coverage tallies (>= to allow the speed_control/heal supersets)
+    # vs v_dance/encoders/verify_mechanic_coverage tallies (>= to allow the speed_control/heal supersets)
     n = lambda tag: sum(1 for tags in MT.MOVE_TAGS.values() if tag in tags)
     assert n("force_switch") >= 4
     assert n("recharge") >= 8

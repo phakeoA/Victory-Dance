@@ -5,7 +5,7 @@ co-occurrence × usage (B1); sets fill from the belief's top ability/item/moves/
 legality is Showdown's own validator (B3, node subprocess — no server); scoring reuses the
 deployed pieces (B4): archetype coherence (k10_full distance), the TP set-head's decision
 margin vs a meta sample, and the 4b cluster-vs-cluster matchup prior when the matrix sidecar
-exists (regenerate via scratch/seed_router_priors.py; absent → None, surfaced not silent).
+exists (regenerate via python -m v_dance.datatools.seed_router_priors; absent → None, surfaced not silent).
 
 The rollout scorer is DEFERRED v2 — see the marker in score_team.  # TODO(M4-v2)
 """
@@ -239,7 +239,7 @@ def score_team(mons: Sequence[dict], belief, opp_rosters=None,
             out["matchup_prior"] = round(sum(wrs) / len(wrs), 4)
     elif mat is None:
         out["matchup_note"] = ("no data/router_matrix.json — regenerate via "
-                               "scratch/seed_router_priors.py")
+                               "python -m v_dance.datatools.seed_router_priors")
     # TODO(M4-v2): rollout scorer — N quick self-play games per candidate on the
     # multi-server harness (DS-M4 deferred; do not build without a new gate).
     return out

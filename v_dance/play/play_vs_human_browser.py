@@ -104,7 +104,7 @@ def _load_pool() -> list[tuple[str, str]]:
 # ⚠ It must re-render BOTH the format AND the team button (and set curTeamFormat/curTeamIndex): swapping
 # only the format button leaves the TEAM button stuck on "Random team" (the user then has to toggle the
 # format off+on to free it). Mirror the client's own change (it reads format from the format button, picks
-# a capacity-6 team of that format, re-renders both). All verified live (scratch/browser_format_change_probe.py).
+# a capacity-6 team of that format, re-renders both). All verified live (scratch/archive/browser/browser_format_change_probe.py).
 _DEFAULT_FORMAT_JS = """(fmt) => {
     const home = app.rooms[''] || app.rooms['home'];
     if (!home) return 'no-home-room';
@@ -161,11 +161,11 @@ async def _setup_client(context, *, name: str, teams: list[tuple[str, str]], fra
     # wrapper. The old code tacked .name/.format onto that array and pushed it; saveTeams() then wrote an
     # EMPTY packed `team` string, so the Teambuilder showed the team NAME but no Pokémon. Build a real
     # wrapper whose `team` is the PACKED string (Storage.packTeam(sets)). Verified live in
-    # scratch/browser_team_import_probe.py (pokemon_count_seen_by_client: 0 → 6).
+    # scratch/archive/browser/browser_team_import_probe.py (pokemon_count_seen_by_client: 0 → 6).
     # ⚠ `capacity: 6` is REQUIRED: the team selector's auto-pick (MainMenuRoom.renderTeams) only selects a
     # team where `format === teamFormat && capacity === 6`. Without it the picker shows "Select a team"
     # (you can't choose a team) and a stale index renders as "Error: Corrupted team". Verified live in
-    # scratch/browser_capacity_probe.py (no-capacity → "Select a team"; capacity:6 → the team + 6 mons).
+    # scratch/archive/browser/browser_capacity_probe.py (no-capacity → "Select a team"; capacity:6 → the team + 6 mons).
     failed = await page.evaluate(
         "(args) => { const [fmt, pastes] = args; const failed = [];"
         "  for (const [nm, paste] of pastes) {"

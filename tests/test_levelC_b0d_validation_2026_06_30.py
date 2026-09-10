@@ -1,7 +1,7 @@
 """
 Level C / B0d — corpus-validation gate helpers (2026-06-30).
 
-Unit-tests the PURE helpers of ``scratch/levelC_b0_validation_probe.py`` — action reconstruction
+Unit-tests the PURE helpers of ``v_dance/eval/white_box_validation.py`` (``scratch/levelC_b0_validation_probe.py`` until 2026-09-10) — action reconstruction
 (move + species→bench_index switch + unresolved opp switch + mega flag), identity pairing over the
 active∪bench union (incl. the fainted-relocated-to-bench case + illusion skip), and the alive predicate —
 so the gate's correctness is locked independent of the (slow) full-corpus run. Design:
@@ -15,12 +15,7 @@ from pathlib import Path
 
 import pytest
 
-# repo root → import the scratch probe as a namespace package (robust to install mode)
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-# scratch/ is a local-only dev-harness dir (gitignored) — skip cleanly where it's absent (CI)
-pytest.importorskip("scratch.levelC_b0_validation_probe",
-                    reason="scratch/ probe harness is local-only, not in the published repo")
-from scratch.levelC_b0_validation_probe import (  # noqa: E402
+from v_dance.eval.white_box_validation import (   # a package module since 2026-09-10 (was scratch/, CI-skipped)
     reconstruct_actions, identity_map, _alive, _bench_index_for_species,
 )
 

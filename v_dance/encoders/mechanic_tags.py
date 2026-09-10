@@ -3,7 +3,7 @@
 path at the layout cutover).
 
 MOVE tags (this sub-step) are DERIVED from the pinned Showdown ``moves.ts`` structured fields — the exact
-fields ``scratch/verify_mechanic_coverage.py`` confirmed: ``forceSwitch``/``selfSwitch``/``overrideOffensive
+fields ``v_dance/encoders/verify_mechanic_coverage.py`` confirmed: ``forceSwitch``/``selfSwitch``/``overrideOffensive
 Stat``/``overrideDefensiveStat``/``overrideOffensivePokemon``/``basePowerCallback``/``mustrecharge``/
 ``flags.charge``/``status``/``secondary.status``/``boosts``/``sideCondition``/``volatileStatus`` — plus a few
 small hand sets where single-field detection is unreliable (hazard_clear, redirect, ability/item-interact,

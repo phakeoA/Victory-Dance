@@ -3,7 +3,7 @@
 Each move gets 2 NEW channels (one per enemy active) = the realized hit chance of that move vs that enemy,
 folding the defender's evasion stage / Sand Veil / Snow Cloak / Tangled Feet / Bright Powder + No Guard + the
 Showdown acc−eva COMBINED net boost (battle-actions.ts:706-722). Shared `_per_enemy_hit_chance` → byte-parity.
-Design: scratch/v11_b2b_evasion_design_synthesis.md (wf_afb03b5a).
+Design: scratch/archive/v11/v11_b2b_evasion_design_synthesis.md (wf_afb03b5a).
 """
 from __future__ import annotations
 

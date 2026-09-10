@@ -7,7 +7,7 @@ P1: the parser had no `-formechange` case → Aegislash Stance Change (Blade↔S
 B1: an intact Mimikyu Disguise blocks the first damaging hit (band → 0). Keyed on ability + full HP (the
     busted species is invisible to poke-env, so the species flip is offline-only and would break parity). Mold
     Breaker bypasses. Ice Face/Eiscue NOT modelled (HP-free bust breaks the hp-frac proxy; absent from the meta).
-Design: scratch/v11_b1p1_*; the §1b switch-reset + Ice Face were dropped after empirical poke-env verification.
+Design: scratch/archive/v11/v11_b1p1_*; the §1b switch-reset + Ice Face were dropped after empirical poke-env verification.
 """
 from __future__ import annotations
 

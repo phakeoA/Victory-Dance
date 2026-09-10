@@ -239,7 +239,7 @@ def test_smoke_train_with_type_a_and_patience(tmp_path):
 def test_default_out_per_features_mode_matches_consumer_dirs():
     # rename-wiring: each --features mode defaults --out to the dir its CONSUMER reads, so a default
     # retrain is never an orphan. sbda -> checkpoints/ (served by model_io.DEFAULT_TP_CHECKPOINT);
-    # legacy -> checkpoints_pre_sbda/ (read by scratch/tp_headtohead_eval.py TP_LEGACY).
+    # legacy -> checkpoints_pre_sbda/ (read by v_dance/eval/tp_headtohead_eval.py TP_LEGACY).
     assert Path(trainmod.parse_args([]).out).name == "checkpoints_pre_sbda"             # default features=legacy
     assert Path(trainmod.parse_args(["--features", "legacy"]).out).name == "checkpoints_pre_sbda"
     assert Path(trainmod.parse_args(["--features", "sbda"]).out).name == "checkpoints"

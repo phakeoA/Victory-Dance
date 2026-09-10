@@ -511,14 +511,14 @@ REGISTRY = [
     # 2026-09-04 (USER: "make a UI version of this command in Mission Control ... on execution have the
     # config swap out the ppo model for the latest one in .env"). The W3b chain step the USER runs after
     # every ~200 learning games / nightly. Defaults = the verified command of 2026-09-04:
-    #   scratch/ladder_ppo_update.py --run-gates --register --base learning --days 1 --actor-lr 1e-3 --epochs 4
+    #   python -m v_dance.ladder.ppo_update --run-gates --register --base learning --days 1 --actor-lr 1e-3 --epochs 4
     # The script trains from the learning arm's checkpoint on its own games, runs the gates, registers
     # arm ppo_<date> as the new learning arm (the old one benched) and deploys it to .env VD_BATTLE_CKPT.
     # bot_down=True: refused while the online bot is up (it records the games this trains on, reads the
     # bandit config + .env at launch, and shares the CPU) — stop it in the Online tab first.
     dict(id="ladder_ppo", cat="train", heavy=False, bot_down=True,
          title="W3b chain update (nightly ladder PPO)",
-         script="scratch/ladder_ppo_update.py",
+         module="v_dance.ladder.ppo_update",
          desc="Bot DOWN first. Trains the learning arm's checkpoint on its last --days of recorded ladder "
               "games (leashed PPO, CPU, ~20 s), runs the ruler + type-eff gates (minutes), registers "
               "ppo_<date> as the NEW learning arm (the previous head is benched) plus its argmax TWIN "
@@ -566,7 +566,7 @@ REGISTRY = [
     # perspective (Type-C) into the era-2 lineage BC fine-tune of the chain head; GPU ~1.5 h; the bot may stay up.
     dict(id="bc_finetune", cat="train", heavy=True,
          title="B4 ladder-wins BC fine-tune (Type-C → train_bc)",
-         script="scratch/ladder_bc_finetune.py",
+         module="v_dance.ladder.bc_finetune",
          desc="Exports every rated ladder game's WINNING perspective (Type-C, two passes: rated + hand-approved), "
               "fine-tunes the chain head on the era-2 lineage recipe (HF corpus + Type-C, exp advantage + rating "
               "weighting; GPU ~1.5 h), runs the ruler (vs base, vs era2) + type-eff gates, registers bcft_<date> as an "
@@ -583,7 +583,7 @@ REGISTRY = [
                dict(name="no-export", type="flag", label="--no-export (reuse the current Jsonl_TypeC folder)"),
                dict(name="dry-run", type="flag", label="--dry-run (counts + the exact commands; nothing runs)")],
          note="Exit 0 ok · 2 refused · 3 a gate failed (candidate saved, NOT registered) · 4 training failed. Terminal-only "
-              "plumbing check: `scratch/ladder_bc_finetune.py --smoke` (CPU, ~2 min)."),
+              "plumbing check: `python -m v_dance.ladder.bc_finetune --smoke` (CPU, ~2 min)."),
 
     # ---- DATA ----
     dict(id="scrape_pika", cat="data", heavy=True, title="Scrape Pikalytics (MANUAL only)",
@@ -622,7 +622,7 @@ REGISTRY = [
          module="v_dance.datatools.corpus_qa",
          opts=[dict(name="strict", type="flag", label="--strict")]),
     dict(id="seed_router", cat="data", heavy=False, title="Seed router priors (4b + matrix sidecar)",
-         script="scratch/seed_router_priors.py",
+         module="v_dance.datatools.seed_router_priors",
          desc="Re-seeds data/router_priors.json AND writes data/router_matrix.json (M4 sidecar).",
          opts=[]),
 
@@ -650,7 +650,7 @@ REGISTRY = [
          opts=[dict(name="battles", type="int", label="--battles", default=20, min=1, max=50),
                dict(name="ckpt", type="ckpt", label="--ckpt (optional)")]),
     dict(id="type_eff", cat="eval", heavy=False, title="Type-effectiveness probe",
-         script="scratch/type_eff_probe.py",
+         module="v_dance.eval.type_eff_probe",
          desc="Reusable acceptance gate: the battle net must RESPECT type effectiveness (graded).",
          opts=[]),
 
@@ -709,7 +709,7 @@ _LP_PHASES = [
 
 
 def _ladder_ppo_progress(text: str) -> dict:
-    """Phase + numbers from scratch/ladder_ppo_update.py's log (see _LP_PHASES). A refusal / failed gate /
+    """Phase + numbers from v_dance.ladder.ppo_update's log (see _LP_PHASES). A refusal / failed gate /
     dry run is named as the phase so the card reads right without opening the log."""
     phase, done = "starting", 0
     for i, (name, rx) in enumerate(_LP_PHASES, 1):

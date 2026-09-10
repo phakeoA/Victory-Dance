@@ -14,7 +14,8 @@ The learning half of the USER's live-training idea, as a NIGHTLY step the USER l
 Everything the script decides is reported: per-arm / per-reason counts, the τ picked, the parity
 switches, the loss stats, the gates. It REFUSES (exit 2) rather than trains on doubtful data: no
 sampler log-prob (`logprob_valid=false`), an arm that played a different checkpoint, mixed pair
-decodes, fewer than ``--min-steps`` turn steps. The CLI is ``scratch/ladder_ppo_update.py``.
+decodes, fewer than ``--min-steps`` turn steps. The CLI is ``python -m v_dance.ladder.ppo_update``
+(``scratch/ladder_ppo_update.py`` until the 2026-09-10 refactor).
 """
 from __future__ import annotations
 
@@ -613,7 +614,7 @@ def external_gate_commands(base, candidate, out_dir, *, py: str = ".venv/Scripts
     the ANCHOR checkpoint in chain mode — the absolute floor, 2026-09-03 L3)."""
     out = {
         "ruler": f'{py} -m v_dance.eval.bc_val_report --ckpt "{base}" --ckpt "{candidate}"',
-        "type_eff": f'{py} scratch/type_eff_probe.py --ckpt "{candidate}" --out "{Path(out_dir) / "type_eff_probe.json"}"',
+        "type_eff": f'{py} -m v_dance.eval.type_eff_probe --ckpt "{candidate}" --out "{Path(out_dir) / "type_eff_probe.json"}"',
         "suite": f"{py} -m pytest tests -q",
     }
     if anchor is not None:

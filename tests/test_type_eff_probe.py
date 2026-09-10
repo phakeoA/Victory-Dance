@@ -1,4 +1,4 @@
-"""Tests for the #25 type-effectiveness sensitivity probe (scratch/type_eff_probe.py).
+"""Tests for the #25 type-effectiveness sensitivity probe (v_dance/eval/type_eff_probe.py).
 
 Covers the probe's *correctness* claims that don't need the trained model:
   * the type-chart effectiveness math (known matchups),
@@ -17,9 +17,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-# scratch/ is a local-only dev-harness dir (gitignored) — skip cleanly where it's absent (CI)
-P = pytest.importorskip("scratch.type_eff_probe",
-                        reason="scratch/ probe harness is local-only, not in the published repo")
+from v_dance.eval import type_eff_probe as P   # a package module since 2026-09-10 (was scratch/, CI-skipped)
 from v_dance.encoders.state_encoder import StateEncoder, NUM_TYPES  # noqa: E402
 
 

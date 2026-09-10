@@ -27,15 +27,15 @@ def test_card_defaults_build_the_verified_command_and_the_choices_map_to_flags()
     mc = _mc()
     e = mc._REG_BY_ID["ladder_ppo"]
     assert e["cat"] == "train" and e["bot_down"] is True and not e.get("heavy")   # launchable, one click
-    assert e["script"] == "scratch/ladder_ppo_update.py" and (_REPO / e["script"]).is_file()
+    assert e["module"] == "v_dance.ladder.ppo_update" and not e.get("script")   # a package module since 2026-09-10
     argv = mc._build_argv(e, {}, [], _NO_CKPTS)
     assert argv[0].endswith("python.exe") and argv[1:4] == ["-X", "utf8", "-u"]
-    assert argv[4].endswith("ladder_ppo_update.py")
-    # == .venv/Scripts/python.exe scratch/ladder_ppo_update.py --run-gates --register --base learning
+    assert argv[4:6] == ["-m", "v_dance.ladder.ppo_update"]
+    # == .venv/Scripts/python.exe -m v_dance.ladder.ppo_update --run-gates --register --base learning
     #    --days 1 --actor-lr 1e-3 --epochs 4   (the USER's 2026-09-04 command; --min-steps 200 = the default)
     #    + --twin (2026-09-04 "go build it": the argmax twin ppo_<date>_t0 registered with every step)
     #    + B3 fields (the recipe's own defaults, passed explicitly) + the B2 opp-weight knob
-    assert argv[5:] == ["--base", "learning", "--days", "1.0", "--actor-lr", "0.001", "--epochs", "4",
+    assert argv[6:] == ["--base", "learning", "--days", "1.0", "--actor-lr", "0.001", "--epochs", "4",
                         "--min-steps", "200", "--approx-kl-stop", "0.02", "--ruler-floor-pp", "-0.5",
                         "--ruler-abs-floor-pp", "-1.0", "--opp-weight-scale", "400.0",
                         "--run-gates", "--register", "--twin"]
@@ -43,7 +43,7 @@ def test_card_defaults_build_the_verified_command_and_the_choices_map_to_flags()
     argv = mc._build_argv(e, {"base": "incumbent", "register": False, "twin": False, "dry-run": True,
                               "no-deploy-env": True, "actor-lr": "0.0005", "days": "2",
                               "opp-weight-scale": "0", "ruler-abs-floor-pp": "-2"}, [], _NO_CKPTS)
-    tail = argv[5:]
+    tail = argv[6:]
     assert "--base" not in tail and "--register" not in tail and "--twin" not in tail
     assert tail[tail.index("--opp-weight-scale") + 1] == "0.0"          # 0 is a value (off), not "unset"
     assert tail[tail.index("--ruler-abs-floor-pp") + 1] == "-2.0"      # negative floors survive the clamp
@@ -58,7 +58,7 @@ def test_card_defaults_build_the_verified_command_and_the_choices_map_to_flags()
 def test_the_script_accepts_the_deploy_switch():
     """The CLI deploys a registered arm to .env by default; --no-deploy-env is the opt-out (hidden --env-path
     makes it testable)."""
-    r = subprocess.run([sys.executable, str(_REPO / "scratch" / "ladder_ppo_update.py"), "--help"],
+    r = subprocess.run([sys.executable, "-m", "v_dance.ladder.ppo_update", "--help"],
                        capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=str(_REPO),
                        timeout=300)
     assert r.returncode == 0, r.stderr[-800:]
@@ -103,7 +103,7 @@ def test_chain_launch_is_refused_while_the_online_bot_is_up(jobs, monkeypatch):
     # (c) the bot down -> the chain job starts with the verified argv
     live.alive = False
     info = jobs.start(chain, {}, {})
-    assert info["id"] == "ladder_ppo" and _FakeJob.made[-1].argv[5:7] == ["--base", "learning"]
+    assert info["id"] == "ladder_ppo" and _FakeJob.made[-1].argv[6:8] == ["--base", "learning"]
     # (d) and while the chain job runs, launching the bot is refused (it rotates config + .env at the end)
     with pytest.raises(ValueError, match="still running"):
         jobs.start(bot, {}, {})
@@ -138,7 +138,7 @@ def test_jobs_tab_progress_parses_the_scripts_report_lines(tmp_path):
     mc = _mc()
     log = tmp_path / "mc_ladder_ppo_x.log"
     log.write_text(_LOG_OK, encoding="utf-8")
-    p = mc._job_progress("ladder_ppo", ["python", "scratch/ladder_ppo_update.py"], log)
+    p = mc._job_progress("ladder_ppo", ["python", "-m", "v_dance.ladder.ppo_update"], log)
     assert p["label"] == "phase" and p["value"] == "deployed" and p["pct"] == 100
     m = p["metrics"]
     assert m["games"] == "221" and m["turn steps"] == "1386"

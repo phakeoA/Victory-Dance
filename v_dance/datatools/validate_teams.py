@@ -1,4 +1,4 @@
-"""Showdown-authoritative team validation (M4 B3 — promoted from scratch/validate_teams.py).
+"""Showdown-authoritative team validation (M4 B3 — promoted from scratch/archive/misc/validate_teams.py).
 
 Runs the pinned server's OWN ``validate-team`` (node subprocess, no server process) so the
 verdict is exactly what the ladder would apply. ``fmt=None`` uses the stack's active format.

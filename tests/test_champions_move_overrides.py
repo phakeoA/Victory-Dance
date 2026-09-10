@@ -4,7 +4,7 @@ The custom Champions VGC format (pokemon-showdown/data/mods/champions/moves.ts) 
 type/accuracy vs standard Gen-9, but BOTH encoders read standard data (offline GenData(9), live poke-env
 Move). N1 overlays the modded values via shared id-keyed helpers (champ_bp/champ_type/champ_acc_raw) at 9
 chokepoints so the damage band, type-eff cross, STAB, immunity, accuracy channel, and the Technician/-ate
-gates all see the Champions value, byte-identically on both encoders. Design: scratch/v11_n1_design_synthesis.md.
+gates all see the Champions value, byte-identically on both encoders. Design: scratch/archive/v11/v11_n1_design_synthesis.md.
 """
 from __future__ import annotations
 

@@ -1,6 +1,6 @@
 """v11 Phase A.2 — ability DAMAGE MULTIPLIERS (offensive boosts + defensive resists) folded into the
 B1.2 damage band. Verifies every multiplier value/condition against the spec (adversarially verified vs
-abilities.ts in scratch/v11_a2_ability_damage_mult_synthesis.md), the Mold-Breaker breakable rule, the
+abilities.ts in scratch/archive/v11/v11_a2_ability_damage_mult_synthesis.md), the Mold-Breaker breakable rule, the
 two corrected decisions (steelyspirit INCLUDE; shadowshield/prismarmor NOT mold-breakable), and the
 GenData-sourced move props that keep offline↔live byte-parity.
 """

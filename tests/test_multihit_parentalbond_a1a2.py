@@ -4,7 +4,7 @@ A1: `_damage_band` applied base power ONCE; a 2-5 multihit move read ~1/N of tru
 intrinsic channel existed). Now the band scales by hit count (min-hits × low roll, max-hits × high), with
 Skill Link (→ variable forced to max) and Loaded Dice ([2,5] → 4-5) folded in. A2: Mega Kangaskhan's Parental
 Bond (Gen-9 2nd strike ×0.25 → effective ×1.25) on single-target non-multihit moves. Multihit-ineligibility
-keeps A1 and A2 disjoint. Both value-only (no layout). Audit: scratch/v11_pre_phaseD_gap_audit_synthesis.md.
+keeps A1 and A2 disjoint. Both value-only (no layout). Audit: scratch/archive/v11/v11_pre_phaseD_gap_audit_synthesis.md.
 """
 from __future__ import annotations
 

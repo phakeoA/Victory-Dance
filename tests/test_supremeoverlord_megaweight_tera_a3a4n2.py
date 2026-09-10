@@ -10,7 +10,7 @@ A4: live encoder read `species_weight(mon.species)`, but poke-env keeps `mon.spe
 N2 (D7): live `_live_eff_types` read the NONEXISTENT attr `terastallized` (always False) instead of
     `is_terastallized`, so the live type-eff/damage cross used PRE-tera typing on every post-tera turn.
 
-Re-audit: scratch/v11_reaudit_synthesis.md.
+Re-audit: scratch/archive/v11/v11_reaudit_synthesis.md.
 """
 from __future__ import annotations
 

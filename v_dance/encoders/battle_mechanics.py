@@ -990,7 +990,7 @@ def _move_immune(move_type, defender, attacker_ability, move_id) -> bool:
 # ──────────────────────────────────────────────────────────────────────────────
 # Exact chainModify rationals from pokemon-showdown/data/abilities.ts (decimals shown). One shared
 # helper folds them into the B1.2 damage band's situational_mult so the offline + live paths are
-# byte-identical (parity twin of _ability_immunizes). Adversarially verified: scratch/
+# byte-identical (parity twin of _ability_immunizes). Adversarially verified: scratch/archive/v11/
 # v11_a2_ability_damage_mult_synthesis.md.
 _M_1_2 = 4915 / 4096   # 1.19995…  ironfist, reckless, the -ate set
 _M_1_3 = 5325 / 4096   # 1.30005…  toughclaws, punkrock(off), transistor, sheerforce
