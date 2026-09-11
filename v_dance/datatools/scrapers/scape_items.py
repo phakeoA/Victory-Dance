@@ -21,7 +21,7 @@ from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 # ── Config ─────────────────────────────────────────────────────────────────────
 TARGET_URL   = "https://www.serebii.net/pokemonchampions/items.shtml"
 
-_SCRIPT_DIR = Path(__file__).resolve().parent          # data/scripts/scrapers/
+_SCRIPT_DIR = Path(__file__).resolve().parent          # v_dance/datatools/scrapers/ (parents[2] = project root)
 OUTPUT_DIR  = _SCRIPT_DIR.parents[2] / "data"          # <project_root>/data/
 # Per-reg output (Serebii's page is single + tracks the CURRENT reg). The active
 # format's reg by default; --reg overrides in __main__.

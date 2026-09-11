@@ -75,7 +75,7 @@ from typing import Optional
 import requests
 
 # ── vod_parser bootstrap (so `import vod_parser` works from anywhere) ─────────
-_SCRIPT_DIR = Path(__file__).resolve().parent          # data/scripts/scrapers/
+_SCRIPT_DIR = Path(__file__).resolve().parent          # v_dance/datatools/scrapers/
 from v_dance.parser.vod_parser.replay_parser import (  # noqa: E402  (after sys.path tweak)
     extract_log_from_html,
     extract_replay_id_from_html,
@@ -86,8 +86,8 @@ BASE_URL    = "https://replay.pokemonshowdown.com"
 SEARCH_URL  = f"{BASE_URL}/search.json"
 
 # data/vods/Type_B  (the per-format slug subfolder is appended at runtime)
-# scrapers/ → parents[1]==data/  (data/scripts/scrapers/ -> data/)
-VODS_ROOT   = _SCRIPT_DIR.parents[1] / "vods" / "Type_B"
+# scrapers/ → parents[2]==repo root  (v_dance/datatools/scrapers/; was data/scripts/scrapers/ until Phase 4, 2026-09-11)
+VODS_ROOT   = _SCRIPT_DIR.parents[2] / "data" / "vods" / "Type_B"
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "

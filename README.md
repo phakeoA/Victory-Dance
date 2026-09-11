@@ -82,7 +82,7 @@ Everything downstream of the encoder reads a **frozen, versioned feature layout*
 Every part of the project — data prep, belief scraping/blending, training the battle and team-preview nets, evaluation, deployment, and both local and online play — is driven from a single local page:
 
 ```bash
-python -m v_dance.datatools.mission_control      # opens http://127.0.0.1:8990/
+python -m v_dance.ui.mission_control             # opens http://127.0.0.1:8990/
 ```
 
 It's a dependency-light, **torch-free** stdlib server (starts instantly, safe to run alongside anything) that knows every entry point in the project through a typed command registry. Tabs:

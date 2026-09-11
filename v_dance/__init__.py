@@ -6,12 +6,14 @@ The single importable package for the project. Subpackages:
 - ``parser``    VOD/replay parsing + belief state (vod_parser, belief_state)
 - ``models``    network definitions (BC model, team-preview model, network)
 - ``training``  training + dataset + eval scripts (train_bc, bc_dataset, ...)
-- ``play``      live battle players (vgc_base, live_vgc_base, player, model_io)
+- ``play``      the serve / decision core + local harnesses (vgc_base, live_vgc_base, player, model_io)
+- ``online``    the ladder bot + its ops (play_online_browser, bot_control_ui, send_gate, browser/)
 - ``eval``      gauntlet + scripted opponents
 - ``rl``        the PPO core (schema, collector, store, reward, gae, pbrs, actor_critic, ppo, trainer)
 - ``selfplay``  the era loop, collection infra and the exploiter (uses ``rl``)
 - ``ladder``    learning from the ladder (W3b): recorder, update, the chain / B4 CLIs
-- ``datatools`` scrapers, bulk export, corpus QA, team sheets, the flask server
+- ``datatools`` data prep + team tools (+ ``scrapers/``: manual scraper scripts, run by path)
+- ``ui``        Mission Control :8990, the dashboard :5175, the team builder :5174 + ``static/`` web assets
 
 NOTE: subpackages are populated incrementally during restructure Stage 2. The
 package is intentionally named ``v_dance`` (not ``victory_dance``) because

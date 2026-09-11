@@ -80,7 +80,7 @@ from pathlib import Path
 # This file lives in data/scripts/; its siblings are belief_state.py,
 # state_encoder.py and the vod_parser package.
 _SCRIPTS_DIR = Path(__file__).resolve().parent
-_PROJECT_ROOT = _SCRIPTS_DIR.parents[1]            # data/scripts → data → root
+_PROJECT_ROOT = _SCRIPTS_DIR.parents[1]            # v_dance/datatools → v_dance → root (comment fixed Phase 4; the depth is the same as the old data/scripts layout)
 from v_dance.parser.vod_parser.transitions import replay_to_transitions   # noqa: E402
 from v_dance.parser.vod_parser.replay_parser import (                      # noqa: E402
     extract_log_from_html, extract_replay_id_from_html,

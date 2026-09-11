@@ -18,6 +18,10 @@ requires-python = ">=3.12"
 # ai_train_scripts/, pokemon-showdown/) during the migration.
 include = ["v_dance*"]
 
+[tool.setuptools.package-data]
+# The UI servers serve these from next to their own file (refactor Phase 4, 2026-09-11).
+"v_dance.ui" = ["static/*/*"]
+
 [tool.pytest.ini_options]
 # All tests live at the top-level tests/ dir (Stage 2). Bare `pytest` finds them.
 testpaths = ["tests"]

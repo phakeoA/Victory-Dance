@@ -46,13 +46,15 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-# ── Bootstrap: locate data/scripts by walking up (folder-depth independent) ───
+# ── Bootstrap: locate the repo root by walking up (folder-depth independent) ──
 def _find_scripts_dir() -> Path:
+    """Historical ``<repo>/data/scripts`` path — only its ``.parent`` (= ``<repo>/data``) is used (tests). Resolved from
+    the repo root since refactor Phase 4 (2026-09-11) emptied ``data/scripts`` (web assets → ``v_dance/ui/static``,
+    scrapers → ``v_dance/datatools/scrapers``); the directory itself no longer needs to exist."""
     for parent in Path(__file__).resolve().parents:
-        cand = parent / "data" / "scripts"
-        if cand.is_dir():
-            return cand
-    raise RuntimeError(f"could not locate data/scripts above {__file__}")
+        if (parent / "pyproject.toml").is_file() and (parent / "data").is_dir():
+            return parent / "data" / "scripts"
+    raise RuntimeError(f"could not locate the repo root (pyproject.toml + data/) above {__file__}")
 
 _SCRIPTS_DIR = _find_scripts_dir()
 from v_dance.encoders.state_encoder import (  # noqa: E402  (import after sys.path bootstrap)

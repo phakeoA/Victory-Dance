@@ -17,7 +17,7 @@ import pytest
 pytest.importorskip("crawl4ai")  # the scraper imports crawl4ai at module load
 
 _REPO = Path(__file__).resolve().parents[1]
-_SCRAPER = _REPO / "data" / "scripts" / "scrapers" / "scrape_pikalytics.py"
+_SCRAPER = _REPO / "v_dance" / "datatools" / "scrapers" / "scrape_pikalytics.py"
 
 
 def _load_scraper():

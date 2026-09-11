@@ -92,9 +92,9 @@ INDEX_URL    = f"{BASE_URL}/pokedex/{FORMAT_SLUG}"
 SMOGON_STATS_BASE = "https://www.smogon.com/stats"
 
 # Output goes to  <project_root>/data/pikalytics_regma.json
-# __file__ is     <project_root>/data/scripts/scrape_pikalytics.py
-# data/scripts/scrapers/ → parents[1]==data/ , parents[2]==project root
-_SCRIPT_DIR = Path(__file__).resolve().parent        # data/scripts/scrapers/
+# __file__ is     <project_root>/v_dance/datatools/scrapers/scrape_pikalytics.py (was data/scripts/scrapers/ until Phase 4)
+# scrapers/ → parents[1]==datatools/ , parents[2]==project root  (same depth as before the move)
+_SCRIPT_DIR = Path(__file__).resolve().parent        # v_dance/datatools/scrapers/
 OUTPUT_DIR  = _SCRIPT_DIR.parents[2] / "data"        # <project_root>/data/
 OUTPUT_FILE = OUTPUT_DIR / "pikalytics_regma.json"
 

@@ -48,11 +48,11 @@ def _reset_send_gate():
     panel test's sends. Clear the slot around every test (only if the module is already imported — never import
     it here)."""
     import sys
-    m = sys.modules.get("v_dance.play.play_vs_human_browser")
+    m = sys.modules.get("v_dance.online.play_vs_human_browser")
     if m is not None and isinstance(getattr(m, "SEND_GATE", None), list) and m.SEND_GATE:
         m.SEND_GATE[0] = None
     yield
-    m = sys.modules.get("v_dance.play.play_vs_human_browser")
+    m = sys.modules.get("v_dance.online.play_vs_human_browser")
     if m is not None and isinstance(getattr(m, "SEND_GATE", None), list) and m.SEND_GATE:
         m.SEND_GATE[0] = None
 

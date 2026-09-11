@@ -5,7 +5,7 @@ Run from the repo root:
     ... --docs        also search docs/*.md and the repo-root *.md notes (off by default: history, not code)
     ... --names-only  print only the file names that match
 
-Searches ONLY the roots that can carry a live reference (package, tests, tools, the web assets under data/scripts, the
+Searches ONLY the roots that can carry a live reference (package, tests, tools, the web assets under v_dance/ui/static, the
 top-level runbooks, setup.sh, pyproject, CI, README, .claude/launch.json). It NEVER descends into data (replays, corpora,
 dex JSON), artifacts (logs, replays, bandit state, archives), checkpoints, the venv, the Showdown clone, memory archives
 or __pycache__ — those are gigabytes of text that cannot hold a code reference and only waste time and tokens.
@@ -26,13 +26,13 @@ SKIP_DIRS = {
     "pokemon-showdown",           # the pinned server clone (TypeScript + data, not ours)
     "ai_train_scripts",           # checkpoints (binary)
     "artifacts",                  # logs / replays / bandit state / archives (top-level *.sh are added explicitly)
-    "data",                       # dex JSON, corpora, vods, teams (data/scripts is added explicitly)
+    "data",                       # dex JSON, corpora, vods, teams (data/scripts was emptied in refactor Phase 4)
     "logs", "memory_archive", "teams", "config", "dist", "build",
     "archive",                    # scratch/archive once Phase 1 tidies it
 }
 CODE_SUFFIXES = {".py", ".pyi", ".js", ".mjs", ".ts", ".html", ".css", ".sh", ".ps1", ".bat", ".yml", ".yaml",
                  ".toml", ".json", ".cfg", ".ini", ".txt"}
-ROOTS = ["v_dance", "tests", "tools", "scratch", "data/scripts", ".github", ".claude"]
+ROOTS = ["v_dance", "tests", "tools", "scratch", ".github", ".claude"]   # data/scripts emptied in Phase 4 (assets → v_dance/ui/static)
 ROOT_FILES = ["setup.sh", "pyproject.toml", "README.md", "requirements.txt", "config.example.json", ".gitignore"]
 DOC_ROOTS = ["docs"]
 

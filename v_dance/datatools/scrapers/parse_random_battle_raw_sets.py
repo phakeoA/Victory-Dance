@@ -25,10 +25,10 @@ class constants:  # noqa: N801  (shim for the former foul-play `constants` modul
     ITEMS = "items"
 
 
-# data/scripts/scrapers/ -> parents[2]==data/ , parents[3]==repo root
+# v_dance/datatools/scrapers/ -> parents[3]==repo root (was data/scripts/scrapers/ until refactor Phase 4, 2026-09-11)
 _HERE = Path(__file__).resolve()
 fp = _HERE.parents[3] / "sets.txt"            # raw input (provide at repo root)
-pokedex_path = _HERE.parents[2] / "pokedex.json"
+pokedex_path = _HERE.parents[3] / "data" / "pokedex.json"
 
 
 all_pokemon_dict = dict()

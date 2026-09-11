@@ -197,7 +197,7 @@ def test_page_ships_the_card_hooks():
     badge = "🔥 prior ${a.warm_games}/${a.warm_cap || a.warm_games} g left"
     assert "📊 ${Math.round(a.share * 100)}%" in html and badge in html
     assert "rule.thompson_share" in html and "one displaced per real game" in html
-    panel_src = (mc._REPO / "v_dance" / "play" / "bot_control_ui.py").read_text(encoding="utf-8")
+    panel_src = (mc._REPO / "v_dance" / "online" / "bot_control_ui.py").read_text(encoding="utf-8")
     assert "📊 ${Math.round(a.share * 100)}%" in panel_src and badge in panel_src
     assert "rule.thompson_share" in panel_src and "one displaced per real game" in panel_src
     # 2026-09-05 (USER: "6 in flight with 5 lanes"): both headers say live L/lanes and how many await their rating
