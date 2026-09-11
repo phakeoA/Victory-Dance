@@ -31,7 +31,7 @@ from typing import Callable, List, Optional, Tuple
 
 from v_dance.play.parallel_battles import (close_players, collect_account_names, gen_salt,
                                            play_pairing, run_jobs)
-from v_dance.selfplay.collector import align_paired_trajectories   # pure (poke-env-free)
+from v_dance.rl.collector import align_paired_trajectories   # pure (poke-env-free)
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 log = logging.getLogger(__name__)
@@ -295,7 +295,7 @@ def _worker_ac(ckpt):
     key = (str(ckpt), os.path.getmtime(ckpt))
     ac = _WORKER_CACHE.get(key)
     if ac is None:
-        from v_dance.selfplay.actor_critic import ActorCritic
+        from v_dance.rl.actor_critic import ActorCritic
         ac = ActorCritic.from_bc_checkpoint(ckpt, device="cpu")
         # CRITICAL (14b.3 review): from_bc_checkpoint RE-CLONES the critic from the policy's value
         # head and IGNORES the saved critic_state. The recorded ``value`` is the GAE baseline (read

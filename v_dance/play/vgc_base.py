@@ -200,7 +200,7 @@ def prune_replay_buffer(buffer_dir, keep: int = 200) -> int:
     Each live player streams a per-turn BC-style trace (state/action/source/outcome) to its own
     ``<username>.jsonl`` here; the usernames are uid-keyed, so a long run accumulates THOUSANDS of
     files that nothing cleans up. The self-play RL training does NOT read these (it uses a separate
-    trajectory store — see ``selfplay/store.py``), so trimming old ones is safe. ``keep`` <= 0 keeps
+    trajectory store — see ``rl/store.py``), so trimming old ones is safe. ``keep`` <= 0 keeps
     ALL. Crash-proof: a file that can't be deleted (an open handle on Windows = a battle still
     writing it) is skipped, so call this at GEN BOUNDARIES when no battle is mid-write (the current
     generation's files may transiently exceed ``keep`` until the next boundary prune)."""

@@ -35,13 +35,13 @@ _HERE = Path(__file__).resolve().parent
 _REPO_ROOT = _HERE.parents[1]
 import torch
 
-from v_dance.selfplay import policy_eval
-from v_dance.selfplay.collector import (
+from v_dance.rl import policy_eval
+from v_dance.rl.collector import (
     TrajectoryCollector, align_opponent_actions, assert_zero_sum,
 )
-from v_dance.selfplay.reward import _MODEL_DRIVEN_SOURCES, place_terminal_reward
-from v_dance.selfplay.schema import PASS_ACTION, Transition, Trajectory
-from v_dance.selfplay.store import assert_terminal_rewards_clean, write_trajectories
+from v_dance.rl.reward import _MODEL_DRIVEN_SOURCES, place_terminal_reward
+from v_dance.rl.schema import PASS_ACTION, Transition, Trajectory
+from v_dance.rl.store import assert_terminal_rewards_clean, write_trajectories
 
 log = logging.getLogger(__name__)
 
@@ -365,7 +365,7 @@ def phase0_report(pairs: List[tuple], source_counts: dict, *, min_games: int = 2
     # forfeit / retry / retry_default / forced_switch_escape …) — a BLOCKLIST, not a 3-key whitelist that
     # silently drops a forced source it forgot to list (which biased MODEL-DRIVEN% HIGH and could green-
     # light a desync-corrupted run). Reuse reward.py's canonical sets so the two measures can't drift.
-    from v_dance.selfplay.reward import _MODEL_DRIVEN_SOURCES, _NON_DECISION_COUNTERS
+    from v_dance.rl.reward import _MODEL_DRIVEN_SOURCES, _NON_DECISION_COUNTERS
     _excluded = set(_MODEL_DRIVEN_SOURCES) | set(_NON_DECISION_COUNTERS)   # model + bookkeeping (tp_* already stripped)
     non_model = sum(int(v or 0) for k, v in sc.items() if k not in _excluded)
     finalize_failed = int(sc.get("finalize_failed", 0) or 0)   # games that failed to finalize → dropped from the sample
@@ -382,7 +382,7 @@ def phase0_report(pairs: List[tuple], source_counts: dict, *, min_games: int = 2
     # audit: the documented #1 silent PPO bug is win-prob [0,1] stored as value_pm [-1,1] — a range assert
     # cannot catch it (a [0,1] batch is a subset of [-1,1]). looks_like_winprob over the POOLED both-
     # perspective values (which MUST contain negative/losing states) is the real catch; wire it into the gate.
-    from v_dance.selfplay.value_space import looks_like_winprob
+    from v_dance.rl.value_space import looks_like_winprob
     all_vals = [t.value for pair in pairs for traj in pair for t in traj.transitions]
     winprob_suspect = looks_like_winprob(all_vals)
     value_space_ok = not winprob_suspect
@@ -746,7 +746,7 @@ def main(argv=None) -> int:
         print("[phase0] --sample ab must run with --search off and --match-belief off "
               "(one variable per A/B).", file=sys.stderr)
         return 2
-    from v_dance.selfplay.actor_critic import ActorCritic
+    from v_dance.rl.actor_critic import ActorCritic
     ac = ActorCritic.from_bc_checkpoint(ckpt)
 
     # The Type-C store is APPEND-only (training accumulates across generations), so a

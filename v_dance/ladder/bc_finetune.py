@@ -31,7 +31,7 @@ from pathlib import Path
 _REPO = Path(__file__).resolve().parents[2]          # v_dance/ladder/ -> repo root
 assert (_REPO / "pyproject.toml").is_file(), _REPO
 
-from v_dance.selfplay import ladder_update as LU   # noqa: E402
+from v_dance.ladder import update as LU   # noqa: E402
 
 PY = sys.executable
 PREP = _REPO / "data" / "vods" / "Prepared_training_data"

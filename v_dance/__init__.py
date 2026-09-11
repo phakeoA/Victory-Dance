@@ -8,7 +8,9 @@ The single importable package for the project. Subpackages:
 - ``training``  training + dataset + eval scripts (train_bc, bc_dataset, ...)
 - ``play``      live battle players (vgc_base, live_vgc_base, player, model_io)
 - ``eval``      gauntlet + scripted opponents
-- ``selfplay``  PPO self-play stack (the former local_battle/self_play)
+- ``rl``        the PPO core (schema, collector, store, reward, gae, pbrs, actor_critic, ppo, trainer)
+- ``selfplay``  the era loop, collection infra and the exploiter (uses ``rl``)
+- ``ladder``    learning from the ladder (W3b): recorder, update, the chain / B4 CLIs
 - ``datatools`` scrapers, bulk export, corpus QA, team sheets, the flask server
 
 NOTE: subpackages are populated incrementally during restructure Stage 2. The

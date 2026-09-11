@@ -814,7 +814,7 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
     recorder = None
     if os.environ.get("VD_LADDER_RECORD", "1").strip() != "0" and not args.dry_run:
         try:
-            from v_dance.play.ladder_recorder import LADDER_RL_DIR, LadderRecorder
+            from v_dance.ladder.recorder import LADDER_RL_DIR, LadderRecorder
             recorder = LadderRecorder(host.player, LADDER_RL_DIR / BATTLE_FORMAT / f"{session_id}.jsonl",
                                       session_id=session_id, fmt=BATTLE_FORMAT, arm_info=_arm_info,
                                       adapt_rules=bool(args.adapt_rules))

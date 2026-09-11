@@ -131,7 +131,7 @@ def run_generation(
     # T3.1: drop FALLBACK trajectories (loop-guard backstop-forfeits) + their mislabeled zero-sum
     # mirror, by battle_id, before they reach PPO (a forfeited battle is an engineering escape, not a
     # game — rewarding either side corrupts credit assignment, sec 1). reward.py is torch-free.
-    from v_dance.selfplay.reward import drop_fallback_pairs, model_driven_fraction  # noqa: E402
+    from v_dance.rl.reward import drop_fallback_pairs, model_driven_fraction  # noqa: E402
     _n0 = len(trajectories)
     trajectories = drop_fallback_pairs(trajectories)
     if len(trajectories) != _n0:
@@ -329,7 +329,7 @@ async def collect_with_league(actor_critic, league: OpponentLeague, n_games: int
     from v_dance.play.live_vgc_base import _norm_tag   # #4: match the opponent's forfeit-tag key
     from v_dance.eval.gauntlet import _make_opponent
     from v_dance.selfplay.game_runner import SelfPlayVGCPlayer
-    from v_dance.selfplay.collector import align_paired_trajectories
+    from v_dance.rl.collector import align_paired_trajectories
 
     chunks = build_collection_chunks(league, team_pool, n_games, chunk_size=chunk_size,
                                      matchup_seed=matchup_seed, seed=seed, own_team=own_team,
@@ -469,8 +469,8 @@ def _load_run_config(path, gen_dests) -> dict:
     so you can annotate the file. Returns the parsed dict (absent sections just absent)."""
     import json
     import dataclasses
-    from v_dance.selfplay.ppo import PPOConfig
-    from v_dance.selfplay.trainer import TrainConfig
+    from v_dance.rl.ppo import PPOConfig
+    from v_dance.rl.trainer import TrainConfig
     from v_dance.selfplay.gate import GateConfigV2
     p = Path(path)
     if not p.is_file():
@@ -508,8 +508,8 @@ def _default_run_config(ap) -> dict:
     ``_load_run_config`` (every key is valid by construction). Powers ``--dump-config`` and
     the launcher UI's schema/defaults."""
     import dataclasses
-    from v_dance.selfplay.ppo import PPOConfig
-    from v_dance.selfplay.trainer import TrainConfig
+    from v_dance.rl.ppo import PPOConfig
+    from v_dance.rl.trainer import TrainConfig
     from v_dance.selfplay.gate import GateConfigV2
     _SKIP = {"help", "config", "dump_config", "dry_run", "live", "wizard"}
     defaults = ap.parse_args([])
@@ -560,8 +560,8 @@ def build_train_configs(*, kl_coef: Optional[float] = None, target_kl_bc: Option
         reached collection but not the loss).
 
     Imported lazily so this module stays importable (``--dry-run``) without torch."""
-    from v_dance.selfplay.ppo import PPOConfig
-    from v_dance.selfplay.trainer import TrainConfig
+    from v_dance.rl.ppo import PPOConfig
+    from v_dance.rl.trainer import TrainConfig
     # #3 precedence for EVERY overlapping knob: an explicit CLI value (non-None here) WINS; else a
     # --config file value (in *_overrides) is KEPT; else the LAUNCHER default. The launcher default
     # differs from the dataclass default for kl_coef (0.5 vs 0.0) and target_kl_from_bc (0.15 vs None) —
@@ -744,8 +744,8 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
     import time as _time
 
     import v_dance.play.run_local_battle as R
-    from v_dance.selfplay.actor_critic import ActorCritic
-    from v_dance.selfplay.trainer import PPOTrainer
+    from v_dance.rl.actor_critic import ActorCritic
+    from v_dance.rl.trainer import PPOTrainer
     from v_dance.selfplay import mp_collect as MP
     from v_dance.selfplay import resume as RS
     from v_dance.selfplay.status import LiveStatus
@@ -1072,7 +1072,7 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                 # at ~40 games). NEVER fatal - a config problem must not kill a 6-hour run.
                 _gp = archive / "checkpoints" / f"gen{rep['generation']}.pt"
                 try:
-                    from v_dance.selfplay.ladder_update import (DEFAULT_BANDIT_CONFIG,
+                    from v_dance.ladder.update import (DEFAULT_BANDIT_CONFIG,
                                                                 register_arm)
                     _cfg = bandit_config or DEFAULT_BANDIT_CONFIG   # a SMOKE points elsewhere
                     _arm = f"{register_prefix}{rep['generation']}"
