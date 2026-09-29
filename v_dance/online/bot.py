@@ -945,7 +945,12 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
     tally = {"ai": 0, "you": 0, "draw": 0}
     stop = asyncio.Event()
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=False, args=["--window-size=1280,900"])
+        # 2026-09-29: 4 socket closes in ~15 min on the new Chromium build (playwright 1.63, chromium-1243) vs 1 in
+        # 8 h the night before — keep a backgrounded / occluded / minimised window's timers and renderer at full
+        # speed so the client's SockJS heartbeats and the page calls are never throttled.
+        browser = await pw.chromium.launch(headless=False, args=[
+            "--window-size=1280,900", "--disable-background-timer-throttling",
+            "--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding"])
         try:
             frame_q: asyncio.Queue = asyncio.Queue()
             ctx = await browser.new_context(no_viewport=True)
