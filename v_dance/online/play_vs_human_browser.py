@@ -285,6 +285,42 @@ GAME_DONE_HOOK = None
 
 
 PAGE_CALL_TIMEOUT_S = 10.0     # 2026-09-06: a page call that does not answer in this long is a dead renderer
+# 2026-09-29 (live bug, session 20260929-080543-15680): after a 16:06 UTC socket close + rejoin the consumer HUNG
+# silently inside one host.feed_async await (2,689 [ai] lines before, 0 after, no traceback) — every battle then
+# lost on the timer while the panel kept queueing new ones. The feed now has a deadline below the 90 s turn timer:
+# a stuck frame is dropped (its coroutine cancelled) with a stack dump so the next occurrence NAMES the hang.
+FEED_TIMEOUT_S = float(os.environ.get("VD_FEED_TIMEOUT_S") or 45.0)
+FEED_WEDGED_AFTER = 3          # consecutive stuck feeds → print the 'stop the bot' banner
+_stuck_feeds = 0
+
+
+def _report_stuck_feed(tag, payload: str) -> None:
+    """Print where POKE_LOOP is stuck: its thread's live Python stack (catches a BLOCKING call) plus, scheduled on
+    the loop, every task's await stack (catches an await that never completes)."""
+    import threading
+    import traceback
+    global _stuck_feeds
+    _stuck_feeds += 1
+    head = payload.splitlines()[1:3] if payload else []
+    print(f"[ai] ⛔ FEED STUCK > {FEED_TIMEOUT_S:.0f}s on {tag} (#{_stuck_feeds} in a row) — frame dropped; "
+          f"head: {head}")
+    poke_thread = next((t for t in threading.enumerate() if getattr(t, "_target", None) is not None
+                        and "run_forever" in repr(t._target)), None)
+    frame = sys._current_frames().get(poke_thread.ident) if poke_thread else None
+    if frame is not None:
+        print("[ai] POKE_LOOP thread stack:\n" + "".join(traceback.format_stack(frame)[-12:]))
+
+    def _dump_tasks() -> None:
+        for task in asyncio.all_tasks(POKE_LOOP):
+            print(f"[ai] POKE_LOOP task {task.get_name()}:")
+            task.print_stack(limit=8, file=sys.stdout)
+    try:
+        POKE_LOOP.call_soon_threadsafe(_dump_tasks)
+    except RuntimeError:
+        pass
+    if _stuck_feeds >= FEED_WEDGED_AFTER:
+        print("[ai] ⛔⛔ AI LOOP WEDGED — frames keep hanging; STOP THE BOT (it is losing on the timer) and send "
+              "the [ai] lines above to Claude.")
 
 
 async def page_eval(page, js: str, arg=None, timeout_s: Optional[float] = None):
@@ -629,8 +665,15 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
                     bo3_state.note_bestof_frame(host.player, active_tag, payload)
                 result = _result_line(payload)                       # prefix-matched terminal line, or None
                 try:
-                    decisions = await asyncio.wrap_future(
-                        asyncio.run_coroutine_threadsafe(host.feed_async(payload), POKE_LOOP))
+                    global _stuck_feeds
+                    _fut = asyncio.run_coroutine_threadsafe(host.feed_async(payload), POKE_LOOP)
+                    try:
+                        decisions = await asyncio.wait_for(asyncio.wrap_future(_fut), FEED_TIMEOUT_S)
+                        _stuck_feeds = 0
+                    except asyncio.TimeoutError:
+                        _fut.cancel()                    # cancels the coroutine on POKE_LOOP (frees host._lock)
+                        _report_stuck_feed(active_tag, payload)
+                        decisions = []
                     for r, msg in decisions:
                         if msg == "/rejectopenteamsheets" and OTS_ACCEPT:   # 2026-09-03 (USER): the OTS toggle
                             msg = ots_answer(msg)
