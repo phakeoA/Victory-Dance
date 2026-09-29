@@ -233,6 +233,17 @@ def _discover(input_dir: Path, recursive: bool) -> list[Path]:
     return sorted(globber("*.html"))
 
 
+def filter_format(replays: list[Path], fmt: str | None) -> list[Path]:
+    """Keep only replays of format ``fmt`` (the id in the file name, e.g. ``...online_battle-<fmt>-2646960772.html``
+    or a scraped ``<Fmt>-2026-09-24-a-b.html``). data/vods/Type_C MIXES regulations (B5 2026-09-29: M-B + M-C), so a
+    per-reg export must filter or it copies every other reg's games into the wrong Regulation_* folder. The trailing
+    ``-<digit>`` keeps ``regmb`` from also matching ``regmbbo3``."""
+    if not fmt:
+        return replays
+    pat = re.compile(rf"(?:^|[-_]){re.escape(fmt.lower())}-\d")
+    return [p for p in replays if pat.search(p.name.lower())]
+
+
 # ── GUI folder pickers (used when --input/--output are omitted) ───────────────
 # A single hidden Tk root is shared across the input picker, output picker, and
 # the completion dialog so we never create more than one Tk instance.
@@ -345,6 +356,9 @@ def main() -> int:
                     help="Re-export replays whose .jsonl already exists.")
     ap.add_argument("--players", default=None,
                     help='Force perspectives, e.g. "p1" or "p1,p2".')
+    ap.add_argument("--format", default=None,
+                    help="export only replays of this format id (e.g. gen9championsvgc2026regmc); required "
+                         "for data/vods/Type_C, which mixes regulations.")
     ap.add_argument("--rated-only", action="store_true",
                     help="skip replays without a |rated battle-log line (private/challenge "
                          "games; their stale exports are removed). Type_C ingest guard — "
@@ -418,7 +432,7 @@ def main() -> int:
     # When folders are picked via the dialog, search recursively so the user can
     # choose any ancestor folder and still find every replay beneath it.
     recursive = args.recursive or gui_mode
-    replays = _discover(input_dir, recursive)
+    replays = filter_format(_discover(input_dir, recursive), args.format)
     if args.limit is not None:
         replays = replays[: args.limit]
     if not replays:

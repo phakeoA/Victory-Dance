@@ -59,7 +59,7 @@ def typec_folder(fmt: str) -> Path:
     return PREP / reg_folder(fmt) / "Jsonl_TypeC"
 
 
-def export_commands(out_dir, *, limit=None, py: str = PY) -> dict:
+def export_commands(out_dir, *, fmt=None, limit=None, py: str = PY) -> dict:
     """The two Type-C passes (STANDING pipeline 2026-07-19): rated games from data/vods/Type_C with the
     ``--rated-only`` purge gate; hand-approved private games from Type_C_private/approved without it (moving the
     file IS the approval), ``--overwrite`` so a re-approval refreshes. Both winner-only, same output folder;
@@ -68,6 +68,9 @@ def export_commands(out_dir, *, limit=None, py: str = PY) -> dict:
               "--output", str(out_dir), "--type", "C", "--winner-only"]
     main = common[:8] + ["--input", str(TYPE_C_DIR)] + common[8:] + ["--rated-only"]
     approved = common[:8] + ["--input", str(APPROVED_DIR)] + common[8:] + ["--overwrite"]
+    if fmt:                                   # Type_C mixes regulations (B5 2026-09-29): export only this one
+        main += ["--format", fmt]
+        approved += ["--format", fmt]
     if limit:
         main += ["--limit", str(int(limit))]
         approved += ["--limit", str(int(limit))]
@@ -196,7 +199,7 @@ def main(argv=None) -> int:
     print(f"[bcft] base {LU.repo_relative(base)}   anchor {LU.repo_relative(anchor) if anchor else '-'}   format {fmt}")
     print(f"[bcft] replays: Type_C {counts['type_c_replays']}  approved {counts['approved_replays']}  "
           f"exported so far {counts['jsonl_exported']} -> {LU.repo_relative(typec)}")
-    exp = export_commands(typec)
+    exp = export_commands(typec, fmt=fmt)
     train_argv = train_command(base, out_dir, typec=typec, epochs=(1 if args.smoke else args.epochs), lr=args.lr,
                                patience=args.patience, device=("cpu" if args.smoke else args.device),
                                loader_workers=args.loader_workers, limit_files=(40 if args.smoke else None))
