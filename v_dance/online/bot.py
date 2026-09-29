@@ -313,6 +313,35 @@ _LINK_CLOSE_HOOK_JS = ("() => { const s = window.app && app.socket; if (!s) retu
                        "{ code: e && e.code, reason: e && e.reason, wasClean: e && e.wasClean, t: Date.now() }; } catch (_) {} "
                        "return prev ? prev.apply(this, arguments) : undefined; }; return true; }")
 _LINK_LAST_CLOSE_JS = "() => (window.__vd_last_close || null)"
+# 2026-09-29 (USER: "record the real close reason"): the app.socket.onclose hook above logged 'no hook data' on every
+# close (the client re-creates / re-assigns its socket). This INIT script runs before any page script on every load
+# and wraps the browser's own WebSocket, so every socket's close event is recorded: code (1006 = abnormal drop with
+# no close frame, 1000/1001 = normal / going away, 3000+ = server-side SockJS / app codes), reason, wasClean, how long
+# the socket lived, and whether the tab was hidden or offline at that moment (throttling vs network). The reconnect
+# path reads window.__vd_last_close BEFORE its reload (_read_close_detail); window.__vd_closes keeps the last 20.
+_WS_CLOSE_TRACE_JS = """(() => {
+  const Native = window.WebSocket;
+  if (!Native || Native.__vd_wrapped) return;
+  function VDWebSocket(...args) {
+    const ws = new Native(...args);
+    const opened = Date.now();
+    ws.addEventListener('close', (e) => {
+      try {
+        const rec = {code: e.code, reason: e.reason || '', wasClean: e.wasClean, t: new Date().toISOString(),
+                     lived_s: Math.round((Date.now() - opened) / 1000), url: String(args[0]).slice(0, 60),
+                     hidden: document.visibilityState, online: navigator.onLine};
+        window.__vd_last_close = rec;
+        (window.__vd_closes = window.__vd_closes || []).push(rec);
+        if (window.__vd_closes.length > 20) window.__vd_closes.shift();
+      } catch (_) {}
+    });
+    return ws;
+  }
+  VDWebSocket.prototype = Native.prototype;
+  for (const k of ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED']) VDWebSocket[k] = Native[k];
+  VDWebSocket.__vd_wrapped = true;
+  window.WebSocket = VDWebSocket;
+})();"""
 
 
 class LinkWatch:
@@ -980,6 +1009,7 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
         try:
             frame_q: asyncio.Queue = asyncio.Queue()
             ctx = await browser.new_context(no_viewport=True)
+            await ctx.add_init_script(_WS_CLOSE_TRACE_JS)   # every load, before the client's scripts (close reasons)
             page = await ctx.new_page()
             # 2026-09-01 link watchdog (USER: mid-battle disconnects) — see LinkWatch.
             _prefs = None
