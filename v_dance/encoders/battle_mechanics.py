@@ -880,6 +880,7 @@ _MAGIC_BOUNCE_AB = frozenset({"magicbounce"})
 _DEF_REDUCE_AB   = frozenset({
     "multiscale", "shadowshield", "thickfat", "filter", "solidrock",
     "prismarmor", "fluffy", "icescales", "furcoat", "heatproof", "wonderguard",
+    "auraguard",
 })
 _STATUS_IMMUNE_AB = frozenset({
     "limber", "insomnia", "vitalspirit", "waterveil", "magmaarmor", "immunity",
@@ -1149,6 +1150,9 @@ def _ability_damage_mult(move_id: Optional[str], attacker_ability: Optional[str]
             elif da == "fluffy":
                 if mt == "FIRE":
                     mult *= 2.0
+                if props["is_contact"]:
+                    mult *= 0.5
+            elif da == "auraguard":                   # Champions (Mega Lucario Z): ½ damage from contact moves
                 if props["is_contact"]:
                     mult *= 0.5
             elif da == "icescales":

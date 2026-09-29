@@ -369,9 +369,13 @@ def test_resolve_train_pool_all_expands_to_full_pool():
     ma = resolve_train_pool(["all"], reg="gen9championsvgc2026regma")
     assert set(ma) == set(R.discover_teams(reg="gen9championsvgc2026regma"))
     assert ma and all("/M-B/" not in t for t in ma)
-    # an M-B run draws M-A + M-B (M-A teams stay legal in M-B) = the whole Champions pool.
+    # an M-B run draws M-A + M-B (M-A teams stay legal in M-B), never the newer M-C folder.
     mb = resolve_train_pool(["all"], reg="gen9championsvgc2026regmb")
-    assert set(mb) == set(R.discover_teams()) and len(mb) >= 50
+    everything = set(R.discover_teams())
+    assert set(mb) == {t for t in everything if "/M-C/" not in t} and len(mb) >= 50
+    # an M-C run (the newest reg) draws the whole Champions pool.
+    mc = resolve_train_pool(["all"], reg="gen9championsvgc2026regmc")
+    assert set(mc) == everything and any("/M-C/" in t for t in mc)
     # explicit names pass through verbatim (no discovery / no filtering).
     assert resolve_train_pool(["WolfeGlick", "x"]) == ["WolfeGlick", "x"]
 

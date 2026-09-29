@@ -12,10 +12,11 @@ import pytest
 from v_dance import formats
 
 
-def test_default_is_active_regmb_and_registry_lists_both():
-    assert formats.default_format() == "gen9championsvgc2026regmb"
+def test_default_is_active_regmc_and_registry_lists_all():
+    assert formats.default_format() == "gen9championsvgc2026regmc"
     known = formats.known_formats()
     assert "gen9championsvgc2026regmb" in known
+    assert "gen9championsvgc2026regmc" in known
     assert "gen9championsvgc2026regma" in known  # M-A retained for backwards-compat
 
 
@@ -24,7 +25,7 @@ def test_env_override_is_spawn_safe(monkeypatch):
     monkeypatch.setenv(formats.ENV_FORMAT_KEY, "gen9championsvgc2026regma")
     assert formats.default_format() == "gen9championsvgc2026regma"
     monkeypatch.delenv(formats.ENV_FORMAT_KEY, raising=False)
-    assert formats.default_format() == "gen9championsvgc2026regmb"
+    assert formats.default_format() == "gen9championsvgc2026regmc"
 
 
 def test_set_active_format_sets_env_and_snapshot(monkeypatch):
@@ -89,17 +90,17 @@ def test_pikalytics_prefers_format_specific_when_present(monkeypatch, tmp_path):
 
 def test_belief_default_path_resolves_via_formats():
     """belief_state's default path must come THROUGH the resolver (not hardcoded), so it
-    tracks the ACTIVE format's scraped file (now regmb) rather than a baked-in constant.
+    tracks the ACTIVE format's scraped file (now regmc) rather than a baked-in constant.
     The equality is the durable assertion; the filename documents the current active reg."""
     from v_dance.parser import belief_state
     assert belief_state._DEFAULT_PIKALYTICS_PATH == formats.pikalytics_path_for(formats.DEFAULT_FORMAT)
-    assert belief_state._DEFAULT_PIKALYTICS_PATH.name == "pikalytics_regmb.json"
+    assert belief_state._DEFAULT_PIKALYTICS_PATH.name == "belief_regmc.json"   # the merged file (belief_sources)
     assert belief_state._DEFAULT_PIKALYTICS_PATH.exists()
 
 
 def test_run_local_battle_format_follows_registry():
     import v_dance.play.run_local_battle as R
-    assert R.BATTLE_FORMAT == formats.DEFAULT_FORMAT == "gen9championsvgc2026regmb"
+    assert R.BATTLE_FORMAT == formats.DEFAULT_FORMAT == "gen9championsvgc2026regmc"
 
 
 def test_belief_resolves_active_format_fresh(monkeypatch, tmp_path):

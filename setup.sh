@@ -191,7 +191,7 @@ header "Installing Node.js into .venv"
 
 NODE_DIR="$VENV_DIR/node"
 NODE_MIN_MAJOR=10
-NODE_VERSION="22.3.0"   # LTS — change if you need a different 10+ release
+NODE_VERSION="22.23.3"   # LTS — change if you need a different 10+ release
 NODE_WIN_ZIP="node-v${NODE_VERSION}-win-x64.zip"
 NODE_WIN_URL="https://nodejs.org/dist/v${NODE_VERSION}/${NODE_WIN_ZIP}"
 NODE_LINUX_TAR="node-v${NODE_VERSION}-linux-x64.tar.xz"
@@ -331,7 +331,7 @@ SHOWDOWN_REPO="https://github.com/smogon/pokemon-showdown.git"
 # PINNED commit — the exact sim/protocol the bot was built + tested against (see PINS.md).
 # Showdown's master moves fast and can change the battle protocol; bumping this must be
 # followed by re-verifying the full test suite + a live self-play smoke. Empty = track master.
-SHOWDOWN_SHA="4880d3693580bd33652797cf31179c6fcdf87e50"   # Reg M-B (smogon/master, 2026-06-18; "Champions: Add Wise Glasses" #12120)
+SHOWDOWN_SHA="a5df8274e85b0889bf2a9b3422a08b39732374fc"   # Reg M-C (smogon/master, 2026-09-28; "Teams: Tweak user feedback"); needs node >=22.18
 # Reg M-A (frozen — for reproducing pre-migration runs): ecf39eef1e9cd2fd6ed2e9b9011b86610258d757 (v0.11.10-1271, 2026-06-17)
 
 if [[ -d "$SHOWDOWN_DIR/.git" ]]; then

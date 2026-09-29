@@ -138,8 +138,8 @@ def test_representative_ability_tags_incl_multitag():
 
 
 def test_every_tagged_ability_is_in_vocab_no_typos():
-    from v_dance.encoders.mechanic_vocab import ABILITY_VOCAB
-    bad = sorted(i for i in MT._ABILITY_TAGS if i not in ABILITY_VOCAB)
+    from v_dance.encoders.mechanic_vocab import ABILITY_VOCAB, _POST_LAYOUT_IDS
+    bad = sorted(i for i in MT._ABILITY_TAGS if i not in ABILITY_VOCAB and i not in _POST_LAYOUT_IDS["ability"])
     assert bad == [], f"tagged ability ids not in the dex vocab (typos / not-in-format): {bad}"
 
 

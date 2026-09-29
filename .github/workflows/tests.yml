@@ -56,7 +56,7 @@ jobs:
           pip install "pytest==9.0.3" "numpy==2.4.6" "python-dotenv==1.2.2" \
                       "Flask==3.1.3" "flask-cors==6.0.5" "psutil==7.2.2" \
                       "tabulate==0.10.0" "requests==2.33.0" \
-                      "poke_env @ git+https://github.com/hsahovic/poke-env.git@a6e4f67d204a390a3c8368c182197aff35816aca"
+                      "poke_env @ git+https://github.com/hsahovic/poke-env.git@7ff6212e4e738efd46f1ea52035b37a8bba1e386"
           pip install -e .
 
       - name: Run test suite

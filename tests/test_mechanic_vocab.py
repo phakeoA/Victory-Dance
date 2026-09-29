@@ -64,7 +64,10 @@ def test_full_coverage_no_collisions():
 
 def test_determinism_rebuild_is_identical():
     # re-deriving from the pinned dex yields the SAME index mapping (stable embedding indices)
-    assert MV._build(MV._dex_ids("abilities.ts", "mods/champions/abilities.ts")) == MV.ABILITY_VOCAB
+    # minus the ids the dex gained after the trained layout (they stay PAD until a layout bump)
+    post = MV._POST_LAYOUT_IDS["ability"]
+    ids = [i for i in MV._dex_ids("abilities.ts", "mods/champions/abilities.ts") if i not in post]
+    assert MV._build(ids) == MV.ABILITY_VOCAB
     assert MV._build(MV._dex_ids("moves.ts", "mods/champions/moves.ts")) == MV.MOVE_VOCAB
     assert MV._build(MV._dex_ids("items.ts", "mods/champions/items.ts")) == MV.ITEM_VOCAB
 

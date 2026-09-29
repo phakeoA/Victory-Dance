@@ -610,11 +610,15 @@ def resolve_train_pool(spec, reg=None):
     spec = list(spec) if spec else ["all"]
     if any(str(s).lower() == "all" for s in spec):
         import v_dance.play.run_local_battle as R   # lazy: pulls poke_env
-        from v_dance.formats import reg_token, default_format
+        from v_dance.formats import reg_token, default_format, known_formats
         fmt = reg or default_format()
+        mine = reg_token(fmt)
         pool = set(R.discover_teams(reg=fmt))            # this reg's own subfolder
-        if reg_token(fmt) != "regma":                    # M-A base is legal in every reg upward
-            pool |= set(R.discover_teams(reg="gen9championsvgc2026regma"))
+        # every OLDER reg's teams stay legal upward (M-A ⊆ M-B ⊆ M-C rosters; B5 2026-09-29
+        # validated 111/112 M-A + M-B files legal in M-C). Tokens sort in reg order (regma < regmb < regmc).
+        for f in known_formats():
+            if reg_token(f) < mine:
+                pool |= set(R.discover_teams(reg=f))
         return sorted(pool)
     return spec
 

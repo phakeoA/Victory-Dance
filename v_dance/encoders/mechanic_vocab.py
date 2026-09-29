@@ -51,9 +51,18 @@ def _build(ids: List[str]) -> Dict[str, int]:
 
 # Base data files already carry the Champions customs (verified: eelevate/firemane/megasol/dragonize are in
 # data/abilities.ts + data/moves.ts); the mods/champions overlay is unioned in as belt-and-suspenders.
-ABILITY_IDS: List[str] = _dex_ids("abilities.ts", "mods/champions/abilities.ts")
-MOVE_IDS: List[str] = _dex_ids("moves.ts", "mods/champions/moves.ts")
-ITEM_IDS: List[str] = _dex_ids("items.ts", "mods/champions/items.ts")
+# Ids the pinned dex gained AFTER the trained v9 layout. Inserting one into the sorted list would shift every
+# later index and break every checkpoint, so they stay PAD/UNKNOWN (their mechanics still come from the tag
+# tables) until a deliberate layout bump appends them. B5 re-pin 4880d3693 -> a5df8274e (2026-09-29) added
+# auraguard (Mega Lucario Z); moves and items were unchanged.
+_POST_LAYOUT_IDS = {"ability": {"auraguard"}, "move": set(), "item": set()}
+
+ABILITY_IDS: List[str] = [i for i in _dex_ids("abilities.ts", "mods/champions/abilities.ts")
+                          if i not in _POST_LAYOUT_IDS["ability"]]
+MOVE_IDS: List[str] = [i for i in _dex_ids("moves.ts", "mods/champions/moves.ts")
+                       if i not in _POST_LAYOUT_IDS["move"]]
+ITEM_IDS: List[str] = [i for i in _dex_ids("items.ts", "mods/champions/items.ts")
+                       if i not in _POST_LAYOUT_IDS["item"]]
 
 ABILITY_VOCAB: Dict[str, int] = _build(ABILITY_IDS)
 MOVE_VOCAB: Dict[str, int] = _build(MOVE_IDS)

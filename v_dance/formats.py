@@ -105,16 +105,17 @@ def pikalytics_path_for(fmt: Optional[str] = None) -> Optional[Path]:
     """Resolve the Pikalytics belief file for ``fmt`` (defaults to the active
     format).
 
-    Prefers ``data/pikalytics_<reg>.json``; falls back to the canonical M-A file
-    (M-A ⊂ M-B) so the belief prior is never silently zeroed for a new reg.
-    Returns None only if no Pikalytics file exists at all.
+    Prefers the merged ``data/belief_<reg>.json`` (``datatools.belief_sources``: MunchStats first,
+    then Pikalytics, then the previous reg), then the raw ``data/pikalytics_<reg>.json``; falls
+    back to the canonical M-A file (M-A ⊂ M-B) so the belief prior is never silently zeroed for a
+    new reg. Returns None only if no belief file exists at all.
     """
     fmt = fmt or DEFAULT_FORMAT
     reg = reg_token(fmt)
     if reg:
-        p = _DATA_DIR / pikalytics_filename(fmt)
-        if p.exists():
-            return p
+        for p in (_DATA_DIR / f"belief_{reg}.json", _DATA_DIR / pikalytics_filename(fmt)):
+            if p.exists():
+                return p
     if _FALLBACK_PIKALYTICS.exists():
         return _FALLBACK_PIKALYTICS
     return None
