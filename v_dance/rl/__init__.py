@@ -1,4 +1,4 @@
-"""PPO core — the format-agnostic RL machinery (refactor Phase 2, 2026-09-10; formerly in ``v_dance.selfplay``).
+"""PPO core — the format-agnostic RL machinery (moved here from ``v_dance.selfplay`` in the 2026-09-10 refactor).
 
 - ``schema``        Transition / Trajectory / EpisodeMeta (+ ``PASS_ACTION``) — the trajectory record
 - ``collector``     TrajectoryCollector (per-battle step capture, pair alignment)
@@ -12,6 +12,5 @@
 - ``ppo``           PPOConfig, the loss, the KL-to-reference leash
 - ``trainer``       PPOTrainer / TrainConfig (the update loop)
 
-Consumers: ``v_dance.selfplay`` (the era loop + collection) and ``v_dance.ladder`` (W3b). The old
-``v_dance.selfplay.<module>`` paths are ``sys.modules`` shims until Phase 6.
+Consumers: ``v_dance.selfplay`` (the era loop + collection) and ``v_dance.ladder`` (W3b).
 """

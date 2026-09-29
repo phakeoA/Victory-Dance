@@ -10,7 +10,7 @@ pytest.importorskip("numpy")
 import numpy as np
 
 _REPO = Path(__file__).resolve().parents[1]
-from v_dance.selfplay.collector import TrajectoryCollector, assert_zero_sum  # noqa: E402
+from v_dance.rl.collector import TrajectoryCollector, assert_zero_sum  # noqa: E402
 
 
 def _collect(battle_id, role, won, terminal_type, n_steps=2):

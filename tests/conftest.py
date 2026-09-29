@@ -73,7 +73,7 @@ def vod_path() -> Path:
 
 @pytest.fixture(scope="session")
 def dex():
-    from v_dance.parser.vod_parser.pokedex import Pokedex
+    from v_dance.dex.pokedex import Pokedex
     return Pokedex(POKEDEX_PATH)
 
 

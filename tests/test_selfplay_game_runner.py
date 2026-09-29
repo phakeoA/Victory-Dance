@@ -21,9 +21,9 @@ _REPO = Path(__file__).resolve().parents[1]
 from v_dance.encoders.state_encoder import (get_state_dim, get_action_dim, get_gimmick_dim,  # noqa: E402
                            get_state_layout_version)
 from conftest import write_attn_ckpt  # noqa: E402
-from v_dance.selfplay.actor_critic import ActorCritic  # noqa: E402
-from v_dance.selfplay.collector import TrajectoryCollector, assert_zero_sum  # noqa: E402
-from v_dance.selfplay.schema import PASS_ACTION  # noqa: E402
+from v_dance.rl.actor_critic import ActorCritic  # noqa: E402
+from v_dance.rl.collector import TrajectoryCollector, assert_zero_sum  # noqa: E402
+from v_dance.rl.schema import PASS_ACTION  # noqa: E402
 from v_dance.selfplay import game_runner as G  # noqa: E402
 
 SD, AD, GD = get_state_dim(), get_action_dim(), get_gimmick_dim()
@@ -91,7 +91,7 @@ def test_record_decision_tau_zero_finite_logprob(tmp_path):
 def test_finalize_stamps_sampling_meta():
     """Scan 2026-07-02 (LOW): trajectories now carry the behaviour-sampling params
     (tau/top_p) so a top-p-truncated or argmax seat's logprobs are never mislabeled."""
-    from v_dance.selfplay.schema import EpisodeMeta
+    from v_dance.rl.schema import EpisodeMeta
     c = TrajectoryCollector("g", "p1")
     c.add_step(state=np.zeros(SD, np.float32), action_s0=0, action_s1=0)
     traj = G.finalize_trajectory(c, won=True, terminal_type="win", own_team=["a"] * 6,

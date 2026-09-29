@@ -32,7 +32,7 @@ from pathlib import Path
 import numpy as np
 
 from v_dance.encoders.white_box_sim import white_box_sim, is_fainted, UnmodelledLog
-from v_dance.parser.vod_parser.pokedex import norm_species
+from v_dance.dex.pokedex import norm_species
 
 _REPO = Path(__file__).resolve().parents[2]          # v_dance/eval/ -> repo root
 assert (_REPO / "pyproject.toml").is_file(), _REPO

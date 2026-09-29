@@ -20,9 +20,9 @@ def test_phase0_counts_all_nonmodel_sources_not_just_whitelist():
     pytest.importorskip("numpy")
     import numpy as np
     from v_dance.encoders.state_encoder import get_state_dim, get_action_dim
-    from v_dance.selfplay.collector import TrajectoryCollector
+    from v_dance.rl.collector import TrajectoryCollector
     from v_dance.selfplay import game_runner as G
-    from v_dance.selfplay.schema import PASS_ACTION
+    from v_dance.rl.schema import PASS_ACTION
     SD, AD = get_state_dim(), get_action_dim()
 
     def _game(tag, p1_won, n=3, turn=5):
@@ -51,7 +51,7 @@ def test_phase0_counts_all_nonmodel_sources_not_just_whitelist():
 # ── #4: BattleHost._ended is bounded ──────────────────────────────────────────
 def test_battle_host_ended_set_is_bounded():
     pytest.importorskip("poke_env")
-    from v_dance.play.browser.battle_host import BattleHost
+    from v_dance.online.browser.battle_host import BattleHost
     h = BattleHost(team=None, model_path=None, team_chooser_path=None)
     for i in range(700):
         h.end_battle(f"battle-x-{i}")
@@ -94,7 +94,7 @@ def test_bulk_players_for_exports_both_perspectives():
 
 # ── #9: a cancelled browser challenge is reconciled out of `pending` ──────────
 def test_current_challengers_reports_authoritative_set():
-    mod = pytest.importorskip("v_dance.play.play_vs_human_browser")
+    mod = pytest.importorskip("v_dance.online.play_vs_human_browser")
     cc = mod._current_challengers
     assert cc('|updatechallenges|{"challengesFrom":{"Bob":"gen9foo"}}') == {"bob"}
     assert cc('|updatechallenges|{"challengesFrom":{}}') == set()   # everyone cancelled → empty set

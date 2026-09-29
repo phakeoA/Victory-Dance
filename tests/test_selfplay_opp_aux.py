@@ -20,10 +20,10 @@ import torch.nn.functional as F
 _REPO = Path(__file__).resolve().parents[1]
 from conftest import write_attn_ckpt  # noqa: E402
 from v_dance.encoders.state_encoder import get_state_dim, get_action_dim  # noqa: E402
-from v_dance.selfplay.actor_critic import ActorCritic  # noqa: E402
-from v_dance.selfplay.schema import Transition, PASS_ACTION  # noqa: E402
-from v_dance.selfplay import policy_eval as pe  # noqa: E402
-from v_dance.selfplay import ppo as P  # noqa: E402
+from v_dance.rl.actor_critic import ActorCritic  # noqa: E402
+from v_dance.rl.schema import Transition, PASS_ACTION  # noqa: E402
+from v_dance.rl import policy_eval as pe  # noqa: E402
+from v_dance.rl import ppo as P  # noqa: E402
 
 STATE_DIM, ACTION_DIM = get_state_dim(), get_action_dim()
 

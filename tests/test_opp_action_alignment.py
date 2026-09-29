@@ -15,10 +15,10 @@ pytest.importorskip("numpy")
 import numpy as np
 
 _REPO = Path(__file__).resolve().parents[1]
-from v_dance.selfplay.schema import (  # noqa: E402
+from v_dance.rl.schema import (  # noqa: E402
     Transition, EpisodeMeta, Trajectory, PASS_ACTION,
 )
-from v_dance.selfplay.collector import (  # noqa: E402
+from v_dance.rl.collector import (  # noqa: E402
     align_opponent_actions, align_paired_trajectories,
 )
 

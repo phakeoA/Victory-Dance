@@ -18,10 +18,10 @@ pytest.importorskip("numpy")
 import torch
 
 from conftest import write_attn_ckpt
-from v_dance.selfplay.actor_critic import ActorCritic
+from v_dance.rl.actor_critic import ActorCritic
 from v_dance.selfplay import resume as RS
-from v_dance.selfplay.ppo import PPOConfig, _value_loss, c51_value_loss, c51_support
-from v_dance.selfplay.trainer import PPOTrainer, TrainConfig
+from v_dance.rl.ppo import PPOConfig, _value_loss, c51_value_loss, c51_support
+from v_dance.rl.trainer import PPOTrainer, TrainConfig
 from v_dance.selfplay.league import OpponentLeague
 from v_dance.selfplay.generation import GenerationHistory
 
@@ -75,11 +75,11 @@ def test_c51_loss_uses_threaded_support_over_cfg(tmp_path):
 def test_ppo_loss_from_batch_threads_critic_support(tmp_path):
     # end-to-end: ppo_loss_from_batch must pass ac.critic.support (so loss + value mean share one support)
     import numpy as np
-    from v_dance.selfplay.schema import Transition, PASS_ACTION
-    from v_dance.selfplay.collector import TrajectoryCollector
-    from v_dance.selfplay.reward import place_terminal_reward
-    from v_dance.selfplay import policy_eval as pe
-    from v_dance.selfplay.ppo import ppo_loss_from_batch
+    from v_dance.rl.schema import Transition, PASS_ACTION
+    from v_dance.rl.collector import TrajectoryCollector
+    from v_dance.rl.reward import place_terminal_reward
+    from v_dance.rl import policy_eval as pe
+    from v_dance.rl.ppo import ppo_loss_from_batch
     from v_dance.encoders.state_encoder import get_state_dim, get_action_dim
     SD, AD = get_state_dim(), get_action_dim()
     ac = _c51_ac(tmp_path, 51)

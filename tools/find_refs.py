@@ -1,7 +1,7 @@
 """find_refs — where is a path / module string referenced in the repo's CODE and CONFIG? (refactor instrument, 2026-09-10)
 
 Run from the repo root:
-    PYTHONUTF8=1 .venv/Scripts/python.exe -X utf8 tools/find_refs.py "scratch/" ["v_dance.play.play_online_browser" ...]
+    PYTHONUTF8=1 .venv/Scripts/python.exe -X utf8 tools/find_refs.py "scratch/" ["v_dance.online.bot" ...]
     ... --docs        also search docs/*.md and the repo-root *.md notes (off by default: history, not code)
     ... --names-only  print only the file names that match
 

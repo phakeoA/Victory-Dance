@@ -37,7 +37,7 @@ import time
 from pathlib import Path
 
 from v_dance.formats import reg_token, DEFAULT_FORMAT
-from v_dance.parser.vod_parser.pokedex import norm_species
+from v_dance.dex.pokedex import norm_species
 
 _REPO = Path(__file__).resolve().parents[2]
 _BLEND_BLOCKS = ("moves", "items", "abilities")   # entry-lists of {"name": …, "pct": …}

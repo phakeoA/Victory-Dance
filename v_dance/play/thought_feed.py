@@ -53,7 +53,7 @@ def _display(kind: str, raw) -> str:
     """poke-env id -> display name via the team-sheet maps; title-case fallback."""
     raw = str(raw or "")
     try:
-        from v_dance.parser.vod_parser.team_sheet import _packed_display
+        from v_dance.dex.team_sheet import _packed_display
         d = _packed_display(kind, raw)
         if d and str(d) != raw:               # a map miss echoes the id back ('latiosite')
             return str(d)

@@ -171,7 +171,7 @@ def test_dup_id_and_display_name_takes_max_not_sum():
 
 # ── mega-stone -> ability augmentation (2026-07-23 fix) ───────────────────────
 def _dex_or_skip():
-    from v_dance.parser.vod_parser.pokedex import get_pokedex
+    from v_dance.dex.pokedex import get_pokedex
     dex = get_pokedex()
     if dex is None or not dex.mega_formes_for("Charizard"):
         pytest.skip("pokedex with mega formes unavailable")

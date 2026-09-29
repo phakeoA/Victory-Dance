@@ -734,7 +734,7 @@ def _pack_side(species: Sequence[str], vocab: dict, feat_dim: int, *,
         ``None`` = symmetric belief-only base — parity-correct for a Type-B BC-pretrained
         net, whose ``has_own_detail`` bit is always 0.
     """
-    from v_dance.parser.vod_parser.pokedex import norm_species
+    from v_dance.dex.pokedex import norm_species
     idx = [0] * 6
     if use_tp_features:
         # Schema dispatch (v8): a v6/v7 checkpoint is served through the FROZEN v7 extractor —

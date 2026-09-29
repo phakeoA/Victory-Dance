@@ -6,8 +6,8 @@ play.pokemonshowdown.com: a Playwright tab logs into the ``.env`` account, YOU f
 plays every battle room that opens via the connection-less ``BattleHost`` (frames in → /choose
 back into the tab). Closed team sheets; every finished game appends a bench-JSONL row.
 
-  python -m v_dance.online.play_online_browser --dry-run     # connect+login+teams, NO battles
-  python -m v_dance.online.play_online_browser               # the real thing (Ctrl-C to stop)
+  python -m v_dance.online.bot --dry-run     # connect+login+teams, NO battles
+  python -m v_dance.online.bot               # the real thing (Ctrl-C to stop)
 
 .env keys: PS_USERNAME/PS_PASSWORD (login), PS_CLIENT_URL, PS_AVATAR, VDANCE_BATTLE_FORMAT
 (exported BEFORE v_dance imports so the whole stack runs that format), VD_BATTLE_CKPT/VD_TP_CKPT/
@@ -1029,7 +1029,7 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
             # restore the popup. NOT in --dry-run: the consumer isn't serving there.
             if args.control_port and not args.dry_run:
                 try:
-                    from v_dance.online.bot_control_ui import start_control_ui
+                    from v_dance.online.panel import start_control_ui
                     ctrl_ref["c"] = start_control_ui(
                         page=page, host=host, tally=tally, ai_pool=ai_pool,
                         fmt=BATTLE_FORMAT, username=username,
@@ -1054,7 +1054,7 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
                     print(f"[online] control server on {_ctrl.url}  —  drive it from Mission Control's "
                           f"'Online bot' tab (or open that URL for the standalone panel).")
                 except Exception as exc:
-                    from v_dance.online.bot_control_ui import DuplicateBotError
+                    from v_dance.online.panel import DuplicateBotError
                     if isinstance(exc, DuplicateBotError):
                         # 2026-09-03: a second bot on this account would play the SAME battles as
                         # the running one and lose every order — refuse to serve, loudly.

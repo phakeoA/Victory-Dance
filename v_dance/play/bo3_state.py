@@ -99,7 +99,7 @@ def set_ctx_for(player, battle, our_species: List[str], opp_species: List[str]
         prev = (getattr(player, "_bo3_sets", {}).get(parent) or {}).get(idx - 1)
         if not prev or (not prev.get("our_bring") and not prev.get("opp_seen")):
             return None
-        from v_dance.parser.vod_parser.pokedex import norm_species
+        from v_dance.dex.pokedex import norm_species
 
         def _ctx(roster: List[str], brought: List[str], leads: List[str]) -> np.ndarray:
             b = {norm_species(s) for s in brought if s}

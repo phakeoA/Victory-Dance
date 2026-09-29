@@ -9,7 +9,7 @@ import pytest
 
 pytest.importorskip("poke_env")
 
-import v_dance.play.play_vs_human_browser as B
+import v_dance.online.play_vs_human_browser as B
 
 _FMT = B.BATTLE_FORMAT
 

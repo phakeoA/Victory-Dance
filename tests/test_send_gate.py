@@ -11,7 +11,7 @@ import asyncio
 
 import pytest
 
-from v_dance.play.send_gate import SendGate
+from v_dance.online.send_gate import SendGate
 
 
 class Clock:

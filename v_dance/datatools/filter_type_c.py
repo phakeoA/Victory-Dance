@@ -8,7 +8,7 @@ into the next era-retrain. This script classifies every recorded replay and (wit
 **DELETES the junk** (USER: delete, not quarantine; ``--quarantine`` moves to ``_excluded/``
 instead). The training pipeline is DOUBLY protected: ``bulk_parse_replays`` runs the same
 ``classify_log`` gate itself and skips junk (+ removes its stale exports) even if this script was
-never run, and ``play_online_browser`` auto-runs this filter (delete mode) at every session exit —
+never run, and ``online.bot`` auto-runs this filter (delete mode) at every session exit —
 so the folder stays clean with zero manual steps.
 
 Classification (per replay's embedded battle log):

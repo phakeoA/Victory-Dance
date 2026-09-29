@@ -84,7 +84,7 @@ def test_run_epoch_loss_identical_with_and_without_slot_mask():
 
 # ── ladder-rating capture ──────────────────────────────────────────────────────
 def test_parse_rating_lines_poke_env_convention():
-    from v_dance.play.play_vs_human_browser import _parse_rating_lines
+    from v_dance.online.play_vs_human_browser import _parse_rating_lines
     payload = (">battle-gen9x-1\n"
                "|raw|VictoriousDancing's rating: 1049 &rarr; <strong>1076</strong><br />(+27)\n"
                "|raw|somefoe's rating: 1102 &rarr; <strong>1075</strong><br />(-27)\n"

@@ -35,7 +35,7 @@ from v_dance.encoders.battle_mechanics import (
 from v_dance.encoders.damage_mechanics import variable_base_power, species_weight, effective_move_type
 from v_dance.encoders.encoder_layout import _TERRAIN_TO_FIELD
 from v_dance.parser.belief_state import dex_base_stats
-from v_dance.parser.vod_parser.pokedex import get_pokedex, norm_species
+from v_dance.dex.pokedex import get_pokedex, norm_species
 
 _STAT_KEYS = ("hp", "atk", "def", "spa", "spd", "spe")
 _ZERO_DMG = (0.0, 0.0, 0.0, 0.0)        # (mean, lo_nc, hi_nc, hi_crit) — a no-damage _move_damage_pct result

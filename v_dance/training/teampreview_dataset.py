@@ -54,7 +54,7 @@ def _find_scripts_dir() -> Path:
     raise RuntimeError(f"could not locate the repo root (pyproject.toml + data/) above {__file__}")
 
 _SCRIPTS_DIR = _find_scripts_dir()
-from v_dance.parser.vod_parser.pokedex import get_pokedex, norm_species  # noqa: E402
+from v_dance.dex.pokedex import get_pokedex, norm_species  # noqa: E402
 from v_dance.parser.belief_state import dex_base_stats, STAT_ORDER         # noqa: E402
 from v_dance.encoders.state_encoder import TYPE_NAMES                        # noqa: E402
 

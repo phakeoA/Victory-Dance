@@ -77,7 +77,7 @@ def display_species(species: str, belief=None) -> str:
 def _dex_entry(species: str) -> Optional[dict]:
     """The parser pokedex entry for an id / display name (None when unknown or the dex is missing)."""
     try:
-        from v_dance.parser.vod_parser.pokedex import get_pokedex
+        from v_dance.dex.pokedex import get_pokedex
         dx = get_pokedex()
         return dx.entry(species) if dx is not None else None
     except Exception:
@@ -125,7 +125,7 @@ def _display(kind: str, raw: str) -> str:
     """poke-env id ('lifeorb') -> display name ('Life Orb') via the team-sheet maps; title-case
     fallback when the data files are unavailable (tests without data/)."""
     try:
-        from v_dance.parser.vod_parser.team_sheet import _packed_display
+        from v_dance.dex.team_sheet import _packed_display
         d = _packed_display(kind, raw)
         if d and str(d) != str(raw):          # a map miss echoes the id back ('latiosite')
             return str(d)
@@ -136,7 +136,7 @@ def _display(kind: str, raw: str) -> str:
 
 def _dex():
     try:
-        from v_dance.parser.vod_parser.pokedex import get_pokedex
+        from v_dance.dex.pokedex import get_pokedex
         return get_pokedex()
     except Exception:
         return None

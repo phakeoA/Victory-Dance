@@ -21,13 +21,13 @@ _REPO = Path(__file__).resolve().parents[1]
 from v_dance.encoders.state_encoder import (get_state_dim, get_action_dim, get_gimmick_dim,  # noqa: E402
                            get_state_layout_version)
 from conftest import write_attn_ckpt  # noqa: E402
-from v_dance.selfplay.actor_critic import ActorCritic  # noqa: E402
-from v_dance.selfplay.schema import Transition, PASS_ACTION  # noqa: E402
-from v_dance.selfplay.collector import TrajectoryCollector  # noqa: E402
-from v_dance.selfplay.reward import place_terminal_reward  # noqa: E402
-from v_dance.selfplay import policy_eval as pe  # noqa: E402
-from v_dance.selfplay.ppo import PPOConfig  # noqa: E402
-from v_dance.selfplay.trainer import PPOTrainer, TrainConfig, explained_variance  # noqa: E402
+from v_dance.rl.actor_critic import ActorCritic  # noqa: E402
+from v_dance.rl.schema import Transition, PASS_ACTION  # noqa: E402
+from v_dance.rl.collector import TrajectoryCollector  # noqa: E402
+from v_dance.rl.reward import place_terminal_reward  # noqa: E402
+from v_dance.rl import policy_eval as pe  # noqa: E402
+from v_dance.rl.ppo import PPOConfig  # noqa: E402
+from v_dance.rl.trainer import PPOTrainer, TrainConfig, explained_variance  # noqa: E402
 from v_dance.selfplay.generation import build_train_configs  # noqa: E402
 
 STATE_DIM, ACTION_DIM, GIMMICK_DIM = get_state_dim(), get_action_dim(), get_gimmick_dim()
@@ -94,7 +94,7 @@ def test_ppo_update_skips_nonfinite_loss(tmp_path, monkeypatch):
     """NaN guard: a minibatch whose loss is non-finite is SKIPPED (no backward/step), the weights are left
     UNCHANGED, and the skip count is surfaced — so a degenerate batch can't silently poison the weights,
     the Adam moments, or the per-gen snapshots on an unattended run."""
-    import v_dance.selfplay.ppo as P
+    import v_dance.rl.ppo as P
     ac = _fresh_ac(tmp_path)
     trajs = [_traj(ac, won=True, seed=1), _traj(ac, won=False, seed=2)]
     tr = PPOTrainer(ac, train_cfg=TrainConfig(minibatch_size=0, ppo_epochs=1, target_kl_from_bc=None))

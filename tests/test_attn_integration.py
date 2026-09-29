@@ -83,7 +83,7 @@ def test_attn_1d_2d_parity():
 
 # ── shared-trunk AttnCritic: leak-free invariant ──────────────────────────────
 def test_attn_actor_critic_is_leak_free(tmp_path):
-    from v_dance.selfplay.actor_critic import ActorCritic, AttnCritic
+    from v_dance.rl.actor_critic import ActorCritic, AttnCritic
     ac = ActorCritic.from_bc_checkpoint(_save_attn_ckpt(tmp_path), require_value_trained=False)
     assert isinstance(ac.critic, AttnCritic)
     x = torch.randn(4, SD)
@@ -108,7 +108,7 @@ def test_attn_actor_critic_is_leak_free(tmp_path):
 
 
 def test_attn_state_checkpoint_roundtrips(tmp_path):
-    from v_dance.selfplay.actor_critic import ActorCritic
+    from v_dance.rl.actor_critic import ActorCritic
     ac = ActorCritic.from_bc_checkpoint(
         _save_attn_ckpt(tmp_path, "concat_active"), require_value_trained=False)
     out = tmp_path / "ac.pt"
@@ -120,8 +120,8 @@ def test_attn_state_checkpoint_roundtrips(tmp_path):
 
 # ── PBRS (default-OFF) must not crash with an attn critic ─────────────────────
 def test_pbrs_from_attn_critic_no_crash(tmp_path):
-    from v_dance.selfplay.actor_critic import ActorCritic
-    from v_dance.selfplay.pbrs import PotentialShaper
+    from v_dance.rl.actor_critic import ActorCritic
+    from v_dance.rl.pbrs import PotentialShaper
     ac = ActorCritic.from_bc_checkpoint(_save_attn_ckpt(tmp_path), require_value_trained=False)
     shaper = PotentialShaper.from_critic(ac.critic, coef=0.2)
     phi = shaper.phi_values(np.zeros((3, SD), dtype=np.float32))

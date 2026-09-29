@@ -156,7 +156,7 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 import numpy as np
-from v_dance.parser.vod_parser.pokedex import get_pokedex, norm_species
+from v_dance.dex.pokedex import get_pokedex, norm_species
 from v_dance.parser.belief_state import BeliefState, dex_base_stats, STAT_ORDER
 
 # ── v9 (B1-mechanics): data-grounded mechanic substrate ──────────────────────────

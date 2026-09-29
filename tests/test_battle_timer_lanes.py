@@ -21,10 +21,10 @@ import pytest
 
 pytest.importorskip("poke_env")
 
-import v_dance.play.play_vs_human_browser as _pvhb
-from v_dance.play import bot_control_ui as bcu
-from v_dance.play import play_online_browser as pob
-from v_dance.play.bot_control_ui import BotController
+import v_dance.online.play_vs_human_browser as _pvhb
+from v_dance.online import panel as bcu
+from v_dance.online import bot as pob
+from v_dance.online.panel import BotController
 
 FMT = "gen9championsvgc2026regmb"
 A = f"battle-{FMT}-9001"
@@ -230,7 +230,7 @@ def test_panel_html_carries_the_toggle_wired_to_the_options_api():
 
 
 def test_mission_control_exposes_the_timer_env_key_and_both_cards():
-    from v_dance.datatools import mission_control as mc
+    from v_dance.ui import mission_control as mc
     assert "VD_TIMER_IMMEDIATE" in mc._ENV_WRITE_KEYS and "VD_TIMER_IMMEDIATE" in mc._ENV_READ_KEYS
     html = mc._HTML_PATH.read_text(encoding="utf-8")
     assert 'envRow("VD_TIMER_IMMEDIATE", "bool")' in html          # Deploy row

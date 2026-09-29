@@ -10,9 +10,9 @@ pytest.importorskip("numpy")
 import numpy as np
 
 _REPO = Path(__file__).resolve().parents[1]
-from v_dance.selfplay.collector import TrajectoryCollector  # noqa: E402
-from v_dance.selfplay.reward import place_terminal_reward  # noqa: E402
-from v_dance.selfplay.gae import compute_gae, standardize, compute_batch_gae, DEFAULT_GAMMA, DEFAULT_LAM  # noqa: E402
+from v_dance.rl.collector import TrajectoryCollector  # noqa: E402
+from v_dance.rl.reward import place_terminal_reward  # noqa: E402
+from v_dance.rl.gae import compute_gae, standardize, compute_batch_gae, DEFAULT_GAMMA, DEFAULT_LAM  # noqa: E402
 
 
 def _traj(terminal_type, won, values, rewards=None, n=None):

@@ -107,7 +107,7 @@ from typing import Optional
 _SCRIPTS_DIR = str(Path(__file__).resolve().parent)
 # Reuse existing project logic — do not duplicate (pokedex lookups + the
 # Bug-8-aware known-stats merge used by transitions.py).
-from v_dance.parser.vod_parser.pokedex import get_pokedex, norm_species
+from v_dance.dex.pokedex import get_pokedex, norm_species
 from v_dance.parser.vod_parser.transitions import _inject_known_stats
 
 # Default Pikalytics path — resolved per the ACTIVE format (v_dance/formats.py),

@@ -47,7 +47,7 @@ from typing import Optional, Sequence
 
 import numpy as np
 
-from v_dance.parser.vod_parser.pokedex import norm_species, get_pokedex  # noqa: F401
+from v_dance.dex.pokedex import norm_species, get_pokedex  # noqa: F401
 from v_dance.training.teampreview_dataset import (
     mon_dex_features, MON_FEAT_DIM, NUM_TYPES, _TYPE_IDX, _canon_type,
 )

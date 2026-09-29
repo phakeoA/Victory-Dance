@@ -182,7 +182,7 @@ def main() -> None:
 
     # S5: credentials + deploy defaults come from .env like the browser harness (flags override;
     # the legacy VD_LADDER_PASSWORD env var still wins over the .env password).
-    from v_dance.online.play_online_browser import _load_env
+    from v_dance.online.bot import _load_env
     env = _load_env()
     ckpt = Path(args.ckpt or env.get("VD_BATTLE_CKPT") or DEFAULT_BC_CHECKPOINT)
     tp_ckpt = Path(args.tp_ckpt or env.get("VD_TP_CKPT") or DEFAULT_TP_CHECKPOINT)

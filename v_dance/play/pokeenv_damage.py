@@ -33,7 +33,7 @@ from typing import Optional
 
 from v_dance.parser.belief_state import dex_base_stats, calc_full_stats
 from v_dance.parser.match_belief import _spread_key, _LIKELIHOOD_FLOOR
-from v_dance.parser.vod_parser.pokedex import norm_species
+from v_dance.dex.pokedex import norm_species
 
 try:  # poke-env optional (offline machines)
     from poke_env.calc import calculate_damage

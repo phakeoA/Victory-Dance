@@ -21,7 +21,7 @@ import types
 
 from v_dance.parser.belief_state import BeliefState
 from v_dance.parser.match_belief import MatchBelief
-from v_dance.parser.vod_parser.pokedex import norm_species
+from v_dance.dex.pokedex import norm_species
 from v_dance.play.live_belief_feed import feed_speed_constraints, _move_speed_props
 
 OPP = "Garchomp"   # any species — the speed feeder records constraints without a belief lookup

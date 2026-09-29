@@ -7,10 +7,10 @@ wiring (ppo_forward -> ppo_losses -> _value_loss, warm-up two-hot init, checkpoi
 import pytest
 import torch
 
-from v_dance.selfplay.ppo import (
+from v_dance.rl.ppo import (
     PPOConfig, c51_support, project_returns_to_support, c51_value_loss, _value_loss,
 )
-from v_dance.selfplay.actor_critic import AttnCritic
+from v_dance.rl.actor_critic import AttnCritic
 from v_dance.models.bc_model_attn import AttnBCPolicy
 
 

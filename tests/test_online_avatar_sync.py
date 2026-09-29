@@ -7,7 +7,7 @@ The server confirms avatar changes with ``|updateuser|USER|NAMED|AVATAR|{setting
 must apply ONLY named (post-login) updates for OUR account, rewrite just the PS_AVATAR line
 (every other .env line byte-identical), and never write when nothing changed.
 """
-import v_dance.play.play_online_browser as O
+import v_dance.online.bot as O
 
 
 def _env_file(tmp_path, body):
@@ -98,7 +98,7 @@ def test_malformed_a_frame_passes_through():
 
 
 def test_parse_challenge_ignores_our_own_outgoing_pm(monkeypatch):
-    import v_dance.play.play_vs_human_browser as P
+    import v_dance.online.play_vs_human_browser as P
     monkeypatch.setattr(P, "_AI_NAME", "VictoriousDancing")
     theirs = P._parse_challenge("|pm| Kronomono| VictoriousDancing|/challenge gen9championsvgc2026regmb|")
     assert theirs == ("Kronomono", "gen9championsvgc2026regmb")
@@ -110,7 +110,7 @@ def test_consumer_stops_when_window_closed():
     """Window closed → the consumer notices on its idle tick (no frames arrive from a dead tab),
     sets ``stop`` and returns — the harness then shuts down exactly like a Ctrl-C."""
     import asyncio
-    from v_dance.play.play_vs_human_browser import _ai_consumer
+    from v_dance.online.play_vs_human_browser import _ai_consumer
 
     class ClosedPage:
         def is_closed(self):

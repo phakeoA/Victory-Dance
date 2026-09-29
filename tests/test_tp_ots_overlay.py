@@ -202,7 +202,7 @@ def test_own_build_belief_crisp_and_delegating(tiny_belief):
 
 
 def test_own_build_two_mega_smear_resolves_to_crisp_sun(tiny_belief):
-    from v_dance.parser.vod_parser.pokedex import get_pokedex
+    from v_dance.dex.pokedex import get_pokedex
     dex = get_pokedex()
     if dex is None or not dex.mega_formes_for("Charizard"):
         pytest.skip("pokedex with mega formes unavailable")

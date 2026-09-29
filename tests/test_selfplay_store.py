@@ -10,9 +10,9 @@ pytest.importorskip("numpy")
 import numpy as np
 
 _REPO = Path(__file__).resolve().parents[1]
-from v_dance.selfplay.collector import TrajectoryCollector  # noqa: E402
-from v_dance.selfplay.reward import place_terminal_reward  # noqa: E402
-from v_dance.selfplay.store import (  # noqa: E402
+from v_dance.rl.collector import TrajectoryCollector  # noqa: E402
+from v_dance.rl.reward import place_terminal_reward  # noqa: E402
+from v_dance.rl.store import (  # noqa: E402
     TrajectoryStore, write_trajectories, read_trajectories, iter_trajectories,
     assert_terminal_rewards_clean,
 )

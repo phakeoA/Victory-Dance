@@ -17,13 +17,13 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from v_dance.parser.vod_parser.pokedex import get_pokedex, norm_species
+from v_dance.dex.pokedex import get_pokedex, norm_species
 from v_dance.parser.vod_parser.replay_parser import (
     ShowdownReplayParser,
     extract_log_from_html,
     extract_replay_id_from_html,
 )
-from v_dance.parser.vod_parser.team_sheet import (
+from v_dance.dex.team_sheet import (
     packed_team_to_known_side,
     parse_showteam_sides,
 )

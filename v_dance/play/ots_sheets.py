@@ -49,8 +49,8 @@ def stamp_ots_sheets(opp_snapshot: Optional[dict], mons: Optional[List[dict]]) -
     offline ``_apply_ots_knowledge``). Returns the number of mons stamped."""
     if not opp_snapshot or not mons:
         return 0
-    from v_dance.parser.vod_parser.pokedex import norm_species
-    from v_dance.parser.vod_parser.team_sheet import packed_team_to_known_side
+    from v_dance.dex.pokedex import norm_species
+    from v_dance.dex.team_sheet import packed_team_to_known_side
     from v_dance.parser.vod_parser.transitions import _inject_known_stats
     side = {norm_species(k): v for k, v in packed_team_to_known_side(mons).items()}
     n = 0

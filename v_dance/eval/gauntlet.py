@@ -359,7 +359,7 @@ def observed_team_weights(team_pool: Sequence[str], meta_path=None, *,
     ladder dossiers' ``data/observed_meta_<reg>.json``), floored at ``floor_pct`` so a rare
     archetype keeps a minimum share of the opponent seat. Mega formes count under their base
     species (the meta file keys base names). A team whose paste cannot be read weighs the floor."""
-    from v_dance.parser.vod_parser.team_sheet import parse_showdown_team, base_species
+    from v_dance.dex.team_sheet import parse_showdown_team, base_species
     path = Path(meta_path) if meta_path else default_observed_meta_path()
     try:
         meta = json.loads(Path(path).read_text(encoding="utf-8"))

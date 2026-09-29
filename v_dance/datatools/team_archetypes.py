@@ -51,7 +51,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from v_dance.encoders.state_encoder import POKEMON_FEATURES, StateEncoder
-from v_dance.parser.vod_parser.pokedex import norm_species
+from v_dance.dex.pokedex import norm_species
 from v_dance.training.bc_dataset import iter_jsonl_files
 
 # Aggregate play statistics appended after the pooled mon features.

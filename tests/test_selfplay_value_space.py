@@ -13,8 +13,8 @@ import numpy as np
 import pytest
 
 _REPO = Path(__file__).resolve().parents[1]
-from v_dance.selfplay.schema import Transition, PASS_ACTION  # noqa: E402
-from v_dance.selfplay import value_space as vs  # noqa: E402
+from v_dance.rl.schema import Transition, PASS_ACTION  # noqa: E402
+from v_dance.rl import value_space as vs  # noqa: E402
 
 
 def _tx(value):
@@ -84,10 +84,10 @@ def test_trainer_backstop_catches_corrupted_value(tmp_path):
     from v_dance.encoders.state_encoder import (get_state_dim, get_action_dim, get_gimmick_dim,
                                get_state_layout_version)
     from conftest import write_attn_ckpt
-    from v_dance.selfplay.actor_critic import ActorCritic
-    from v_dance.selfplay.collector import TrajectoryCollector
-    from v_dance.selfplay.reward import place_terminal_reward
-    from v_dance.selfplay.trainer import PPOTrainer, TrainConfig
+    from v_dance.rl.actor_critic import ActorCritic
+    from v_dance.rl.collector import TrajectoryCollector
+    from v_dance.rl.reward import place_terminal_reward
+    from v_dance.rl.trainer import PPOTrainer, TrainConfig
 
     sd, ad = get_state_dim(), get_action_dim()
     ac = ActorCritic.from_bc_checkpoint(write_attn_ckpt(tmp_path / "bc.pt"))

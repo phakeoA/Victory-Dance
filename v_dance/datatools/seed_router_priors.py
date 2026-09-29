@@ -51,7 +51,7 @@ def outcomes_from_caches() -> dict:
 def main() -> int:
     from v_dance.datatools.team_archetypes import (
         load_archetype_assignments, load_artifact, assign_team_sheet)
-    from v_dance.parser.vod_parser.team_sheet import parse_showdown_team
+    from v_dance.dex.team_sheet import parse_showdown_team
 
     art = load_artifact(str(ARTIFACT))
     k = int(art["k"])

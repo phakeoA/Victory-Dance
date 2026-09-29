@@ -97,7 +97,7 @@ def ots_opp_known(player, battle) -> Optional[dict]:
             return None
         role = getattr(battle, "player_role", None)
         opp = sides.get("p2" if role == "p1" else "p1") or []
-        from v_dance.parser.vod_parser.pokedex import norm_species
+        from v_dance.dex.pokedex import norm_species
         from v_dance.training.tp_features import OwnKnown
         out = {}
         for m in opp:
@@ -563,7 +563,7 @@ class VGCPlayer(VGCPlayerBase):
             # own BASE channels. team_order ignores this for v6/v7 checkpoints.
             own_build = None
             if _M.uses_tp_features(self._tc_cfg):
-                from v_dance.parser.vod_parser.pokedex import norm_species
+                from v_dance.dex.pokedex import norm_species
                 own_build = {}
                 for m in team:
                     sp = getattr(m, "species", None)

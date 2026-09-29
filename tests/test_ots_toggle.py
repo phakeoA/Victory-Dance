@@ -14,8 +14,8 @@ import pytest
 
 pytest.importorskip("poke_env")
 
-import v_dance.play.play_vs_human_browser as _pvhb
-from v_dance.parser.vod_parser.team_sheet import parse_packed_team
+import v_dance.online.play_vs_human_browser as _pvhb
+from v_dance.dex.team_sheet import parse_packed_team
 from v_dance.play.ots_sheets import apply_ots_sheets, opp_sheet_mons, ots_known, room_base_tag, stamp_ots_sheets
 
 PACKED = ("Charizard||charizarditey|solarpower|heatwave,solarbeam,protect,weatherball|Timid||||||50|,,,,,Fire]"
@@ -81,8 +81,8 @@ def test_consumer_swaps_the_reject_for_an_accept_only_when_the_toggle_is_on(monk
 
 def test_panel_toggle_status_and_page(monkeypatch):
     import asyncio
-    from v_dance.play import bot_control_ui as bcu
-    from v_dance.play.bot_control_ui import BotController
+    from v_dance.online import panel as bcu
+    from v_dance.online.panel import BotController
     tb = _mod("test_bot_control_ui")
     monkeypatch.setattr(bcu, "discover_teams", lambda reg=None: [])
     monkeypatch.setenv("VD_SITE_POLL", "0")
@@ -124,7 +124,7 @@ def test_recorder_seals_the_ots_flag(tmp_path):
 
 
 def test_mission_control_carries_the_launch_key_and_both_checkboxes():
-    from v_dance.datatools import mission_control as mc
+    from v_dance.ui import mission_control as mc
     assert "VD_OTS_ACCEPT" in mc._ENV_READ_KEYS and "VD_OTS_ACCEPT" in mc._ENV_WRITE_KEYS
     html = mc._HTML_PATH.read_text(encoding="utf-8")
     assert 'id="ob-launch-ots"' in html and 'id="ob-ots"' in html and "ots_accept: $(\"ob-ots\").checked" in html

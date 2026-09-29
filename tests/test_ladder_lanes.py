@@ -19,9 +19,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from v_dance.play import bot_control_ui as bcu
+from v_dance.online import panel as bcu
 from v_dance.play import serve_bandit as SB
-from v_dance.play.bot_control_ui import BotController
+from v_dance.online.panel import BotController
 
 FMT = "gen9championsvgc2026regmb"
 
@@ -340,7 +340,7 @@ def test_panel_applies_arms_and_pins_under_live_games_when_the_player_resolves_p
 
 
 def test_mission_control_exposes_the_lanes_env_key():
-    from v_dance.datatools import mission_control as mc
+    from v_dance.ui import mission_control as mc
     assert "VD_LADDER_LANES" in mc._ENV_WRITE_KEYS and "VD_LADDER_LANES" in mc._ENV_READ_KEYS
 
 

@@ -151,7 +151,7 @@ def test_worker_result_is_picklable():
 def test_trajectory_is_picklable():
     """Trajectories cross the process boundary as pickled return values — confirm a real one
     (numpy state + masks + meta) round-trips."""
-    from v_dance.selfplay.collector import TrajectoryCollector
+    from v_dance.rl.collector import TrajectoryCollector
     c = TrajectoryCollector("battle-x", "p1")
     c.add_step(state=np.zeros(4, np.float32), action_s0=0, action_s1=1, gimmick_s0=0,
                gimmick_s1=0, logprob=-1.0, value=0.5, mask_s0=[1, 1, 1, 1],
@@ -478,7 +478,7 @@ def _tiny_ac(tmp_path):
     """Build a tiny ActorCritic from a synthetic value-trained BC checkpoint."""
     from conftest import write_attn_ckpt
     from v_dance.encoders.state_encoder import get_action_dim, get_gimmick_dim, get_state_dim
-    from v_dance.selfplay.actor_critic import ActorCritic
+    from v_dance.rl.actor_critic import ActorCritic
     sd, ad, gd = get_state_dim(), get_action_dim(), get_gimmick_dim()
     p = write_attn_ckpt(tmp_path / "bc.pt")
     return ActorCritic.from_bc_checkpoint(p), (sd, ad, gd)
@@ -492,7 +492,7 @@ def test_save_inference_ckpt_roundtrips_to_worker_loadable(tmp_path):
     """The per-gen handoff: save the AC's current weights, then reload exactly how a worker does
     (from_bc_checkpoint on CPU) and confirm the policy weights match bit-for-bit."""
     import torch
-    from v_dance.selfplay.actor_critic import ActorCritic
+    from v_dance.rl.actor_critic import ActorCritic
     ac, _ = _tiny_ac(tmp_path)
     out = MP.mp_ckpt_path(tmp_path, 0)
     ret = MP.save_inference_ckpt(ac, out, generation=7)
@@ -510,7 +510,7 @@ def test_worker_ac_loads_the_trained_critic_not_the_bc_clone(tmp_path):
     worker MUST load the TRAINED critic_state — from_bc_checkpoint alone re-clones the critic from
     the policy value head, so a warm-started/PPO-updated critic would be silently discarded."""
     import torch
-    from v_dance.selfplay.actor_critic import ActorCritic
+    from v_dance.rl.actor_critic import ActorCritic
     ac, _ = _tiny_ac(tmp_path)
     with torch.no_grad():                          # diverge the trained critic from the policy head
         for p in ac.critic.parameters():

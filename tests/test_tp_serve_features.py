@@ -26,7 +26,7 @@ pytest.importorskip("poke_env")
 import torch  # noqa: E402
 
 import v_dance.play.model_io as M  # noqa: E402
-from v_dance.parser.vod_parser.pokedex import norm_species  # noqa: E402
+from v_dance.dex.pokedex import norm_species  # noqa: E402
 from v_dance.training import tp_features as TPF  # noqa: E402
 from v_dance.models.teampreview_model import build_model  # noqa: E402
 

@@ -229,14 +229,19 @@ This project stands on excellent prior work and open resources:
 ```
 Victory-Dance/
 ├── v_dance/                # installable package (pip install -e .)
+│   ├── dex/                # shared dex utilities: pokedex, team_sheet
 │   ├── parser/             # Showdown logs -> per-turn transitions; belief_state, match_belief
 │   ├── encoders/           # snapshot -> 5057-dim state (layout v19); white-box forward model
 │   ├── models/             # AttnBCPolicy set-attention battle net + SBDA team-preview net
 │   ├── training/           # BC trainer, streaming memmap cache, advantage weights, z-archetypes
-│   ├── selfplay/           # A/B game runner, league/gate machinery, multiprocess collection
-│   ├── play/               # serving: local/browser/online transports, adapt_rules, dossiers
-│   ├── eval/               # checkpoint ruler, human-benchmark report, gauntlet + Elo
-│   └── datatools/          # Mission Control UI, team generator/builder, HF ingest, corpus QA, dashboards
+│   ├── rl/                 # PPO core: schema, collector, store, reward, GAE, PBRS, actor-critic, trainer
+│   ├── selfplay/           # A/B game runner, league/gate machinery, multiprocess collection, exploiter
+│   ├── ladder/             # learning from the ladder (W3b): recorder, update, chain + B4 CLIs
+│   ├── play/               # the serve core: model_io, player, vgc_base, adapt_rules, search, dossiers, bandit
+│   ├── online/             # the ladder bot (bot), its :8777 panel, SendGate, the browser transport
+│   ├── eval/               # checkpoint ruler, human-benchmark report, gauntlet + Elo, probes
+│   ├── datatools/          # data prep, team generator/builder tools, HF ingest, corpus QA, scrapers/
+│   └── ui/                 # Mission Control :8990, dashboard :5175, team builder :5174 + static/ assets
 ├── data/                   # dex data, Pikalytics usage, teams, prepared training corpora
 ├── docs/                   # design docs + the execution playbook (audit, decisions, specs)
 ├── tests/                  # pytest suite: byte-parity, legality, QA gates, unit tests
@@ -248,7 +253,7 @@ Victory-Dance/
 
 A crucial design property: **the battle net is team-agnostic.** Because the encoder uses mechanics (types, computed stats, item/ability *effect* categories) and never species identities, the *same* checkpoint pilots any Champions-doubles team. `maw_zard` is only the **default team** it brings (`VD_DEFAULT_TEAM`) and the **proving team** used in eval — it is *not* baked into the weights. "Specializing on a different team" therefore needs **no retraining** — you just give the bot the team:
 
-1. **Get a legal paste.** Either write a Showdown export and drop it as a file in `teams/Champions/<regulation>/`, or generate one in the **team-builder** (Mission Control → *Teams*, or `python -m v_dance.datatools.server` → `http://localhost:5174/`). The generator grows a roster by belief-driven beam search over teammate co-occurrence, fills each set from usage stats, and **scores** it three ways (archetype coherence, team-preview-net confidence, and a corpus matchup prior). Every generated or pasted team is checked by **Showdown's own validator**, so illegal teams are dropped, not silently played.
+1. **Get a legal paste.** Either write a Showdown export and drop it as a file in `teams/Champions/<regulation>/`, or generate one in the **team-builder** (Mission Control → *Teams*, or `python -m v_dance.ui.team_builder_server` → `http://localhost:5174/`). The generator grows a roster by belief-driven beam search over teammate co-occurrence, fills each set from usage stats, and **scores** it three ways (archetype coherence, team-preview-net confidence, and a corpus matchup prior). Every generated or pasted team is checked by **Showdown's own validator**, so illegal teams are dropped, not silently played.
    - ⚠ Champions uses the **0–32 stat-point budget** (66 total), *not* classic 0–252 EVs, and enforces the VGC **Item Clause** (one of each item). The generator and validator handle both; hand-written pastes must too.
 2. **Point the bot at it** — any of: set `VD_DEFAULT_TEAM=<name>` (Mission Control → *Deploy*), pass `--ai-team <name>` to any play harness, or pin it live in the Online-bot tab's team dropdown.
 
@@ -256,7 +261,7 @@ Every harness auto-discovers the pool under `teams/Champions/`, so a new file is
 
 ## Setup: playing locally
 
-**Prerequisites:** Python 3.11+ (venv recommended), Node.js, and a local Pokémon Showdown checkout that includes the Champions-format mod (exact pinned commits for Showdown and poke-env are in `PINS.md` — the encoder's enum-name mapping and the format both depend on them). The quickest path to *any* of the workflows below — play, train, evaluate — is **Mission Control** (`python -m v_dance.datatools.mission_control`); the explicit commands are given here so you know what each button runs.
+**Prerequisites:** Python 3.11+ (venv recommended), Node.js, and a local Pokémon Showdown checkout that includes the Champions-format mod (exact pinned commits for Showdown and poke-env are in `PINS.md` — the encoder's enum-name mapping and the format both depend on them). The quickest path to *any* of the workflows below — play, train, evaluate — is **Mission Control** (`python -m v_dance.ui.mission_control`); the explicit commands are given here so you know what each button runs.
 
 ```bash
 # 1. install the package + the pinned server
@@ -272,7 +277,7 @@ Teams live in `teams/Champions/<regulation>/` as Showdown paste files — drop a
 ```bash
 # The battle + team-preview checkpoints default to the deployed pair (model_io + .env), so you
 # can omit --ckpt/--tp-ckpt entirely; they're shown here only to make the override explicit.
-python -m v_dance.play.play_vs_human_browser --ai-team maw_zard \
+python -m v_dance.online.play_vs_human_browser --ai-team maw_zard \
     --ckpt ai_train_scripts/BC_model/checkpoints_attn_era2/battle_base.pt \
     --tp-ckpt ai_train_scripts/teamPreview_model/checkpoints_set/teampreview_sbda.pt \
     --adapt-rules --bench-note my_session
@@ -315,13 +320,13 @@ These `VD_*` deploy defaults must match the canonical checkpoints hard-coded in 
 2. **Dry-run first** — connects, logs in (scripted; if the login UI changes it falls back to "log in manually in the window" and waits), imports the team pool, and idles so you can verify everything without playing:
 
 ```bash
-python -m v_dance.play.play_online_browser --dry-run
+python -m v_dance.online.bot --dry-run
 ```
 
 3. **Go live.** Drop `--dry-run`. Sensible first session: a couple of *unrated* challenge games before touching the rated ladder. All recording (bench rows **with ladder ratings**, replays, dossiers) is automatic; `--adapt-rules` enables the anti-exploit tilt.
 
 ```bash
-python -m v_dance.play.play_online_browser --adapt-rules --bench-note online_v1
+python -m v_dance.online.bot --adapt-rules --bench-note online_v1
 ```
 
 Once it's live, a **control panel** comes up (its own local page, and mirrored into Mission Control's *Online bot* tab — which is also where you set the format + launch config and start the bot in the first place, with `--adapt-rules` and `--dossier` on by default) where you drive matchmaking without touching the browser: start a **ladder run of N rated games** (it re-queues after each finished game until the target is hit), toggle **auto-accept** for incoming challenges, send **private challenges** by username, pin the AI's team, and watch the live rating / W–L tally / activity feed. `--dossier` warm-starts the belief against opponents you've faced before; `VD_ROUTE_TEAMS=1` lets the bot pick its best-matchup pool team against a known opponent on challenge-accepts.

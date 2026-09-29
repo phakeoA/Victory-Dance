@@ -22,11 +22,11 @@ import torch
 from v_dance.encoders.state_encoder import get_action_dim, get_gimmick_dim, get_state_dim
 from v_dance.models.bc_model_attn import AttnBCPolicy
 from v_dance.play import model_io as M
-from v_dance.selfplay import policy_eval as pe
-from v_dance.selfplay.actor_critic import ActorCritic, AttnCritic
-from v_dance.selfplay.collector import TrajectoryCollector
-from v_dance.selfplay.ppo import PPOConfig, make_reference_policy, ppo_loss_from_batch
-from v_dance.selfplay.schema import PASS_ACTION, Transition
+from v_dance.rl import policy_eval as pe
+from v_dance.rl.actor_critic import ActorCritic, AttnCritic
+from v_dance.rl.collector import TrajectoryCollector
+from v_dance.rl.ppo import PPOConfig, make_reference_policy, ppo_loss_from_batch
+from v_dance.rl.schema import PASS_ACTION, Transition
 
 A, S, G = get_action_dim(), get_state_dim(), get_gimmick_dim()
 HEADS = ("our_a", "our_b", "opp_a", "opp_b")

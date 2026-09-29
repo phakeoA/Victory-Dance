@@ -1,4 +1,4 @@
-"""Tests for v_dance.play.browser.battle_host.BattleHost — the connection-less frame→decision core
+"""Tests for v_dance.online.browser.battle_host.BattleHost — the connection-less frame→decision core
 that the "AI plays through the browser" transport reuses (local now, online later).
 
 These validate the TRANSPORT PLUMBING with NO Showdown server and NO model (model_path=None → random
@@ -14,7 +14,7 @@ import pytest
 pytest.importorskip("poke_env")
 
 from v_dance.formats import DEFAULT_FORMAT
-from v_dance.play.browser.battle_host import BattleHost
+from v_dance.online.browser.battle_host import BattleHost
 
 _TAG = f"battle-{DEFAULT_FORMAT}-1"
 # A minimal, well-formed VGC-doubles battle-init frame (the shape poke-env's PSClient delivers).

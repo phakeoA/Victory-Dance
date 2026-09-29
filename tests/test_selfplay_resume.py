@@ -17,13 +17,13 @@ _REPO = Path(__file__).resolve().parents[1]
 from v_dance.encoders.state_encoder import (get_state_dim, get_action_dim, get_gimmick_dim,  # noqa: E402
                            get_state_layout_version)
 from conftest import write_attn_ckpt  # noqa: E402
-from v_dance.selfplay.actor_critic import ActorCritic  # noqa: E402
-from v_dance.selfplay.collector import TrajectoryCollector  # noqa: E402
-from v_dance.selfplay.reward import place_terminal_reward  # noqa: E402
-from v_dance.selfplay.schema import PASS_ACTION  # noqa: E402
-from v_dance.selfplay import policy_eval as pe  # noqa: E402
-from v_dance.selfplay.ppo import PPOConfig  # noqa: E402
-from v_dance.selfplay.trainer import PPOTrainer, TrainConfig  # noqa: E402
+from v_dance.rl.actor_critic import ActorCritic  # noqa: E402
+from v_dance.rl.collector import TrajectoryCollector  # noqa: E402
+from v_dance.rl.reward import place_terminal_reward  # noqa: E402
+from v_dance.rl.schema import PASS_ACTION  # noqa: E402
+from v_dance.rl import policy_eval as pe  # noqa: E402
+from v_dance.rl.ppo import PPOConfig  # noqa: E402
+from v_dance.rl.trainer import PPOTrainer, TrainConfig  # noqa: E402
 from v_dance.selfplay.league import OpponentLeague  # noqa: E402
 from v_dance.selfplay.generation import GenerationHistory, GenerationRecord, GenConfig  # noqa: E402
 from v_dance.selfplay import resume as RS  # noqa: E402

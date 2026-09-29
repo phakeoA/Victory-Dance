@@ -333,7 +333,7 @@ def test_actor_critic_roundtrips_pair_cond_policy(tmp_path):
     # Regression (2026-07-24, exploit-meter crash): an ActorCritic warm-started from a
     # pair_cond target must SAVE a config that rebuilds the widened heads — the verify
     # reload inside ac.save() is the gate that caught the missing pair_cond stamp.
-    from v_dance.selfplay.actor_critic import ActorCritic
+    from v_dance.rl.actor_critic import ActorCritic
     m = _tiny(pair_cond=True)
     src = _save_ckpt(m, tmp_path / "target_pair.pt", pair=True)
     ac = ActorCritic.from_bc_checkpoint(str(src), require_value_trained=False)

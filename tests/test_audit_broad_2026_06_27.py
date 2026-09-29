@@ -15,7 +15,7 @@ import pytest
 def test_actor_critic_aliasing_assertion_fires():
     pytest.importorskip("torch")
     import torch.nn as nn
-    from v_dance.selfplay.actor_critic import ActorCritic
+    from v_dance.rl.actor_critic import ActorCritic
     shared = nn.Linear(2, 2)
     with pytest.raises(AssertionError):
         ActorCritic(shared, shared, ("our_a",), (), True)   # policy IS critic → must raise now
@@ -27,9 +27,9 @@ def test_phase0_flags_winprob_value_batch():
     pytest.importorskip("numpy")
     import numpy as np
     from v_dance.encoders.state_encoder import get_state_dim, get_action_dim
-    from v_dance.selfplay.collector import TrajectoryCollector
+    from v_dance.rl.collector import TrajectoryCollector
     from v_dance.selfplay import game_runner as G
-    from v_dance.selfplay.schema import PASS_ACTION
+    from v_dance.rl.schema import PASS_ACTION
     SD, AD = get_state_dim(), get_action_dim()
 
     def _game(tag, p1_won, value):

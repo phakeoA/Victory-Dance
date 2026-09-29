@@ -158,8 +158,8 @@ def apply_dossier(opp_snapshot: Optional[dict], battle) -> Optional[dict]:
         recs = (load(opp).get("mons") or {})
         if not recs:
             return opp_snapshot
-        from v_dance.parser.vod_parser.pokedex import norm_species
-        from v_dance.parser.vod_parser.team_sheet import _packed_display
+        from v_dance.dex.pokedex import norm_species
+        from v_dance.dex.team_sheet import _packed_display
         n_fill = 0
         for key in ("opp_active", "opp_bench"):
             cont = opp_snapshot.get(key) or {}

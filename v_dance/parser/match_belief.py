@@ -51,7 +51,7 @@ from v_dance.parser.belief_state import (
     calc_full_stats,
     dex_base_stats,
 )
-from v_dance.parser.vod_parser.pokedex import norm_species
+from v_dance.dex.pokedex import norm_species
 
 # ── Tunables ────────────────────────────────────────────────────────────────
 # Down-weight factor applied to an EV spread whose nature contradicts the

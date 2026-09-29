@@ -10,7 +10,7 @@ import pytest
 
 def test_dashboard_run_info_names_the_run_it_follows_and_carries_its_status(tmp_path):
     flask = pytest.importorskip("flask")   # noqa: F841 — the dashboard is a Flask app
-    from v_dance.datatools.dashboard_server import _IDLE_STATUS, create_app
+    from v_dance.ui.dashboard_server import _IDLE_STATUS, create_app
     app = create_app(archive_dir=tmp_path)
     app.config["TESTING"] = True
     c = app.test_client()
@@ -35,7 +35,7 @@ def test_dashboard_run_info_names_the_run_it_follows_and_carries_its_status(tmp_
 
 
 def test_mission_control_proxies_the_dashboard_and_ships_the_tab_and_the_arms_panel(monkeypatch):
-    from v_dance.datatools import mission_control as mc
+    from v_dance.ui import mission_control as mc
     monkeypatch.setattr(mc, "_port_open", lambda port: False)
     assert mc._dashboard_status() == {"up": False}                    # :5175 down -> a clean 'down'
     html = mc._HTML_PATH.read_text(encoding="utf-8")

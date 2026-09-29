@@ -14,7 +14,7 @@ import json
 
 import pytest
 
-from v_dance.parser.vod_parser.team_sheet import (
+from v_dance.dex.team_sheet import (
     packed_team_to_known_side,
     parse_packed_team,
     parse_showteam_sides,
@@ -300,7 +300,7 @@ def test_ots_stamp_norm_keyed_lookup_nicknamed_forme():
     field is packName'd ("ChienPao") and the CamelCase restore ("Chien Pao") is
     only norm-identical to the parser's display species ("Chien-Pao") — the old
     exact-string lookup silently skipped the sheet stamp for such mons."""
-    from v_dance.parser.vod_parser.team_sheet import (
+    from v_dance.dex.team_sheet import (
         parse_packed_team, packed_team_to_known_side)
     from v_dance.parser.vod_parser.transitions import _apply_ots_knowledge
 

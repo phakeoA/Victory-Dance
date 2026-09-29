@@ -69,8 +69,8 @@ def test_summary_returns_every_row_by_default_with_sprites_and_the_mega_sprite()
 
 
 def test_both_pages_ship_the_sort_controls_and_the_sprite_fallback():
-    from v_dance.play import bot_control_ui as bcu
-    from v_dance.datatools import mission_control as mc
+    from v_dance.online import panel as bcu
+    from v_dance.ui import mission_control as mc
     panel = bcu._PANEL_HTML
     assert 'id="muSSort"' in panel and 'id="muASort"' in panel and "function pkMissing" in panel
     assert "play.pokemonshowdown.com/sprites/gen5/" in panel and "function muSorted" in panel

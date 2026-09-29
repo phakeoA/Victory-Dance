@@ -13,9 +13,9 @@ from pathlib import Path
 
 import pytest
 
-import v_dance.play.play_vs_human_browser as _pvhb
-from v_dance.play import bot_control_ui as bcu
-from v_dance.play.bot_control_ui import BotController, start_control_ui
+import v_dance.online.play_vs_human_browser as _pvhb
+from v_dance.online import panel as bcu
+from v_dance.online.panel import BotController, start_control_ui
 
 FMT = "gen9championsvgc2026regmb"
 POOL = ["alpha_team", "beta_team"]

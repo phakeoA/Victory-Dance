@@ -27,7 +27,7 @@ _STAT_LABEL = {"hp": "HP", "atk": "Atk", "def": "Def", "spa": "SpA", "spd": "SpD
 
 # ── B1: roster beam ───────────────────────────────────────────────────────────
 def _affinity_maps(belief, species: Sequence[str]) -> Dict[str, Dict[str, float]]:
-    from v_dance.parser.vod_parser.pokedex import norm_species
+    from v_dance.dex.pokedex import norm_species
     return {s: {norm_species(t["name"]): float(t["p"]) for t in belief.teammates(s, top_k=24)}
             for s in species}
 
@@ -39,7 +39,7 @@ def generate_rosters(seed_core: Sequence[str], n: int, belief,
     Extension score for candidate c on partial P: mean directional co-occurrence
     affinity(P, c) × (1 + usage(c)/100) — established pairings first, popularity as the
     tiebreak. Deterministic (pure argsort, no RNG)."""
-    from v_dance.parser.vod_parser.pokedex import norm_species
+    from v_dance.dex.pokedex import norm_species
     core = [s for s in seed_core if s and belief.known(s)]
     if not core:
         raise ValueError(f"seed core {list(seed_core)!r} has no belief-known species")
@@ -77,7 +77,7 @@ def generate_rosters(seed_core: Sequence[str], n: int, belief,
 # ── B2: set filler + paste writer ─────────────────────────────────────────────
 def fill_sets(roster: Sequence[str], belief) -> List[dict]:
     """Per-species most-likely set from the belief (team_sheet mon-dict shape)."""
-    from v_dance.parser.vod_parser.pokedex import norm_species
+    from v_dance.dex.pokedex import norm_species
     mons = []
     used_items: set = set()
     for sp in roster:

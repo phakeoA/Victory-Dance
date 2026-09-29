@@ -15,8 +15,8 @@ import pytest
 
 pytest.importorskip("poke_env")
 
-from v_dance.play import bot_control_ui as bcu
-from v_dance.play.bot_control_ui import DuplicateBotError, find_running_panel, start_control_ui
+from v_dance.online import panel as bcu
+from v_dance.online.panel import DuplicateBotError, find_running_panel, start_control_ui
 
 
 def test_find_running_panel_recognises_a_bot_panel_by_its_status_shape():
@@ -71,7 +71,7 @@ def test_a_second_panel_next_to_a_live_one_is_refused_and_the_first_keeps_servin
 
 
 def test_mission_control_refuses_a_second_online_bot_job(monkeypatch):
-    from v_dance.datatools import mission_control as mc
+    from v_dance.ui import mission_control as mc
     entry = next(e for e in mc.REGISTRY if e["id"] == "play_online")
     assert entry.get("single") is True
     jobs = mc._Jobs()
@@ -88,7 +88,7 @@ def test_panel_json_writer_swallows_a_client_that_hung_up_and_mc_reads_with_a_re
     """2026-09-04: Mission Control's 0.6 s proxy timeout aborted the bigger status body mid-write — 53
     ConnectionAbortedError tracebacks in one session and a flickering Online tab. The panel treats a
     vanished client as nothing; MC's body read gets 3 s (the port probe stays separate and fast)."""
-    from v_dance.datatools import mission_control as mc
+    from v_dance.ui import mission_control as mc
     assert mc._PANEL_STATUS_TIMEOUT_S >= 3.0
     assert ConnectionAbortedError in bcu._CLIENT_GONE and BrokenPipeError in bcu._CLIENT_GONE
     # the writer: a socket that raises on write must not propagate

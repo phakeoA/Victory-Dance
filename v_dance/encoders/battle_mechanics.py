@@ -14,7 +14,7 @@ from v_dance.encoders import damage_mechanics as _DMG
 from pathlib import Path
 from typing import Optional
 from v_dance.encoders.champions_move_overrides import CHAMP_ACC, CHAMP_BP, CHAMP_TYPE
-from v_dance.parser.vod_parser.pokedex import get_pokedex, norm_species
+from v_dance.dex.pokedex import get_pokedex, norm_species
 from v_dance.encoders.encoder_layout import (_ABIL_EFFECT_IDX, _ITEM_EFFECT_IDX, _SCREEN_TO_SC)
 
 

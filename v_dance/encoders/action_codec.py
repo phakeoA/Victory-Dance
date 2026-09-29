@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 from typing import Optional, Sequence
 from v_dance.encoders.mechanic_tags import NUM_ABILITY_TAGS
-from v_dance.parser.vod_parser.pokedex import get_pokedex, norm_species
+from v_dance.dex.pokedex import get_pokedex, norm_species
 from v_dance.encoders.encoder_layout import (ACTIONS_PER_SLOT, BENCH_SLOTS, GIMMICK_DIM, GIMMICK_MEGA, GIMMICK_NONE, GIMMICK_TERA, ITEM_BLOCK_V9, MOVE_FEATURES, NUM_BOOSTS, NUM_MOVES, NUM_STATUS, NUM_TYPES, POKEMON_FEATURES, SWITCH_OFFSET, WEIGHT_FEATURES)
 from v_dance.encoders.battle_mechanics import (_gen9_moves, _get_moves_data, pp_max)
 

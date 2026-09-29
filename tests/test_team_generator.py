@@ -60,7 +60,7 @@ def test_generate_rosters_deterministic_and_valid():
 
 
 def test_fill_sets_and_paste_roundtrip():
-    from v_dance.parser.vod_parser.team_sheet import parse_showdown_team
+    from v_dance.dex.team_sheet import parse_showdown_team
     b = _StubBelief()
     mons = tg.fill_sets(["Mawile", "Torkoal"], b)
     paste = tg.to_paste(mons)
@@ -94,7 +94,7 @@ def test_generate_teams_pipeline_no_validate_no_score():
 # ── B5 endpoints (Flask test client; generator + belief stubbed) ───────────────
 @pytest.fixture()
 def client(monkeypatch):
-    from v_dance.datatools import server as srv
+    from v_dance.ui import team_builder_server as srv
     monkeypatch.setattr(srv, "_get_belief", lambda: _StubBelief())
     return srv.app.test_client()
 

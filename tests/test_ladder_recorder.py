@@ -13,9 +13,9 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from v_dance.play.ladder_recorder import LadderRecorder, terminal_type_for
-from v_dance.selfplay.schema import PASS_ACTION
-from v_dance.selfplay.store import read_trajectories
+from v_dance.ladder.recorder import LadderRecorder, terminal_type_for
+from v_dance.rl.schema import PASS_ACTION
+from v_dance.rl.store import read_trajectories
 
 FMT = "gen9championsvgc2026regmb"
 DIM = 8

@@ -19,7 +19,7 @@ import pytest
 
 from v_dance.parser.belief_state import BeliefState, dex_base_stats, calc_full_stats
 from v_dance.parser.match_belief import MatchBelief, _spread_key
-from v_dance.parser.vod_parser.pokedex import norm_species
+from v_dance.dex.pokedex import norm_species
 from v_dance.play.live_belief_feed import feed_speed_constraints
 
 

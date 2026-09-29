@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from v_dance.parser.vod_parser.pokedex import Pokedex, get_pokedex, is_mega_species_name, norm_species
+from v_dance.dex.pokedex import Pokedex, get_pokedex, is_mega_species_name, norm_species
 
 
 # ── norm_species ──────────────────────────────────────────────────────────

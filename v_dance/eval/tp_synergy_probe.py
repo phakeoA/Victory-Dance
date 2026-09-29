@@ -34,7 +34,7 @@ _REPO = Path(__file__).resolve().parents[2]          # v_dance/eval/ -> repo roo
 assert (_REPO / "pyproject.toml").is_file(), _REPO
 
 from v_dance.play.model_io import load_team_chooser, _pack_side, DEFAULT_TP_CHECKPOINT  # noqa: E402
-from v_dance.parser.vod_parser.pokedex import norm_species             # noqa: E402
+from v_dance.dex.pokedex import norm_species             # noqa: E402
 
 # Default to the SERVED SBDA TP net (model_io single source of truth, post 2026-06-25 rename). The probe
 # auto-detects the legacy-vs-SBDA recipe (make_score_fn), so pass --ckpt

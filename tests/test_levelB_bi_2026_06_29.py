@@ -16,7 +16,7 @@ import torch
 from v_dance.models.bc_model_attn import AttnBCPolicy
 from v_dance.encoders.state_encoder import get_action_dim
 from v_dance.play import model_io
-from v_dance.selfplay.actor_critic import AttnCritic, ActorCritic
+from v_dance.rl.actor_critic import AttnCritic, ActorCritic
 
 A = get_action_dim()
 FOUR = ("our_a", "our_b", "opp_a", "opp_b")

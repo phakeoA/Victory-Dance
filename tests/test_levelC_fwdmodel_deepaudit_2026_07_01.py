@@ -14,7 +14,7 @@ pytest.importorskip("numpy")
 
 from v_dance.encoders import white_box_sim as W
 from v_dance.encoders.battle_mechanics import _gen9_moves
-from v_dance.parser.vod_parser.pokedex import norm_species
+from v_dance.dex.pokedex import norm_species
 
 
 def _mon(species, hp=100.0, atk=200, spa=200, spe=100, hp_stat=200, defn=120, item=None, ability=None):

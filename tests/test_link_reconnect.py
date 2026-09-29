@@ -15,9 +15,9 @@ import pytest
 
 pytest.importorskip("poke_env")
 
-import v_dance.play.play_vs_human_browser as _pvhb
-from v_dance.play import play_online_browser as pob
-from v_dance.play.bot_control_ui import BotController
+import v_dance.online.play_vs_human_browser as _pvhb
+from v_dance.online import bot as pob
+from v_dance.online.panel import BotController
 
 TAG = "battle-gen9championsvgc2026regmb-2673980258"
 
@@ -378,7 +378,7 @@ def _panel(loop):
 
 
 def test_run_keeps_a_tick_pending_after_search_and_after_battle_start(monkeypatch):
-    from v_dance.play import bot_control_ui as bcu
+    from v_dance.online import panel as bcu
     monkeypatch.setattr(bcu, "discover_teams", lambda reg=None: [])
 
     async def main():
@@ -394,7 +394,7 @@ def test_run_keeps_a_tick_pending_after_search_and_after_battle_start(monkeypatc
 
 
 def test_room_gone_drops_live_counts_the_game_and_resumes(monkeypatch):
-    from v_dance.play import bot_control_ui as bcu
+    from v_dance.online import panel as bcu
     monkeypatch.setattr(bcu, "discover_teams", lambda reg=None: [])
 
     async def main():
@@ -413,7 +413,7 @@ def test_room_gone_drops_live_counts_the_game_and_resumes(monkeypatch):
 
 
 def test_on_reconnected_clears_bridge_flags_and_reschedules(monkeypatch):
-    from v_dance.play import bot_control_ui as bcu
+    from v_dance.online import panel as bcu
     monkeypatch.setattr(bcu, "discover_teams", lambda reg=None: [])
 
     async def main():
@@ -596,7 +596,7 @@ def test_watchdog_retries_a_refused_rejoin_once_logged_in_then_gives_up():
 
 
 def test_close_room_leaves_every_id_form_and_reports_a_missing_tab(monkeypatch):
-    from v_dance.play import bot_control_ui as bcu
+    from v_dance.online import panel as bcu
     monkeypatch.setattr(bcu, "discover_teams", lambda reg=None: [])
 
     class CountingPage(_PanelPage):

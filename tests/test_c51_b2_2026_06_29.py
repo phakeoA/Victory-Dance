@@ -19,13 +19,13 @@ import torch
 
 from conftest import write_attn_ckpt
 from v_dance.encoders.state_encoder import get_state_dim, get_action_dim
-from v_dance.selfplay.actor_critic import ActorCritic, init_value_atoms_from_scalar
-from v_dance.selfplay.schema import Transition, PASS_ACTION
-from v_dance.selfplay.collector import TrajectoryCollector
-from v_dance.selfplay.reward import place_terminal_reward
-from v_dance.selfplay import policy_eval as pe
-from v_dance.selfplay.ppo import PPOConfig
-from v_dance.selfplay.trainer import PPOTrainer, TrainConfig
+from v_dance.rl.actor_critic import ActorCritic, init_value_atoms_from_scalar
+from v_dance.rl.schema import Transition, PASS_ACTION
+from v_dance.rl.collector import TrajectoryCollector
+from v_dance.rl.reward import place_terminal_reward
+from v_dance.rl import policy_eval as pe
+from v_dance.rl.ppo import PPOConfig
+from v_dance.rl.trainer import PPOTrainer, TrainConfig
 
 STATE_DIM, ACTION_DIM = get_state_dim(), get_action_dim()
 

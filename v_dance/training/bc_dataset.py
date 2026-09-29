@@ -571,7 +571,7 @@ def compute_closed_copy_weights(
 def parse_team_species(team) -> List[str]:
     """Normalized species of a team: a paste FILE path, a pool team name (resolved under
     ``teams/Champions``), or the paste TEXT itself. Era-5 W1 (`--own-team`)."""
-    from v_dance.parser.vod_parser.pokedex import get_pokedex, norm_species
+    from v_dance.dex.pokedex import get_pokedex, norm_species
     s = str(team)
     text = s
     if "\n" not in s and len(s) < 260:                # a path or a pool name, not a paste
@@ -604,7 +604,7 @@ def parse_team_species(team) -> List[str]:
 
 def own_team_overlap(roster: Sequence[str], own: set) -> float:
     """Fraction of OUR team's species present in a demonstrator's 6-mon roster (0..1)."""
-    from v_dance.parser.vod_parser.pokedex import norm_species
+    from v_dance.dex.pokedex import norm_species
     if not own:
         return 0.0
     r = {norm_species(s) for s in (roster or []) if s}
@@ -619,7 +619,7 @@ def own_team_overlap_map(folders: Sequence[str], own_species: Sequence[str],
     JSON-cached per (folder list, team); delete ``artifacts/.own_team_overlap_*.json`` after a
     corpus folder grows. Examples look themselves up by ``(canonical_rid(replay_id), perspective)``."""
     import hashlib
-    from v_dance.parser.vod_parser.pokedex import norm_species
+    from v_dance.dex.pokedex import norm_species
     own = {norm_species(s) for s in own_species if s}
     flist = sorted(str(f) for f in folders)
     cache = None

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import torch
 
-from v_dance.selfplay.policy_eval import _joint_kl, _SlotBatch
+from v_dance.rl.policy_eval import _joint_kl, _SlotBatch
 
 
 def _slot(gimmick: bool):

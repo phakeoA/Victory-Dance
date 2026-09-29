@@ -143,17 +143,20 @@ def _get_belief():
     return _belief
 
 
-if _BeliefState is None:
-    print("[warn] belief_state.py not found — Pikalytics inference unavailable.")
-elif not _BELIEF_PATH.exists():
-    print(
-        f"[warn] Belief state file not found at {_BELIEF_PATH}.\n"
-        "       Pikalytics inference will be unavailable until it exists."
-    )
-else:
-    print(f"[startup] Loading belief state from {_BELIEF_PATH} ...")
-    _get_belief()
-    print("[startup] Belief state ready.")
+def _startup_belief_warmup() -> None:
+    """Load the belief state once at SERVER start (refactor Phase 6, 2026-09-11: this ran at IMPORT before, so every
+    importer — tests, the import smoke — paid the load; the endpoints go through ``_get_belief()`` lazily anyway)."""
+    if _BeliefState is None:
+        print("[warn] belief_state.py not found — Pikalytics inference unavailable.")
+    elif not _BELIEF_PATH.exists():
+        print(
+            f"[warn] Belief state file not found at {_BELIEF_PATH}.\n"
+            "       Pikalytics inference will be unavailable until it exists."
+        )
+    else:
+        print(f"[startup] Loading belief state from {_BELIEF_PATH} ...")
+        _get_belief()
+        print("[startup] Belief state ready.")
 
 if _StateEncoder is not None:
     _encoder = _StateEncoder()
@@ -367,7 +370,7 @@ def api_teams_score():
     if not paste.strip():
         return jsonify({"error": "paste required"}), 400
     try:
-        from v_dance.parser.vod_parser.team_sheet import parse_showdown_team
+        from v_dance.dex.team_sheet import parse_showdown_team
         from v_dance.datatools.team_generator import score_team
         mons = parse_showdown_team(paste)
         if not mons:
@@ -379,6 +382,7 @@ def api_teams_score():
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    _startup_belief_warmup()
     print(f"[server] Project root   : {_PROJECT_ROOT}")
     print(f"[server] Scripts dir    : {_SCRIPTS_DIR}")
     print(f"[server] VOD parser pkg : {_VOD_PARSER_DIR}")

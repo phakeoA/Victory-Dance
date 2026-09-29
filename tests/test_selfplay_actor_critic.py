@@ -21,7 +21,7 @@ _REPO = Path(__file__).resolve().parents[1]
 from v_dance.encoders.state_encoder import get_state_dim, get_action_dim, get_gimmick_dim, get_state_layout_version  # noqa: E402
 from conftest import write_attn_ckpt  # noqa: E402
 import v_dance.play.model_io as model_io  # noqa: E402
-from v_dance.selfplay.actor_critic import ActorCritic, AttnCritic  # noqa: E402
+from v_dance.rl.actor_critic import ActorCritic, AttnCritic  # noqa: E402
 
 STATE_DIM = get_state_dim()
 ACTION_DIM = get_action_dim()

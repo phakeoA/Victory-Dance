@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 _REPO = Path(__file__).resolve().parents[1]
-from v_dance.selfplay.schema import EpisodeMeta  # noqa: E402
+from v_dance.rl.schema import EpisodeMeta  # noqa: E402
 from v_dance.selfplay.diagnostics import (  # noqa: E402
     Tally, bring_winrates, lead_winrates, matchup_winrates, overall, summarize,
 )

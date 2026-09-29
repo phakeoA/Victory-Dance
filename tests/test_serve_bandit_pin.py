@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from v_dance.play import serve_bandit as SB
-from v_dance.play.bot_control_ui import BotController
+from v_dance.online.panel import BotController
 
 FMT = "gen9championsvgc2026regmb"
 
@@ -128,7 +128,7 @@ def _controller(tmp_path, bandit):
 
 
 def test_panel_pin_applies_between_games_and_defers_while_a_battle_is_live(monkeypatch, tmp_path):
-    from v_dance.play import bot_control_ui as bcu
+    from v_dance.online import panel as bcu
     monkeypatch.setattr(bcu, "discover_teams", lambda reg=None: [])
     monkeypatch.setenv("VD_SITE_POLL", "0")
     applied = []
@@ -160,7 +160,7 @@ def test_panel_pin_applies_between_games_and_defers_while_a_battle_is_live(monke
 
 
 def test_panel_pin_marks_the_rating_line_and_is_refused_when_the_bandit_is_off(monkeypatch, tmp_path):
-    from v_dance.play import bot_control_ui as bcu
+    from v_dance.online import panel as bcu
     monkeypatch.setattr(bcu, "discover_teams", lambda reg=None: [])
     monkeypatch.setenv("VD_SITE_POLL", "0")
 
@@ -174,7 +174,7 @@ def test_panel_pin_marks_the_rating_line_and_is_refused_when_the_bandit_is_off(m
 
 
 def test_mission_control_exposes_the_pin_env_keys_and_the_arm_names():
-    from v_dance.datatools import mission_control as mc
+    from v_dance.ui import mission_control as mc
     for k in ("VD_BANDIT", "VD_BANDIT_PIN"):
         assert k in mc._ENV_WRITE_KEYS and k in mc._ENV_READ_KEYS
     names = mc._bandit_arm_names()

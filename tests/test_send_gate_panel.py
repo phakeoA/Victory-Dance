@@ -19,10 +19,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from v_dance.play import bot_control_ui as bcu
-from v_dance.play import play_vs_human_browser as _pvhb
-from v_dance.play.bot_control_ui import BotController
-from v_dance.play.play_online_browser import player_ratings_from_battle
+from v_dance.online import panel as bcu
+from v_dance.online import play_vs_human_browser as _pvhb
+from v_dance.online.panel import BotController
+from v_dance.online.bot import player_ratings_from_battle
 
 FMT = "gen9championsvgc2026regmb"
 

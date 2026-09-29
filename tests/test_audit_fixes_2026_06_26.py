@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from v_dance.selfplay.reward import model_driven_fraction, assert_model_driven
+from v_dance.rl.reward import model_driven_fraction, assert_model_driven
 from v_dance.play.parallel_battles import discount_forfeits
 
 

@@ -34,7 +34,7 @@ from v_dance.parser.match_belief import (
     _move_category, _offensive_stat_for_move, damage_main_term, identity_reliable,
     analyze_speed_order, _SIGMA_ROLL, _SIGMA_MITIG, _SIGMA_MISC,
 )
-from v_dance.parser.vod_parser.pokedex import norm_species
+from v_dance.dex.pokedex import norm_species
 from v_dance.encoders.battle_mechanics import (
     _damage_band, _type_mult, _effective_types, champ_bp, champ_type, is_spread_target, _gen9_moves,
 )

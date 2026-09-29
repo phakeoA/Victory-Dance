@@ -77,7 +77,7 @@ from v_dance.encoders.live_state_encoder import (  # noqa: E402
     reconstruct_for_decision, reconstruct_full_for_decision,
 )
 from v_dance.encoders.state_encoder import SWITCH_OFFSET, GIMMICK_NONE, _WEATHER_SPEED_ABILITY  # noqa: E402
-from v_dance.parser.vod_parser.pokedex import norm_species  # noqa: E402  (A3 belief-feed species keys)
+from v_dance.dex.pokedex import norm_species  # noqa: E402  (A3 belief-feed species keys)
 
 log = logging.getLogger(__name__)
 

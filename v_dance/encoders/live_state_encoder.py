@@ -20,8 +20,8 @@ import numpy as np
 
 # Bootstrap: sibling imports work when run/imported from anywhere.
 _SCRIPTS_DIR = str(Path(__file__).resolve().parent)
-from v_dance.parser.vod_parser.pokedex import norm_species
-from v_dance.parser.vod_parser.team_sheet import parse_showdown_team, base_species as _paste_base_species
+from v_dance.dex.pokedex import norm_species
+from v_dance.dex.team_sheet import parse_showdown_team, base_species as _paste_base_species
 from v_dance.parser.belief_state import BeliefState, STAT_ORDER
 
 # The FROZEN layout is owned by the VOD module — import it so live == offline.

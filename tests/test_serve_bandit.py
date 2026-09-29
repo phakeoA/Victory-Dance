@@ -15,9 +15,9 @@ import pytest
 
 pytest.importorskip("poke_env")
 
-import v_dance.play.play_vs_human_browser as _pvhb
+import v_dance.online.play_vs_human_browser as _pvhb
 from v_dance.play import serve_bandit as SB
-from v_dance.play.bot_control_ui import BotController, RatingBook
+from v_dance.online.panel import BotController, RatingBook
 
 FMT = "gen9championsvgc2026regmb"
 
@@ -289,7 +289,7 @@ class _PanelHost:
 
 
 def test_panel_applies_an_arm_before_search_and_binds_it_on_battle_start(monkeypatch, tmp_path):
-    from v_dance.play import bot_control_ui as bcu
+    from v_dance.online import panel as bcu
     monkeypatch.setattr(bcu, "discover_teams", lambda reg=None: [])
     monkeypatch.setenv("VD_SITE_POLL", "0")
     applied = []

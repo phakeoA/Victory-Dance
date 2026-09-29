@@ -17,10 +17,10 @@ pytest.importorskip("numpy")
 import numpy as np
 
 _REPO = Path(__file__).resolve().parents[1]
-from v_dance.selfplay.collector import TrajectoryCollector, assert_zero_sum  # noqa: E402
-from v_dance.selfplay.reward import prepare_batch  # noqa: E402
-from v_dance.selfplay.store import write_trajectories, read_trajectories, assert_terminal_rewards_clean  # noqa: E402
-from v_dance.selfplay.gae import compute_batch_gae  # noqa: E402
+from v_dance.rl.collector import TrajectoryCollector, assert_zero_sum  # noqa: E402
+from v_dance.rl.reward import prepare_batch  # noqa: E402
+from v_dance.rl.store import write_trajectories, read_trajectories, assert_terminal_rewards_clean  # noqa: E402
+from v_dance.rl.gae import compute_batch_gae  # noqa: E402
 from v_dance.selfplay import diagnostics  # noqa: E402
 
 STATE_DIM = 7

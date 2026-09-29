@@ -15,9 +15,9 @@ from pathlib import Path
 
 import pytest
 
-import v_dance.play.play_vs_human_browser as _pvhb
-from v_dance.play import bot_control_ui as bcu
-from v_dance.play.bot_control_ui import BotController, start_control_ui
+import v_dance.online.play_vs_human_browser as _pvhb
+from v_dance.online import panel as bcu
+from v_dance.online.panel import BotController, start_control_ui
 
 FMT = "gen9championsvgc2026regmb"
 POOL = ["alpha_team", "beta_team"]
@@ -158,7 +158,7 @@ def test_regression_updatesearch_first_does_not_stall_the_run():
 
 
 def test_base_tag_normalises_private_suffix():
-    from v_dance.play.bot_control_ui import _base_tag
+    from v_dance.online.panel import _base_tag
     assert _base_tag(f"battle-{FMT}-2647021200") == f"battle-{FMT}-2647021200"
     assert _base_tag(f"battle-{FMT}-2647021200-6x833vkm5lopvmjyy3emxtquprxaxv0pw") \
         == f"battle-{FMT}-2647021200"

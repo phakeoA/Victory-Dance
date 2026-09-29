@@ -611,7 +611,7 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
                 # opponent's revealed builds to the TP net. Closed play: no such frames.
                 if "|showteam|" in payload:
                     try:
-                        from v_dance.parser.vod_parser.team_sheet import parse_showteam_sides
+                        from v_dance.dex.team_sheet import parse_showteam_sides
                         from v_dance.play.player import room_base_tag
                         _sides = parse_showteam_sides(payload)
                         if _sides:

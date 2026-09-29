@@ -22,7 +22,7 @@ from v_dance.parser.vod_parser.battle_models import (
     PokemonSlot,
     SideConditions,
 )
-from v_dance.parser.vod_parser.pokedex import get_pokedex, is_mega_species_name, norm_species
+from v_dance.dex.pokedex import get_pokedex, is_mega_species_name, norm_species
 
 
 # Species with the Illusion ability (normalised).  Used to resolve a disguise

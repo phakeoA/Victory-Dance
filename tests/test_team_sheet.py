@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 _HERE = Path(__file__).resolve().parent
-from v_dance.parser.vod_parser.team_sheet import (
+from v_dance.dex.team_sheet import (
     parse_showdown_team,
     team_to_known_side,
     detect_our_side,

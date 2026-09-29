@@ -69,7 +69,7 @@ def test_export_is_the_two_pass_type_c_pipeline_and_the_folder_follows_the_forma
 
 
 def test_mission_control_card_defaults_and_progress_spec():
-    from v_dance.datatools import mission_control as mc
+    from v_dance.ui import mission_control as mc
     e = mc._REG_BY_ID["bc_finetune"]
     assert e["heavy"] is True and not e.get("bot_down") and e["module"] == "v_dance.ladder.bc_finetune"
     argv = mc._build_argv(e, {}, [], _NO_CKPTS)

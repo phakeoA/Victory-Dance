@@ -39,7 +39,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from v_dance.parser.vod_parser.pokedex import get_pokedex, is_mega_species_name, norm_species
+from v_dance.dex.pokedex import get_pokedex, is_mega_species_name, norm_species
 
 # Showdown EV/IV stat labels → internal stat keys.
 _STAT_LABELS = {
@@ -185,7 +185,7 @@ def _parse_stat_line(line: str) -> dict:
 # DOES reveal nature (verified on the VGC-Bench regmb logs, 2026-07-01).
 
 # data/ lives three levels up from this file (v_dance/parser/vod_parser/).
-_DATA_DIR = Path(__file__).resolve().parents[3] / "data"
+_DATA_DIR = Path(__file__).resolve().parents[2] / "data"   # v_dance/dex/ (was parser/vod_parser/, parents[3], until Phase 5)
 
 _CAMEL_SPLIT = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 

@@ -303,7 +303,7 @@ def _bandit_cfg(tmp_path):
 
 def test_register_arm_writes_an_argmax_arm(tmp_path):
     """What --register-arms writes for a promoted generation: tau 0, adapt-rules OFF, top-p 1."""
-    from v_dance.selfplay.ladder_update import register_arm
+    from v_dance.ladder.update import register_arm
     cfg = _bandit_cfg(tmp_path)
     ckpt = tmp_path / "gen7.pt"
     ckpt.write_bytes(b"x")
@@ -317,7 +317,7 @@ def test_register_arm_writes_an_argmax_arm(tmp_path):
 
 
 def test_register_arm_refuses_a_duplicate(tmp_path):
-    from v_dance.selfplay.ladder_update import register_arm
+    from v_dance.ladder.update import register_arm
     cfg = _bandit_cfg(tmp_path)
     ckpt = tmp_path / "gen7.pt"
     ckpt.write_bytes(b"x")

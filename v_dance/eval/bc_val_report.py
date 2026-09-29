@@ -152,7 +152,7 @@ def _species_fp_map() -> Dict:
     if _SPECIES_FP is None:
         from v_dance.encoders.encoder_layout import _TYPE_IDX
         from v_dance.parser.belief_state import STAT_ORDER, dex_base_stats
-        from v_dance.parser.vod_parser.pokedex import get_pokedex
+        from v_dance.dex.pokedex import get_pokedex
         fp: Dict = {}
         dex = get_pokedex()
         for key, e in (dex._dex.items() if dex else ()):

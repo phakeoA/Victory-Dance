@@ -14,7 +14,7 @@ import torch
 
 from conftest import write_attn_ckpt
 from v_dance.encoders.state_encoder import get_state_dim
-from v_dance.selfplay.actor_critic import ActorCritic
+from v_dance.rl.actor_critic import ActorCritic
 
 STATE_DIM = get_state_dim()
 

@@ -7,7 +7,7 @@ Public API re-exports. server.py and other callers do:
 """
 
 from v_dance.parser.vod_parser.battle_models import PokemonSlot, SideConditions, FieldConditions
-from v_dance.parser.vod_parser.pokedex import (
+from v_dance.dex.pokedex import (
     Pokedex,
     get_pokedex,
     norm_species,

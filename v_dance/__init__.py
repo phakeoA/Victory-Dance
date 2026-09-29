@@ -2,12 +2,13 @@
 
 The single importable package for the project. Subpackages:
 
+- ``dex``       shared dex utilities: pokedex, team_sheet (Phase 5; were under parser/vod_parser)
 - ``encoders``  state/live state encoding (state_encoder, live_state_encoder)
 - ``parser``    VOD/replay parsing + belief state (vod_parser, belief_state)
 - ``models``    network definitions (BC model, team-preview model, network)
 - ``training``  training + dataset + eval scripts (train_bc, bc_dataset, ...)
 - ``play``      the serve / decision core + local harnesses (vgc_base, live_vgc_base, player, model_io)
-- ``online``    the ladder bot + its ops (play_online_browser, bot_control_ui, send_gate, browser/)
+- ``online``    the ladder bot + its ops (bot, panel, play_vs_human_browser, play_ladder, send_gate, browser/)
 - ``eval``      gauntlet + scripted opponents
 - ``rl``        the PPO core (schema, collector, store, reward, gae, pbrs, actor_critic, ppo, trainer)
 - ``selfplay``  the era loop, collection infra and the exploiter (uses ``rl``)
@@ -15,7 +16,7 @@ The single importable package for the project. Subpackages:
 - ``datatools`` data prep + team tools (+ ``scrapers/``: manual scraper scripts, run by path)
 - ``ui``        Mission Control :8990, the dashboard :5175, the team builder :5174 + ``static/`` web assets
 
-NOTE: subpackages are populated incrementally during restructure Stage 2. The
+The
 package is intentionally named ``v_dance`` (not ``victory_dance``) because
 "Victory Dance" is an actual in-game Pokemon move and would be confusing.
 """

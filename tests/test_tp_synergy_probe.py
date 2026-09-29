@@ -64,7 +64,7 @@ def test_synergy_delta_ignores_pure_context_strength():
 
 def test_probe_runs_on_a_real_teampreview_model():
     from v_dance.models.teampreview_model import TeamPreviewModel
-    from v_dance.parser.vod_parser.pokedex import norm_species
+    from v_dance.dex.pokedex import norm_species
 
     names = ["Tyranitar", "Excadrill", "Aaa", "Bbb", "Ccc", "Ddd", "Eee", "Ooo"]
     vocab = {norm_species(s): i + 1 for i, s in enumerate(names)}

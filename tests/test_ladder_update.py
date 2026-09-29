@@ -23,14 +23,14 @@ import torch
 from v_dance.encoders.state_encoder import get_action_dim, get_state_dim
 from v_dance.models.bc_model_attn import AttnBCPolicy
 from v_dance.play import model_io as M
-from v_dance.selfplay import ladder_update as LU
-from v_dance.selfplay.actor_critic import ActorCritic, AttnCritic
-from v_dance.selfplay.collector import TrajectoryCollector
-from v_dance.selfplay.reward import place_terminal_reward
-from v_dance.selfplay.schema import PASS_ACTION
-from v_dance.selfplay.store import write_trajectories
-from v_dance.selfplay.trainer import PPOTrainer, TrainConfig
-from v_dance.selfplay.ppo import PPOConfig
+from v_dance.ladder import update as LU
+from v_dance.rl.actor_critic import ActorCritic, AttnCritic
+from v_dance.rl.collector import TrajectoryCollector
+from v_dance.rl.reward import place_terminal_reward
+from v_dance.rl.schema import PASS_ACTION
+from v_dance.rl.store import write_trajectories
+from v_dance.rl.trainer import PPOTrainer, TrainConfig
+from v_dance.rl.ppo import PPOConfig
 
 A, S = get_action_dim(), get_state_dim()
 HEADS = ("our_a", "our_b", "opp_a", "opp_b")
@@ -283,7 +283,7 @@ def test_selection_repairs_the_recorders_empty_slot_zero_into_pass(world):
     empty / fainted slot (the first W3b update died in ``assert_actions_legal`` on transition 23,
     ~10 % of turn steps, every arm). The selector repairs them to PASS_ACTION, counts + reports them,
     and the legality guard then passes; an action illegal under a NON-EMPTY mask stays the alarm."""
-    from v_dance.selfplay.policy_eval import assert_actions_legal
+    from v_dance.rl.policy_eval import assert_actions_legal
     g = _game(world.policy, arm="tau03", tau=0.3, n=4, seed=300, won=True)
     t = g.transitions[1]
     t.action_s1, t.mask_s1 = 0, [0] * A                                # what the old recorder wrote
@@ -476,7 +476,7 @@ def test_opp_rating_weights_scale_the_advantages_per_game(world):
     u = report["update"]
     assert u["traj_weight_mean"] == pytest.approx(sum(w) / 6) and u["traj_weight_max"] == pytest.approx(max(w))
     assert np.isfinite(report["kl_to_base_after"]) and report["n_games"] == 6
-    from v_dance.selfplay.trainer import PPOTrainer
+    from v_dance.rl.trainer import PPOTrainer
     with pytest.raises(ValueError, match="traj_weights"):
         PPOTrainer(ac, ppo, train, seed=1).ppo_update(sel.trajectories, traj_weights=[1.0])
     # register_arm: adapt_rules None = no key (an argmax candidate follows the launch default, like era2)

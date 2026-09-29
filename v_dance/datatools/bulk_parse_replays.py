@@ -86,7 +86,7 @@ from v_dance.parser.vod_parser.replay_parser import (                      # noq
     extract_log_from_html, extract_replay_id_from_html,
 )
 from v_dance.datatools.filter_type_c import classify_log                   # noqa: E402
-from v_dance.parser.vod_parser.team_sheet import (                          # noqa: E402
+from v_dance.dex.team_sheet import (                          # noqa: E402
     parse_showdown_team, team_to_known_side, detect_our_side,
 )
 

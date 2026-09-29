@@ -19,8 +19,8 @@ import numpy as np
 
 _REPO = Path(__file__).resolve().parents[1]
 from v_dance.encoders.state_encoder import get_state_dim, get_action_dim  # noqa: E402
-from v_dance.selfplay.collector import TrajectoryCollector  # noqa: E402
-from v_dance.selfplay.schema import PASS_ACTION  # noqa: E402
+from v_dance.rl.collector import TrajectoryCollector  # noqa: E402
+from v_dance.rl.schema import PASS_ACTION  # noqa: E402
 from v_dance.selfplay import game_runner as G  # noqa: E402
 
 SD, AD = get_state_dim(), get_action_dim()
@@ -46,7 +46,7 @@ def _games(pattern, turn=5):
 
 # ── reward.py: the collector's HARD-FAIL guard ─────────────────────────────────
 def test_reward_model_driven_set_includes_search():
-    from v_dance.selfplay.reward import _MODEL_DRIVEN_SOURCES
+    from v_dance.rl.reward import _MODEL_DRIVEN_SOURCES
     assert "search" in _MODEL_DRIVEN_SOURCES
 
 
@@ -54,7 +54,7 @@ def test_recording_gate_mirrors_model_driven_set():
     # The step-RECORDING gate (_record_rl_decision) MUST equal the MODEL-DRIVEN accounting set, else a
     # model-driven source like 'search' is counted but its turns are never recorded -> n_steps=0,
     # MODEL-DRIVEN reads 0% on a legit search run, and the search corpus is empty (audit 2026-06-30).
-    from v_dance.selfplay.reward import _MODEL_DRIVEN_SOURCES
+    from v_dance.rl.reward import _MODEL_DRIVEN_SOURCES
     assert G._MODEL_SOURCES == _MODEL_DRIVEN_SOURCES
     assert "search" in G._MODEL_SOURCES
     # the dead, never-updated module-level mirror is gone (was a drift hazard).
@@ -62,7 +62,7 @@ def test_recording_gate_mirrors_model_driven_set():
 
 
 def test_model_driven_fraction_counts_search_and_strips_diagnostics():
-    from v_dance.selfplay.reward import model_driven_fraction
+    from v_dance.rl.reward import model_driven_fraction
     # bare "search" is a model-grounded decision; search_*/belief_* are DIAGNOSTIC, not decisions.
     sc = {"search": 97, "model": 2, "forced_default": 1,
           "search_search": 97, "search_fallback": 5, "belief_dmg_used": 40}
@@ -71,7 +71,7 @@ def test_model_driven_fraction_counts_search_and_strips_diagnostics():
 
 
 def test_assert_model_driven_passes_on_search_heavy_run():
-    from v_dance.selfplay.reward import assert_model_driven
+    from v_dance.rl.reward import assert_model_driven
     # Pre-fix this raised (search counted as non-model → frac≈0.005). Post-fix it passes.
     frac = assert_model_driven(
         {"search": 199, "model": 1, "search_search": 199, "search_fallback": 0}, 0.99)

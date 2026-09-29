@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 _SCRIPTS_DIR = Path(__file__).resolve().parents[1]
-import v_dance.datatools.server as server  # noqa: E402
+import v_dance.ui.team_builder_server as server  # noqa: E402
 
 
 @pytest.fixture(scope="module")

@@ -199,9 +199,9 @@ def test_phase0_report_never_counts_spawn_counters_as_non_model_steps():
     source_counts; the Phase-0 gate summed them as non-model decisions → MODEL-DRIVEN 46% → FAIL."""
     pytest.importorskip("torch")
     import numpy as np
-    from v_dance.selfplay.collector import TrajectoryCollector
+    from v_dance.rl.collector import TrajectoryCollector
     from v_dance.selfplay.game_runner import phase0_report
-    from v_dance.selfplay.reward import place_terminal_reward
+    from v_dance.rl.reward import place_terminal_reward
 
     def _traj(won, role):
         c = TrajectoryCollector("battle-x-1", role)
@@ -228,7 +228,7 @@ def test_phase0_report_never_counts_spawn_counters_as_non_model_steps():
 def test_live_spawned_self_play_collects_pairs_and_reports_throughput(tmp_path: Path):
     pytest.importorskip("torch")
     pytest.importorskip("poke_env")
-    from v_dance.selfplay.actor_critic import ActorCritic
+    from v_dance.rl.actor_critic import ActorCritic
     from v_dance.selfplay.game_runner import run_self_play_games
     repo = Path(__file__).resolve().parents[1]
     ckpt = repo / "ai_train_scripts" / "BC_model" / "checkpoints_attn_era4_2b" / "battle_base.pt"

@@ -26,7 +26,7 @@ from v_dance.encoders.action_codec import (
 )
 from v_dance.encoders.white_box_sim import white_box_sim
 from v_dance.parser.belief_state import dex_base_stats, calc_full_stats
-from v_dance.parser.vod_parser.pokedex import norm_species
+from v_dance.dex.pokedex import norm_species
 
 
 class SearchConfig:

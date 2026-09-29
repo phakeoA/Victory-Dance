@@ -12,8 +12,8 @@ import pytest
 pytest.importorskip("poke_env")
 
 import test_battle_timer_lanes as T                        # the consumer driver + fakes (pytest prepend import)
-import v_dance.play.play_vs_human_browser as _pvhb
-from v_dance.play.send_gate import SendGate
+import v_dance.online.play_vs_human_browser as _pvhb
+from v_dance.online.send_gate import SendGate
 
 FMT = "gen9championsvgc2026regmb"
 ROOMS = [f"battle-{FMT}-77{i}" for i in range(5)]
@@ -52,7 +52,7 @@ def test_single_room_flow_is_byte_identical_to_the_pre_gate_wire_format(monkeypa
 
 
 def test_panel_status_carries_the_gate_counters():
-    from v_dance.play import bot_control_ui as bcu
+    from v_dance.online import panel as bcu
     src = (bcu.__file__)
     text = open(src, encoding="utf-8").read()
     assert '"send_gate"' in text and "SEND_GATE" in text

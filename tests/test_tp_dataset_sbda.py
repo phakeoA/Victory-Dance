@@ -10,7 +10,7 @@ import pytest
 pytest.importorskip("torch")
 pytest.importorskip("poke_env")
 
-from v_dance.parser.vod_parser.pokedex import norm_species  # noqa: E402
+from v_dance.dex.pokedex import norm_species  # noqa: E402
 from v_dance.training import tp_features as TPF             # noqa: E402
 from v_dance.training import teampreview_dataset as DS       # noqa: E402
 import v_dance.play.model_io as M                            # noqa: E402

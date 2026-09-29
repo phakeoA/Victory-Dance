@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from v_dance.parser.vod_parser.team_sheet import parse_showteam_sides
+from v_dance.dex.team_sheet import parse_showteam_sides
 from v_dance.play import player as player_mod
 from v_dance.play.player import ots_opp_known, room_base_tag
 

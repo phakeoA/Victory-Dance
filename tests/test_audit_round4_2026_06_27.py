@@ -18,7 +18,7 @@ import pytest
 def test_mean_stats_drops_nonfinite_per_key():
     pytest.importorskip("torch")
     pytest.importorskip("numpy")
-    from v_dance.selfplay.trainer import _mean_stats
+    from v_dance.rl.trainer import _mean_stats
     stats = [{"loss": 1.0, "opp_ce": 2.0}, {"loss": 3.0, "opp_ce": float("nan")}]
     out = _mean_stats(stats)
     assert out["loss"] == pytest.approx(2.0)        # finite mean unaffected

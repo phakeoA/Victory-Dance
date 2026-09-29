@@ -26,8 +26,8 @@ _REPO = Path(__file__).resolve().parents[1]
 import v_dance.play.player as P            # noqa: E402
 from v_dance.play import vgc_base          # noqa: E402
 from v_dance.selfplay import game_runner as G  # noqa: E402
-from v_dance.selfplay.collector import TrajectoryCollector  # noqa: E402
-from v_dance.selfplay.schema import PASS_ACTION  # noqa: E402
+from v_dance.rl.collector import TrajectoryCollector  # noqa: E402
+from v_dance.rl.schema import PASS_ACTION  # noqa: E402
 from v_dance.encoders.state_encoder import get_state_dim, get_action_dim  # noqa: E402
 
 SD, AD = get_state_dim(), get_action_dim()

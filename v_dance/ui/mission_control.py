@@ -5,7 +5,7 @@ Design: docs/mission_control_ui_design.md (2026-07-12).
     python -m v_dance.ui.mission_control            # serve + open the page
     python -m v_dance.ui.mission_control --no-browser --port 8990
 
-Deliberately stdlib-only and torch-free (same pattern as online/bot_control_ui.py): the
+Deliberately stdlib-only and torch-free (same pattern as online/panel.py): the
 server starts instantly, never fights the Flask debug reloader, and can run alongside
 anything. It knows the project's entry points through a typed COMMAND REGISTRY. Every entry is a
 launchable managed job (argv list, never shell=True; logs under artifacts/logs/mc_*.log;
@@ -20,7 +20,7 @@ stop = Windows tree-kill `taskkill /T /F`); the page ALSO renders the exact `PYT
 
 Security: binds 127.0.0.1 only; /api/status exposes a strict .env WHITELIST (PS_PASSWORD
 never leaves the process); /api/env writes only whitelisted deploy keys via the same
-atomic tmp-replace as bot_control_ui.save_format; job options are validated server-side
+atomic tmp-replace as panel.save_format; job options are validated server-side
 (teams/ckpts must exist on disk, numbers clamped, free text is a single argv element).
 """
 from __future__ import annotations
@@ -117,7 +117,7 @@ def _env_read() -> dict:
 
 
 def _env_write(key: str, value: str) -> None:
-    """Atomic single-key .env update (mirrors bot_control_ui.save_format)."""
+    """Atomic single-key .env update (mirrors panel.save_format)."""
     if key not in _ENV_WRITE_KEYS:
         raise ValueError(f"key {key!r} is not editable from the panel")
     value = (value or "").strip()
@@ -224,7 +224,7 @@ def _port_open(port: int) -> bool:
 
 
 # ── online bot control-panel proxy (front the :8777 panel from the master UI) ──
-# The panel (online/bot_control_ui.py) lives INSIDE the running online bot process — it needs the
+# The panel (online/panel.py) lives INSIDE the running online bot process — it needs the
 # live Playwright page. Mission Control can't hold that page, so it PROXIES the panel's HTTP API:
 # the Online tab drives ladder runs / auto-accept / challenges through here, so the USER never
 # opens :8777 separately. Panel binds the first free port in [8777, 8786].
@@ -395,7 +395,7 @@ def _recent_logs(n: int = 40) -> list:
 REGISTRY = [
     # ---- PLAY ----
     dict(id="play_online", cat="play", heavy=False, single=True, title="Online bot (browser)",
-         module="v_dance.online.play_online_browser",
+         module="v_dance.online.bot",
          desc="Logs into play.pokemonshowdown.com. Drive it live from the Online bot tab — set the "
               "format + launch there (format writes .env), then ladder runs, auto-accept, private "
               "challenges — the control panel is embedded there (no separate window). Bo3 venues: "

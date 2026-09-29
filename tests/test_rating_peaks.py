@@ -14,7 +14,7 @@ import pytest
 
 pytest.importorskip("poke_env")
 
-from v_dance.play.bot_control_ui import BotController, RatingBook, _reg_label
+from v_dance.online.panel import BotController, RatingBook, _reg_label
 
 MB = "gen9championsvgc2026regmb"
 MA = "gen9championsvgc2026regma"
@@ -106,7 +106,7 @@ def test_panel_status_carries_peaks_and_link():
 # ── host: forget (rejoin) vs abandon (room gone) ─────────────────────────────
 def test_host_forget_battle_drops_state_without_ending_and_a_replay_rebuilds_it():
     from v_dance.formats import DEFAULT_FORMAT
-    from v_dance.play.browser.battle_host import BattleHost
+    from v_dance.online.browser.battle_host import BattleHost
 
     tag = f"battle-{DEFAULT_FORMAT}-1"
     init = (f">{tag}\n|init|battle\n|title|Alice vs. Bob\n|gametype|doubles\n"
@@ -124,7 +124,7 @@ def test_host_forget_battle_drops_state_without_ending_and_a_replay_rebuilds_it(
 
 def test_host_abandon_battle_marks_ended_so_stray_frames_are_gated():
     from v_dance.formats import DEFAULT_FORMAT
-    from v_dance.play.browser.battle_host import BattleHost
+    from v_dance.online.browser.battle_host import BattleHost
 
     tag = f"battle-{DEFAULT_FORMAT}-2"
     init = (f">{tag}\n|init|battle\n|title|A vs. B\n|gametype|doubles\n"

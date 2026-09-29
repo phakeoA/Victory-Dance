@@ -30,8 +30,8 @@ import re
 from pathlib import Path
 from typing import Optional
 
-# v_dance/parser/vod_parser/pokedex.py → parents[3] == repo root, holds data/
-_DEFAULT_POKEDEX_PATH = Path(__file__).resolve().parents[3] / "data" / "pokedex.json"
+# v_dance/dex/pokedex.py → parents[2] == repo root, holds data/ (was parser/vod_parser/, parents[3], until refactor Phase 5)
+_DEFAULT_POKEDEX_PATH = Path(__file__).resolve().parents[2] / "data" / "pokedex.json"
 
 _NON_ALNUM = re.compile(r"[^a-z0-9]")
 
