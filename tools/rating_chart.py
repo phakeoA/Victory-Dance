@@ -21,13 +21,16 @@ _REPO = Path(__file__).resolve().parents[1]
 W, H, PAD = 1100, 360, 48
 
 
-def load(path: Path) -> dict[str, list[dict]]:
-    teams, games = {}, {}
+def load(path: Path) -> tuple[dict[str, list[dict]], dict[str, list[dict]]]:
+    teams, games, site = {}, {}, {}
     for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         r = json.loads(line)
         tag = r.get("battle_tag") or ""
+        if r.get("type") == "site_rating" and r.get("format"):      # the ladder's own numbers (truth)
+            site.setdefault(r["format"], []).append(r)
+            continue
         if "result" in r and tag:
             teams[tag] = r.get("ai_team")
         if r.get("type") == "rating_update" and r.get("rating") is not None and r.get("rating_after") is not None:
@@ -37,7 +40,7 @@ def load(path: Path) -> dict[str, list[dict]]:
     for rows in games.values():
         for g in rows:
             g["team"] = teams.get(g["tag"])
-    return games
+    return games, site
 
 
 def equilibrium(rows: list[dict], window: int) -> list[float | None]:
@@ -56,7 +59,7 @@ def equilibrium(rows: list[dict], window: int) -> list[float | None]:
     return out
 
 
-def svg(fmt: str, rows: list[dict], window: int) -> str:
+def svg(fmt: str, rows: list[dict], window: int, site: list[dict]) -> str:
     ys = [g["r1"] for g in rows]
     eq = equilibrium(rows, window)
     peak, best = [], -1e9
@@ -79,12 +82,17 @@ def svg(fmt: str, rows: list[dict], window: int) -> str:
             ticks += (f'<line x1="{X(k):.1f}" x2="{X(k):.1f}" y1="{PAD}" y2="{H - PAD}" class="team"/>'
                       f'<text x="{X(k) + 3:.1f}" y="{PAD - 6}" class="ax">{html.escape(g["team"])}</text>')
             prev = g["team"]
+    import bisect
+    stamps = [g["ts"] for g in rows]
+    dots = "".join(f'<circle cx="{X(max(0, bisect.bisect_right(stamps, s["ts"]) - 1)):.1f}" '
+                   f'cy="{Y(min(max(s["elo"], lo), hi)):.1f}" r="3" class="site"/>' for s in site)
     last_eq = next((e for e in reversed(eq) if e), None)
     title = (f"{fmt} — {n} rated games · now {ys[-1]} · peak {max(ys)} · "
-             f"equilibrium {'%.0f' % last_eq if last_eq else 'n/a (too few games)'}")
+             f"equilibrium {'%.0f' % last_eq if last_eq else 'n/a (too few games)'}"
+             + (f" · SITE (truth) {site[-1]['elo']:.0f}, {site[-1]['w']}W-{site[-1]['l']}L" if site else ""))
     return (f'<h2>{html.escape(title)}</h2><svg viewBox="0 0 {W} {H}" role="img" aria-label="{html.escape(title)}">'
             f'{grid}{ticks}<path d="{path(peak)}" class="peak"/><path d="{path(ys)}" class="rating"/>'
-            f'<path d="{path(eq)}" class="eq"/>'
+            f'<path d="{path(eq)}" class="eq"/>{dots}'
             f'<text x="{W - PAD}" y="{H - 12}" class="ax" text-anchor="end">rated game #</text></svg>')
 
 
@@ -94,17 +102,17 @@ def main() -> None:
     ap.add_argument("--out", default=str(_REPO / "artifacts" / "charts" / "rating_chart.html"))
     ap.add_argument("--window", type=int, default=300, help="games in the rolling equilibrium fit")
     a = ap.parse_args()
-    games = load(Path(a.bench))
-    body = "".join(svg(f, rows, a.window) for f, rows in sorted(games.items(), reverse=True) if len(rows) >= 2)
+    games, site = load(Path(a.bench))
+    body = "".join(svg(f, rows, a.window, site.get(f, [])) for f, rows in sorted(games.items(), reverse=True) if len(rows) >= 2)
     page = f"""<!doctype html><meta charset="utf-8"><title>Ladder rating</title>
 <style>body{{background:#fff;color:#1f2328;font:14px system-ui,sans-serif;margin:16px;max-width:1140px}}
 svg{{width:100%;height:auto}} .grid{{stroke:#e5e7eb}} .ax{{fill:#6b7280;font-size:11px}}
 .rating{{fill:none;stroke:#2563eb;stroke-width:1.2}} .peak{{fill:none;stroke:#9ca3af;stroke-dasharray:4 3}}
-.eq{{fill:none;stroke:#ea580c;stroke-width:2}} .team{{stroke:#16a34a;stroke-dasharray:2 3}}
+.eq{{fill:none;stroke:#ea580c;stroke-width:2}} .team{{stroke:#16a34a;stroke-dasharray:2 3}} .site{{fill:#111827}}
 h2{{font-size:15px;margin:22px 0 4px}}</style>
 <p><b style="color:#2563eb">rating</b> · <b style="color:#9ca3af">running peak</b> ·
 <b style="color:#ea580c">equilibrium ({a.window}-game fit: where expected gain = 0)</b> ·
-<b style="color:#16a34a">team change</b></p>{body}"""
+<b style="color:#16a34a">team change</b> · <b>● site Elo (the truth)</b></p>{body}"""
     out = Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(page, encoding="utf-8")

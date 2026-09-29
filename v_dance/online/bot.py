@@ -248,6 +248,32 @@ def _sync_avatar_from_send(payload: str, env_path: Path = _REPO / ".env") -> Non
         print(f"[online] avatar .env sync failed (non-fatal): {exc!r}")
 
 
+async def _site_sync_loop(username: str, fmt: str, ctrl_ref: dict, log, period_s: float) -> None:
+    """Poll the official ladder numbers (v_dance/online/site_rating.py) — the truth the chained panel rating drifts
+    from whenever a rating exchange is missed. Appends a ``site_rating`` bench row when they change; never raises."""
+    from v_dance.online import site_rating as _SR
+    last = None
+    while True:
+        try:
+            site = await asyncio.to_thread(_SR.fetch, username, fmt)
+        except Exception as exc:                       # the sync must never touch play
+            site = None
+            log(f"[online] site rating sync failed (non-fatal): {exc!r}")
+        if site and site != last:
+            c = ctrl_ref.get("c")
+            panel = getattr(c, "last_rating", None) if c is not None else None
+            row = {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "type": "site_rating",
+                   "format": fmt, **site, "panel_rating": panel}
+            try:
+                with open(BENCH_LOG, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(row) + "\n")
+            except OSError as exc:
+                log(f"[online] site rating row not written (non-fatal): {exc!r}")
+            log(_SR.drift_line(site, panel))
+            last = site
+        await asyncio.sleep(period_s)
+
+
 async def _login(page, username: str, password: str) -> bool:
     """Log the tab into the registered account. Scripted via the client's own rename flow (the
     challstr/assertion dance is the client's job); on any failure fall back to MANUAL login —
@@ -1015,6 +1041,13 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
             link.start(asyncio.get_running_loop())   # 2026-09-06: the watchdog's OWN task (a parked consumer no longer silences it)
             print(link.banner())
             _slog(session_log, "    " + link.banner())
+            # 2026-09-29 (USER: "the site elo is the absolute truth"): poll the ladder's own numbers
+            _site_period = float(os.environ.get("VD_SITE_SYNC_S") or 120.0)
+            if _site_period > 0:
+                _site_task = asyncio.create_task(_site_sync_loop(
+                    username, BATTLE_FORMAT, ctrl_ref,
+                    lambda t: (print(t), _slog(session_log, "    " + t)), _site_period))
+                print(f"[online] site rating sync ON — every {_site_period:.0f}s (VD_SITE_SYNC_S=0 turns it off)")
             # 2026-09-02 (USER): battle-timer mode — immediate vs the per-room grace (launch echo)
             _pvhb.TIMER_IMMEDIATE = _timer_immediate_env()
             _tb = _timer_banner(_pvhb.TIMER_IMMEDIATE, _pvhb._OPP_TIMER_S)
