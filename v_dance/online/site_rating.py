@@ -34,7 +34,10 @@ def fetch(username: str, fmt: str, timeout: float = 10.0) -> Optional[dict]:
             "l": int(rt.get("l") or 0)}
 
 
-def drift_line(site: dict, panel_rating: Optional[float]) -> str:
+def drift_line(site: dict, panel_rating: Optional[float], persistent: bool = True) -> str:
+    """``persistent`` = the gap was also > 5 at the previous poll. With 5 battles at once the panel and the site are
+    often a game apart for a moment (09-30: 79 of 266 polls > 5 Elo, median gap 1.1), so only a gap that SURVIVES
+    a poll is called a desync."""
     gap = "" if panel_rating is None else f" · panel {panel_rating:.0f} (Δ {site['elo'] - panel_rating:+.0f})"
-    flag = "  ⚠ DESYNC — the panel missed games" if panel_rating is not None and abs(site["elo"] - panel_rating) > 5 else ""
+    flag = "  ⚠ DESYNC — the panel missed games" if panel_rating is not None and abs(site["elo"] - panel_rating) > 5 and persistent else ""
     return f"[online] SITE (truth): elo {site['elo']:.0f} · {site['w']}W-{site['l']}L · GXE {site['gxe']}{gap}{flag}"

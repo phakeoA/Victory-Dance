@@ -252,7 +252,7 @@ async def _site_sync_loop(username: str, fmt: str, ctrl_ref: dict, log, period_s
     """Poll the official ladder numbers (v_dance/online/site_rating.py) — the truth the chained panel rating drifts
     from whenever a rating exchange is missed. Appends a ``site_rating`` bench row when they change; never raises."""
     from v_dance.online import site_rating as _SR
-    last = None
+    last, prev_gap = None, 0.0
     while True:
         try:
             site = await asyncio.to_thread(_SR.fetch, username, fmt)
@@ -269,8 +269,9 @@ async def _site_sync_loop(username: str, fmt: str, ctrl_ref: dict, log, period_s
                     fh.write(json.dumps(row) + "\n")
             except OSError as exc:
                 log(f"[online] site rating row not written (non-fatal): {exc!r}")
-            log(_SR.drift_line(site, panel))
-            last = site
+            gap = abs(site["elo"] - panel) if panel is not None else 0.0
+            log(_SR.drift_line(site, panel, persistent=prev_gap > 5))
+            last, prev_gap = site, gap
         await asyncio.sleep(period_s)
 
 
@@ -431,13 +432,27 @@ class LinkWatch:
 
     async def _read_close_detail(self) -> None:
         """Log why the socket closed (the page hook's code / reason) and the last frames seen — BEFORE the reload wipes them."""
-        try:
-            d = await self._eval(_LINK_LAST_CLOSE_JS)
-        except Exception as exc:                        # noqa: BLE001
-            d = {"error": type(exc).__name__}
+        # 2026-09-30: every close still read 'no hook data' although the init-script recorder DOES record the Showdown
+        # socket (probe on the real client: code/reason captured). The CDP close reaches us before the page's JS has
+        # dispatched its close event → poll briefly for the record instead of reading once.
+        d = None
+        for _ in range(8):
+            try:
+                d = await self._eval(_LINK_LAST_CLOSE_JS)
+            except Exception as exc:                    # noqa: BLE001
+                d = {"error": type(exc).__name__}
+                break
+            if d:
+                break
+            await asyncio.sleep(0.25)
         self.last_close = d if isinstance(d, dict) else None
+        # a DELIBERATE server close arrives as a SockJS close frame c[code,"reason"] before the socket drops
+        sockjs = next((f for f in reversed(self._recent_frames) if str(f).startswith("c[")), None)
+        idle = self._now() - self.last_rx if self.last_rx else None
         frames = " | ".join(f.replace("\n", "⏎")[:70] for f in self._recent_frames) or "-"
-        self.log(f"[online] socket close detail: {d if d else 'no hook data'}; last frames: {frames}")
+        self.log(f"[online] socket close detail: {d if d else 'no hook data'}; sockjs close frame: "
+                 f"{sockjs or 'none (not a deliberate server close)'}; since the last frame: "
+                 f"{'%.1fs' % idle if idle is not None else '?'}; last frames: {frames}")
 
     def on_raw_frame(self, _payload) -> None:
         self.frames += 1
