@@ -68,6 +68,8 @@ class LeagueConfig:
     scripted_decay_per_snapshot: float = 0.02
     pfsp_power: float = 2.0            # (1 - latest_winrate)^power: favour hard counters
     pfsp_floor: float = 0.05          # min weight so even an always-beaten snapshot recurs
+    clone_frac: float = 0.0           # league P1 (2026-09-30): share of games vs behaviour-cloned HUMAN opponents
+                                      # (build_clone: nemesis + team-archetype clones). 0 = the old mixture exactly.
     pfsp_decay: float = 0.95          # #24: EMA decay for record_result (≈20-game memory). The
                                       # in-memory latest is PPO-updated EVERY gen (incl. HOLD gens
                                       # where reset_pfsp is NOT called), so a plain running tally
@@ -81,6 +83,7 @@ class OpponentLeague:
     scripted: Tuple[str, ...] = DEFAULT_SCRIPTED
     snapshots: List[LeagueSnapshot] = field(default_factory=list)
     cfg: LeagueConfig = field(default_factory=LeagueConfig)
+    clones: Tuple[str, ...] = ()        # checkpoint paths of the clone opponents (drawn uniformly)
 
     # ── mixture (anchor decay tied to pool size) ──────────────────────────────
     def scripted_fraction(self) -> float:
@@ -93,16 +96,17 @@ class OpponentLeague:
                    self.cfg.scripted_frac_max - self.cfg.scripted_decay_per_snapshot * n)
 
     def mixture(self) -> Dict[str, float]:
-        """``{"latest": x, "past": y, "scripted": z}`` summing to 1. With no snapshots the
-        past share is 0 (redistributed to latest); latest/past keep their 0.5:0.3 ratio
-        within the non-scripted remainder."""
+        """``{"latest": x, "past": y, "clone": c, "scripted": z}`` summing to 1. ``clone`` = cfg.clone_frac
+        when clones are loaded (else 0). With no snapshots the past share is 0 (redistributed to latest);
+        latest/past keep their 0.5:0.3 ratio within the non-scripted, non-clone remainder."""
         s = self.scripted_fraction()
+        c = self.cfg.clone_frac if self.clones else 0.0
+        rem = max(0.0, 1.0 - s - c)
         if not self.snapshots:
-            return {"latest": 1.0 - s, "past": 0.0, "scripted": s}
+            return {"latest": rem, "past": 0.0, "clone": c, "scripted": s}
         lp = self.cfg.latest_frac + self.cfg.past_frac
-        rem = 1.0 - s
         return {"latest": rem * self.cfg.latest_frac / lp,
-                "past": rem * self.cfg.past_frac / lp, "scripted": s}
+                "past": rem * self.cfg.past_frac / lp, "clone": c, "scripted": s}
 
     # ── PFSP weighting (favour the snapshots the latest loses to) ─────────────
     def pfsp_weights(self) -> List[float]:
@@ -112,7 +116,7 @@ class OpponentLeague:
     # ── sampling one opponent ─────────────────────────────────────────────────
     def sample(self, rng: np.random.Generator) -> Tuple[str, object]:
         """Draw one opponent. Returns ``("latest", latest_path)`` /
-        ``("snapshot", LeagueSnapshot)`` / ``("scripted", kind)``."""
+        ``("snapshot", LeagueSnapshot)`` / ``("clone", path)`` / ``("scripted", kind)``."""
         mix = self.mixture()
         u = float(rng.random())
         if u < mix["latest"]:
@@ -122,6 +126,8 @@ class OpponentLeague:
             w = w / w.sum()
             i = int(rng.choice(len(self.snapshots), p=w))
             return ("snapshot", self.snapshots[i])
+        if u < mix["latest"] + mix["past"] + mix["clone"] and self.clones:
+            return ("clone", self.clones[int(rng.integers(len(self.clones)))])
         if self.scripted:
             return ("scripted", self.scripted[int(rng.integers(len(self.scripted)))])
         return ("latest", self.latest_path)   # degenerate: no scripted, no snapshots
@@ -214,21 +220,23 @@ class OpponentLeague:
                         "scripted_frac_min": c.scripted_frac_min,
                         "scripted_decay_per_snapshot": c.scripted_decay_per_snapshot,
                         "pfsp_power": c.pfsp_power, "pfsp_floor": c.pfsp_floor,
-                        "pfsp_decay": c.pfsp_decay}}
+                        "pfsp_decay": c.pfsp_decay, "clone_frac": c.clone_frac},
+                "clones": list(self.clones)}
 
     @classmethod
     def from_obj(cls, d: dict) -> "OpponentLeague":
         return cls(latest_path=d["latest_path"],
                    scripted=tuple(d.get("scripted", DEFAULT_SCRIPTED)),
                    snapshots=[LeagueSnapshot.from_obj(s) for s in d.get("snapshots", [])],
-                   cfg=LeagueConfig(**d.get("cfg", {})))
+                   cfg=LeagueConfig(**d.get("cfg", {})),
+                   clones=tuple(d.get("clones", ())))
 
 
 def make_league_opponent(spec: Tuple[str, object], *, username: str, team,
                          make_model: Callable, make_scripted: Callable):
     """Map a sampled ``spec`` to a live opponent player via injected constructors
     (the runner, 3c.3, passes a model-player factory + ``gauntlet._make_opponent``):
-      ("latest", path) / ("snapshot", snap) -> make_model(username, team, model_path)
+      ("latest", path) / ("snapshot", snap) / ("clone", path) -> make_model(username, team, model_path)
       ("scripted", kind)                     -> make_scripted(kind, username, team)
     """
     kind, val = spec
@@ -236,6 +244,8 @@ def make_league_opponent(spec: Tuple[str, object], *, username: str, team,
         return make_model(username, team, model_path=val)
     if kind == "snapshot":
         return make_model(username, team, model_path=val.path)
+    if kind == "clone":
+        return make_model(username, team, model_path=val)
     if kind == "scripted":
         return make_scripted(val, username, team)
     raise ValueError(f"unknown opponent spec kind: {kind!r}")

@@ -367,6 +367,9 @@ async def collect_with_league(actor_critic, league: OpponentLeague, n_games: int
         elif kind == "snapshot":
             opp = R.make_player(opp_name, tb, model_path=spec[1].path,
                                 team_chooser_path=team_chooser, max_concurrent_battles=max(1, cn))
+        elif kind == "clone":                             # league P1: a behaviour-cloned human opponent
+            opp = R.make_player(opp_name, tb, model_path=spec[1],
+                                team_chooser_path=team_chooser, max_concurrent_battles=max(1, cn))
         else:   # scripted
             opp = _make_opponent(spec[1], opp_name, tb,
                                  max_concurrent_battles=max(1, cn))
@@ -723,6 +726,7 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                          restart_server_every: int = 20, n_servers: int = 1,
                          snapshot_path=None, max_hours=None, spawn_rooms: int = 0,
                          own_team=None, own_mirror_frac: float = 0.2, opp_weights=None,
+                         league_clones=(), clone_frac: float = 0.0,
                          register_arms: bool = False,
                          register_prefix: str = "era5b_g",
                          bandit_config=None) -> dict:
@@ -836,6 +840,10 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                                               device=device)
         print(f"[resume] loaded {Path(_resume_path).name} — continuing at generation "
               f"{history.generation} (league={len(league.snapshots)})")
+    if league_clones:                                  # league P1 (2026-09-30): behaviour-cloned human opponents
+        league.clones = tuple(str(p) for p in league_clones)
+        league.cfg.clone_frac = float(clone_frac)
+        print(f"[league] {len(league.clones)} clone opponent(s) at {league.cfg.clone_frac:.0%} of games")
     stop = RS.StopController(max_hours=max_hours)
     status = LiveStatus(archive / "status.json", min_interval=0.5)   # live feed; throttled (3c.8c)
     status.start_run(n_generations, hours=max_hours)
@@ -1344,6 +1352,7 @@ def _launch_live(args):
         restart_server_every=args.restart_server_every, n_servers=args.servers,
         spawn_rooms=args.spawn_rooms,
         own_team=_own, own_mirror_frac=args.own_mirror, opp_weights=_opp_w,
+        league_clones=args.league_clones or (), clone_frac=args.clone_frac,
         register_arms=args.register_arms, register_prefix=args.register_prefix,
         bandit_config=args.bandit_config,
         snapshot_path=args.snapshot, max_hours=args.hours)
@@ -1715,6 +1724,12 @@ if __name__ == "__main__":
                          "promote past a scripted plateau by beating the accepted-best mirror). "
                          "--no-prev-best = pure scripted gate (also skips the mirror's eval games)")
     # ── Phase-2 Hall-of-Fame breadth veto (sec 16) ────────────────────────────
+    ap.add_argument("--league-clones", nargs="+", default=None,
+                    help="league P1: behaviour-cloned HUMAN opponent checkpoints (build_clone: nemesis / "
+                         "archetype clones), drawn uniformly for --clone-frac of the games")
+    ap.add_argument("--clone-frac", type=float, default=0.3,
+                    help="share of games vs --league-clones (ignored without clones; default 0.3 = "
+                         "the design's archetype 30 %%; the nemesis counts as a human-style clone)")
     ap.add_argument("--hof", action=argparse.BooleanOptionalAction, default=True,
                     help="Phase-2 HoF breadth veto: on a PROMOTE, ALSO require the candidate to "
                          "not-LOSE to its last --hof-champions PAST champions (catches lineage "

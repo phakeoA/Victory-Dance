@@ -80,9 +80,107 @@ def train_cmd(data_dirs: list[Path], val_dirs: list[Path], out: Path, epochs: in
             "--mmap-cache", "--loader-workers", "4", *extra]
 
 
+# ── archetype clones (league P1, 2026-09-30) ──────────────────────────────────────────────────────────────────────
+# One clone per team ARCHETYPE (team_archetypes k10 centroids), each imitating only the SIDES whose team belongs to it,
+# so the league meets distinct game plans (rain, Trick Room, sand, goodstuffs …). Sources = the M-B + M-C corpora only
+# (M-A is two regs old; its 75 GB Bo3 set is too heavy to duplicate). A replay file holds BOTH perspectives, so the
+# split writes one file per SIDE under Archetypes_k10/aNN/{train,val} (~10 GB for these sources; the folders can go to
+# the Recycle Bin once the clones are trained). 10 % of sides (hash of replay+side) are held out for validation.
+ARCH_SOURCES = ["Regulation_MB/Jsonl_HF_OTS", "Regulation_MB_Bo3/Jsonl_HF_OTS", "Regulation_MB/Jsonl_TypeB",
+                "Regulation_MB_Bo3/Jsonl_TypeB", "Regulation_MC/Jsonl_TypeB"]
+ARCH_ARTIFACT = _BC / "team_archetypes_k10_full.json"
+ARCH_ROOT = _PTD / "Archetypes_k10"
+ARCH_MIN_TRAIN = 150                                   # sides; a smaller archetype is too thin to clone
+
+
+def _is_val(replay_id: str, perspective: str) -> bool:
+    import hashlib
+    return int(hashlib.md5(f"{replay_id}|{perspective}".encode()).hexdigest(), 16) % 10 == 0
+
+
+def side_archetypes(sources: list[Path], artifact_path: Path, limit_files: int | None = None) -> dict:
+    """{(replay_id, perspective): archetype} — every team-side assigned to its nearest k10 centroid."""
+    from v_dance.datatools.team_archetypes import assign, collect_team_records, load_artifact
+    art = load_artifact(str(artifact_path))
+    side = {}
+    for rec in collect_team_records([str(s) for s in sources], limit_files=limit_files).values():
+        a, _ = assign(rec["feats"], art)
+        for rid, persp in rec["sightings"]:
+            side[(str(rid), str(persp))] = int(a)
+    return side
+
+
+def split_by_archetype(sources: list[Path], side: dict, out_root: Path) -> dict:
+    """Write each assigned SIDE's rows to out_root/aNN/{train,val}/<replay>_<side>.jsonl; returns {(a, split): n}."""
+    from collections import Counter, defaultdict
+
+    from v_dance.training.bc_dataset import iter_jsonl_files
+    counts = Counter()
+    for folder in sources:
+        for f in iter_jsonl_files(str(folder)):
+            groups = defaultdict(list)
+            with open(f, encoding="utf-8") as fh:
+                for line in fh:
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    groups[(str(row.get("replay_id")), str(row.get("perspective")))].append(line)
+            for (rid, persp), lines in groups.items():
+                a = side.get((rid, persp))
+                if a is None:
+                    continue
+                split = "val" if _is_val(rid, persp) else "train"
+                dest = out_root / f"a{a:02d}" / split / f"{Path(f).stem}_{persp}.jsonl"
+                if not dest.exists():
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    tmp = dest.with_suffix(".tmp")
+                    tmp.write_text("".join(lines), encoding="utf-8")
+                    os.replace(tmp, dest)
+                counts[(a, split)] += 1
+    return dict(counts)
+
+
+def _run_archetype(a) -> None:
+    if a.split:
+        sources = [_PTD / s for s in ARCH_SOURCES if (_PTD / s).is_dir()]
+        print(f"[clone] archetype split: {len(sources)} source folders, artifact {ARCH_ARTIFACT.name} -> "
+              f"{ARCH_ROOT.relative_to(_REPO)}")
+        side = side_archetypes(sources, ARCH_ARTIFACT, a.limit_files)
+        print(f"[clone] {len(side)} team-sides assigned")
+        counts = split_by_archetype(sources, side, ARCH_ROOT)
+        for k in sorted({x for x, _ in counts}):
+            print(f"  a{k:02d}: train {counts.get((k, 'train'), 0):5d}  val {counts.get((k, 'val'), 0):4d}")
+        return
+    todo = []
+    for d in sorted(ARCH_ROOT.glob("a[0-9][0-9]")):
+        k = int(d.name[1:])
+        if a.only and k not in a.only:
+            continue
+        n = len(list((d / "train").glob("*.jsonl")))
+        if n < ARCH_MIN_TRAIN:
+            print(f"[clone] a{k:02d}: {n} train sides < {ARCH_MIN_TRAIN} — skipped (too thin)")
+            continue
+        out = _BC / f"checkpoints_attn_clone_arch{k:02d}_k10_{datetime.now():%Y%m%d}"
+        todo.append((k, n, train_cmd([d / "train"], [d / "val"], out, a.epochs, a.device, a.batch_size), out))
+    if not todo:
+        raise SystemExit("[clone] nothing to train — run --kind archetype --split first")
+    for k, n, cmd, out in todo:
+        print(f"[clone] a{k:02d}: {n} train sides -> {out.relative_to(_REPO)}")
+    if a.dry_run:
+        print("[clone] train (first):", " ".join(todo[0][2][1:]))
+        return
+    for k, n, cmd, out in todo:
+        rc = subprocess.call(cmd, cwd=_REPO)
+        print(f"[clone] a{k:02d} exit {rc}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--kind", choices=["nemesis"], required=True)
+    ap.add_argument("--kind", choices=["nemesis", "archetype"], required=True)
+    ap.add_argument("--split", action="store_true", help="archetype: build the per-archetype data folders (CPU)")
+    ap.add_argument("--only", type=int, nargs="+", default=None, help="archetype: train only these ids")
+    ap.add_argument("--limit-files", type=int, default=None, help="archetype split: cap source files (smoke)")
     ap.add_argument("--reg", nargs="+", default=["regmb"], choices=sorted(_REG_DIR),
                     help="one or more regs whose Type_C losses are pooled (e.g. regmb regmc)")
     ap.add_argument("--epochs", type=int, default=8)
@@ -91,6 +189,10 @@ def main() -> None:
                     help="train_bc batch size (default: train_bc's); lower it on a CUDA out-of-memory")
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args()
+    if a.kind == "archetype":
+        if not a.split and not ANCHOR.exists():
+            raise SystemExit(f"[clone] anchor missing: {ANCHOR}")
+        return _run_archetype(a)
 
     bots, losses, val = bot_accounts(), [], []
     for reg in a.reg:

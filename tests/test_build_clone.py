@@ -27,3 +27,18 @@ def test_link_into_is_idempotent_and_keeps_contents(tmp_path):
     assert link_into([src / "b.jsonl"], dest) == 1
     assert link_into([src / "b.jsonl"], dest) == 0
     assert (dest / "b.jsonl").read_text(encoding="utf-8") == (src / "b.jsonl").read_text(encoding="utf-8")
+
+
+def test_split_by_archetype_writes_one_file_per_side(tmp_path):
+    from v_dance.selfplay.build_clone import _is_val, split_by_archetype
+    src = tmp_path / "src"
+    src.mkdir()
+    rows = [{"replay_id": "r1", "perspective": p, "turn": t} for p in ("p1", "p2") for t in (1, 2)]
+    (src / "r1.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    out = tmp_path / "Archetypes_k10"
+    counts = split_by_archetype([src], {("r1", "p1"): 3, ("r1", "p2"): 7}, out)
+    for arch, persp in ((3, "p1"), (7, "p2")):
+        split = "val" if _is_val("r1", persp) else "train"
+        f = out / f"a{arch:02d}" / split / f"r1_{persp}.jsonl"
+        got = [json.loads(line) for line in f.read_text(encoding="utf-8").splitlines()]
+        assert [r["perspective"] for r in got] == [persp, persp] and counts[(arch, split)] == 1

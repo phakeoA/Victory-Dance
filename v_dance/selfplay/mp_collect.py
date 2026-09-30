@@ -79,6 +79,8 @@ def _spec_from_sample(sample, team_a: str, team_b: str, n: int, uid: int, gen: i
     if kind == "snapshot":
         snap = sample[1]
         return ChunkSpec(team_a, team_b, n, "snapshot", snap.path, snap.snapshot_id, uid, gen)
+    if kind == "clone":                               # league P1: opp_ref = the clone checkpoint PATH
+        return ChunkSpec(team_a, team_b, n, "clone", str(sample[1]), None, uid, gen)
     if kind == "scripted":
         return ChunkSpec(team_a, team_b, n, "scripted", str(sample[1]), None, uid, gen)
     return ChunkSpec(team_a, team_b, n, "latest", None, None, uid, gen)   # latest (or degenerate)
@@ -274,7 +276,7 @@ def _build_players_real(ac, spec: ChunkSpec, tau: float, seed: int, team_chooser
     our = _sp(ta, 0, our_name, live=live_dir)         # #18: worker publishes its battle to live_dir
     if spec.kind == "latest":
         opp = _sp(tb, 1, opp_name)
-    elif spec.kind == "snapshot":
+    elif spec.kind in ("snapshot", "clone"):
         opp = R.make_player(opp_name, tb, model_path=spec.opp_ref,
                             team_chooser_path=team_chooser, max_concurrent_battles=_mcb,
                             port=port)

@@ -76,6 +76,8 @@ def collect_account_names(kind: str, uid, *, salt: str = "", opp_ref=None) -> Tu
         opp = f"LG1x{s}"
     elif kind == "snapshot":
         opp = f"LGsx{s}"
+    elif kind == "clone":                       # league P1: a behaviour-cloned human opponent
+        opp = f"LGkx{s}"
     else:                                       # scripted anchor
         opp = f"LGc{(opp_ref or '')[:3]}{s}"
     return our, opp
