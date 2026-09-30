@@ -70,12 +70,14 @@ def link_into(files: list[Path], dest: Path) -> int:
     return made
 
 
-def train_cmd(data_dirs: list[Path], val_dirs: list[Path], out: Path, epochs: int, device: str) -> list[str]:
+def train_cmd(data_dirs: list[Path], val_dirs: list[Path], out: Path, epochs: int, device: str,
+              batch_size: int | None = None) -> list[str]:
+    extra = ["--batch-size", str(batch_size)] if batch_size else []
     return [sys.executable, "-X", "utf8", "-u", "-m", "v_dance.training.train_bc",
             "--data", *map(str, data_dirs), "--val-data", *map(str, val_dirs),
             "--warm-start", str(ANCHOR), *_ARCH, "--epochs", str(epochs), "--lr", "5e-4", "--patience", "3",
             "--seed", "0", "--device", device, "--progress-secs", "300", "--out", str(out),
-            "--mmap-cache", "--loader-workers", "4"]
+            "--mmap-cache", "--loader-workers", "4", *extra]
 
 
 def main() -> None:
@@ -85,6 +87,8 @@ def main() -> None:
                     help="one or more regs whose Type_C losses are pooled (e.g. regmb regmc)")
     ap.add_argument("--epochs", type=int, default=8)
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--batch-size", type=int, default=None,
+                    help="train_bc batch size (default: train_bc's); lower it on a CUDA out-of-memory")
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args()
 
@@ -101,7 +105,7 @@ def main() -> None:
     tag = "_".join(a.reg)
     dest = _PTD / f"Nemesis_{tag}"
     out = _BC / f"checkpoints_attn_clone_nemesis_{tag}_{datetime.now():%Y%m%d}"
-    cmd = train_cmd([dest], val, out, a.epochs, a.device)
+    cmd = train_cmd([dest], val, out, a.epochs, a.device, a.batch_size)
     print(f"[clone] nemesis: {len(losses)} files -> {dest.relative_to(_REPO)}")
     print(f"[clone] warm-start {ANCHOR.relative_to(_REPO)} -> {out.relative_to(_REPO)}")
     print("[clone] train:", " ".join(cmd[1:]))
