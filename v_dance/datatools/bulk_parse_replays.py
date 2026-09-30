@@ -432,9 +432,16 @@ def main() -> int:
     # When folders are picked via the dialog, search recursively so the user can
     # choose any ancestor folder and still find every replay beneath it.
     recursive = args.recursive or gui_mode
-    replays = filter_format(_discover(input_dir, recursive), args.format)
+    found = _discover(input_dir, recursive)
+    replays = filter_format(found, args.format)
     if args.limit is not None:
         replays = replays[: args.limit]
+    if not replays and found and args.format:
+        # the folder HAS replays, none of this format (e.g. the M-B-only approved/ folder on an M-C export) —
+        # nothing to do is a success, not a failure (bc_finetune treats a non-zero exit as a refused export)
+        print(f"No {args.format} replays among the {len(found)} in {input_dir} — nothing to export.")
+        _gui_close()
+        return 0
     if not replays:
         msg = (f"No .html replays found in:\n{input_dir}"
                f"{' (searched sub-folders too)' if recursive else ''}.")
