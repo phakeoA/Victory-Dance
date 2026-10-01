@@ -69,7 +69,9 @@ def test_repo_config_loads_and_names_real_checkpoints():
     # 2026-09-04: the live roster changes nightly (chain heads rotate, frozen arms get benched) — assert the
     # SHAPE the bot relies on, not a name: an incumbent, at least one tau > 0 (learning) arm, unique names.
     assert names and len(set(names)) == len(names) and any(a.incumbent for a in arms)
-    assert any(a.tau > 0 for a in arms)            # the learning / exploration arm is present
+    # 2026-10-01: the USER paused the W3b chain (both chain arms benched) — a learning arm is no longer guaranteed;
+    # when one IS present it must sample (tau > 0: its games are the chain's PPO data).
+    assert all(a.tau > 0 for a in arms if a.learning)
 
 
 # ── allocation ───────────────────────────────────────────────────────────────

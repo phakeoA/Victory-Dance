@@ -834,10 +834,19 @@ def _near_tie_sample(scores: np.ndarray, eps: float):
     return pick, pick != best
 
 
+def _leads_with(brought, lead_logits, lead_k: int, require_lead: Sequence[int] = ()) -> list:
+    """The ``lead_k`` leads within ``brought`` by lead logit — with ``require_lead`` (a matchup rule) first."""
+    req = [i for i in require_lead if i in brought][:lead_k]
+    rest = sorted((b for b in brought if b not in req), key=lambda i: -lead_logits[i])
+    return req + rest[:max(0, lead_k - len(req))]
+
+
 def _set_head_order(model, oi, of, pi, pf, aff_t, valid: int, bring_k: int, lead_k: int,
-                    n: int, device: str, ctx_kw: Optional[dict] = None):
+                    n: int, device: str, ctx_kw: Optional[dict] = None, require: Sequence[int] = (),
+                    require_lead: Sequence[int] = ()):
     """(order, True) via the contrastive set head, or (None, False) when not applicable
-    (model has no set head / nothing to choose)."""
+    (model has no set head / nothing to choose). ``require`` (matchup rules, 2026-10-01): only sets
+    containing these roster indices are scored — the net still ranks them and picks the leads."""
     from itertools import combinations
     if not getattr(model, "use_set_head", False):
         return None, False
@@ -845,6 +854,8 @@ def _set_head_order(model, oi, of, pi, pf, aff_t, valid: int, bring_k: int, lead
     if k <= 0 or valid <= k:
         return None, False                       # ≤ one candidate subset → greedy is already exact
     subsets = list(combinations(range(valid), k))             # ≤ C(6,4)=15
+    if require:
+        subsets = [s for s in subsets if set(require) <= set(s)] or subsets
     with torch.no_grad():
         scores, _bl, ll = model.score_subsets(
             torch.as_tensor([list(oi)], device=device),
@@ -857,7 +868,7 @@ def _set_head_order(model, oi, of, pi, pf, aff_t, valid: int, bring_k: int, lead
     eps = _tp_tie_eps()
     if eps <= 0:                                   # default: exact argmax, original path
         brought = list(subsets[int(np.argmax(scores))])
-        leads = sorted(brought, key=lambda i: -ll[i])[:lead_k]  # lead decode unchanged (within bring)
+        leads = _leads_with(brought, ll, lead_k, require_lead)  # lead decode unchanged (within bring)
         _stash(LAST_TP, path="set_head", subsets=[list(s) for s in subsets],
                scores=[float(x) for x in scores], lead_logits=[float(x) for x in ll],
                set=list(brought), leads=list(leads), eps=0.0, set_dev=False, lead_dev=False)
@@ -865,6 +876,8 @@ def _set_head_order(model, oi, of, pi, pf, aff_t, valid: int, bring_k: int, lead
     si, dev_s = _near_tie_sample(scores, eps)
     brought = list(subsets[si])
     pairs = list(combinations(brought, min(lead_k, len(brought)))) or [tuple(brought)]
+    if require_lead:                                  # matchup rule: only lead pairs that hold the required mon
+        pairs = [q for q in pairs if set(require_lead) & set(brought) <= set(q)] or pairs
     pair_scores = np.asarray([float(ll[list(p)].sum()) for p in pairs])
     pj, dev_l = _near_tie_sample(pair_scores, eps)
     leads = sorted(pairs[pj], key=lambda i: -ll[i])
@@ -926,9 +939,15 @@ def team_order(
     joint_bring: Optional[bool] = None,
     our_set_ctx: Optional[np.ndarray] = None,
     opp_set_ctx: Optional[np.ndarray] = None,
+    require: Sequence[int] = (),
+    require_lead: Sequence[int] = (),
 ) -> List[int]:
     """Return roster indices to bring, LEADS FIRST (matching how the trainer
     labels — the first two brought are the leads), capped at ``n``.
+
+    ``require`` (matchup rules, 2026-10-01): roster indices that MUST be brought; the net chooses
+    the rest and the leads (set head: only sets containing them are scored; greedy: they take the
+    first places in the bring list).
 
     ``our_species`` / ``opp_species`` are the teampreview rosters (any species
     string form; normalised internally).  Falls back to first-n on any issue.
@@ -948,6 +967,8 @@ def team_order(
     """
     _stash(LAST_TP)                               # a fresh preview: no stale narration
     valid = min(len(our_species), 6)
+    require = [int(i) for i in (require or ()) if 0 <= int(i) < valid]
+    require_lead = [int(i) for i in (require_lead or ()) if int(i) in require]
     if valid == 0:
         return list(range(n))
     feat_dim = cfg.get("feat_dim", 46)
@@ -994,14 +1015,16 @@ def team_order(
     # with a head TRAINED on exactly that question — dispatched by its config stamp.
     if TP_SET_HEAD and getattr(model, "use_set_head", False):
         order, ok = _set_head_order(model, oi, of, pi, pf, aff_t,
-                                    valid, bring_k, lead_k, n, device, ctx_kw=ctx_kw)
+                                    valid, bring_k, lead_k, n, device, ctx_kw=ctx_kw, require=require,
+                                    require_lead=require_lead)
         if ok:
             return order
 
     # Joint conditional re-decode (2026-07-10, flag-gated): score bring-SETS, not mons.
-    # Falls through to the greedy decode when disabled or not applicable.
+    # Falls through to the greedy decode when disabled or not applicable (and under a ``require``
+    # constraint, which only the set-head and greedy paths honour).
     joint = TP_JOINT_BRING if joint_bring is None else bool(joint_bring)
-    if joint and use_tp:
+    if joint and use_tp and not require:
         order, ok = _joint_bring_order(model, oi, of, pi, pf, aff_t,
                                        valid, bring_k, lead_k, n, device)
         if ok:
@@ -1021,8 +1044,9 @@ def team_order(
     # Top bring_k roster positions (over valid slots), then leads = top lead_k of
     # those by the lead head; emit leads first then the remaining brought.
     by_bring = sorted(range(valid), key=lambda i: -bring[i])
+    by_bring = list(require) + [i for i in by_bring if i not in require]     # matchup rule: required first
     brought = by_bring[: min(bring_k, valid, n)]
-    leads = sorted(brought, key=lambda i: -lead[i])[:lead_k]
+    leads = _leads_with(brought, lead, lead_k, require_lead)
     order = leads + [b for b in brought if b not in leads]
     _stash(LAST_TP, path="greedy", bring_logits=[float(x) for x in bring[:valid]],
            lead_logits=[float(x) for x in lead[:valid]], set=list(brought), leads=list(leads))

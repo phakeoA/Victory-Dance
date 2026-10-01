@@ -88,7 +88,9 @@ def test_cli_help_and_dry_run_are_clean():
     assert r.returncode == 0 and "--smoke" in r.stdout and "--run-gates" in r.stdout, r.stderr[-800:]
     if not (_REPO / "config" / "serve_bandit.json").is_file():
         pytest.skip("config/serve_bandit.json is local (gitignored)")
-    r = subprocess.run([sys.executable, "-m", "v_dance.ladder.bc_finetune", "--dry-run"], capture_output=True, text=True, encoding="utf-8",
+    # --base incumbent: the live roster need not have a learning arm (the chain can be paused, as on 2026-10-01).
+    r = subprocess.run([sys.executable, "-m", "v_dance.ladder.bc_finetune", "--dry-run", "--base", "incumbent"],
+                       capture_output=True, text=True, encoding="utf-8",
                        errors="replace", cwd=str(_REPO), timeout=600)
     assert r.returncode == 0, r.stdout[-1500:] + r.stderr[-800:]
     assert "[bcft] plan (dry run" in r.stdout and "export main:" in r.stdout and "train:" in r.stdout
