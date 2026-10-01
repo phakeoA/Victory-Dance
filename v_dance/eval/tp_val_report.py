@@ -44,6 +44,10 @@ def main(argv=None) -> int:
     ap.add_argument("--batch-size", type=int, default=128)
     ap.add_argument("--limit-files", type=int, default=None)
     ap.add_argument("--device", default="cpu")
+    ap.add_argument("--val-filter", default=None, metavar="SUBSTR",
+                    help="after the split, score ONLY val examples whose replay_id contains SUBSTR (e.g. 'regmc'). "
+                         "Pass --val-data = the TRAINER's exact --data list so the split is the trainer's; the filter "
+                         "then isolates replays NO compared ckpt trained on (2026-10-01, the M-C TP retrain gate).")
     ap.add_argument("--joint-ab", action="store_true",
                     help="decode-level A/B on the FIRST ckpt: serve-faithful greedy top-k vs the "
                          "joint conditional subset re-decode (model_io._joint_bring_order). The "
@@ -80,6 +84,10 @@ def main(argv=None) -> int:
         raise SystemExit("[tp-val] no examples in --val-data")
     _train, val_ex = split_by_replay(examples, val_frac=args.val_frac, seed=args.seed)
     del examples, _train
+    if args.val_filter:
+        val_ex = [e for e in val_ex if args.val_filter in str(e["replay_id"])]
+        if not val_ex:
+            raise SystemExit(f"[tp-val] --val-filter {args.val_filter!r} left no val examples")
     print(f"[tp-val] val set: {len(val_ex)} examples "
           f"({len({e['replay_id'] for e in val_ex})} replays, {time.time()-t0:.1f}s)")
 
