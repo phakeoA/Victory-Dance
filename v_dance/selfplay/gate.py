@@ -165,6 +165,9 @@ class GateConfigV2:
     mirror_collapse_z: float = 1.645       # significance band for the mirror-collapse test
     mirror_collapse_min_games: int = 360   # need >= this many mirror games so a freshly-re-anchored learner
                                            # (~50% vs the new champion) is never falsely reverted (sim: ~0%)
+    mirror_revert: bool = True             # 2026-10-01 --no-mirror-revert: False = a mirror collapse only HOLDS. League
+                                           # run 2 gen 21 BEAT the panel (57 %) yet lost the one-team mirror to an
+                                           # exploit-promoted champion → reverted, learner reset 15 gens, ckpt deleted.
 
 
 def promotion_gate_v2(*, scripted_wins: int, scripted_games: int,
@@ -218,7 +221,8 @@ def promotion_gate_v2(*, scripted_wins: int, scripted_games: int,
     mir_upper = wilson_upper_bound(mirror_wins, mirror_games, cfg.mirror_collapse_z) \
         if mirror_games > 0 else 1.0
     mirror_enough = mirror_games >= cfg.mirror_collapse_min_games
-    mirror_collapsed = mirror_enough and mir_upper < (0.5 - cfg.mirror_collapse_margin)
+    mirror_collapsed = (cfg.mirror_revert and mirror_enough
+                        and mir_upper < (0.5 - cfg.mirror_collapse_margin))
 
     plateaued = is_plateau(h2h_history, cfg.plateau_window, cfg.plateau_margin)
     backstop = plateaued and (p_mir >= cfg.plateau_not_losing) and not beats_bar
@@ -364,12 +368,16 @@ class GenerationRecord:
     update_stats: dict = field(default_factory=dict)
     champion_elo: Optional[float] = None     # the champion-LINEAGE Elo as of this gen (non-saturating)
     hof: Optional[dict] = None               # the Phase-2 HoF breadth-veto result this gen (None = not run)
+    reason: Optional[str] = None             # the gate reason (beat_champion / plateau_reanchor / hold / ...)
+    panel: Optional[dict] = None             # PANEL (2026-10-01): {name: (wins, finished)} vs the fixed checkpoints
 
     def to_obj(self) -> dict:
         return {"generation": self.generation, "n_trajectories": self.n_trajectories,
                 "scripted_wins": self.scripted_wins, "scripted_games": self.scripted_games,
                 "model_elo": self.model_elo, "verdict": self.verdict,
                 "promoted": self.promoted, "champion_elo": self.champion_elo, "hof": self.hof,
+                "reason": self.reason,
+                "panel": {k: list(v) for k, v in self.panel.items()} if self.panel else None,
                 "update_stats": {k: v for k, v in self.update_stats.items()
                                  if isinstance(v, (int, float))}}
 
@@ -380,7 +388,8 @@ class GenerationRecord:
                    scripted_games=int(d.get("scripted_games", 0)),
                    model_elo=d.get("model_elo"), verdict=d.get("verdict", "hold"),
                    promoted=bool(d.get("promoted", False)),
-                   champion_elo=d.get("champion_elo"), hof=d.get("hof"),
+                   champion_elo=d.get("champion_elo"), hof=d.get("hof"), reason=d.get("reason"),
+                   panel={k: tuple(v) for k, v in d["panel"].items()} if d.get("panel") else None,
                    update_stats=d.get("update_stats", {}))
 
 
@@ -497,3 +506,84 @@ def operator_alert(history, *, revert_limit: int = 3, stall_limit: int = 25,
         return (f"OPERATOR ALERT: champion frozen {since} gens (no promotion) — check the h2h "
                 f"trend: a genuine plateau (backstop should fire) or stuck?")
     return None
+
+
+# ── plateau stop (2026-09-30: stop a run that has stopped improving; saves power) ──
+# A plateau RE-ANCHOR crowns a lateral successor because the climb STALLED — it is not an improvement,
+# so it does not reset the clock. Calibrated on the two full W2 runs (40 gens each):
+#   era5b  real new champions 0/6/8/28 (the 8→28 gap = 20 gens; gen 28 = the only ladder-positive arm)
+#   bcft   real new champions 0/2/4, then only re-anchors (23, 34)
+# patience 20 keeps era5b's gen 28 by ONE generation; the default 25 keeps it with margin and would
+# have stopped bcft after gen 29 (10 of 40 gens saved).
+LATERAL_PROMOTE_REASONS = ("plateau_reanchor",)
+
+
+def _promote_reason(rec) -> Optional[str]:
+    return getattr(rec, "reason", None) or (getattr(rec, "hof", None) or {}).get("promote_reason")
+
+
+def plateau_stop(history, patience: int) -> Optional[str]:
+    """The stop reason when the last REAL new champion is ``patience`` or more generations old, else
+    None. ``patience`` <= 0 disables it. Old records without a stored reason count as real (fail-safe:
+    a resumed pre-2026-09-30 run never stops early because of missing data)."""
+    recs = getattr(history, "records", None) or []
+    if not patience or patience <= 0 or not recs:
+        return None
+    last = None
+    for r in recs:
+        if r.promoted and _promote_reason(r) not in LATERAL_PROMOTE_REASONS:
+            last = r.generation
+    since = recs[-1].generation - last if last is not None else len(recs)
+    if since < patience:
+        return None
+    return (f"no real improvement for {since} generations (last real new champion: "
+            f"{'gen ' + str(last) if last is not None else 'none'}; re-anchors don't count)")
+
+
+PANEL_PREFIX = "panel:"                   # eval result keys "panel:<name>" (mp_eval)
+
+
+# ── the PANEL yardstick (2026-10-01) ──────────────────────────────────────────────
+# A generation BEATS THE PANEL when its pooled win rate vs the fixed checkpoints (era2 + held-out clones,
+# random teams both sides) has a Wilson lower bound above 50 % — at 300 pooled games that needs ~55 %, i.e.
+# a change big enough to SEE, not a 1-2 pp drift (strategic review S5). The panel does NOT drive promotion;
+# it is the external yardstick, the early stop and the pick for the ladder.
+def panel_pooled(panel: Optional[dict]) -> Tuple[int, int]:
+    w = f = 0
+    for pw, pf in (panel or {}).values():
+        w += int(pw)
+        f += int(pf)
+    return w, f
+
+
+def panel_passed(panel: Optional[dict], z: float = 1.645) -> bool:
+    w, f = panel_pooled(panel)
+    return f > 0 and wilson_lower_bound(w, f, z) > 0.5
+
+
+def panel_stop(history, patience: int, z: float = 1.645) -> Optional[str]:
+    """The stop reason once ``patience`` panel-evaluated generations in a row (from the start, or since the
+    last one that beat the panel) failed to beat it; None otherwise / when ``patience`` <= 0."""
+    if not patience or patience <= 0:
+        return None
+    scored = [r for r in (getattr(history, "records", None) or []) if r.panel]
+    since = 0
+    for r in reversed(scored):
+        if panel_passed(r.panel, z):
+            break
+        since += 1
+    if since < patience:
+        return None
+    ever = [r.generation for r in scored if panel_passed(r.panel, z)]
+    return (f"{since} generations in a row did not beat the panel "
+            + (f"(last one that did: gen {ever[-1]})" if ever else "(none ever did)"))
+
+
+def best_panel_generation(history) -> Optional[Tuple[int, float, int]]:
+    """``(generation, pooled win rate, games)`` of the best panel-scored generation, or None."""
+    best = None
+    for r in getattr(history, "records", None) or []:
+        w, f = panel_pooled(r.panel)
+        if f > 0 and (best is None or w / f > best[1]):
+            best = (r.generation, w / f, f)
+    return best

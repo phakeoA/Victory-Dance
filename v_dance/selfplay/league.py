@@ -26,6 +26,14 @@ import numpy as np
 DEFAULT_SCRIPTED = ("random", "max_damage", "heuristic")
 
 
+def opp_key(kind: str, ref=None) -> str:
+    """Coverage key for one opponent (2026-09-30 preflight): ``latest`` / ``snapshot`` /
+    ``clone:<ckpt path>`` / ``scripted:<kind>`` — every clone and scripted anchor counted apart."""
+    if kind in ("clone", "scripted"):
+        return f"{kind}:{ref}"
+    return kind
+
+
 @dataclass
 class LeagueSnapshot:
     """A frozen past checkpoint in the pool."""
@@ -84,6 +92,16 @@ class OpponentLeague:
     snapshots: List[LeagueSnapshot] = field(default_factory=list)
     cfg: LeagueConfig = field(default_factory=LeagueConfig)
     clones: Tuple[str, ...] = ()        # checkpoint paths of the clone opponents (drawn uniformly)
+    # 2026-09-30: an ARCHETYPE clone plays teams of ITS OWN archetype (clone path -> pool teams; build_clone.
+    # clone_team_map). Its policy is only a small tilt off era2 (+1.8 pp on its archetype's held-out moves), so
+    # the TEAM carries most of the style. Unmapped clones (the nemesis) keep the pairing's team.
+    clone_teams: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
+    # Preflight (2026-09-30), NOT persisted: ``cover_kinds`` makes ``sample`` ROTATE through every
+    # opponent so a short check plays each one; ``played`` counts FINISHED games per ``opp_key`` (both
+    # collection paths fold into it), so an opponent whose games silently fail shows up as 0.
+    cover_kinds: bool = field(default=False, repr=False, compare=False)
+    played: Dict[str, int] = field(default_factory=dict, repr=False, compare=False)
+    _cover_i: int = field(default=0, repr=False, compare=False)
 
     # ── mixture (anchor decay tied to pool size) ──────────────────────────────
     def scripted_fraction(self) -> float:
@@ -117,6 +135,11 @@ class OpponentLeague:
     def sample(self, rng: np.random.Generator) -> Tuple[str, object]:
         """Draw one opponent. Returns ``("latest", latest_path)`` /
         ``("snapshot", LeagueSnapshot)`` / ``("clone", path)`` / ``("scripted", kind)``."""
+        if self.cover_kinds:
+            opts = self._cover_options()
+            spec = opts[self._cover_i % len(opts)]
+            self._cover_i += 1
+            return spec
         mix = self.mixture()
         u = float(rng.random())
         if u < mix["latest"]:
@@ -131,6 +154,34 @@ class OpponentLeague:
         if self.scripted:
             return ("scripted", self.scripted[int(rng.integers(len(self.scripted)))])
         return ("latest", self.latest_path)   # degenerate: no scripted, no snapshots
+
+    def opponent_team(self, spec: Tuple[str, object], team_b: str, rng: np.random.Generator) -> str:
+        """The opponent seat's team for a sampled ``spec``: a mapped clone draws from its archetype's
+        teams, everything else keeps the pairing's ``team_b``."""
+        if spec[0] == "clone":
+            pool = self.clone_teams.get(str(spec[1]))
+            if pool:
+                return pool[int(rng.integers(len(pool)))]
+        return team_b
+
+    # ── preflight coverage (2026-09-30) ───────────────────────────────────────
+    def _cover_options(self) -> List[Tuple[str, object]]:
+        """Every opponent ``sample`` can currently return — the newest snapshot stands for the pool,
+        clones only when their share is > 0 (the same condition ``mixture`` uses)."""
+        opts: List[Tuple[str, object]] = [("latest", self.latest_path)]
+        if self.snapshots:
+            opts.append(("snapshot", self.snapshots[-1]))
+        if self.clones and self.cfg.clone_frac > 0:
+            opts += [("clone", c) for c in self.clones]
+        opts += [("scripted", s) for s in self.scripted]
+        return opts
+
+    def opponent_keys(self) -> List[str]:
+        return [opp_key(k, v if k in ("clone", "scripted") else None) for k, v in self._cover_options()]
+
+    def note_played(self, counts: Dict[str, int]) -> None:
+        for k, v in (counts or {}).items():
+            self.played[k] = self.played.get(k, 0) + int(v or 0)
 
     # ── mutation (admission / promotion / result recording) ───────────────────
     def admit(self, snapshot_id: str, path: str, generation: int, elo: float = 1000.0,
@@ -166,6 +217,16 @@ class OpponentLeague:
         evicted = [s for i, s in enumerate(self.snapshots) if i not in keep]
         self.snapshots = [s for i, s in enumerate(self.snapshots) if i in keep]
         return evicted
+
+    def drop_missing(self, exists: Callable = None) -> List[LeagueSnapshot]:
+        """Remove (and return) members whose checkpoint file is gone — a resume from an older snapshot can list
+        members a later generation evicted (2026-10-01: gen15 → an opponent with no model, stalled chunks)."""
+        import os
+        exists = exists or os.path.exists
+        gone = [s for s in self.snapshots if not exists(s.path)]
+        if gone:
+            self.snapshots = [s for s in self.snapshots if exists(s.path)]
+        return gone
 
     def promote_latest(self, new_path: str, *, demote_old_as: Optional[str] = None,
                        generation: int = 0, elo: float = 1000.0) -> None:
@@ -221,7 +282,8 @@ class OpponentLeague:
                         "scripted_decay_per_snapshot": c.scripted_decay_per_snapshot,
                         "pfsp_power": c.pfsp_power, "pfsp_floor": c.pfsp_floor,
                         "pfsp_decay": c.pfsp_decay, "clone_frac": c.clone_frac},
-                "clones": list(self.clones)}
+                "clones": list(self.clones),
+                "clone_teams": {k: list(v) for k, v in self.clone_teams.items()}}
 
     @classmethod
     def from_obj(cls, d: dict) -> "OpponentLeague":
@@ -229,7 +291,8 @@ class OpponentLeague:
                    scripted=tuple(d.get("scripted", DEFAULT_SCRIPTED)),
                    snapshots=[LeagueSnapshot.from_obj(s) for s in d.get("snapshots", [])],
                    cfg=LeagueConfig(**d.get("cfg", {})),
-                   clones=tuple(d.get("clones", ())))
+                   clones=tuple(d.get("clones", ())),
+                   clone_teams={k: tuple(v) for k, v in (d.get("clone_teams") or {}).items()})
 
 
 def make_league_opponent(spec: Tuple[str, object], *, username: str, team,

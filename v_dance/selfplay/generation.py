@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-from v_dance.selfplay.league import OpponentLeague
+from v_dance.selfplay.league import OpponentLeague, opp_key
 # The GATE + history bookkeeping live in gate.py (pure, offline-tested). Re-exported here so
 # existing `from ...generation import promotion_gate / GenerationHistory / GateConfig / ...`
 # imports keep working unchanged after the split (sec 16).
@@ -35,7 +35,8 @@ from v_dance.selfplay.gate import (  # noqa: F401,E402
     SCRIPTED_OPPONENTS, _two_prop_se, wilson_lower_bound, wilson_upper_bound,
     GateConfig, promotion_gate, is_plateau, GateConfigV2, promotion_gate_v2,
     HoFConfig, cluster_hof_suspects, hall_of_fame_gate,
-    aggregate_scripted, aggregate_prev_best, operator_alert,
+    aggregate_scripted, aggregate_prev_best, operator_alert, plateau_stop,
+    PANEL_PREFIX, panel_pooled, panel_passed, panel_stop, best_panel_generation,
     GenerationRecord, GenerationHistory, GenConfig,
 )
 # Phase-2 HoF LIVE orchestration (pure gate logic stays in gate.py); re-exported so existing
@@ -113,7 +114,7 @@ def run_generation(
     collect_fn: Callable, eval_fn: Callable, save_fn: Callable,
     restore_fn: Optional[Callable] = None, cleanup_fn: Optional[Callable] = None,
     hof_eval_fn: Optional[Callable] = None,
-    status=None, cfg: GenConfig = GenConfig(),
+    status=None, cfg: GenConfig = GenConfig(), keep_fn: Optional[Callable] = None,
 ) -> dict:
     """Run ONE generation. Injected live steps:
       * ``collect_fn(actor_critic, league, gen) -> (trajectories, source_counts)``
@@ -177,6 +178,8 @@ def run_generation(
     results, elo = eval_fn(candidate, pb_path)
     sw, sg = aggregate_scripted(results)
     pbw, pbg = aggregate_prev_best(results)
+    panel = {k[len(PANEL_PREFIX):]: (int(w), int(f)) for k, (w, f) in results.items()
+             if str(k).startswith(PANEL_PREFIX)} or None
     mirror_rate = (pbw / pbg) if pbg else None
     have_champion = history.best_path is not None
 
@@ -216,6 +219,14 @@ def run_generation(
         league.reset_pfsp()
         history.h2h_history = []                 # abandon the climb (restored policy == champion)
 
+    # 2026-10-01: a generation that BEAT THE PANEL is copied out (``keep_fn``) BEFORE the revert cleanup below and
+    # before any later league eviction can delete it (league run 2 lost gen 21, a panel pass, exactly that way).
+    if keep_fn is not None and panel and panel_passed(panel):
+        try:
+            keep_fn(candidate, gen)
+        except Exception:
+            log.warning("could not keep the panel-passing candidate %s", candidate, exc_info=True)
+
     # T4.2: a REVERTED candidate gen{N}.pt was written by save_fn but never admitted to the league, so
     # cleanup_fn (which only deletes EVICTED league snapshots) never reaches it → a ~21MB orphan per
     # collapse-revert. Unlink it here (live run only; guarded to never touch the restored champion).
@@ -236,10 +247,11 @@ def run_generation(
     rec = GenerationRecord(generation=gen, n_trajectories=len(trajectories),
                            scripted_wins=sw, scripted_games=sg, model_elo=elo,
                            verdict=verdict, promoted=promoted, update_stats=update_stats,
-                           champion_elo=history.champion_elo, hof=hof_stats)
+                           champion_elo=history.champion_elo, hof=hof_stats, reason=hof_reason,
+                           panel=panel)
     history.add(rec)
     return {"generation": gen, "verdict": verdict, "promoted": promoted,
-            "reason": hof_reason,
+            "reason": hof_reason, "panel": panel,
             "scripted_win_rate": (sw / sg) if sg else None, "model_elo": elo,
             "champion_elo": history.champion_elo, "mirror_win_rate": mirror_rate,
             "league_size": len(league.snapshots), "gate": gate_stats, "hof": hof_stats,
@@ -260,6 +272,11 @@ def print_generation_report(rep: dict) -> None:
     print(f"  gen {rep['generation']:>2} | {rep['n_trajectories']:>4} trajs | "
           f"scripted {wr_s:>6}{mwr_s} | Elo {elo_s:>5}{celo_s} | {rep['verdict'].upper():7s}{reason_s} | "
           f"league={rep['league_size']}")
+    if rep.get("panel"):
+        w, f = panel_pooled(rep["panel"])
+        per = "  ".join(f"{n} {pw}/{pf}" for n, (pw, pf) in rep["panel"].items())
+        print(f"        PANEL {w}/{f} = {w / f * 100 if f else 0:.1f}%"
+              f" {'BEATS THE PANEL' if panel_passed(rep['panel']) else '(not above 50 % yet)'} | {per}")
     # fs-monitor: only surface the edge tally when something actually fired (keeps the happy path quiet).
     # Display-order keys first, then any dynamically-captured non-model label not in the known set.
     fs = rep.get("fs_monitor") or {}
@@ -295,8 +312,9 @@ def build_collection_chunks(league, team_pool, n_games, *, chunk_size, matchup_s
             cn = min(chunk_size, remaining)
             remaining -= cn
             uid += 1
-            chunks.append({"team_a": team_a, "team_b": team_b, "cn": cn,
-                           "spec": league.sample(rng), "uid": uid})
+            spec = league.sample(rng)
+            tb = league.opponent_team(spec, team_b, rng) if hasattr(league, "opponent_team") else team_b
+            chunks.append({"team_a": team_a, "team_b": tb, "cn": cn, "spec": spec, "uid": uid})
     return chunks
 
 
@@ -394,6 +412,9 @@ async def collect_with_league(actor_critic, league: OpponentLeague, n_games: int
                         if _norm_tag(_t.meta.battle_id) in _opp_ff:
                             _t.meta.terminal_type = "fallback"
             trajectories.extend(our_trajs.values())
+            if hasattr(league, "note_played"):                  # preflight coverage (finished games)
+                league.note_played({opp_key(kind, spec[1] if kind in ("clone", "scripted") else None):
+                                    len(our_trajs)})
             prog["games"] += cn
             for _t in our_trajs.values():
                 if _t.meta.won is not None:
@@ -727,6 +748,9 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                          snapshot_path=None, max_hours=None, spawn_rooms: int = 0,
                          own_team=None, own_mirror_frac: float = 0.2, opp_weights=None,
                          league_clones=(), clone_frac: float = 0.0,
+                         stop_after_stale: int = 0, cover_kinds: bool = False,
+                         clone_own_teams: bool = True, panel=None, panel_battles: int = 100,
+                         panel_patience: int = 5, panel_team_pool=None,
                          register_arms: bool = False,
                          register_prefix: str = "era5b_g",
                          bandit_config=None) -> dict:
@@ -779,6 +803,10 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
     # submit, after the server is up — and is torn down in the finally. procs=1 keeps the asyncio
     # path verbatim (zero behaviour change).
     _mp = bool(collect_procs and int(collect_procs) > 1)
+    if panel and not _mp:                              # the panel rides the multiprocess eval batch
+        print("[gen] FATAL: --panel needs --collect-procs >= 2 (its games run in parallel on the worker "
+              "pool; the single-process path has no panel)", file=sys.stderr)
+        sys.exit(2)
     pool = MP.CollectionPool(int(collect_procs)) if _mp else None
     if _mp:
         MP.sweep_mp_ckpts(archive)   # reclaim any per-gen worker ckpts orphaned by a prior crash
@@ -840,10 +868,28 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                                               device=device)
         print(f"[resume] loaded {Path(_resume_path).name} — continuing at generation "
               f"{history.generation} (league={len(league.snapshots)})")
+        # 10-01: a snapshot can list league members whose checkpoint a LATER generation evicted (resume --resume-gen N
+        # after the run went past N). Playing them = an opponent with no model that never moves ("NO model loaded")
+        # → stalled chunks + junk PFSP. Drop them LOUDLY; champions are never evicted, so the gate target survives.
+        _gone = league.drop_missing()
+        if _gone:
+            print(f"[resume] ⚠ dropped {len(_gone)} league member(s) whose checkpoint no longer exists: "
+                  f"{', '.join(s.snapshot_id for s in _gone)} (league={len(league.snapshots)})")
     if league_clones:                                  # league P1 (2026-09-30): behaviour-cloned human opponents
         league.clones = tuple(str(p) for p in league_clones)
         league.cfg.clone_frac = float(clone_frac)
         print(f"[league] {len(league.clones)} clone opponent(s) at {league.cfg.clone_frac:.0%} of games")
+        league.clone_teams = {}
+        if clone_own_teams:                            # an archetype clone plays ITS archetype's pool teams
+            from v_dance.selfplay.build_clone import clone_archetype, clone_team_map
+            league.clone_teams = {k: tuple(v) for k, v in clone_team_map(league.clones, team_pool).items()}
+            for c in league.clones:
+                a, n = clone_archetype(c), len(league.clone_teams.get(c, ()))
+                print(f"[league]   {Path(c).parent.name}: "
+                      + (f"archetype {a} -> {n} pool team(s)" if n else
+                         "no archetype -> the pairing's team" if a is None else
+                         f"archetype {a} -> NO pool team of its own, uses the pairing's team"))
+    league.cover_kinds = bool(cover_kinds)             # preflight: rotate through every opponent
     stop = RS.StopController(max_hours=max_hours)
     status = LiveStatus(archive / "status.json", min_interval=0.5)   # live feed; throttled (3c.8c)
     status.start_run(n_generations, hours=max_hours)
@@ -943,7 +989,9 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                 live_dir=_eval_live, save_replays=save_replays,
                 generation=history.generation,   # 22d: gen-keyed account names
                 ports=_pool_ports,               # 22f: spread eval workers across the pool
-                own_team=own_team)               # W2: own seat vs the eval pool, mirror own-vs-own
+                own_team=own_team,               # W2: own seat vs the eval pool, mirror own-vs-own
+                panel=panel, panel_battles=panel_battles,   # 10-01: the fixed PANEL, same parallel batch
+                panel_team_pool=panel_team_pool)
             out = (results, GA.model_elo(results))
             _eval_label = f"{int(collect_procs)} procs"
         else:
@@ -981,6 +1029,14 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
         n = sum(g for _i, _w, g in out)
         print(f"   HoF eval: {len(out)} past champions, {n} games in {dt:.1f}s")
         return out
+
+    def keep_fn(candidate_path, gen):
+        # 10-01: a panel-passing generation is copied OUT of the evictable league into panel_pass/ (never pruned)
+        import shutil as _sh
+        dst = archive / "panel_pass" / f"gen{gen}.pt"
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        _sh.copy2(candidate_path, dst)
+        print(f"        PANEL PASS -> kept a copy: {dst.relative_to(archive).as_posix()} (never evicted)")
 
     def restore_fn(ac_, path):
         ac_.restore_from(path)        # reload champion policy + critic (collapse recovery)
@@ -1076,7 +1132,7 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                                  eval_fn=eval_fn, save_fn=save_fn, restore_fn=restore_fn,
                                  cleanup_fn=cleanup_fn,
                                  hof_eval_fn=(hof_run if gen_cfg.hof.enabled else None),
-                                 status=status, cfg=gen_cfg)
+                                 status=status, cfg=gen_cfg, keep_fn=(keep_fn if panel else None))
             print_generation_report(rep)
             if register_arms and rep.get("promoted"):
                 # W2: hand the PROMOTED snapshot to the serve-side bandit as an argmax arm, so the
@@ -1131,6 +1187,16 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
             status.phase("idle", generation=rep["generation"])
             reports.append(rep)
             done += 1
+            _pwhy = panel_stop(history, panel_patience) if panel else None
+            if _pwhy:
+                print(f"\n  [stop] PANEL: {_pwhy} — ending the run (--panel-patience {panel_patience}; 0 = off)")
+                break
+            _why = plateau_stop(history, stop_after_stale)
+            if _why:
+                print(f"\n  [stop] {_why} — ending the run to save power "
+                      f"(--stop-after-stale {stop_after_stale}; to keep going anyway: "
+                      f"--resume-gen latest --stop-after-stale 0)")
+                break
     finally:
         status.finish_run()
         _save()                              # final flush (also on Ctrl-C / exception)
@@ -1143,6 +1209,12 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
           f"{_latest.name if _latest else '(none)'}  (resume with --resume-gen latest)")
     print(f"  Elo curve: {[(g, round(e) if e else None) for g, e in history.elo_curve()]}")
     print(f"  league   : {[s.snapshot_id for s in league.snapshots]}")
+    _bp = best_panel_generation(history)
+    if _bp:
+        _passed = [r.generation for r in history.records if r.panel and panel_passed(r.panel)]
+        print(f"  PANEL    : best gen {_bp[0]} at {_bp[1] * 100:.1f}% over {_bp[2]} games; beat the panel: "
+              f"{_passed if _passed else 'NO generation'}  (curve: "
+              f"{[(r.generation, round(panel_pooled(r.panel)[0] / max(1, panel_pooled(r.panel)[1]) * 100)) for r in history.records if r.panel]})")
     return {"history": history, "league": league, "reports": reports,
             "snapshot": str(_latest) if _latest else None}
 
@@ -1226,7 +1298,36 @@ def _dry_run(n_generations: int = 6, seed: int = 0) -> None:
     print("============================================================")
 
 
+def parse_panel(items) -> dict:
+    """``--panel NAME=CKPT …`` -> ``{name: path}`` (insertion order kept). A missing file or a malformed item
+    is a launch-time error (exit 2), never a panel that silently plays 0 games."""
+    out = {}
+    for it in items or ():
+        name, sep, path = str(it).partition("=")
+        if not sep or not name or not path:
+            print(f"[gen] FATAL: --panel item {it!r} is not NAME=CHECKPOINT", file=sys.stderr)
+            sys.exit(2)
+        if not Path(path).exists():
+            print(f"[gen] FATAL: --panel {name}: checkpoint not found: {path}", file=sys.stderr)
+            sys.exit(2)
+        out[name] = path
+    return out
+
+
 def _launch_live(args):
+    """``--live`` / ``--wizard`` entry: the PREFLIGHT (2026-09-30, ``v_dance/selfplay/preflight.py``)
+    first when wanted — a ~minutes-long mini run through every code path the long run will hit — and
+    the real run only if it passes."""
+    from v_dance.selfplay import preflight as PF
+    if PF.wanted(args):
+        if not PF.run_preflight(args, _launch_live_core):
+            sys.exit(3)
+        if getattr(args, "preflight_only", False):
+            return None
+    return _launch_live_core(args)
+
+
+def _launch_live_core(args):
     """Apply the resource budget + build the configs and run the live generation loop for a
     parsed ``args`` namespace. Shared by ``--live`` and the ``--wizard`` interactive launcher."""
     import logging as _logging
@@ -1290,11 +1391,13 @@ def _launch_live(args):
     print(f"   exploration (sec 12): KL-to-BC coef={ppo_cfg.kl_coef} "
           f"target_kl_bc={'off' if not train_cfg.target_kl_from_bc else train_cfg.target_kl_from_bc} "
           f"min_ev={'off' if train_cfg.min_explained_variance is None else train_cfg.min_explained_variance} {_tau_desc}")
+    if getattr(args, "no_mirror_revert", False):       # 10-01: the one-team mirror can no longer reset the learner
+        args.run_cfg_gate = {**(getattr(args, "run_cfg_gate", None) or {}), "mirror_revert": False}
     _gc = GateConfigV2(**(getattr(args, "run_cfg_gate", None) or {}))
     # #06: a sub-floor --mirror-battles SILENTLY disables beat_champion AND mirror-collapse-revert (both
     # require the games floor), leaving only the plateau-reanchor backstop active on a noisy small sample.
     # Refuse a real run below the floor unless the operator explicitly opts in for a smoke.
-    _mirror_floor = max(_gc.min_h2h_games, _gc.mirror_collapse_min_games)
+    _mirror_floor = max(_gc.min_h2h_games, _gc.mirror_collapse_min_games if _gc.mirror_revert else 0)
     if args.mirror_battles < _mirror_floor:
         _m = (f"--mirror-battles={args.mirror_battles} < gate floor (min_h2h_games={_gc.min_h2h_games}, "
               f"mirror_collapse_min_games={_gc.mirror_collapse_min_games}): beat_champion AND "
@@ -1307,7 +1410,8 @@ def _launch_live(args):
                   f"--mirror-battles to >= {_mirror_floor}.", file=sys.stderr)
             sys.exit(2)
     print(f"   gate (sec 16): frozen-champion ladder — beat_champion >= {_gc.promote_threshold:.2f} over "
-          f"{args.mirror_battles} mirror games; mirror-collapse revert < {0.5 - _gc.mirror_collapse_margin:.2f}; "
+          f"{args.mirror_battles} mirror games; mirror-collapse revert "
+          f"{('< %.2f' % (0.5 - _gc.mirror_collapse_margin)) if _gc.mirror_revert else 'OFF (--no-mirror-revert: a collapse only holds)'}; "
           f"prev_best mirror = {'ON' if args.prev_best else 'OFF (pure scripted ladder)'}")
     print(f"   HoF (Phase 2): {'ON' if args.hof else 'OFF'} — not-lose to last {args.hof_champions} "
           f"past champions @ {args.hof_games} games each"
@@ -1332,7 +1436,20 @@ def _launch_live(args):
               f"{args.collect_async} battles each (~{args.collect_procs * args.collect_async} "
               f"concurrent, ~{round(args.collect_procs * 0.6, 1)}GB RAM) — GIL-free per process "
               f"(probe 14a ~5x). [supersedes --collect-workers]")
-    run_live_generations(
+    _panel = parse_panel(getattr(args, "panel", None))
+    _panel_pool = None
+    if _panel:
+        import v_dance.play.run_local_battle as _R
+        from v_dance.formats import default_format as _dfmt
+        _panel_pool = sorted(_R.discover_teams(reg=args.battle_format or _dfmt())) or train_pool   # this reg's own teams
+        print(f"   PANEL (10-01): every gen also plays {args.panel_battles} games vs EACH of "
+              f"{', '.join(_panel)} on random {len(_panel_pool)}-team pairings, in the eval's parallel batch; "
+              f"stop after {args.panel_patience} gens in a row that don't beat it (0 = never)")
+    _stale = int(getattr(args, "stop_after_stale", 0) or 0)
+    print(f"   plateau stop: "
+          + (f"end the run after {_stale} gens with no REAL new champion (re-anchors don't count)"
+             if _stale > 0 else "OFF (--stop-after-stale 0)"))
+    return run_live_generations(
         Path(args.ckpt), n_generations=n_gen, team_pool=train_pool,
         eval_team_pool=eval_pool,
         team_chooser=args.team_chooser, archive_dir=args.archive,
@@ -1353,6 +1470,10 @@ def _launch_live(args):
         spawn_rooms=args.spawn_rooms,
         own_team=_own, own_mirror_frac=args.own_mirror, opp_weights=_opp_w,
         league_clones=args.league_clones or (), clone_frac=args.clone_frac,
+        stop_after_stale=_stale, cover_kinds=bool(getattr(args, "cover_kinds", False)),
+        clone_own_teams=bool(getattr(args, "clone_own_teams", True)),
+        panel=_panel or None, panel_battles=int(getattr(args, "panel_battles", 100) or 0),
+        panel_patience=int(getattr(args, "panel_patience", 0) or 0), panel_team_pool=_panel_pool,
         register_arms=args.register_arms, register_prefix=args.register_prefix,
         bandit_config=args.bandit_config,
         snapshot_path=args.snapshot, max_hours=args.hours)
@@ -1719,6 +1840,30 @@ if __name__ == "__main__":
                     help="(deprecated; ignored) snapshots are now per-gen snap_gen{N}.pt in <archive>/sub_checkpoints/")
     ap.add_argument("--hours", type=float, default=None,
                     help="stop cleanly after ~this many wall-clock hours (between gens)")
+    ap.add_argument("--stop-after-stale", type=int, default=25,
+                    help="end the run once this many generations pass with no REAL new champion "
+                         "(plateau re-anchors don't count) — saves power on a run that stopped "
+                         "improving. Default 25 (calibrated on the two W2 runs); 0 = off.")
+    ap.add_argument("--panel", nargs="+", default=None, metavar="NAME=CKPT",
+                    help="the fixed PANEL yardstick (10-01): every generation also plays these checkpoints "
+                         "(e.g. era2 + the held-out clones) on RANDOM teams for both sides, in the eval's "
+                         "parallel batch (needs --collect-procs >= 2). A gen BEATS the panel when its pooled "
+                         "win rate's 95 %% lower bound is above 50 %%.")
+    ap.add_argument("--no-mirror-revert", action="store_true",
+                    help="a MIRROR collapse (the candidate losing the one-team mirror to the frozen champion) only "
+                         "HOLDS instead of reverting — the learner is never reset by it. The scripted-collapse revert "
+                         "stays. Use with --panel (the fair yardstick); 10-01: the mirror reverted a panel-passing gen.")
+    ap.add_argument("--panel-battles", type=int, default=100,
+                    help="panel games vs EACH panel checkpoint per generation (default 100; 4 per team pairing)")
+    ap.add_argument("--panel-patience", type=int, default=5,
+                    help="end the run after this many generations in a row that do NOT beat the panel "
+                         "(from the start, or since the last one that did). Default 5; 0 = never stop on it.")
+    ap.add_argument("--preflight", default="auto", choices=["auto", "on", "off"],
+                    help="before the real run, play a ~minutes-long mini run through every code path "
+                         "(3 gens + a resume, every opponent incl. each clone, promote, HoF, save) and "
+                         "abort if anything breaks. auto = on for runs longer than 3 generations.")
+    ap.add_argument("--preflight-only", action="store_true",
+                    help="run just the preflight and exit (0 = pass, 3 = fail)")
     ap.add_argument("--prev-best", action=argparse.BooleanOptionalAction, default=True,
                     help="use the prev_best head-to-head promotion bar (sec 16: lets a gen "
                          "promote past a scripted plateau by beating the accepted-best mirror). "
@@ -1730,6 +1875,9 @@ if __name__ == "__main__":
     ap.add_argument("--clone-frac", type=float, default=0.3,
                     help="share of games vs --league-clones (ignored without clones; default 0.3 = "
                          "the design's archetype 30 %%; the nemesis counts as a human-style clone)")
+    ap.add_argument("--clone-own-teams", action=argparse.BooleanOptionalAction, default=True,
+                    help="an ARCHETYPE clone plays teams of its own archetype from the training pool (the "
+                         "team carries most of its style); --no-clone-own-teams = the pairing's team")
     ap.add_argument("--hof", action=argparse.BooleanOptionalAction, default=True,
                     help="Phase-2 HoF breadth veto: on a PROMOTE, ALSO require the candidate to "
                          "not-LOSE to its last --hof-champions PAST champions (catches lineage "

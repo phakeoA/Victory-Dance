@@ -110,6 +110,46 @@ def side_archetypes(sources: list[Path], artifact_path: Path, limit_files: int |
     return side
 
 
+def clone_archetype(ckpt_path) -> int | None:
+    """The archetype id an archetype clone was trained on (from its ``..._clone_archNN_k10_...`` folder), else None."""
+    import re
+    m = re.search(r"clone_arch(\d+)_k10", str(Path(ckpt_path).as_posix()))
+    return int(m.group(1)) if m else None
+
+
+def _team_archetype_fn(artifact_path: Path = ARCH_ARTIFACT):
+    """team paste path -> archetype id (mon-slice nearest centroid; the serve-side assigner)."""
+    from v_dance.datatools.team_archetypes import assign_team_sheet, load_artifact
+    from v_dance.dex.team_sheet import parse_showdown_team
+    from v_dance.encoders.state_encoder import StateEncoder
+    art, enc = load_artifact(str(artifact_path)), StateEncoder()
+
+    def fn(team_path) -> int | None:
+        try:
+            mons = parse_showdown_team(Path(team_path).read_text(encoding="utf-8"))
+            return int(assign_team_sheet(mons, art, encoder=enc)[0]) if mons else None
+        except Exception:
+            return None
+    return fn
+
+
+def clone_team_map(clone_paths, team_pool, team_archetype=None) -> dict:
+    """{clone path: [pool teams of that clone's archetype]} for the ARCHETYPE clones (the league's
+    ``clone_teams``). Clones without an archetype (the nemesis) or with no matching pool team are left out,
+    so they keep the pairing's team."""
+    arch = {str(p): clone_archetype(p) for p in clone_paths}
+    if not any(a is not None for a in arch.values()):
+        return {}
+    fn = team_archetype or _team_archetype_fn()
+    team_z = {t: fn(t) for t in team_pool}
+    out = {}
+    for p, a in arch.items():
+        teams = [t for t, z in team_z.items() if a is not None and z == a]
+        if teams:
+            out[p] = teams
+    return out
+
+
 def split_by_archetype(sources: list[Path], side: dict, out_root: Path) -> dict:
     """Write each assigned SIDE's rows to out_root/aNN/{train,val}/<replay>_<side>.jsonl; returns {(a, split): n}."""
     from collections import Counter, defaultdict

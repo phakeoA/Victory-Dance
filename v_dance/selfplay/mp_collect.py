@@ -32,6 +32,7 @@ from typing import Callable, List, Optional, Tuple
 from v_dance.play.parallel_battles import (close_players, collect_account_names, gen_salt,
                                            play_pairing, run_jobs)
 from v_dance.rl.collector import align_paired_trajectories   # pure (poke-env-free)
+from v_dance.selfplay.league import opp_key                  # pure (numpy only)
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 log = logging.getLogger(__name__)
@@ -72,6 +73,7 @@ class WorkerResult:
     source_counts: dict = field(default_factory=dict)
     pfsp: List[Tuple[str, bool]] = field(default_factory=list)
     n_games: int = 0
+    kind_games: dict = field(default_factory=dict)   # finished games per league.opp_key (preflight coverage)
 
 
 def _spec_from_sample(sample, team_a: str, team_b: str, n: int, uid: int, gen: int) -> ChunkSpec:
@@ -111,7 +113,9 @@ def build_chunk_specs(league, team_pool, n_games: int, *, chunk_size: int = 10,
             cn = min(chunk_size, remaining)
             remaining -= cn
             uid += 1
-            spec = _spec_from_sample(league.sample(rng), team_a, team_b, cn, uid, gen)
+            sample = league.sample(rng)
+            tb = league.opponent_team(sample, team_b, rng) if hasattr(league, "opponent_team") else team_b
+            spec = _spec_from_sample(sample, team_a, tb, cn, uid, gen)
             spec.spawn_rooms = max(0, int(spawn_rooms or 0))
             specs.append(spec)
     return specs
@@ -136,6 +140,7 @@ def merge_results(results) -> WorkerResult:
     sc: Counter = Counter()
     pfsp: List[Tuple[str, bool]] = []
     games = 0
+    kinds: Counter = Counter()
     for r in results:
         if r is None:
             continue
@@ -143,7 +148,8 @@ def merge_results(results) -> WorkerResult:
         sc.update(r.source_counts)
         pfsp.extend(r.pfsp)
         games += r.n_games
-    return WorkerResult(trajs, dict(sc), pfsp, games)
+        kinds.update(getattr(r, "kind_games", None) or {})
+    return WorkerResult(trajs, dict(sc), pfsp, games, dict(kinds))
 
 
 # ── collection dispatch (injected player factory → offline-testable) ───────────
@@ -176,6 +182,7 @@ async def _collect_specs(ac, specs: List[ChunkSpec], *, tau: float, seed: int,
     source_counts: Counter = Counter()
     pfsp: List[Tuple[str, bool]] = []
     games = {"n": 0}
+    kind_games: Counter = Counter()
     _spawn_fn = play_spawned or _play_spawned_real
 
     async def _run(spec: ChunkSpec):
@@ -215,6 +222,7 @@ async def _collect_specs(ac, specs: List[ChunkSpec], *, tau: float, seed: int,
                             _t.meta.terminal_type = "fallback"
             trajectories.extend(our_trajs.values())
             games["n"] += len(our_trajs)
+            kind_games[opp_key(spec.kind, spec.opp_ref)] += len(our_trajs)
             if spec.kind == "latest":
                 source_counts.update(getattr(opp, "_source_counts", {}) or {})
                 opp_trajs = opp.finished_trajectories()
@@ -232,7 +240,7 @@ async def _collect_specs(ac, specs: List[ChunkSpec], *, tau: float, seed: int,
             await close_players(our, opp)
 
     await run_jobs([lambda s=s: _run(s) for s in specs], workers=async_workers)
-    return WorkerResult(trajectories, dict(source_counts), pfsp, games["n"])
+    return WorkerResult(trajectories, dict(source_counts), pfsp, games["n"], dict(kind_games))
 
 
 def _build_players_real(ac, spec: ChunkSpec, tau: float, seed: int, team_chooser, live_dir=None,
@@ -533,6 +541,8 @@ def collect_with_pool(ac, league, n_games: int, *, team_pool, ckpt_path,
     merged = merge_results(raw)
     for snapshot_id, won in merged.pfsp:                 # PFSP update in MAIN (league stays here)
         league.record_result(snapshot_id, won)
+    if hasattr(league, "note_played"):                   # preflight coverage (offline fakes may lack it)
+        league.note_played(merged.kind_games)
     if status is not None:
         decided = won = 0
         for t in merged.trajectories:                    # final reconcile (covers the no-hook path)

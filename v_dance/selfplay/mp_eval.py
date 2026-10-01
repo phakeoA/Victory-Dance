@@ -41,6 +41,42 @@ class EvalSpec:
     n: int
     uid: int
     gen: int = 0
+    opp_ckpt: Optional[str] = None     # PANEL (2026-10-01): a fixed checkpoint opponent; kind = "panel:<name>"
+
+
+# ── the PANEL (2026-10-01) ─────────────────────────────────────────────────────
+# Every generation also plays a FIXED set of checkpoints (era2 + held-out clones) on RANDOM teams for
+# both sides — the yardstick self-play never had: its own gate (own-team mirror vs its previous best +
+# saturated scripted bots) rose all run while the champion stayed at 50 % vs era2. Panel games ride in
+# the SAME parallel batch as the gauntlet (one fan-out across the worker processes).
+from v_dance.selfplay.gate import PANEL_PREFIX   # noqa: E402  ("panel:"; gate.py is pure)
+
+
+def build_panel_specs(panel: dict, team_pool, battles_per_opponent: int, *, matchup_seed: int = 0,
+                      gen: int = 0, uid_start: int = 0, games_per_pairing: int = 4,
+                      own_team=None) -> List[EvalSpec]:
+    """``battles_per_opponent`` games vs EACH ``panel`` checkpoint (``{name: path}``), on random team
+    pairings (the same pairings for every opponent, so they are comparable), ``games_per_pairing``
+    games per pairing (each chunk builds two players that each load a checkpoint — 4 per pairing
+    cuts those loads 4x). ``own_team`` (the ladder shape): the candidate ALWAYS plays that team, the
+    opponent a random pool team (no mirrors)."""
+    from v_dance.eval.gauntlet import canonical_own_team, own_team_matchups, team_matchups
+    k = max(1, int(games_per_pairing))
+    n_pairs = max(1, int(battles_per_opponent) // k)
+    if own_team:
+        own = canonical_own_team(own_team, team_pool)
+        pairs = own_team_matchups(own, [t for t in team_pool if t != own], n_pairs, mirror_frac=0.0,
+                                  weights=None, seed=matchup_seed)
+    else:
+        pairs = team_matchups(team_pool, n_pairs, seed=matchup_seed)
+    specs: List[EvalSpec] = []
+    uid = int(uid_start)
+    for name, ckpt in panel.items():
+        for team_a, team_b, n in pairs:
+            uid += 1
+            specs.append(EvalSpec(PANEL_PREFIX + str(name), team_a, team_b, n * k, uid, gen,
+                                  opp_ckpt=str(ckpt)))
+    return specs
 
 
 def build_eval_specs(opponents, team_pool, battles_per_opponent: int, *, matchup_seed: int = 0,
@@ -147,15 +183,22 @@ def _build_eval_players_real(candidate, prev_best, team_chooser, spec: EvalSpec,
     model_name, opp_name = eval_account_names(spec.kind, uid, salt=gen_salt(spec.gen))
     # task E: file the saved replay under eval/<kind>/ (scripted) or eval/league/ (gen-vs-gen),
     # named gen<N>_vs_<kind|genM>; the live spectate JSON stays flat in live_dir (dashboard).
-    subdir, label = eval_replay_routing(spec.kind, _ckpt_gen(candidate),
-                                        opp_ref=(prev_best if spec.kind == "prev_best" else None))
+    if spec.opp_ckpt:                                  # PANEL: a fixed checkpoint opponent
+        subdir, label = "panel", f"gen{_ckpt_gen(candidate)}_vs_{spec.kind[len(PANEL_PREFIX):]}"
+    else:
+        subdir, label = eval_replay_routing(spec.kind, _ckpt_gen(candidate),
+                                            opp_ref=(prev_best if spec.kind == "prev_best" else None))
     rdir = str(Path(live_dir) / subdir) if (live_dir and save_replays) else None
     model_player = R.make_player(model_name, model_team, model_path=candidate,
                                  team_chooser_path=team_chooser,
                                  live_dir=live_dir, save_replays=save_replays,
                                  replay_dir=rdir, replay_label=label, port=port)
-    opp = _make_opponent(spec.kind, opp_name, opp_team,
-                         model_path=prev_best, team_chooser_path=team_chooser, port=port)
+    if spec.opp_ckpt:
+        opp = R.make_player(opp_name, opp_team, model_path=spec.opp_ckpt,
+                            team_chooser_path=team_chooser, port=port)
+    else:
+        opp = _make_opponent(spec.kind, opp_name, opp_team,
+                             model_path=prev_best, team_chooser_path=team_chooser, port=port)
     return model_player, opp
 
 
@@ -186,7 +229,8 @@ def eval_with_pool(candidate, *, opponents, team_pool, battles_per_opponent: int
                    matchup_seed: int = 0, battle_timeout: Optional[float] = 90.0,
                    n_procs: int = 4, async_per_proc: int = 3,
                    live_dir=None, save_replays: bool = False, generation: int = 0, ports=None,
-                   own_team=None):
+                   own_team=None, panel: Optional[dict] = None, panel_battles: int = 0,
+                   panel_team_pool=None, panel_games_per_pairing: int = 4, panel_own_team=None):
     """Multiprocess analogue of ``gauntlet.run_gauntlet`` (task #19). Pre-validates the candidate
     (+ prev_best) load LOUDLY in main, plans + partitions the gauntlet descriptors, ships them to
     the pool via the injected ``submit_fn`` (``pool.submit(payloads, worker_fn=eval_worker)``), and
@@ -200,6 +244,15 @@ def eval_with_pool(candidate, *, opponents, team_pool, battles_per_opponent: int
                              matchup_seed=matchup_seed, mirror_battles=mirror_battles,
                              gen=generation, own_team=own_team,
                              n_ways=max(1, int(n_procs) * int(async_per_proc)))
+    panel_kinds = []
+    if panel and int(panel_battles) > 0:
+        for p in panel.values():
+            model_io.load_bc_policy(str(p))            # a broken panel ckpt fails LOUD, not as 0/0 games
+        specs += build_panel_specs(panel, panel_team_pool or team_pool, int(panel_battles),
+                                   matchup_seed=matchup_seed, gen=generation,
+                                   uid_start=max((s.uid for s in specs), default=0),
+                                   games_per_pairing=panel_games_per_pairing, own_team=panel_own_team)
+        panel_kinds = [PANEL_PREFIX + str(n) for n in panel]
     batches = partition_specs(specs, n_procs)
     pb = str(prev_best) if prev_best else None
     tc = str(team_chooser) if team_chooser else None
@@ -210,6 +263,6 @@ def eval_with_pool(candidate, *, opponents, team_pool, battles_per_opponent: int
                  bool(save_replays), (_ports[i % len(_ports)] if _ports else None))
                 for i, batch in enumerate(batches)]
     results, source = merge_eval_results(submit_fn(payloads, worker_fn=eval_worker))
-    for kind in opponents:
+    for kind in list(opponents) + panel_kinds:
         results.setdefault(kind, (0, 0))             # a fully-dropped opponent reads 0/0, not absent
     return results, source
