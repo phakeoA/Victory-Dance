@@ -4,50 +4,50 @@ EVs: 2 HP / 32 SpA / 32 Spe
 Timid Nature
 - Hyper Voice
 - Draco Meteor
-- Tailwind
+- Flamethrower
+- Protect
+
+Sneasler @ White Herb
+Ability: Unburden
+EVs: 20 HP / 10 Atk / 1 Def / 5 SpD / 30 Spe
+Adamant Nature
+- Dire Claw
+- Coaching
+- Protect
+- Close Combat
+
+Indeedee @ Choice Scarf
+Ability: Psychic Surge
+EVs: 2 Def / 32 SpA / 32 Spe
+Modest Nature
+- Expanding Force
+- Mystical Fire
+- Trick
 - Protect
 
 Tyranitar @ Tyranitarite
 Ability: Sand Stream
-EVs: 2 HP / 32 Atk / 32 Spe
-Adamant Nature
+EVs: 17 HP / 17 Atk / 32 Spe
+Jolly Nature
 - Rock Slide
 - Knock Off
 - Low Kick
 - Protect
 
+Corviknight @ Psychic Seed
+Ability: Mirror Armor
+EVs: 32 HP / 1 Atk / 1 Def / 15 SpD / 17 Spe
+Careful Nature
+- Brave Bird
+- Power Trip
+- Roost
+- Bulk Up
+
 Excadrill @ Focus Sash
 Ability: Sand Rush
 EVs: 2 HP / 32 Atk / 32 Spe
-Adamant Nature
+Jolly Nature
 - Iron Head
 - High Horsepower
 - Rock Slide
 - Protect
-
-Sneasler @ Psychic Seed
-Ability: Unburden
-EVs: 2 HP / 32 Atk / 32 Spe
-Adamant Nature
-- Close Combat
-- Dire Claw
-- Rock Slide
-- Protect
-
-Indeedee @ Choice Scarf
-Ability: Psychic Surge
-EVs: 2 HP / 32 SpA / 32 Spe
-Modest Nature
-- Expanding Force
-- Mystical Fire
-- Dazzling Gleam
-- Trick
-
-Corviknight @ Leftovers
-Ability: Mirror Armor
-EVs: 32 HP / 2 Def / 32 SpD
-Careful Nature
-- Brave Bird
-- Power Trip
-- Bulk Up
-- Roost
