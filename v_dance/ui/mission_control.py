@@ -1053,6 +1053,21 @@ def _make_handler():
                     self._json(_dashboard_status())
                 elif u.path == "/api/species":
                     self._json({"species": _species_list()})
+                elif u.path == "/rating_chart":             # 2026-10-01: the Rating tab's chart (iframe)
+                    from v_dance.ui.rating_chart import cached_page
+                    q = parse_qs(u.query)
+                    try:
+                        window = max(50, min(2000, int((q.get("window") or ["300"])[0])))
+                    except ValueError:
+                        window = 300
+                    theme = "light" if (q.get("theme") or ["dark"])[0] == "light" else "dark"
+                    body = cached_page(window=window, theme=theme).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
                 elif u.path == "/api/log":
                     q = parse_qs(u.query)
                     name = (q.get("name") or [""])[0]

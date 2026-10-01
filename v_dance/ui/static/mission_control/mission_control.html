@@ -116,6 +116,9 @@
                  background:#fff; }
   /* 2026-09-03 (USER): the Dashboard tab — a full-height embed + a run strip; the arms panel badges */
   iframe.embed.tall { height:calc(100vh - 150px); min-height:640px; }
+  .ratingbar { display:flex; gap:10px; align-items:center; margin:4px 0 10px; flex-wrap:wrap; }
+  .ratingbar select { width:auto; }
+  .ratingbar .sub { color:#9db0c0; font-size:8.5pt; }
   .page.wide { max-width:1600px; }
   .runstrip { background:#22303e; border:1px solid #34506e; border-radius:8px; padding:7px 12px;
               margin:0 0 8px; font-size:9pt; color:#c4d3e0; }
@@ -164,6 +167,7 @@
 
 <div class="page" id="page-overview"></div>
 <div class="page" id="page-online"></div>
+<div class="page" id="page-rating"></div>
 <div class="page" id="page-play"></div>
 <div class="page" id="page-train"></div>
 <div class="page" id="page-generate"></div>
@@ -178,7 +182,7 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-const TABS = [["overview","Overview"],["online","Online bot"],["play","Play"],["train","Train"],
+const TABS = [["overview","Overview"],["online","Online bot"],["rating","Rating"],["play","Play"],["train","Train"],
               ["generate","Generate"],["parser","Parser"],["data","Data"],["eval","Eval"],
               ["deploy","Deploy"],["monitor","Dashboard"],["jobs","Jobs"]];
 let S = null, CMDS = null, OB = {up:false}, SPECIES = null, GEN_CORE = [], GEN_TEAMS = [],
@@ -208,12 +212,43 @@ function showTab(k) {
   TABS.forEach(([t]) => { $("tab-" + t).classList.toggle("on", t === k);
                           $("page-" + t).classList.toggle("on", t === k); });
   if (k === "online") refreshOnline();
+  if (k === "rating") renderRating(true);
   if (k === "generate") renderGenerate();
   if (k === "parser" && S) renderParser();
   if (k === "monitor" && S) renderMonitor();
   if (k === "jobs" && S) renderJobs();
   if (k === "overview" && S) renderOverview();
   if (k === "train" && S) renderChainStatus();
+}
+
+/* ── Rating tab (2026-10-01): the ladder rating vs rated games chart (v_dance/ui/rating_chart.py via /rating_chart).
+   The iframe reloads when the tab opens and every 2 min while it stays open; the server only re-parses
+   human_bench.jsonl when it changed. ── */
+let ratingTimer = null, ratingWindow = 300;
+function renderRating(force) {
+  const el = $("page-rating");
+  if (!$("rating-frame")) {
+    el.innerHTML = `<h2 class="sec">Ladder rating</h2>
+      <div class="ratingbar">
+        <label class="fld" for="rating-window" style="margin:0">Equilibrium fit</label>
+        <select id="rating-window" onchange="ratingWindow = +this.value; renderRating(true)">
+          ${[150, 300, 600, 1000].map(w => `<option value="${w}" ${w === ratingWindow ? "selected" : ""}>${w} games</option>`).join("")}
+        </select>
+        <button class="btn gray" onclick="renderRating(true)">↻ Refresh</button>
+        <span class="sub" id="rating-stamp"></span>
+      </div>
+      <div class="desc" style="color:#9db0c0;font-size:8.5pt;margin-bottom:8px">Blue = rating after each rated
+        game · dashed grey = running peak · orange = equilibrium (the rating where the fitted expected gain is 0 —
+        the honest skill line; peaks are mostly streaks) · green ticks = team changes · white dots = the site's own
+        Elo (the truth). Updates as the bot logs games.</div>
+      <iframe class="embed tall" id="rating-frame" title="Ladder rating chart"></iframe>`;
+    force = true;
+  }
+  if (force) {
+    $("rating-frame").src = `/rating_chart?window=${ratingWindow}&t=${Date.now()}`;
+    $("rating-stamp").textContent = "loaded " + new Date().toLocaleTimeString();
+  }
+  if (!ratingTimer) ratingTimer = setInterval(() => { if (curTab === "rating") renderRating(true); }, 120000);
 }
 
 /* ── command card rendering (generic over the registry) ── */
