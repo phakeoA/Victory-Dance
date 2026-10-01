@@ -307,6 +307,11 @@ _LINK_STATE_JS = "() => (window.app && app.socket) ? app.socket.readyState : -1"
 _LINK_OPEN_JS = "() => !!(window.app && app.socket && app.socket.readyState === 1)"
 _LINK_PROBE_JS = "(u) => app.socket.send('|/cmd userdetails ' + u)"
 _LINK_REJOIN_JS = "(r) => { if (window.app && app.joinRoom && !app.rooms[r]) app.joinRoom(r, 'battle'); }"
+# 2026-10-01: force the server to re-send a battle's FULL log (|init| + history + the live |request|). A /join for a room
+# we are already in re-sends nothing, so leave first (raw global commands — no client close/forfeit prompt); a player
+# leaving the room keeps the battle (the inactivity timer just keeps running), and the re-join restores it.
+_LINK_RESYNC_JS = ("(r) => { if (!window.app || !app.send) return false; app.send('/leave ' + r); "
+                   "setTimeout(() => app.send('/join ' + r), 800); return true; }")
 # 2026-09-06 (8 socket closes in a day, cause unknown): remember the SockJS close code / reason on the page so the
 # reconnect can log WHY the socket closed (1000 = a clean close by the server, 1006 = the network dropped it…).
 _LINK_CLOSE_HOOK_JS = ("() => { const s = window.app && app.socket; if (!s) return false; if (s.__vd_hooked) return true; "
@@ -390,6 +395,12 @@ class LinkWatch:
         self._last_rejoin_retry_at = -1e9
         self._rejoin_tries: dict = {}
         self.rejoin_retries_sent = 0
+        # 2026-10-01: a battle whose frames sit PARKED in the host (no |init| reached it after a rejoin) is resynced:
+        # leave + re-join the room so the server re-sends the full log. After ``resync_after_s``, at most
+        # ``resync_retries`` times per battle.
+        self.resync_after_s = 8.0
+        self.resync_retries = 3
+        self._resync_tries: dict = {}
         # 2026-09-06 close diagnostics: the socket's URL on open, its close code / reason (page hook), the last frames
         self._loop = loop
         self._recent_frames: deque = deque(maxlen=4)
@@ -528,6 +539,31 @@ class LinkWatch:
             except Exception as exc:
                 self.log(f"[online] rejoin retry #{n} for {t} failed (non-fatal): {exc!r}")
 
+    async def _resync_parked(self) -> None:
+        """2026-10-01: a battle the host has had to PARK frames for (no battle object, no |init| — the reconnect's
+        replayed log never reached it) gets a leave + re-join, which makes the server re-send the full log and the
+        live |request|. Without it the battle sat dead until the timer ended it."""
+        stale = getattr(self.host, "parked_older_than", None)
+        if not callable(stale):
+            return
+        for tag, age in stale(self.resync_after_s):
+            n = self._resync_tries.get(tag, 0) + 1
+            self._resync_tries[tag] = n
+            if n > self.resync_retries:
+                if n == self.resync_retries + 1:
+                    self.log(f"[online] {tag}: still no battle state after {self.resync_retries} resyncs — giving up "
+                             f"(its frames keep parking; the other games are unaffected)")
+                continue
+            self.log(f"[online] {tag}: no battle state after the rejoin (frames parked {age:.0f}s) — leave + "
+                     f"re-join the room so the server re-sends the full log (#{n})")
+            try:
+                await self._eval(_LINK_RESYNC_JS, tag)
+            except Exception as exc:
+                self.log(f"[online] resync {tag} failed (non-fatal): {exc!r}")
+            touch = getattr(self.host, "touch_parked", None)
+            if callable(touch):
+                touch(tag)
+
     # ── the tick (its own task via ``start``; the consumer's idle branch calls it too) ──
     async def tick(self) -> None:
         if self._busy:
@@ -538,6 +574,7 @@ class LinkWatch:
             return
         if _pvhb.REJOIN_REFUSED:
             await self._retry_refused_rejoins(now)
+        await self._resync_parked()
         idle = now - self.last_rx
         if idle < self.probe_s:
             return

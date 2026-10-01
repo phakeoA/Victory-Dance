@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from collections import deque
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -103,6 +104,17 @@ class BattleHost:
         # sound even if a caller ever overlaps frames (the shipped consumer feeds one-at-a-time, but the
         # online roadmap may drain in parallel). Lazily created on the player's loop (see _get_lock).
         self._lock = None
+        # 2026-10-01 (USER: "it disconnected and didn't make any moves"): a battle frame for a tag with NO battle
+        # object and no |init| (a reconnect forgot the battle and its replayed |init| never reached the host — or a
+        # |request| racing ahead of a new battle's |init|) used to go to poke-env, whose _get_battle() waits FOREVER;
+        # the shared lock then stalled EVERY game for the 45 s feed timeout, frame after frame. Such frames are now
+        # PARKED here instead: replayed after the battle's |init| (a new battle), or discarded when the |init| is a
+        # reconnect REPLAY (it already contains them). A battle parked too long is resynced by the transport
+        # (``parked_older_than`` → LinkWatch leaves + re-joins the room so the server re-sends the full log).
+        self._parked: dict = {}                        # tag -> [frames] (bounded)
+        self._parked_since: dict = {}                  # tag -> monotonic time of the first parked frame
+        self._forgotten: set = set()                   # tags forget_battle() dropped for a reconnect rejoin
+        self._clock = time.monotonic
         # The REAL production player — encoder + gen141 + SBDA + gap-#6 splice — but NOT connected.
         # poke-env's _battle_count_queue (sized by max_concurrent_battles) gets a put() on every battle
         # init and a get() on its |win|/|tie|. A battle that ends ABNORMALLY (tab closed mid-game, room
@@ -163,14 +175,39 @@ class BattleHost:
         # A stray frame for an ALREADY-ENDED battle (late |l|/leave/chat after |win|) would route through
         # poke-env's _get_battle() and block forever on _battle_start_condition (the tag is gone from
         # _battles) — wedging this feed and the entire consumer loop. Drop it before it reaches poke-env.
+        tag = None
         if raw_frame.startswith(">battle"):
             tag = raw_frame.split("\n", 1)[0].lstrip(">")
             if tag in self._ended:
                 return []
+            if tag not in self.player._battles and "\n|init|" not in raw_frame:
+                q = self._parked.setdefault(tag, [])          # no battle yet: PARK, never block (see __init__)
+                if len(q) < 64:
+                    q.append(raw_frame)
+                self._parked_since.setdefault(tag, self._clock())
+                return []
         async with self._get_lock():
             before = len(self._outgoing)               # captured INSIDE the lock so it can't race
             await self.player.ps_client._handle_message(raw_frame)
+            if tag is not None and "\n|init|" in raw_frame:
+                parked = self._parked.pop(tag, [])
+                self._parked_since.pop(tag, None)
+                if tag in self._forgotten:             # a reconnect REPLAY: it already holds the parked frames
+                    self._forgotten.discard(tag)
+                else:                                  # a new battle whose |request| raced ahead of its |init|
+                    for f in parked:
+                        await self.player.ps_client._handle_message(f)
             return self._outgoing[before:]
+
+    def parked_older_than(self, seconds: float) -> List[Tuple[str, float]]:
+        """``[(tag, age_s)]`` for battles whose frames have been parked (no |init| yet) for ≥ ``seconds``."""
+        now = self._clock()
+        return [(t, now - t0) for t, t0 in list(self._parked_since.items()) if now - t0 >= seconds]
+
+    def touch_parked(self, tag: str) -> None:
+        """Restart a parked battle's age clock (the transport just asked the server to resend its log)."""
+        if tag in self._parked_since:
+            self._parked_since[tag] = self._clock()
 
     def feed(self, raw_frame: str, timeout: Optional[float] = 30.0) -> List[Outgoing]:
         """Sync bridge for callers on a DIFFERENT thread than the player's loop (e.g. a test, or a
@@ -199,6 +236,9 @@ class BattleHost:
             while len(self._ended_order) > 512:
                 self._ended.discard(self._ended_order.popleft())
         self.player._battles.pop(tag, None)
+        self._parked.pop(tag, None)
+        self._parked_since.pop(tag, None)
+        self._forgotten.discard(tag)
         proto = getattr(self.player, "_proto_log", None)
         if isinstance(proto, dict):
             proto.pop(tag, None)
@@ -217,6 +257,9 @@ class BattleHost:
         must flow) and ``_tp_decision`` is KEPT (the bring/lead choice was made once, server-side)."""
         tag = (tag or "").lstrip(">")
         self.player._battles.pop(tag, None)
+        self._forgotten.add(tag)                       # its next |init| is a REPLAY (parked frames are stale)
+        self._parked.pop(tag, None)
+        self._parked_since.pop(tag, None)
         reset = getattr(self.player, "reset_battle_state", None)
         if callable(reset):
             try:

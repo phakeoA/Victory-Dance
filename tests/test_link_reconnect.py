@@ -660,3 +660,30 @@ def test_reconnect_logs_the_socket_close_detail_and_the_open_url():
         assert detail and "1006" in detail[0] and "updatesearch" in detail[0] and "| h" in detail[0]
         assert w.status()["last_close"]["code"] == 1006 and page.reloads == 1
     asyncio.run(main())
+
+
+# ── 2026-10-01: a battle with PARKED frames (no |init| after the rejoin) is resynced ─────────────
+class ParkingHost(FakeHost):
+    def __init__(self, parked):
+        super().__init__()
+        self.parked = dict(parked)                 # tag -> age
+        self.touched = []
+
+    def parked_older_than(self, seconds):
+        return [(t, a) for t, a in self.parked.items() if a >= seconds]
+
+    def touch_parked(self, tag):
+        self.touched.append(tag)
+
+
+def test_a_parked_battle_gets_leave_and_rejoin_then_gives_up_after_the_retries():
+    tag = "battle-gen9championsvgc2026regmc-1"
+    host = ParkingHost({tag: 9.0, "battle-gen9championsvgc2026regmc-2": 2.0})
+    w, page, host, clock, logs = _watch(host=host)
+    w.on_ws_open(object())
+    for _ in range(5):
+        asyncio.run(w.tick())
+    sent = _sends(page, "/leave")
+    assert sent == [tag, tag, tag]                 # resync_retries = 3, only the battle parked past 8 s
+    assert host.touched == [tag, tag, tag]
+    assert sum("giving up" in line for line in logs) == 1

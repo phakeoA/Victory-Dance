@@ -80,3 +80,39 @@ def test_captured_message_carries_room_and_is_not_sent_over_a_socket():
     for room, msg in produced:
         assert isinstance(msg, str) and msg.startswith("/")
         assert room == _TAG
+
+
+# ── 2026-10-01: frames for a battle with NO battle object park instead of blocking forever ──────────
+def _turn(n):
+    return f">{_TAG}\n|\n|t:|1790000000\n|turn|{n}"
+
+
+def test_a_frame_before_the_init_parks_instantly_and_replays_after_it():
+    h = _host()
+    assert h.feed(_turn(2), timeout=5) == []                 # returns at once (used to wait forever)
+    assert _TAG not in h.battles and [t for t, _a in h.parked_older_than(0)] == [_TAG]
+    h.feed(_INIT_FRAME)                                      # the battle appears → the parked frame is replayed
+    assert h.battles[_TAG].turn == 2 and h.parked_older_than(0) == []
+
+
+def test_after_a_reconnect_forget_the_replayed_init_supersedes_the_parked_frames():
+    h = _host()
+    h.feed(_INIT_FRAME)
+    h.forget_battle(_TAG)                                    # reconnect: the server will re-send the full log
+    h.feed(_turn(5), timeout=5)                              # a stale pre-disconnect frame: parked, not fed
+    h.feed(_INIT_FRAME)                                      # the REPLAY (turn 1 here)
+    assert h.battles[_TAG].turn == 1 and h.parked_older_than(0) == []   # stale frame discarded, not re-applied
+
+
+def test_parked_age_and_end_battle_cleanup():
+    h = _host()
+    t = [100.0]
+    h._clock = lambda: t[0]
+    h.feed(_turn(2), timeout=5)
+    t[0] = 109.0
+    assert h.parked_older_than(8) == [(_TAG, 9.0)]
+    h.touch_parked(_TAG)
+    assert h.parked_older_than(8) == []
+    h.end_battle(_TAG)
+    t[0] = 200.0
+    assert h.parked_older_than(0) == []

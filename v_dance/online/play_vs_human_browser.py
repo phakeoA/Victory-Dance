@@ -304,8 +304,10 @@ def _report_stuck_feed(tag, payload: str) -> None:
     head = payload.splitlines()[1:3] if payload else []
     print(f"[ai] ⛔ FEED STUCK > {FEED_TIMEOUT_S:.0f}s on {tag} (#{_stuck_feeds} in a row) — frame dropped; "
           f"head: {head}")
-    poke_thread = next((t for t in threading.enumerate() if getattr(t, "_target", None) is not None
-                        and "run_forever" in repr(t._target)), None)
+    # 2026-10-01: the loop's OWN thread id — the old match on "run_forever" in the thread target found nothing, so the
+    # 2026-10-01 wedge logged no stack at all.
+    tid = getattr(POKE_LOOP, "_thread_id", None)
+    poke_thread = next((t for t in threading.enumerate() if t.ident == tid), None) if tid else None
     frame = sys._current_frames().get(poke_thread.ident) if poke_thread else None
     if frame is not None:
         print("[ai] POKE_LOOP thread stack:\n" + "".join(traceback.format_stack(frame)[-12:]))
@@ -671,8 +673,11 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
                         decisions = await asyncio.wait_for(asyncio.wrap_future(_fut), FEED_TIMEOUT_S)
                         _stuck_feeds = 0
                     except asyncio.TimeoutError:
-                        _fut.cancel()                    # cancels the coroutine on POKE_LOOP (frees host._lock)
+                        # 2026-10-01: dump BEFORE cancelling — the stuck coroutine is the only task that knows
+                        # where it waits; cancelled first, the task dump came back empty.
                         _report_stuck_feed(active_tag, payload)
+                        await asyncio.sleep(0.5)        # let the scheduled task dump run on POKE_LOOP
+                        _fut.cancel()                    # cancels the coroutine on POKE_LOOP (frees host._lock)
                         decisions = []
                     for r, msg in decisions:
                         if msg == "/rejectopenteamsheets" and OTS_ACCEPT:   # 2026-09-03 (USER): the OTS toggle
