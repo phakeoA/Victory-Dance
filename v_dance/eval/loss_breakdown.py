@@ -129,6 +129,9 @@ def main(argv=None) -> int:
     ap.add_argument("--replays", default=str(_REPO / "data" / "vods" / "Type_C"))
     ap.add_argument("--arm", default=None, help="only games served by this bandit arm (from human_bench.jsonl) — "
                                                 "read an A/B, e.g. lg2_g50_rule vs lg2_g50")
+    ap.add_argument("--account", default=None,
+                    help="2026-10-02 (two ladder accounts): only games played by this account — 1 / 2 (the .env "
+                         "slot) or a username; games logged before 2026-10-02 belong to account 1")
     ap.add_argument("--bench", default=str(_REPO / "artifacts" / "human_benchmark" / "human_bench.jsonl"))
     a = ap.parse_args(argv)
     if a.since is None:
@@ -139,8 +142,17 @@ def main(argv=None) -> int:
     if not games:
         print(f"[loss] no {a.team} games since {a.since}")
         return 1
-    if a.arm:
-        arm_of = {}
+    if a.arm or a.account:
+        from v_dance.online import accounts as _ACC
+        from v_dance.ui.rating_chart import env_accounts
+        primary, _ = env_accounts()
+        want_acct = None
+        if a.account:
+            if str(a.account).isdigit():
+                want_acct = _ACC.load_account(_ACC.read_env(), int(a.account)).userid
+            else:
+                want_acct = _ACC.userid(a.account)
+        arm_of, acct_of = {}, {}
         for ln in open(a.bench, encoding="utf-8"):
             try:
                 r = json.loads(ln)
@@ -148,15 +160,19 @@ def main(argv=None) -> int:
                 continue
             if "result" in r and r.get("battle_tag"):
                 arm_of[r["battle_tag"]] = r.get("arm")
-        games = {t: g for t, g in games.items() if arm_of.get(t) == a.arm}
+                acct_of[r["battle_tag"]] = _ACC.row_account(r, primary)
+        games = {t: g for t, g in games.items()
+                 if (not a.arm or arm_of.get(t) == a.arm) and (not want_acct or acct_of.get(t) == want_acct)}
         if not games:
-            print(f"[loss] no {a.team} games served by arm {a.arm!r} since {a.since}")
+            print(f"[loss] no {a.team} games{f' served by arm {a.arm!r}' if a.arm else ''}"
+                  f"{f' on account {want_acct}' if want_acct else ''} since {a.since}")
             return 1
     join_replays(games, Path(a.replays))
     n = len(games)
     w = sum(g["won"] for g in games.values())
     p = w / n
-    print(f"[loss] {a.team}{f' / arm {a.arm}' if a.arm else ''}: {n} ladder games since {a.since} — "
+    print(f"[loss] {a.team}{f' / arm {a.arm}' if a.arm else ''}{f' / account {a.account}' if a.account else ''}: "
+          f"{n} ladder games since {a.since} — "
           f"{w}W-{n - w}L = {p * 100:.1f} %")
 
     sp = collections.defaultdict(lambda: [0, 0])

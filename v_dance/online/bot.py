@@ -13,10 +13,17 @@ back into the tab). Closed team sheets; every finished game appends a bench-JSON
 (exported BEFORE v_dance imports so the whole stack runs that format), VD_BATTLE_CKPT/VD_TP_CKPT/
 VD_DEFAULT_TEAM (deploy defaults; --ckpt/--tp-ckpt/--ai-team override), VD_SERVE_TAU/VD_SERVE_TOP_P
 (N2b serve sampling; 0/unset = argmax, byte-identical). Password never printed.
+
+2026-10-02 (USER): a SECOND ladder account — ``--account 2`` logs in with PS2_USERNAME / PS2_PASSWORD
+(PS2_AVATAR; PS_USERNAME_2 … also accepted), serves its panel on 8787+, keeps its own bandit state and may have its own bandit config;
+both processes share the box's search budget (Showdown's prep cap is per IP). See online/accounts.py.
+
+  python -m v_dance.online.bot --account 2   # the second account, next to a running account 1
 """
 from __future__ import annotations
 
 import os
+from typing import Optional
 from pathlib import Path
 
 _REPO = Path(__file__).resolve().parents[2]
@@ -112,6 +119,8 @@ from collections import deque                    # noqa: E402
 import v_dance                                     # noqa: F401,E402  (Selector policy for POKE_LOOP)
 import v_dance.online.play_vs_human_browser as _pvhb  # noqa: E402  (the reused local transport)
 from v_dance.online.browser.battle_host import BattleHost          # noqa: E402
+from v_dance.online import accounts as _ACC                        # noqa: E402  (2026-10-02 two accounts)
+from v_dance.online.accounts import append_jsonl                   # noqa: E402
 from v_dance.play.model_io import DEFAULT_BC_CHECKPOINT, DEFAULT_TP_CHECKPOINT  # noqa: E402
 from v_dance.online.play_vs_human_browser import (                 # noqa: E402
     _ai_consumer, _default_format, _load_pool, _use_proactor_loop,
@@ -199,24 +208,34 @@ def _sockjs_unwrap(payload: str) -> list:
     return [payload]
 
 
-def _write_avatar(avatar: str, env_path: Path = _REPO / ".env") -> None:
+# 2026-10-02 (two accounts): the .env key this process's avatar lives under — PS_AVATAR for account 1,
+# PS_AVATAR_<N> for account N (accounts.Account.avatar_key; set in main()).
+_AVATAR_KEY = "PS_AVATAR"
+# the userid every bench row of this process is stamped with (main(); None = unstamped, as before)
+_ACCOUNT_ID = None
+# every ladder account configured in .env (main()) — a game against one of them is a self-match
+_OWN_ACCOUNTS: set = set()
+
+
+def _write_avatar(avatar: str, env_path: Path = _REPO / ".env", key: Optional[str] = None) -> None:
     """Persist an avatar choice to ``.env`` PS_AVATAR (no-op when unchanged). Atomic write
     (temp + replace): .env holds credentials, a torn write is never acceptable."""
+    key = key or _AVATAR_KEY
     avatar = (avatar or "").strip()
-    if not avatar or avatar == (_ENV.get("PS_AVATAR") or "").strip():
+    if not avatar or avatar == (_ENV.get(key) or "").strip():
         return
     lines = env_path.read_text(encoding="utf-8").splitlines()
     for i, ln in enumerate(lines):
-        if ln.split("=", 1)[0].strip() == "PS_AVATAR":
-            lines[i] = f"PS_AVATAR={avatar}"
+        if ln.split("=", 1)[0].strip() == key:
+            lines[i] = f"{key}={avatar}"
             break
     else:
-        lines.append(f"PS_AVATAR={avatar}")
+        lines.append(f"{key}={avatar}")
     tmp = env_path.with_name(env_path.name + ".tmp")
     tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
     os.replace(tmp, env_path)
-    _ENV["PS_AVATAR"] = avatar
-    print(f"[online] avatar changed in the browser → saved to .env (PS_AVATAR={avatar})")
+    _ENV[key] = avatar
+    print(f"[online] avatar changed in the browser → saved to .env ({key}={avatar})")
 
 
 _AVATAR_CMD = "/avatar "
@@ -264,9 +283,10 @@ async def _site_sync_loop(username: str, fmt: str, ctrl_ref: dict, log, period_s
             panel = getattr(c, "last_rating", None) if c is not None else None
             row = {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "type": "site_rating",
                    "format": fmt, **site, "panel_rating": panel}
+            if _ACCOUNT_ID:
+                row["account"] = _ACCOUNT_ID       # 2026-10-02: whose site numbers (two accounts)
             try:
-                with open(BENCH_LOG, "a", encoding="utf-8") as fh:
-                    fh.write(json.dumps(row) + "\n")
+                append_jsonl(BENCH_LOG, row)
             except OSError as exc:
                 log(f"[online] site rating row not written (non-fatal): {exc!r}")
             gap = abs(site["elo"] - panel) if panel is not None else 0.0
@@ -839,9 +859,18 @@ def _wrap_bench_recording(host: BattleHost, session_id: str, note: str,
                        "arm": arm_name}
                 if arm_pinned:
                     row["pinned"] = True           # 2026-09-02 serve-mode pin: a frozen-block game
-                BENCH_DIR.mkdir(parents=True, exist_ok=True)
-                with BENCH_LOG.open("a", encoding="utf-8") as f:
-                    f.write(json.dumps(row) + "\n")
+                if _ACCOUNT_ID:
+                    row["account"] = _ACCOUNT_ID   # 2026-10-02: which ladder account played it
+                # 2026-10-02 (USER: "the two accounts may fight each other"): Showdown never matches two same-IP
+                # users on the ladder (ladders.ts), so this should never fire — a tripwire, not a counter. A game
+                # against our OWN other account is flagged so every read can drop it (it is not a human game).
+                if _ACC.userid(row["opponent"]) in _OWN_ACCOUNTS - {_ACCOUNT_ID}:
+                    row["self_match"] = True
+                    _warn = (f"[online] ⚠ SELF-MATCH: {row['battle_tag']} was against our own account "
+                             f"{row['opponent']} — flagged self_match in the bench row (exclude it from every read)")
+                    print(_warn)
+                    _slog(LOG_DIR / f"online_{session_id}.log", "    " + _warn)
+                append_jsonl(BENCH_LOG, row)       # locked: a second account's bot appends too
                 # session detail log (2026-07-10): one human-readable line per game as it lands
                 _slog(LOG_DIR / f"online_{session_id}.log",
                       f"{row['ts']}  game {row['game_idx']:>3}  {row['result'].upper():<5} "
@@ -868,9 +897,12 @@ def _wrap_bench_recording(host: BattleHost, session_id: str, note: str,
     host.end_battle = end_battle  # type: ignore[method-assign]
 
 
-async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> dict:
+async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path,
+              account: Optional["_ACC.Account"] = None) -> dict:
     from playwright.async_api import async_playwright
 
+    if account is None:                            # callers before 2026-10-02: the .env's account 1
+        account = _ACC.Account(1, username, password, (_ENV.get("PS_AVATAR") or "").strip())
     teams = _load_pool()
     if not teams:
         raise SystemExit(f"[online] no teams in the {BATTLE_FORMAT} pool.")
@@ -958,9 +990,9 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
             row["arm"] = arm
         if pinned:
             row["pinned"] = True                   # 2026-09-02 serve-mode pin: a frozen-block game
-        BENCH_DIR.mkdir(parents=True, exist_ok=True)
-        with BENCH_LOG.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(row) + "\n")
+        if _ACCOUNT_ID:
+            row["account"] = _ACCOUNT_ID           # 2026-10-02: which ladder account (two accounts)
+        append_jsonl(BENCH_LOG, row)
         _slog(LOG_DIR / f"online_{session_id}.log",
               f"    rating: {user} {old} ({'us' if us else 'them'}) → {new}  {tag}"
               + (f"  arm {arm}{' (pinned)' if pinned else ''}" if arm else ""))
@@ -968,7 +1000,8 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
     _pvhb.RATING_HOOK = None                        # the panel chains its confirm logic here
     _pvhb.RATING_CHANGE_HOOK = _rating_change_row
     session_log = LOG_DIR / f"online_{session_id}.log"
-    _slog(session_log, f"=== ONLINE session {session_id} — {username} @ {args.client_url}")
+    _slog(session_log, f"=== ONLINE session {session_id} — {username} @ {args.client_url}"
+                       + (f"  (account {account.slot})" if account.slot != 1 else ""))
     _slog(session_log, f"    format {BATTLE_FORMAT}  note {args.bench_note!r}")
     _slog(session_log, f"    ckpt {ckpt}\n    tp   {tp_ckpt}")
     print(f"[online] session log -> {session_log}")
@@ -980,7 +1013,8 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
     # VD_DEFAULT_TEAM the RANDOM-fallback — an explicitly OPENED Teambuilder team still wins.
     # 2026-07-10 control panel: a team pinned in the panel OUTRANKS everything (the panel's
     # dropdown is the user's live 'use this team' gesture; challenge-accepts honour it too).
-    default_team = _ENV.get("VD_DEFAULT_TEAM")
+    # 2026-10-02: os.environ first — account N's VD_DEFAULT_TEAM_N lands there (accounts.knob_overrides)
+    default_team = os.environ.get("VD_DEFAULT_TEAM") or _ENV.get("VD_DEFAULT_TEAM")
     _orig_pick = _pvhb._pick_ai_team
     ctrl_ref: dict = {"c": None}                   # filled after login (the panel needs the page)
 
@@ -991,7 +1025,10 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
     if os.environ.get("VD_BANDIT", "1").strip() != "0":
         try:
             from v_dance.play import serve_bandit as _SB
-            _cfg = Path(os.environ.get("VD_BANDIT_CONFIG") or _SB.DEFAULT_CONFIG)
+            # 2026-10-02 (two accounts): account N may have its own config (VD_BANDIT_CONFIG_N, else
+            # config/serve_bandit_N.json when it exists) and ALWAYS has its own state file.
+            _cfg = _ACC.bandit_config_path(account.slot, lambda k: os.environ.get(k) or _ENV.get(k),
+                                           _SB.DEFAULT_CONFIG)
             if _cfg.is_file():
                 _arms = _SB.load_arms(_cfg)
                 if _arms:
@@ -1007,6 +1044,7 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
 
                     bandit = _SB.ServeBandit(
                         _arms, fmt=BATTLE_FORMAT,
+                        state_path=_ACC.bandit_state_path(account, BATTLE_FORMAT, _SB.STATE_DIR),
                         applier=lambda arm: _SB.apply_bundle(host.player, _bundle_for(arm)),
                         **_SB.config_params(_cfg))
                     # 2026-09-02 (lanes): each battle decides under the arm BOUND to its tag, so
@@ -1021,6 +1059,10 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
                     _pin_note = _SB.apply_env_pin(bandit, os.environ.get("VD_BANDIT_PIN"))
                     print(bandit.banner())
                     _slog(session_log, "    " + bandit.banner())
+                    _cfg_note = (f"[online] bandit config {_cfg.name} · state {bandit.state_path.name} "
+                                 f"({account.label})")
+                    print(_cfg_note)                   # launch echo: which arms this ACCOUNT serves
+                    _slog(session_log, "    " + _cfg_note)
                     if _pin_note:                  # launch echo for the frozen mode
                         print(_pin_note)
                         _slog(session_log, "    " + _pin_note)
@@ -1102,8 +1144,8 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
                 "() => window.app && app.socket && app.socket.readyState === 1", timeout=30000)
             if not await _login(page, username, password):
                 raise SystemExit("[online] login did not complete — aborting.")
-            if _ENV.get("PS_AVATAR"):
-                await page.evaluate("(a) => app.socket.send('|/avatar ' + a)", _ENV["PS_AVATAR"])
+            if account.avatar:                     # PS_AVATAR (account 1) / PS_AVATAR_<N>
+                await page.evaluate("(a) => app.socket.send('|/avatar ' + a)", account.avatar)
             if _ENV.get("PS_CLIENT_PREFS"):        # 2026-07-10: USER's default client settings
                 try:
                     _n = await page.evaluate(_CLIENT_PREFS_JS, json.loads(_ENV["PS_CLIENT_PREFS"]))
@@ -1155,6 +1197,13 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
                         fmt=BATTLE_FORMAT, username=username,
                         loop=asyncio.get_running_loop(), env_path=_REPO / ".env",
                         port=args.control_port, open_browser=args.panel_window,
+                        # 2026-10-02 (two accounts): refuse only a bot already on THIS account, in
+                        # either account's port range; share the per-IP search budget; seed the
+                        # all-time peaks from this account's rows only.
+                        guard_ports=_ACC.all_panel_ports(),
+                        prep_ledger=_ACC.PrepLedger(account.userid),
+                        account_slot=account.slot, account_id=account.userid,
+                        primary_account_id=_ACC.primary_userid(_ENV),
                         team_pin_default=args.ai_team or default_team,
                         auto_close_default=(_ENV.get("VD_AUTO_CLOSE_ROOMS", "0").strip() == "1"),
                         log_line=lambda t: _slog(session_log, t),
@@ -1185,7 +1234,7 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path) -> 
                     print(f"[online] control panel failed to start (non-fatal): {exc!r}")
 
             print("\n" + "=" * 64)
-            print(f"  ONLINE — {username} @ {args.client_url}   format {BATTLE_FORMAT}")
+            print(f"  ONLINE — {username} @ {args.client_url}   format {BATTLE_FORMAT}   [account {account.slot}]")
             print(f"  battle ckpt : {ckpt}")
             print(f"  TP ckpt     : {tp_ckpt}")
             print(f"  bench       : session {session_id} (note {args.bench_note!r}) -> {BENCH_LOG}")
@@ -1251,23 +1300,50 @@ def main() -> None:
     ap.add_argument("--dossier", action="store_true",
                     help="S1 L2b: warm-start unknown opp item/ability/moves from the per-opponent "
                          "dossier (cross-game; in-battle evidence always wins). Default OFF.")
-    ap.add_argument("--control-port", type=int, default=8777,
-                    help="local control-panel port (ladder runs / challenges / auto-accept); 0 = off.")
+    ap.add_argument("--account", type=int, default=int(os.environ.get("VD_ACCOUNT") or 1),
+                    help="2026-10-02: which ladder account — 1 = PS_USERNAME / PS_PASSWORD, 2 = PS2_USERNAME / "
+                         "PS2_PASSWORD. One bot process per account; both can run at once.")
+    ap.add_argument("--control-port", type=int, default=None,
+                    help="local control-panel port (ladder runs / challenges / auto-accept); 0 = off. "
+                         "Default: 8777 for account 1, 8787 for account 2.")
     ap.add_argument("--panel-window", action="store_true",
                     help="also POP OPEN the standalone control-panel page in a browser. Default OFF: "
                          "Mission Control's 'Online bot' tab is the control UI (it proxies this "
                          "server), so the panel window is redundant. The panel URL is still logged.")
     args = ap.parse_args()
 
-    username = _ENV.get("PS_USERNAME")
-    password = _ENV.get("PS_PASSWORD")
-    if not (username and password):
-        raise SystemExit("[online] PS_USERNAME / PS_PASSWORD missing from .env")
+    global _AVATAR_KEY, _ACCOUNT_ID, _OWN_ACCOUNTS
+    try:
+        account = _ACC.load_account(_ENV, args.account)
+    except ValueError as exc:
+        raise SystemExit(f"[online] {exc}")
+    username, password = account.username, account.password
+    if args.control_port is None:
+        args.control_port = account.panel_port
+    _AVATAR_KEY = account.avatar_key
+    _ACCOUNT_ID = account.userid
+    _OWN_ACCOUNTS = {_ACC.load_account(_ENV, s).userid for s in _ACC.configured_slots(_ENV)}
+    # per-account launch knobs (VD_BANDIT_PIN_2 …) beat the plain ones for this process
+    for _k, _v in _ACC.knob_overrides(account.slot, lambda k: os.environ.get(k) or _ENV.get(k)).items():
+        os.environ[_k] = _v
+        print(f"[online] {account.label}: {_k}={_v} (from {_ACC.slot_key(_k, account.slot)})")
+    print(f"[online] {account.label} — panel :{args.control_port}, bench rows stamped account={account.userid}")
     ckpt = Path(args.ckpt or _ENV.get("VD_BATTLE_CKPT") or DEFAULT_BC_CHECKPOINT)
     tp_ckpt = Path(args.tp_ckpt or _ENV.get("VD_TP_CKPT") or DEFAULT_TP_CHECKPOINT)
     for p in (ckpt, tp_ckpt):
         if not p.is_file():
             raise SystemExit(f"[online] checkpoint not found: {p}")
+    # 2026-10-02 (USER: "the dashboard takes very long to load while the bot runs"): every decision is ONE small
+    # CPU forward (~3 ms). torch's default pool (one thread per core) then SPINS between decisions — measured one
+    # decision per 150 ms: 12 threads kept 10.8 cores busy, 1 thread 0.02, at the same 3.3 ms per decision. The bot
+    # starved the box (Mission Control, the dashboard, its own Chromium), and two accounts would double it.
+    _threads = max(1, _int_env("VD_TORCH_THREADS", 1))
+    try:
+        import torch
+        torch.set_num_threads(_threads)
+        print(f"[online] torch CPU threads: {_threads} (VD_TORCH_THREADS — more only spins idle cores)")
+    except Exception as exc:
+        print(f"[online] torch thread cap failed (non-fatal): {exc!r}")
     _tau = float(os.environ.get("VD_SERVE_TAU") or 0.0)
     if _tau > 0.0:
         print(f"[online] serve SAMPLING active: tau={_tau:g} "
@@ -1276,7 +1352,7 @@ def main() -> None:
     _use_proactor_loop()
     tally = None
     try:
-        tally = asyncio.run(run(args, username, password, ckpt, tp_ckpt))
+        tally = asyncio.run(run(args, username, password, ckpt, tp_ckpt, account=account))
     except KeyboardInterrupt:
         print("\n[online] Ctrl-C — shutting down.")
     finally:

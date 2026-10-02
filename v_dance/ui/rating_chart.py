@@ -17,6 +17,8 @@ import json
 import re
 from pathlib import Path
 
+from v_dance.online import accounts as _ACC
+
 _REPO = Path(__file__).resolve().parents[2]
 DEFAULT_BENCH = _REPO / "artifacts" / "human_benchmark" / "human_bench.jsonl"
 W, H, PAD = 1100, 360, 48
@@ -30,7 +32,22 @@ _THEMES = {
 }
 
 
-def load(path: Path) -> tuple[dict[str, list[dict]], dict[str, list[dict]]]:
+def env_accounts(env_path: Path = _REPO / ".env") -> tuple[str, dict]:
+    """(primary userid, {userid: display name}) from .env. 2026-10-02 (two ladder accounts): rows carry ``account``;
+    rows written before that have none and belong to the primary (PS_USERNAME)."""
+    env = _ACC.read_env(env_path)
+    names = {}
+    for s in _ACC.configured_slots(env):
+        try:
+            a = _ACC.load_account(env, s)
+        except ValueError:
+            continue
+        names[a.userid] = a.username
+    return _ACC.primary_userid(env), names
+
+
+def load(path: Path, primary: str = "") -> tuple[dict[tuple, list[dict]], dict[tuple, list[dict]]]:
+    """Rated games and site numbers keyed by ``(format, account userid)`` — one chart per account and format."""
     teams, games, site = {}, {}, {}
     for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
@@ -40,14 +57,15 @@ def load(path: Path) -> tuple[dict[str, list[dict]], dict[str, list[dict]]]:
         except ValueError:                                        # a line mid-write by the live bot
             continue
         tag = r.get("battle_tag") or ""
+        acct = _ACC.row_account(r, primary)
         if r.get("type") == "site_rating" and r.get("format"):      # the ladder's own numbers (truth)
-            site.setdefault(r["format"], []).append(r)
+            site.setdefault((r["format"], acct), []).append(r)
             continue
         if "result" in r and tag:
             teams[tag] = r.get("ai_team")
         if r.get("type") == "rating_update" and r.get("rating") is not None and r.get("rating_after") is not None:
             m = re.search(r"(gen9[a-z0-9]+?)-\d+", tag)
-            games.setdefault(m.group(1) if m else "?", []).append(
+            games.setdefault((m.group(1) if m else "?", acct), []).append(
                 {"tag": tag, "r0": r["rating"], "r1": r["rating_after"], "ts": r.get("ts", "")})
     for rows in games.values():
         for g in rows:
@@ -71,7 +89,7 @@ def equilibrium(rows: list[dict], window: int) -> list[float | None]:
     return out
 
 
-def svg(fmt: str, rows: list[dict], window: int, site: list[dict]) -> str:
+def svg(fmt: str, rows: list[dict], window: int, site: list[dict], label: str = "") -> str:
     ys = [g["r1"] for g in rows]
     eq = equilibrium(rows, window)
     peak, best = [], -1e9
@@ -99,7 +117,7 @@ def svg(fmt: str, rows: list[dict], window: int, site: list[dict]) -> str:
     dots = "".join(f'<circle cx="{X(max(0, bisect.bisect_right(stamps, s["ts"]) - 1)):.1f}" '
                    f'cy="{Y(min(max(s["elo"], lo), hi)):.1f}" r="1.8" class="site"/>' for s in site)
     last_eq = next((e for e in reversed(eq) if e), None)
-    title = (f"{fmt} — {n} rated games · now {ys[-1]} · peak {max(ys)} · "
+    title = (f"{fmt}{' · ' + label if label else ''} — {n} rated games · now {ys[-1]} · peak {max(ys)} · "
              f"equilibrium {'%.0f' % last_eq if last_eq else 'n/a (too few games)'}"
              + (f" · SITE (truth) {site[-1]['elo']:.0f}, {site[-1]['w']}W-{site[-1]['l']}L" if site else ""))
     return (f'<h2>{html.escape(title)}</h2><svg viewBox="0 0 {W} {H}" role="img" aria-label="{html.escape(title)}">'
@@ -108,12 +126,19 @@ def svg(fmt: str, rows: list[dict], window: int, site: list[dict]) -> str:
             f'<text x="{W - PAD}" y="{H - 12}" class="ax" text-anchor="end">rated game #</text></svg>')
 
 
-def build_page(bench: Path = DEFAULT_BENCH, window: int = 300, theme: str = "light") -> tuple[str, dict]:
-    """The chart page + ``{format: n_games}``. A missing log renders a short notice, never an error."""
+def build_page(bench: Path = DEFAULT_BENCH, window: int = 300, theme: str = "light",
+               env_path: Path = _REPO / ".env") -> tuple[str, dict]:
+    """The chart page + ``{format: n_games}`` (another account's charts count as ``"<format> · <name>"``). A
+    missing log renders a short notice, never an error. 2026-10-02: one chart per (format, ACCOUNT) — two ladder
+    accounts have two ratings; mixing them in one line would be meaningless."""
     c = _THEMES.get(theme, _THEMES["light"])
-    games, site = load(Path(bench)) if Path(bench).is_file() else ({}, {})
-    body = "".join(svg(f, rows, window, site.get(f, []))
-                   for f, rows in sorted(games.items(), reverse=True) if len(rows) >= 2)
+    primary, names = env_accounts(env_path)
+    games, site = load(Path(bench), primary) if Path(bench).is_file() else ({}, {})
+    multi = len({a for _, a in games}) > 1
+    name = lambda a: names.get(a) or a or "account 1"
+    order = sorted(games, key=lambda k: (k[0], k[1] == primary, k[1]), reverse=True)   # newest format; primary first
+    body = "".join(svg(f, games[(f, a)], window, site.get((f, a), []), name(a) if multi else "")
+                   for f, a in order if len(games[(f, a)]) >= 2)
     if not body:
         body = f"<p>No rated games logged yet ({html.escape(str(bench))}).</p>"
     page = f"""<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -126,7 +151,7 @@ h2{{font-size:15px;margin:22px 0 4px}}</style>
 <p><b style="color:{c['rating']}">rating</b> · <b style="color:{c['peak']}">running peak</b> ·
 <b style="color:{c['eq']}">equilibrium ({window}-game fit: where expected gain = 0)</b> ·
 <b style="color:{c['team']}">team change</b> · <b>● site Elo (the truth)</b></p>{body}"""
-    return page, {f: len(r) for f, r in games.items()}
+    return page, {(f if a == primary else f"{f} · {name(a)}"): len(r) for (f, a), r in games.items()}
 
 
 _CACHE: dict = {}

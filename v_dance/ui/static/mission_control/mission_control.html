@@ -125,6 +125,13 @@
   .runstrip b { color:#e8f1f8; }
   .runstrip .live { color:#8ae0ae; font-weight:bold; }
   .runstrip .stale { color:#e0b36a; font-weight:bold; }
+  /* 2026-10-02 (USER): two ladder accounts — the Online tab's account switcher */
+  .acctbar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:2px 0 10px; }
+  .acctbtn { background:#22303e; border:1px solid #34506e; border-radius:8px; padding:6px 12px; cursor:pointer;
+             font:9pt Verdana; color:#c4d3e0; }
+  .acctbtn.on { border-color:#7fb5e6; background:#2a4560; color:#e8f1f8; }
+  .acctbtn .dot { margin-right:5px; }
+  .acctbar .muted { font-size:8.5pt; }
   table.arms td:nth-child(5), table.arms td:nth-child(6) { white-space:nowrap; }
   table.arms td:nth-child(8) { white-space:normal; max-width:360px; color:#9db0c0; }
   table.arms tr.retired td { color:#6f8394; }
@@ -185,8 +192,15 @@ const $ = (id) => document.getElementById(id);
 const TABS = [["overview","Overview"],["online","Online bot"],["rating","Rating"],["play","Play"],["train","Train"],
               ["generate","Generate"],["parser","Parser"],["data","Data"],["eval","Eval"],
               ["deploy","Deploy"],["monitor","Dashboard"],["jobs","Jobs"]];
-let S = null, CMDS = null, OB = {up:false}, SPECIES = null, GEN_CORE = [], GEN_TEAMS = [],
+let S = null, CMDS = null, OB = {up:false, loading:true}, SPECIES = null, GEN_CORE = [], GEN_TEAMS = [],
     curTab = "overview", logName = null, logOffset = 0, logTimer = null;
+/* 2026-10-02 (USER): two ladder accounts — which one the Online tab drives (remembered per browser) */
+let OB_ACCT = 1;
+try { OB_ACCT = Math.max(1, parseInt(localStorage.getItem("mc_ob_acct") || "1", 10) || 1); } catch {}
+const acctKey = (k, n) => ((n || OB_ACCT) > 1 ? `${k}_${n || OB_ACCT}` : k);      // VD_BANDIT_PIN → VD_BANDIT_PIN_2
+const acctEnv = (k) => (S && S.env && (S.env[acctKey(k)] || (OB_ACCT > 1 ? S.env[k] : ""))) || "";
+const acctInfo = () => ((S && S.accounts) || []).find(a => a.slot === OB_ACCT) || null;
+const jobLabel = (j) => j.id + (j.account ? ` · account ${j.account}` : "");
 
 function toast(msg, err) {
   const t = $("toast");
@@ -211,7 +225,7 @@ function showTab(k) {
   curTab = k;
   TABS.forEach(([t]) => { $("tab-" + t).classList.toggle("on", t === k);
                           $("page-" + t).classList.toggle("on", t === k); });
-  if (k === "online") refreshOnline();
+  if (k === "online") { renderOnline(); refreshOnline(); }   // 2026-10-02: the cached / loading view at once
   if (k === "rating") renderRating(true);
   if (k === "generate") renderGenerate();
   if (k === "parser" && S) renderParser();
@@ -494,7 +508,7 @@ function renderOverview() {
       <h3>▶ Running now (${aliveJobs.length}) <a href="#" style="margin-left:auto;font-size:8.5pt"
         onclick="showTab('jobs')">Jobs tab →</a></h3>` +
       aliveJobs.reverse().map(j => `<div style="margin:8px 0">
-        <div style="font:bold 9pt Verdana;color:#e8f1f8">${esc(j.id)}
+        <div style="font:bold 9pt Verdana;color:#e8f1f8">${esc(jobLabel(j))}
           <span class="muted">· ${fmtElapsed(j.elapsed_s)}</span></div>
         ${jobProgressHTML(j)}</div>`).join("") + `</div>` : "";
   $("page-overview").innerHTML = runningBanner + `
@@ -671,7 +685,7 @@ function renderJobs() {
   }
   const alive = S.jobs.filter(j => j.alive).reverse();
   $("jobs-running").innerHTML = alive.length ? alive.map(j => `<div class="card">
-      <h3>${esc(j.id)} <span class="pill light">running · ${fmtElapsed(j.elapsed_s)}</span>
+      <h3>${esc(jobLabel(j))} <span class="pill light">running · ${fmtElapsed(j.elapsed_s)}</span>
         ${j.heavy ? '<span class="pill heavy">heavy</span>' : ''}
         <button class="btn red" style="margin-left:auto;padding:3px 10px"
           onclick="stopJob('${j.job}')">Stop</button></h3>
@@ -681,7 +695,7 @@ function renderJobs() {
     : `<div class="muted">Nothing running. Launch from Play / Train / Data / Eval — training and the
        exploiter now run here (one heavy job at a time) with live progress.</div>`;
   $("jobs-rows").innerHTML = S.jobs.slice().reverse().map(j => `<tr>
-      <td>${j.job}</td><td>${esc(j.id)}</td><td>${j.started}</td>
+      <td>${j.job}</td><td>${esc(jobLabel(j))}</td><td>${j.started}</td>
       <td class="${j.alive ? "ok" : (j.returncode === 0 ? "ok" : "bad")}">
         ${j.alive ? "running" : "exit " + j.returncode}</td>
       <td>${j.progress ? esc(j.progress.label + " " + j.progress.value) : "—"}</td>
@@ -724,13 +738,14 @@ async function pollLog(first) {
 async function startSvc(id) {
   await api("/api/job/start", { id, options: {}, env: {} });
   toast("service starting…"); setTimeout(refresh, 1200);
+  if (id === "svc_dashboard") waitDashUp();
 }
 async function stopJob(j) { await api("/api/job/stop", { job: j }); toast("stop sent"); setTimeout(refresh, 800); }
 
 /* ── Online bot: live control, proxied from the :8777 panel ── */
 async function onlineAction(path, body) {
   try {
-    const r = await fetch("/api/online" + path, { method: "POST",
+    const r = await fetch("/api/online" + path + "?account=" + OB_ACCT, { method: "POST",   // 2026-10-02: per account
       headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
     const js = await r.json();
     if (!js.ok) toast(js.error || "online action failed", true);
@@ -757,52 +772,102 @@ async function launchOnline() {
   try {
     const fmt = ($("ob-launch-fmt") || {}).value || "";
     if (fmt && S && fmt !== S.format) await api("/api/env", { key: "VDANCE_BATTLE_FORMAT", value: fmt });
-    const options = { "ai-team": ($("ob-launch-team") || {}).value || "",
+    const options = { account: String(OB_ACCT),                       // 2026-10-02: which ladder account
+                      "ai-team": ($("ob-launch-team") || {}).value || "",
                       dossier: !!($("ob-launch-dossier") || {}).checked,
                       "adapt-rules": !!($("ob-launch-adapt") || {}).checked };
     const js = await api("/api/job/start", { id: "play_online", options, env: {} });
-    toast(`started ${js.job.job} — the bot is logging in…`);
+    toast(`started ${js.job.job} — account ${OB_ACCT} is logging in…`);
     showTab("jobs"); openLog(js.job.log); refresh();
   } catch (e) { /* api() already surfaced the error */ }
 }
 
+/* 2026-10-02 (USER): the account switcher — one button per .env account, its bot's state, a click switches what
+   this tab shows and drives (each account = its own bot process, panel, team, serve mode). Rebuilt every poll. */
+function renderAccountBar() {
+  const bar = $("ob-accts"); if (!bar) return;
+  const accts = (S && S.accounts) || [];
+  if (accts.length && !accts.some(a => a.slot === OB_ACCT)) setAccount(accts[0].slot);
+  const html = accts.map(a => `<button class="acctbtn ${a.slot === OB_ACCT ? "on" : ""}" data-slot="${a.slot}"
+      title="${a.up ? "bot running — panel :" + a.port : "bot not running"}"><span class="dot ${a.up ? "up" : "dn"}"></span>
+      Account ${a.slot} · <b>${esc(a.username || "?")}</b> · ${a.up ? "running" : "stopped"}</button>`).join("") +
+    (accts.length < 2 ? `<span class="muted">A second account: add PS2_USERNAME / PS2_PASSWORD to .env.</span>`
+                      : `<span class="muted">Each account runs its own bot (own team, serve mode, panel); both share
+                         Showdown's 12-searches-per-3-min cap for this connection.</span>`);
+  if (bar.getAttribute("data-sig") !== html) { bar.setAttribute("data-sig", html); bar.innerHTML = html;
+    bar.querySelectorAll(".acctbtn").forEach(b => b.onclick = () => setAccount(+b.dataset.slot)); }
+}
+/* USER 2026-10-02: switching accounts flashed the LAUNCH card for ~1 s (OB was reset to "down" until the panel's
+   status arrived). Each account's last status is kept; a switch shows it at once (refreshed right after), and an
+   account never seen this page-load shows a neutral "loading" line — never a launch card it may not need. */
+const OB_CACHE = {};
+function setAccount(n) {
+  if (n === OB_ACCT) return;
+  OB_ACCT = n;
+  try { localStorage.setItem("mc_ob_acct", String(n)); } catch {}
+  OB = OB_CACHE[n] || { up: false, loading: true };  // never show the other account's numbers under this one
+  muTeamsKey = ""; thinkTagsKey = "";
+  $("page-online").removeAttribute("data-online");   // rebuild for the new account
+  renderOnline(); refreshOnline();
+}
+
 function renderOnline() {
   const p = $("page-online"), state = OB.up ? "up" : "down";
+  const acct = acctInfo(), who = `account ${OB_ACCT}${acct && acct.username ? " (" + acct.username + ")" : ""}`;
+  if (OB.loading) {                                   // first look at this account: wait for its status
+    if (p.getAttribute("data-online") !== `${OB_ACCT}:loading`) {
+      p.setAttribute("data-online", `${OB_ACCT}:loading`);
+      p.innerHTML = `<div class="acctbar" id="ob-accts"></div>
+        <h2 class="sec">Online bot — ${esc(who)}</h2><div class="muted">loading this account's bot status…</div>`;
+    }
+    renderAccountBar();
+    return;
+  }
   // Build the STRUCTURE only on an up<->down transition. The 3s poll must NOT rebuild it, or every
   // input (rated-games count, team, format, username) resets to its default each tick (bug: 2026-07-13).
-  if (p.getAttribute("data-online") !== state) {
-    p.setAttribute("data-online", state);
+  // 2026-10-02: the key carries the ACCOUNT too — switching accounts rebuilds.
+  if (p.getAttribute("data-online") !== `${OB_ACCT}:${state}`) {
+    p.setAttribute("data-online", `${OB_ACCT}:${state}`);
     if (!OB.up) {
       const curFmt = (S && S.format) || "";
       const fmtSrc = (S && S.formats_full && S.formats_full.length) ? S.formats_full
                      : ((S && S.formats) || []).map(f => ({ id: f, name: f }));
       const fmtOpts = fmtSrc.map(f =>
         `<option value="${esc(f.id)}" ${f.id === curFmt ? "selected" : ""}>${esc(f.name)}</option>`).join("");
+      // 2026-10-02 (USER: one team per account to ladder-test a team change): the team picked here is
+      // remembered PER ACCOUNT (this browser) and goes to the launch as --ai-team
+      let teamMem = "";
+      try { teamMem = localStorage.getItem(`mc_launch_team_${OB_ACCT}`) || ""; } catch {}
       const teamOpts = `<option value="">— Teambuilder / default —</option>` +
-        ((S && S.teams) || []).map(t => `<option>${esc(t)}</option>`).join("");
+        ((S && S.teams) || []).map(t => `<option ${t === teamMem ? "selected" : ""}>${esc(t)}</option>`).join("");
       // 2026-09-02: serve mode at launch (VD_BANDIT_PIN) — explore, or one frozen arm every game
-      const pinCur = (S && S.env && S.env.VD_BANDIT_PIN) || "explore";
-      const pinOpts = ["explore", ...((S && S.bandit_arms) || [])].map(n =>
+      // 2026-10-02: per account (VD_BANDIT_PIN_2 …), from THAT account's bandit config
+      const pinCur = acctEnv("VD_BANDIT_PIN") || "explore";
+      const arms = (acct && acct.bandit_arms) || (S && S.bandit_arms) || [];
+      const pinOpts = ["explore", ...arms].map(n =>
         `<option value="${esc(n)}" ${n === pinCur ? "selected" : ""}>` +
         `${n === "explore" ? "Bandit — explore (per-game arm choice)" : "Frozen: " + esc(n)}</option>`).join("");
-      const lanesCur = String((S && S.env && S.env.VD_LADDER_LANES) || "1");
+      const lanesCur = String(acctEnv("VD_LADDER_LANES") || "1");
       const lanesOpts = ["1", "2", "3", "4", "5"].map(n =>
         `<option value="${n}" ${n === lanesCur ? "selected" : ""}>${n}</option>`).join("");
+      const kPin = acctKey("VD_BANDIT_PIN"), kLanes = acctKey("VD_LADDER_LANES");
       p.innerHTML = `
-        <h2 class="sec">Online bot — not running</h2>
+        <div class="acctbar" id="ob-accts"></div>
+        <h2 class="sec">Online bot — ${esc(who)} — not running</h2>
         <div class="muted" style="max-width:820px;line-height:1.6">Set the launch options here, then
           launch — the live controls (<b>ladder runs</b>, <b>auto-accept</b>, <b>challenges</b>)
           appear in this tab once the bot logs in. The control panel is embedded here, no separate
           window.</div>
-        <div class="cards"><div class="card"><h3>Launch config</h3>
-          <label class="fld">Format <span class="muted">(saved to .env — applies on launch)</span></label>
+        <div class="cards"><div class="card"><h3>Launch config — ${esc(who)}</h3>
+          <label class="fld">Format <span class="muted">(saved to .env — applies on launch; shared by every account)</span></label>
           <select id="ob-launch-fmt">${fmtOpts}</select>
           <div class="note" id="ob-launch-fmt-note"></div>
-          <label class="fld">Team pin (optional)</label>
+          <label class="fld">Team pin <span class="muted">(this account's team — remembered per account)</span></label>
           <select id="ob-launch-team">${teamOpts}</select>
-          <label class="fld">Serve mode at launch <span class="muted">(VD_BANDIT_PIN — saved to .env; unset keeps the last pin)</span></label>
+          <label class="fld">Serve mode at launch <span class="muted">(${kPin} — saved to .env; bandit config
+            ${esc((acct && acct.bandit_config) || "serve_bandit.json")})</span></label>
           <select id="ob-launch-pin">${pinOpts}</select>
-          <label class="fld">Games at once at launch <span class="muted">(VD_LADDER_LANES — Showdown allows 5 per account)</span></label>
+          <label class="fld">Games at once at launch <span class="muted">(${kLanes} — Showdown allows 5 per account)</span></label>
           <select id="ob-launch-lanes">${lanesOpts}</select>
           <div class="chk"><input type="checkbox" id="ob-launch-timer" ${String((S && S.env && S.env.VD_TIMER_IMMEDIATE) || "0") === "1" ? "checked" : ""}>
             <label for="ob-launch-timer">Start the battle timer immediately <span class="muted">(VD_TIMER_IMMEDIATE — saved to .env; off = after 30 s of opponent silence, per room)</span></label></div>
@@ -812,7 +877,7 @@ function renderOnline() {
             <label for="ob-launch-dossier">--dossier (S1 belief warm-start)</label></div>
           <div class="chk"><input type="checkbox" id="ob-launch-adapt" checked>
             <label for="ob-launch-adapt">--adapt-rules (serve-time pattern tilt)</label></div>
-          <button class="battlebtn" id="ob-launch-btn">▶ Launch online bot</button>
+          <button class="battlebtn" id="ob-launch-btn">▶ Launch ${esc(who)}</button>
           <div class="muted" style="margin-top:8px">Battle / TP checkpoints use the deployed .env —
             override per-run from the <a href="#" onclick="showTab('play')">Play</a> tab if needed.</div>
         </div></div>
@@ -820,13 +885,16 @@ function renderOnline() {
           automatically (polling…).</div>`;
       $("ob-launch-fmt").onchange = onLaunchFmtChange;
       $("ob-launch-btn").onclick = launchOnline;
+      $("ob-launch-team").onchange = () => {              // 2026-10-02: remembered per account
+        try { localStorage.setItem(`mc_launch_team_${OB_ACCT}`, $("ob-launch-team").value); } catch {}
+      };
       $("ob-launch-pin").onchange = async () => {
-        await api("/api/env", { key: "VD_BANDIT_PIN", value: $("ob-launch-pin").value });
-        toast("VD_BANDIT_PIN saved — applies on launch (explore = the bandit picks per game)");
+        await api("/api/env", { key: kPin, value: $("ob-launch-pin").value });
+        toast(`${kPin} saved — applies on ${who}'s launch (explore = the bandit picks per game)`);
       };
       $("ob-launch-lanes").onchange = async () => {
-        await api("/api/env", { key: "VD_LADDER_LANES", value: $("ob-launch-lanes").value });
-        toast("VD_LADDER_LANES saved — applies on launch (rated games at once)");
+        await api("/api/env", { key: kLanes, value: $("ob-launch-lanes").value });
+        toast(`${kLanes} saved — applies on ${who}'s launch (rated games at once)`);
       };
       $("ob-launch-timer").onchange = async () => {          // 2026-09-02 battle-timer mode at launch
         await api("/api/env", { key: "VD_TIMER_IMMEDIATE", value: $("ob-launch-timer").checked ? "1" : "0" });
@@ -836,6 +904,7 @@ function renderOnline() {
         await api("/api/env", { key: "VD_OTS_ACCEPT", value: $("ob-launch-ots").checked ? "1" : "0" });
         toast("VD_OTS_ACCEPT saved — applies on launch (accept the open-team-sheet offer vs closed sheets)");
       };
+      renderAccountBar();
       return;
     }
     const tOpts = `<option value="">— Teambuilder / default —</option>` +
@@ -847,7 +916,8 @@ function renderOnline() {
       (OB.bandit || []).map(a => `<option value="${esc(a.name)}" ${OB.bandit_pin === a.name ? "selected" : ""}>` +
         `Frozen: ${esc(a.name)}${a.incumbent ? " (incumbent)" : ""}</option>`).join("");
     p.innerHTML = `
-      <h2 class="sec">Online bot — live control <span class="muted" id="ob-hdr"></span></h2>
+      <div class="acctbar" id="ob-accts"></div>
+      <h2 class="sec">Online bot — ${esc(who)} — live control <span class="muted" id="ob-hdr"></span></h2>
       <div class="cards fit">
         <div class="card"><h3>Ladder run</h3>
           <label class="fld">Team</label><select id="ob-team">${tOpts}</select>
@@ -955,6 +1025,7 @@ function renderOnline() {
     $("ob-team").onchange = () => onlineAction("/team", { team: $("ob-team").value });
     $("ob-fmt").onchange = () => onlineAction("/format", { format: $("ob-fmt").value });
   }
+  renderAccountBar();
   if (OB.up) updateOnlineLive();
 }
 
@@ -1331,7 +1402,7 @@ function renderMonitor() {
   if (!up && !dashAutoStarted && S) {
     dashAutoStarted = true;
     api("/api/job/start", { id: "svc_dashboard", options: {}, env: {} })
-      .then(() => toast("Self-play dashboard starting on :5175 — embedding when it answers"))
+      .then(() => { toast("Self-play dashboard starting on :5175 — embedding when it answers"); waitDashUp(); })
       .catch(() => {});
   }
   const want = up ? "up" : (dashAutoStarted ? "starting" : "down");
@@ -1347,6 +1418,14 @@ function renderMonitor() {
           <button class="btn" onclick="startSvc('svc_dashboard')">▶ Start the dashboard (:5175)</button></div>`;
   }
   if (up) refreshDashStrip();
+}
+/* 2026-10-02 (USER: "the dashboard takes very long to load"): embed the moment the service answers — poll it
+   every 0.5 s for up to 20 s instead of waiting for the 3 s status cycle to notice. */
+async function waitDashUp() {
+  for (let i = 0; i < 40; i++) {
+    await new Promise(r => setTimeout(r, 500));
+    try { if ((await (await fetch("/api/dashboard/status")).json()).up) { refresh(); return; } } catch {}
+  }
 }
 async function refreshDashStrip() {
   const el = $("dash-strip"); if (!el) return;
@@ -1370,8 +1449,13 @@ async function refreshDashStrip() {
 
 /* ── boot + poll ── */
 async function refreshOnline() {
-  try { OB = await (await fetch("/api/online/status")).json(); }
-  catch { OB = { up: false }; }
+  const want = OB_ACCT;                               // 2026-10-02: this account's bot only
+  let js;
+  try { js = await (await fetch("/api/online/status?account=" + want)).json(); }
+  catch { js = { up: false }; }
+  OB_CACHE[want] = js;                                // the next switch to this account shows it at once
+  if (want !== OB_ACCT) return;                       // the user switched accounts mid-fetch: drop it
+  OB = js;
   if (curTab === "online") renderOnline();
 }
 

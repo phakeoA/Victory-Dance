@@ -39,6 +39,27 @@ def _toid(s: str) -> str:
     return "".join(c for c in (s or "").lower() if c.isalnum())
 
 
+def _atomic_write(p: Path, text: str) -> None:
+    """2026-10-02 (two ladder accounts): two bot processes can finish a game against the SAME opponent at
+    once. A plain write_text from each can interleave into invalid JSON (= the dossier silently resets);
+    temp + replace means a reader sees one whole version or the other. Windows refuses the replace while
+    another process holds the file open for a read — retry briefly, then fall back to the plain write."""
+    import os
+    tmp = p.with_name(f"{p.name}.{os.getpid()}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    for _ in range(5):
+        try:
+            os.replace(tmp, p)
+            return
+        except PermissionError:
+            time.sleep(0.05)
+    p.write_text(text, encoding="utf-8")
+    try:
+        os.replace(tmp, p)                                  # the fallback succeeded → retire the temp
+    except OSError:
+        pass
+
+
 def dossier_path(opponent: str) -> Path:
     return DOSSIER_DIR / f"{_toid(opponent) or 'unknown'}.json"
 
@@ -128,7 +149,7 @@ def update_from_battle(battle, result: str, our_team: Optional[str] = None,
         d["games"] = d["games"][-MAX_GAMES:]
         DOSSIER_DIR.mkdir(parents=True, exist_ok=True)
         p = dossier_path(opp)
-        p.write_text(json.dumps(d, indent=1), encoding="utf-8")
+        _atomic_write(p, json.dumps(d, indent=1))
         return p
     except Exception:
         return None                                     # capture is best-effort by contract

@@ -82,7 +82,7 @@ def jobs(monkeypatch):
     mc = _mc()
     _FakeJob.made = []
     monkeypatch.setattr(mc, "_Job", _FakeJob)                     # never Popen anything from a test
-    monkeypatch.setattr(mc, "_panel_status", lambda: {"up": False})
+    monkeypatch.setattr(mc, "_panel_status", lambda *a: {"up": False})
     return mc._Jobs()
 
 
@@ -90,12 +90,12 @@ def test_chain_launch_is_refused_while_the_online_bot_is_up(jobs, monkeypatch):
     mc = _mc()
     chain, bot = mc._REG_BY_ID["ladder_ppo"], mc._REG_BY_ID["play_online"]
     # (a) a live bot PANEL (launched from a terminal, not through MC) -> refused, nothing spawned
-    monkeypatch.setattr(mc, "_panel_status", lambda: {"up": True, "port": 8777, "run": {}, "tally": {}})
+    monkeypatch.setattr(mc, "_panel_status", lambda *a: {"up": True, "port": 8777, "run": {}, "tally": {}})
     with pytest.raises(ValueError, match="needs the online bot DOWN.*8777"):
         jobs.start(chain, {}, {})
     assert _FakeJob.made == []
     # (b) a live bot JOB of this MC session (its panel not up yet) -> refused too
-    monkeypatch.setattr(mc, "_panel_status", lambda: {"up": False})
+    monkeypatch.setattr(mc, "_panel_status", lambda *a: {"up": False})
     live = _FakeJob("j1", "play_online", ["x"], {})
     jobs._jobs["j1"] = live
     with pytest.raises(ValueError, match="needs the online bot DOWN.*job j1"):
@@ -177,7 +177,7 @@ def test_status_carries_the_learning_arm_next_to_the_env_default(tmp_path, monke
     assert mc._bandit_learning_arm(cfg) is None                       # no learning arm
     assert mc._bandit_learning_arm(tmp_path / "absent.json") is None  # unreadable -> None, never a 500
     monkeypatch.setattr(mc, "_port_open", lambda port: False)
-    monkeypatch.setattr(mc, "_panel_status", lambda: {"up": False})
+    monkeypatch.setattr(mc, "_panel_status", lambda *a: {"up": False})
     st = mc._status()
     assert "learning_arm" in st and st["bot_up"] is False
     if st["learning_arm"]:                                            # the live config: the chain head

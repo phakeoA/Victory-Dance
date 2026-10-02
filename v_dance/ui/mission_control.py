@@ -35,10 +35,13 @@ import threading
 import time
 import urllib.request
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qs, urlparse
+
+from v_dance.online import accounts as _ACC     # stdlib-only (2026-10-02: two ladder accounts)
 
 _REPO = Path(__file__).resolve().parents[2]
 _ENV_PATH = _REPO / ".env"
@@ -63,16 +66,29 @@ _ENV_READ_KEYS = ("PS_USERNAME", "PS_AVATAR", "PS_CLIENT_URL", "VDANCE_BATTLE_FO
                   "VD_TIMER_IMMEDIATE",
                   # 2026-09-03 (USER): open team sheets at launch (1 = accept the offer)
                   "VD_OTS_ACCEPT")
+# 2026-10-02 (two accounts): account N's own launch knobs (VD_BANDIT_PIN_2 …; accounts.knob_overrides)
+_ACCOUNT_ENV_KEYS = tuple(_ACC.slot_key(k, s) for s in range(2, _ACC.MAX_SLOTS + 1)
+                          for k in ("VD_BANDIT_PIN", "VD_LADDER_LANES", "VD_DEFAULT_TEAM"))
+_ENV_READ_KEYS += _ACCOUNT_ENV_KEYS
 _ENV_WRITE_KEYS = ("VDANCE_BATTLE_FORMAT", "VD_BATTLE_CKPT", "VD_TP_CKPT",
                    "VD_DEFAULT_TEAM", "VD_AUTO_CLOSE_ROOMS",
                    "VD_SERVE_TAU", "VD_SERVE_TOP_P",
-                   "VD_BANDIT", "VD_BANDIT_PIN", "VD_LADDER_LANES", "VD_TIMER_IMMEDIATE", "VD_OTS_ACCEPT")
+                   "VD_BANDIT", "VD_BANDIT_PIN", "VD_LADDER_LANES", "VD_TIMER_IMMEDIATE", "VD_OTS_ACCEPT") \
+    + _ACCOUNT_ENV_KEYS
 
-def _bandit_arm_names() -> list:
-    """Arm names from config/serve_bandit.json (names only — the launch-default pin picker; the
+
+def _bandit_config_for(slot: int = 1) -> Path:
+    """The bandit config account ``slot`` reads at launch (accounts.bandit_config_path, .env only — Mission
+    Control's own environment does not reach the bot)."""
+    env = _env_read()
+    return _ACC.bandit_config_path(slot, env.get, _REPO / "config" / "serve_bandit.json")
+
+
+def _bandit_arm_names(slot: int = 1) -> list:
+    """Arm names from the account's bandit config (names only — the launch-default pin picker; the
     bot validates checkpoints itself at launch). [] when the config is absent/unreadable."""
     try:
-        cfg = json.loads((_REPO / "config" / "serve_bandit.json").read_text(encoding="utf-8"))
+        cfg = json.loads(_bandit_config_for(slot).read_text(encoding="utf-8"))
         return [str(a["name"]) for a in (cfg.get("arms") or []) if a.get("name")]
     except Exception:
         return []
@@ -101,6 +117,9 @@ _SERVICES = {
     "dashboard":    {"port": 5175, "label": "Self-play dashboard", "job": "svc_dashboard"},
     "bot_panel":    {"port": 8777, "label": "Bot control panel",
                      "note": "lives inside the online bot process"},
+    # 2026-10-02: the second ladder account's bot (accounts.panel_ports(2))
+    "bot_panel_2":  {"port": 8787, "label": "Bot control panel — account 2",
+                     "note": "lives inside account 2's bot process"},
 }
 
 
@@ -223,53 +242,104 @@ def _port_open(port: int) -> bool:
         return s.connect_ex(("127.0.0.1", port)) == 0
 
 
+_PROBE_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="mc-probe")
+
+
+def _ports_open(ports) -> dict:
+    """{port: open?} probed CONCURRENTLY (2026-10-02). A closed localhost port costs the whole 0.15 s timeout on
+    Windows; serially the 3 s status poll spent ~0.6 s on probes (measured) and a second account adds more."""
+    ports = list(dict.fromkeys(int(p) for p in ports if p))
+    return dict(zip(ports, _PROBE_POOL.map(_port_open, ports)))
+
+
 # ── online bot control-panel proxy (front the :8777 panel from the master UI) ──
 # The panel (online/panel.py) lives INSIDE the running online bot process — it needs the
 # live Playwright page. Mission Control can't hold that page, so it PROXIES the panel's HTTP API:
 # the Online tab drives ladder runs / auto-accept / challenges through here, so the USER never
 # opens :8777 separately. Panel binds the first free port in [8777, 8786].
-_PANEL_PORTS = range(8777, 8787)
+_PANEL_PORTS = _ACC.panel_ports(1)              # account 1: 8777-8786 (account N: accounts.panel_ports(N))
 _PANEL_POST_OK = {"/api/ladder/start", "/api/ladder/stop", "/api/challenge",
                   "/api/challenge/cancel", "/api/options", "/api/team", "/api/format"}
-_panel_cache = {"port": None}
+_panel_cache: dict = {}                         # account slot -> the port its panel last answered on
 # 2026-09-04: the panel's /api/status grew with the full matchup tables (every species, sprites); 0.6 s
 # aborted the read mid-body (53 ConnectionAbortedError tracebacks in the panel, the Online tab flickering
 # "not running"). The port probe stays fast; only the body read gets this budget.
 _PANEL_STATUS_TIMEOUT_S = 3.0
 
 
-def _panel_status() -> dict:
-    """The live online-bot panel status (its own /api/status), or {'up': False}. Probes the
-    cached port first, then the range; identifies the panel by its status shape (run + tally)."""
-    order = ([_panel_cache["port"]] if _panel_cache["port"] else [])
-    order += [p for p in _PANEL_PORTS if p != _panel_cache["port"]]
+def _slot(v) -> int:
+    """An account slot from a query / body value; anything unknown = account 1."""
+    try:
+        s = int(str(v).strip())
+    except (TypeError, ValueError):
+        return 1
+    return s if 1 <= s <= _ACC.MAX_SLOTS else 1
+
+
+def _panel_status(slot: int = 1) -> dict:
+    """The live online-bot panel status for account ``slot`` (its own /api/status), or {'up': False}. Probes the
+    cached port first, then the account's range; identifies the panel by its status shape (run + tally).
+    2026-10-02 (two accounts): account N's bot serves in accounts.panel_ports(N)."""
+    slot = _slot(slot)
+    cached = _panel_cache.get(slot)
+    order = ([cached] if cached else []) + [p for p in _ACC.panel_ports(slot) if p != cached]
+    is_open = _ports_open(order)                   # concurrent: a stopped bot's 10 closed ports cost 0.15 s, not 1.5 s
     for p in order:
-        if not p or not _port_open(p):
+        if not p or not is_open.get(p):
             continue
         try:
             with urllib.request.urlopen(f"http://127.0.0.1:{p}/api/status", timeout=_PANEL_STATUS_TIMEOUT_S) as r:
                 js = json.loads(r.read().decode("utf-8"))
             if isinstance(js, dict) and "run" in js and "tally" in js:
-                _panel_cache["port"] = p
-                return {"up": True, "port": p, **js}
+                _panel_cache[slot] = p
+                return {"up": True, "port": p, "account": slot, **js}
         except Exception:
             continue
-    _panel_cache["port"] = None
+    _panel_cache.pop(slot, None)
+    return {"up": False, "account": slot}
+
+
+def _any_panel_status() -> dict:
+    """The first account whose bot is up (the 'needs the online bot DOWN' guards), else {'up': False}."""
+    for s in range(1, _ACC.MAX_SLOTS + 1):
+        st = _panel_status(s)
+        if st.get("up"):
+            return st
     return {"up": False}
 
 
-def _bot_panel_up(port_8777_up: Optional[bool] = None) -> bool:
-    """Cheap 'is the online bot up' for the 3 s status poll. The panel binds the FIRST free port in 8777-8786,
-    so :8777 (already probed for the Services card — pass that result in) plus the port the Online tab last
-    found cover the real cases. No range scan here: a CLOSED localhost port costs the full 0.15 s timeout on
-    Windows (measured 2026-09-04: ten probes = 1.5 s per poll). No body fetch either — the Online tab and the
-    launch guard use _panel_status()."""
-    if port_8777_up is None:
-        port_8777_up = _port_open(_PANEL_PORTS[0])
-    if port_8777_up:
-        return True
-    cached = _panel_cache["port"]
-    return bool(cached and cached != _PANEL_PORTS[0] and _port_open(cached))
+def _panel_ports_to_probe() -> list:
+    """Per account: the first port of its range + the port its panel last answered on (cheap: no range scan —
+    a CLOSED localhost port costs the full 0.15 s on Windows, measured 2026-09-04)."""
+    out = []
+    for s in range(1, _ACC.MAX_SLOTS + 1):
+        out.append(_ACC.panel_ports(s).start)
+        if _panel_cache.get(s):
+            out.append(_panel_cache[s])
+    return out
+
+
+def _accounts_up(open_ports: dict) -> list:
+    """[{slot, username, up, port}] for every account configured in .env (the Online tab's switcher)."""
+    env = _env_read()
+    out = []
+    for s in _ACC.configured_slots(env):
+        cands = [_panel_cache.get(s), _ACC.panel_ports(s).start]
+        port = next((p for p in cands if p and open_ports.get(p)), None)
+        try:
+            user = _ACC.load_account(env, s).username
+        except ValueError:
+            user = ""
+        out.append({"slot": s, "username": user, "up": port is not None, "port": port})
+    return out
+
+
+def _bot_panel_up(open_ports: Optional[dict] = None) -> bool:
+    """Cheap 'is ANY online bot up' for the 3 s status poll — see _panel_ports_to_probe. No body fetch: the
+    Online tab and the launch guard use _panel_status()."""
+    if open_ports is None:
+        open_ports = _ports_open(_panel_ports_to_probe())
+    return any(open_ports.get(p) for p in _panel_ports_to_probe())
 
 
 def _dashboard_status() -> dict:
@@ -287,12 +357,13 @@ def _dashboard_status() -> dict:
         return {"up": False}
 
 
-def _panel_post(path: str, body: dict) -> dict:
+def _panel_post(path: str, body: dict, slot: int = 1) -> dict:
     if path not in _PANEL_POST_OK:
         raise ValueError(f"not a panel endpoint: {path}")
-    port = _panel_cache["port"] or _panel_status().get("port")
+    slot = _slot(slot)
+    port = _panel_cache.get(slot) or _panel_status(slot).get("port")
     if not port:
-        raise ValueError("online bot panel not found — is the online bot running?")
+        raise ValueError(f"online bot panel not found for account {slot} — is that account's bot running?")
     data = json.dumps(body or {}).encode("utf-8")
     req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=data,
                                  headers={"Content-Type": "application/json"}, method="POST")
@@ -400,7 +471,9 @@ REGISTRY = [
               "format + launch there (format writes .env), then ladder runs, auto-accept, private "
               "challenges — the control panel is embedded there (no separate window). Bo3 venues: "
               "set TP ckpt to checkpoints_setctx.",
-         opts=[dict(name="ai-team", type="team", label="Team pin (optional)"),
+         opts=[dict(name="account", type="choice", label="Ladder account (1 = PS_USERNAME, 2 = PS2_USERNAME)",
+                    choices=[str(s) for s in range(1, _ACC.MAX_SLOTS + 1)], default="1"),
+               dict(name="ai-team", type="team", label="Team pin (optional)"),
                dict(name="dossier", type="flag", label="--dossier (S1 belief warm-start)", default=True),
                dict(name="adapt-rules", type="flag", label="--adapt-rules", default=True),
                dict(name="dry-run", type="flag", label="--dry-run (login + teams, no battles)"),
@@ -882,7 +955,12 @@ class _Job:
         self.argv, self.env_extra = argv, env_extra
         self.heavy = heavy
         self.started = time.time()
-        self.log_path = _LOGS_DIR / f"mc_{entry_id}_{time.strftime('%Y%m%d-%H%M%S')}.log"
+        # 2026-10-02 (two accounts): which ladder account a play_online job serves; account N >= 2 gets its own
+        # log name (mc_play_online_acct2_*.log — still matched by the mc_play_online_*.log session-read glob)
+        acct = _arg_val(argv, "--account")
+        self.account = _slot(acct) if acct else None
+        tag = f"{entry_id}_acct{self.account}" if (self.account or 1) > 1 else entry_id
+        self.log_path = _LOGS_DIR / f"mc_{tag}_{time.strftime('%Y%m%d-%H%M%S')}.log"
         env = {**os.environ, "PYTHONUTF8": "1", **env_extra}
         _LOGS_DIR.mkdir(parents=True, exist_ok=True)
         self._log_f = open(self.log_path, "wb")
@@ -902,7 +980,7 @@ class _Job:
     def info(self) -> dict:
         rc = self.proc.poll()
         return {"job": self.jid, "id": self.entry_id, "alive": rc is None, "returncode": rc,
-                "heavy": self.heavy,
+                "heavy": self.heavy, "account": self.account,
                 "started": time.strftime("%H:%M:%S", time.localtime(self.started)),
                 "elapsed_s": int(time.time() - self.started),
                 "log": self.log_path.name,
@@ -928,7 +1006,7 @@ class _Jobs:
                 # bandit config the bot reads at launch and rewrites .env — the bot must be down.
                 live = next((j for j in self._jobs.values()
                              if _REG_BY_ID.get(j.entry_id, {}).get("single") and j.alive), None)
-                panel = _panel_status()
+                panel = _any_panel_status()            # 2026-10-02: EITHER account's bot blocks it
                 if live is not None or panel.get("up"):
                     where = (f"job {live.jid}" if live is not None else f"panel :{panel.get('port')}")
                     raise ValueError(
@@ -944,11 +1022,16 @@ class _Jobs:
                 # 2026-09-03: ONE online bot at a time. Two launches 5 min apart played the SAME
                 # battles on one account (13 rejections in 14 games, a game sealed under arm None,
                 # the bandit state written by both). The bot itself also refuses (DuplicateBotError).
-                dup = next((j for j in self._jobs.values() if j.entry_id == entry["id"] and j.alive), None)
+                # 2026-10-02 (USER: a second ladder account): one bot PER ACCOUNT — account 2 may run
+                # next to account 1.
+                acct = _slot(_arg_val(argv, "--account") or 1)
+                dup = next((j for j in self._jobs.values() if j.entry_id == entry["id"] and j.alive
+                            and (getattr(j, "account", None) or 1) == acct), None)
                 if dup is not None:
                     raise ValueError(
-                        f"{entry.get('title', entry['id'])} is already running ({dup.jid}). One bot per "
-                        "account — stop it in the Jobs tab (or wait for it to finish) before launching again.")
+                        f"{entry.get('title', entry['id'])} is already running for account {acct} ({dup.jid}). "
+                        "One bot per account — stop it in the Jobs tab (or wait for it to finish) before "
+                        "launching again.")
             if heavy:
                 # ONE heavy run at a time (RTX 3070 Ti 8GB / 32GB RAM). A 2nd heavy launch is
                 # refused with the offender named — stop it (or wait) before starting another.
@@ -992,10 +1075,16 @@ def _status() -> dict:
         "tp": {"env": env.get("VD_TP_CKPT", ""), "model_io": mio["tp"],
                "match": bool(mio["tp"]) and env.get("VD_TP_CKPT", "") == mio["tp"]},
     }
+    # every port this poll needs, probed at once (2026-10-02: ~0.6 s serial → one 0.15 s timeout at worst)
+    open_ports = _ports_open([svc["port"] for svc in _SERVICES.values()] + _panel_ports_to_probe())
     services = {}
     for key, svc in _SERVICES.items():
         services[key] = {**{k: v for k, v in svc.items() if k != "job"},
-                         "up": _port_open(svc["port"]), "job": svc.get("job")}
+                         "up": bool(open_ports.get(svc["port"])), "job": svc.get("job")}
+    accounts = _accounts_up(open_ports)
+    for a in accounts:                             # the launch card's pin picker reads THIS account's arms
+        a["bandit_arms"] = _bandit_arm_names(a["slot"])
+        a["bandit_config"] = _bandit_config_for(a["slot"]).name
     return {"repo": str(_REPO), "env": env_pub, "format": fmt, "formats": _known_formats(),
             "teams": _discover_teams(fmt), "ckpts": inv, "parity": parity,
             "services": services, "exploit": _exploit_summary(), "logs": _recent_logs(),
@@ -1004,7 +1093,9 @@ def _status() -> dict:
             "bandit_arms": _bandit_arm_names(),
             # 2026-09-04: the chain head next to the deployed default (the chain card deploys it)
             "learning_arm": _bandit_learning_arm(),
-            "bot_up": _bot_panel_up(services["bot_panel"]["up"])}
+            # 2026-10-02 (two accounts): who is configured + whose bot is up (the Online tab's switcher)
+            "accounts": accounts,
+            "bot_up": _bot_panel_up(open_ports)}
 
 
 def _registry_public() -> list:
@@ -1017,18 +1108,33 @@ def _registry_public() -> list:
 
 
 # ── HTTP layer ────────────────────────────────────────────────────────────────
+# 2026-10-02 (USER: a traceback at every launch): the browser hung up mid-reply — a page reload / tab close while a
+# poll (the Online tab's panel status takes ~0.5 s) was in flight. WinError 10053 on the reply, then a second one
+# on the 500 the except-branch tried to send. Nothing was wrong; the panel has handled this since 2026-09-04.
+_CLIENT_GONE = (ConnectionAbortedError, ConnectionResetError, BrokenPipeError)
+
+
 def _make_handler():
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):  # noqa: D102 — silence request noise
             pass
 
+        def handle(self):                     # a client that vanishes mid-request is not a traceback
+            try:
+                super().handle()
+            except _CLIENT_GONE:
+                pass
+
         def _json(self, obj, code=200):
             body = json.dumps(obj).encode("utf-8")
-            self.send_response(code)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except _CLIENT_GONE:
+                pass                              # the poller hung up — nobody to answer
 
         def do_GET(self):  # noqa: N802
             u = urlparse(self.path)
@@ -1047,8 +1153,8 @@ def _make_handler():
                     self._json({"commands": _registry_public(), "python": ".venv/Scripts/python.exe"})
                 elif u.path == "/api/exploit_curve":
                     self._json(_exploit_summary())
-                elif u.path == "/api/online/status":
-                    self._json(_panel_status())
+                elif u.path == "/api/online/status":       # ?account=N (2026-10-02; default 1)
+                    self._json(_panel_status(_slot((parse_qs(u.query).get("account") or ["1"])[0])))
                 elif u.path == "/api/dashboard/status":     # 2026-09-03: the Dashboard tab's run strip
                     self._json(_dashboard_status())
                 elif u.path == "/api/species":
@@ -1124,8 +1230,11 @@ def _make_handler():
                     self._json({"ok": True, "job": _JOBS.stop(str(body.get("job") or ""))})
                 elif self.path.startswith("/api/online/"):
                     # proxy to the live bot panel: /api/online/ladder/start -> panel /api/ladder/start
-                    target = "/api" + self.path[len("/api/online"):]
-                    self._json({"ok": True, "panel": _panel_post(target, body)})
+                    # 2026-10-02: ?account=N routes to THAT account's bot (default 1)
+                    pu = urlparse(self.path)
+                    target = "/api" + pu.path[len("/api/online"):]
+                    slot = _slot((parse_qs(pu.query).get("account") or ["1"])[0])
+                    self._json({"ok": True, "panel": _panel_post(target, body, slot)})
                 elif self.path == "/api/tb/generate":
                     self._json(_tb_post("/api/teams/generate", body))
                 elif self.path == "/api/tb/score":

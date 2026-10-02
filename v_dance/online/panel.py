@@ -53,26 +53,39 @@ class _ExclusiveServer(ThreadingHTTPServer):
     allow_reuse_address = False        # a second bind on the port FAILS (Windows honours this)
 
 
-def find_running_panel(ports, *, timeout: float = 0.5, probe=None):
-    """The first bot control panel answering on ``ports`` → ``(port, username)``, else None. A panel
-    is recognised by its status shape (``run`` + ``tally``, the same test Mission Control uses).
-    ``probe(port)`` is injectable for tests (returns the status dict or raises)."""
+def find_running_panels(ports, *, timeout: float = 0.5, probe=None) -> list:
+    """Every bot control panel answering on ``ports`` → ``[(port, username), …]``. A panel is recognised by
+    its status shape (``run`` + ``tally``, the same test Mission Control uses). ``probe(port)`` is injectable
+    for tests (returns the status dict or raises). 2026-10-02 (two accounts): a fast TCP check goes first —
+    a closed localhost port otherwise costs the whole HTTP timeout on Windows, ×20 ports at every launch."""
+    import socket
+
     def _probe(port):
+        with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+            pass                                   # refused / timed out → raises → skipped
         with _urlreq.urlopen(f"http://127.0.0.1:{port}/api/status", timeout=timeout) as r:
             return json.loads(r.read().decode("utf-8"))
     probe = probe or _probe
+    out = []
     for port in ports:
         try:
             js = probe(port)
         except Exception:
             continue
         if isinstance(js, dict) and "run" in js and "tally" in js:
-            return int(port), str(js.get("username") or "")
-    return None
+            out.append((int(port), str(js.get("username") or "")))
+    return out
+
+
+def find_running_panel(ports, *, timeout: float = 0.5, probe=None):
+    """The first bot control panel answering on ``ports`` → ``(port, username)``, else None."""
+    found = find_running_panels(ports, timeout=timeout, probe=probe)
+    return found[0] if found else None
 from pathlib import Path
 from typing import Callable, Optional
 
 import v_dance.online.play_vs_human_browser as _pvhb
+from v_dance.online.accounts import row_account
 from v_dance.formats import known_formats, reg_token
 from v_dance.play.run_local_battle import discover_teams, load_team, resolve_team_path
 from v_dance.play.matchup_book import ALL_TEAMS, MatchupBook, display_species
@@ -121,9 +134,13 @@ class RatingBook:
     lines; ALL-TIME peaks are seeded from the bench JSONL (every past session's rows) at startup.
     Before this, both UIs only ever showed the LAST rating — a peak field never existed."""
 
-    def __init__(self, bench_path: Optional[Path] = None):
+    def __init__(self, bench_path: Optional[Path] = None, *, account: Optional[str] = None,
+                 primary: str = ""):
         self.fmts: dict = {}
         self.loaded_rows = 0
+        # 2026-10-02 (two accounts): seed only THIS account's rows; rows without ``account`` are the
+        # primary's (accounts.row_account). account=None = every row, as before.
+        self.account, self.primary = account, primary
         if bench_path is not None:
             try:
                 self.load_all_time(Path(bench_path))
@@ -156,6 +173,8 @@ class RatingBook:
                     continue
                 fmt = self.fmt_of(r.get("battle_tag"))
                 if not fmt:
+                    continue
+                if self.account is not None and row_account(r, self.primary) != self.account:
                     continue
                 e = self._entry(fmt)
                 if r.get("type") != "rating_update":
@@ -198,14 +217,20 @@ class BotController:
                  bench_path: Optional[Path] = None,
                  bandit=None, lanes_default: int = 1,
                  session_id: Optional[str] = None, belief=None,
-                 dossier_dir: Optional[Path] = None, matchups: bool = True) -> None:
+                 dossier_dir: Optional[Path] = None, matchups: bool = True,
+                 prep_ledger=None, account_slot: Optional[int] = None,
+                 account_id: Optional[str] = None, primary_account_id: str = "") -> None:
         self.page, self.host, self.tally = page, host, tally
         self.ai_pool, self.fmt, self.username = list(ai_pool), fmt, username
         self.loop, self.env_path = loop, env_path
         self._log_line = log_line
+        # 2026-10-02 (two accounts): which ladder account this panel drives, and the box-wide search
+        # ledger (Showdown's prep cap is per IP — accounts.PrepLedger; None = this process only).
+        self.account_slot, self.account_id = account_slot, account_id
+        self.prep_ledger = prep_ledger
         # 2026-09-01: per-regulation rating book (session start/peak + all-time peak) and the
         # online link watchdog (set by play_online_browser; None for other harnesses).
-        self.ratings = RatingBook(bench_path)
+        self.ratings = RatingBook(bench_path, account=account_id, primary=primary_account_id)
         self.link = None
         # 2026-09-01 (era-5 W0): the serve-side bandit (None = off) and the site's official
         # numbers (Elo / GXE / Glicko / W-L from pokemonshowdown.com/users/<id>.json — the true
@@ -561,8 +586,10 @@ class BotController:
             self._schedule_resume(_LIVE_RETRY_S)   # lanes full / target covered — keep watching
             return
         elif not self._prep_budget_ok():
-            self.log(f"search deferred — {_PREP_MAX} searches in the last {_PREP_WINDOW_S:.0f}s "
-                     f"(the server caps battle preps at 12 per 3 min)")
+            others = self._prep_others()
+            self.log(f"search deferred — {len(self._search_times) + others} searches in the last "
+                     f"{_PREP_WINDOW_S:.0f}s" + (f" ({others} by this box's other account)" if others else "")
+                     + f" — our ceiling is {_PREP_MAX} (the server caps battle preps at 12 per 3 min PER IP)")
             self._schedule_resume(_LIVE_RETRY_S)
             return
         self.loop.create_task(self._guarded(self._do_search()))
@@ -577,7 +604,16 @@ class BotController:
     def _prep_budget_ok(self) -> bool:
         now = self.loop.time()
         self._search_times = [t for t in self._search_times if now - t < _PREP_WINDOW_S]
-        return len(self._search_times) < _PREP_MAX
+        return len(self._search_times) + self._prep_others() < _PREP_MAX
+
+    def _prep_others(self) -> int:
+        """Searches by the box's OTHER bot processes in the window (2026-10-02, two accounts)."""
+        if self.prep_ledger is None:
+            return 0
+        try:
+            return int(self.prep_ledger.others(_PREP_WINDOW_S))
+        except Exception:
+            return 0
 
     async def _guarded(self, coro) -> None:
         try:
@@ -626,6 +662,8 @@ class BotController:
         self._search_outstanding = True
         self._search_sent_at = self.loop.time()
         self._search_times.append(self._search_sent_at)   # prep-rate guard (lanes)
+        if self.prep_ledger is not None:
+            self.prep_ledger.record()              # the box's other account counts this one too
         self.log(f"searching ladder ({self.fmt}) with team {name!r} [{src}]")
         if self.run_active:                        # the tick-always-pending invariant (2026-09-01)
             self._schedule_resume(_LIVE_RETRY_S)
@@ -831,6 +869,10 @@ class BotController:
     def status(self) -> dict:
         return {
             "username": self.username, "format": self.fmt,
+            # 2026-10-02 (two accounts): the slot Mission Control routes by + the box-wide search count
+            "account_slot": self.account_slot, "account_id": self.account_id,
+            "prep": {"own": len(self._search_times), "others": self._prep_others(),
+                     "max": _PREP_MAX, "window_s": _PREP_WINDOW_S},
             "formats": (known_formats() or [self.fmt]),
             "teams": self.ai_pool, "team_pin": self.team_pin or "",
             "auto_accept": bool(_pvhb.AUTO_ACCEPT),
@@ -981,18 +1023,23 @@ def start_control_ui(*, page, host, tally: dict, ai_pool: list, fmt: str, userna
                      session_id: Optional[str] = None, belief=None,
                      dossier_dir: Optional[Path] = None, matchups: bool = True,
                      thoughts: bool = True,
-                     guard_duplicates: bool = True) -> BotController:
+                     guard_duplicates: bool = True, guard_ports=None,
+                     prep_ledger=None, account_slot: Optional[int] = None,
+                     account_id: Optional[str] = None,
+                     primary_account_id: str = "") -> BotController:
     """Build the controller + serve the panel on 127.0.0.1 (first free port in [port, port+9]).
     Also chains itself onto ``RATING_HOOK`` (the Δelo battle-done confirm) and
     ``RATING_CHANGE_HOOK`` (post-battle rating → display, peaks, bandit reward) — call AFTER the
-    harness set them. ``bench_path`` seeds the all-time peak per regulation."""
+    harness set them. ``bench_path`` seeds the all-time peak per regulation. ``guard_ports`` = where
+    to look for a bot already serving THIS account (default: the panel's own range)."""
     ctrl = BotController(page=page, host=host, tally=tally, ai_pool=ai_pool, fmt=fmt,
                          username=username, loop=loop, env_path=env_path,
                          team_pin_default=team_pin_default, log_line=log_line,
                          auto_close_default=auto_close_default, bench_path=bench_path,
                          bandit=bandit, lanes_default=lanes_default,
                          session_id=session_id, belief=belief, dossier_dir=dossier_dir,
-                         matchups=matchups)
+                         matchups=matchups, prep_ledger=prep_ledger, account_slot=account_slot,
+                         account_id=account_id, primary_account_id=primary_account_id)
     prev_hook = _pvhb.RATING_HOOK
 
     def _hook(tag, user, rating):                  # PRE-battle number (poke-env semantics)
@@ -1053,8 +1100,12 @@ def start_control_ui(*, page, host, tally: dict, ai_pool: list, fmt: str, userna
     last_exc = None
     # 2026-09-03: ONE bot per account. Before binding, look for a live panel in the port range —
     # a second bot process on the same account plays the same battles and every one of its orders
-    # is rejected (see DuplicateBotError). Any username is refused: one box, one ladder account.
-    other = find_running_panel(range(port, port + 10)) if guard_duplicates else None
+    # is rejected (see DuplicateBotError). 2026-10-02 (USER: a second ladder account): a panel serving
+    # a DIFFERENT account is fine — only the same account (or one that won't say who it is) is refused.
+    found = find_running_panels(guard_ports if guard_ports is not None else range(port, port + 10)) \
+        if guard_duplicates else []
+    me = _pvhb._toid(username)
+    other = next(((p, u) for p, u in found if not _pvhb._toid(u) or _pvhb._toid(u) == me), None)
     if other is not None:
         o_port, o_user = other
         raise DuplicateBotError(
