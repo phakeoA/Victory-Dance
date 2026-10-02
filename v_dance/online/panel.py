@@ -731,11 +731,12 @@ class BotController:
     def set_timer_immediate(self, on: bool) -> None:
         """USER 2026-09-02: battle-timer mode. ON = /timer on at the first frame of every game (team
         preview included); OFF = the consumer's per-room grace (/timer on once our decision sat
-        unanswered ``_OPP_TIMER_S``). Applies from the next battle frame — no restart."""
+        unanswered ``_OPP_TIMER_S``; 2026-10-02: ladder games only, never a private match). Applies from the
+        next battle frame — no restart."""
         _pvhb.TIMER_IMMEDIATE = bool(on)
         self.log("battle timer: " + ("IMMEDIATE — /timer on at every game's first frame" if on else
                                      f"GRACE — /timer on after {_pvhb._OPP_TIMER_S:.0f}s of opponent "
-                                     f"silence, per room"))
+                                     f"silence, per room (ladder games only — never in a private match)"))
 
     def set_ots_accept(self, on: bool) -> None:
         """USER 2026-09-03: open team sheets. ON = answer the server's team-preview offer with
@@ -1259,7 +1260,7 @@ _PANEL_HTML = """<!DOCTYPE html>
       <div class="toggle"><input type="checkbox" id="autoClose">
         <label for="autoClose">Auto-close finished battle tabs</label></div>
       <div class="toggle"><input type="checkbox" id="timerNow">
-        <label for="timerNow">Start the battle timer immediately <span class="muted" id="timerNote">(off = after 30 s of opponent silence, per room)</span></label></div>
+        <label for="timerNow">Start the battle timer immediately <span class="muted" id="timerNote">(off = ladder games after 30 s of opponent silence; private matches never)</span></label></div>
       <div class="toggle"><input type="checkbox" id="otsAccept">
         <label for="otsAccept">Accept open team sheets <span class="muted" id="otsNote">(both must accept; the opponent's sheet then feeds the battle net)</span></label></div>
       <label class="fld" style="margin-top:8px">Serve mode</label>
@@ -1411,7 +1412,7 @@ function render(s) {
   // 2026-09-03 (USER): open team sheets
   if (document.activeElement !== $('otsAccept')) $('otsAccept').checked = !!s.ots_accept;
   $('otsNote').textContent = `(both must accept; the opponent's sheet then feeds the battle net · ${s.ots_games || 0} game(s) with sheets this session)`;
-  $('timerNote').textContent = `(off = after ${Math.round(s.timer_grace_s || 30)} s of opponent silence, per room)`;
+  $('timerNote').textContent = `(off = ladder games after ${Math.round(s.timer_grace_s || 30)} s of opponent silence; private matches never)`;
   const wait = s.awaiting_confirm.length ? ' — confirming result…' : '';
   const lanesTxt = (s.lanes || 1) > 1 ? ` · live ${s.live.length}/${s.lanes}` : '';
   $('prog').textContent = s.run.active

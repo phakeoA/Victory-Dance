@@ -44,6 +44,9 @@ _OPP_TIMER_S = 30.0    # opponent think-time before the consumer sends /timer on
 # has sat unanswered for _OPP_TIMER_S). True = IMMEDIATE: /timer on at the FIRST frame of every battle
 # (team preview included), so an opponent who walks away at preview can never hold a lane. Runtime
 # toggle in the control panel / Mission Control; launch default VD_TIMER_IMMEDIATE (online harness).
+# 2026-10-02 (USER: "unticked 'automatic start timer' against my friend it still started the timer"): the
+# grace never fires in a PRIVATE match — a room whose intro (|tier|) came without a |rated| line, i.e. a
+# challenge. Ladder games keep the grace; IMMEDIATE (box ticked) still starts the timer in every game.
 TIMER_IMMEDIATE = False
 # 2026-09-04: the consumer's outgoing pacing gate (send_gate.SendGate), published here so the control panel can
 # show its counters (sent / deferred / queued / server throttle notices). [None] until a consumer runs.
@@ -448,7 +451,11 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
                                  # server) is the one we're waiting on. PER ROOM since 2026-09-02:
                                  # one global stamp let a busy neighbour room hide a stalled one (lanes).
     timer_sent: set = set()      # battles we already sent /timer on for (once per battle)
-    t0_tag = None                # ladder battles ARRIVE without an accept (the Battle! queue), so
+    from v_dance.play.player import room_base_tag
+    room_rated: dict = {}        # BASE room tag -> True (|rated| seen) / False (intro |tier| seen without
+                                 # it = a private match); absent = not known yet → the grace still applies
+    timer_waived: set = set()    # private rooms whose grace was skipped (log once per room)
+    t0_tag = None               # ladder battles ARRIVE without an accept (the Battle! queue), so
                                  # busy_since was never set → stamp it on a battle's FIRST frame
     # 2026-09-04 (USER: "a message in the team picker said it couldn't be sent, typed too quickly, and it
     # didn't pick any Pokémon"): EVERY room command goes through ONE pacing gate — the server drops chat
@@ -478,12 +485,18 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
         check (one global 'active' room, one global ship stamp) never looked at the stalled room —
         the USER's 09-02 report: an opponent who left at team preview held a lane for good. A rare
         false positive (an extremely long turn resolution) is harmless — the timer is a legitimate
-        tool either way."""
+        tool either way. 2026-10-02: never in a private (unrated) match — see TIMER_IMMEDIATE."""
         now = loop.time()
         for tag, at in list(last_ship.items()):
             if tag in timer_sent or tag in host._ended:
                 continue
             if now - at > _OPP_TIMER_S:
+                if room_rated.get(room_base_tag(tag)) is False:
+                    if tag not in timer_waived:
+                        timer_waived.add(tag)
+                        print(f"[ai] private match (unrated) — not starting the timer ({tag}); "
+                              f"tick 'start the battle timer immediately' to time private games too")
+                    continue
                 await _timer_on(tag, f"opponent slow (>{_OPP_TIMER_S:.0f}s)")
 
     def _forget_room(tag) -> None:
@@ -491,6 +504,8 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
         if tag:
             timer_sent.discard(tag)
             last_ship.pop(tag, None)
+            timer_waived.discard(tag)
+            room_rated.pop(room_base_tag(tag), None)
 
     # _MAX_BATTLE_S is module-level (#16) so run()'s self-test budget can be sized above it.
     while not stop.is_set():
@@ -623,6 +638,13 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
                 # (the "battle done in 686352s" print) — stamp it on the battle's first frame.
                 if not busy and active_tag != t0_tag and active_tag not in host._ended:
                     busy_since, t0_tag = loop.time(), active_tag
+                # 2026-10-02: rated or private? The simulator's intro chunk carries |tier| and, for a
+                # ladder game only, |rated| (a challenge has none). Once rated, always rated.
+                if active_tag not in host._ended:
+                    if "\n|rated|" in payload:
+                        room_rated[room_base_tag(active_tag)] = True
+                    elif "\n|tier|" in payload:
+                        room_rated.setdefault(room_base_tag(active_tag), False)
                 # 2026-09-02 (USER): IMMEDIATE timer mode — /timer on at a room's FIRST frame (team
                 # preview included), once per battle; the per-room sweep stays as the backstop. An
                 # already-ended room's stray frame and a reconnect's replayed |init| (tag still in

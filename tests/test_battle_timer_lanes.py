@@ -10,7 +10,8 @@ whose opponent left at team preview was never looked at — its lane stayed occu
 5-minute ghost sweep, and the server still counted the room against the 5-game cap.
 
 Fixes: (1) ``last_ship`` is per room, swept every loop pass; (2) a toggle sends ``/timer on`` at a
-room's FIRST frame instead (panel / Mission Control checkbox, launch default VD_TIMER_IMMEDIATE).
+room's FIRST frame instead (panel / Mission Control checkbox, launch default VD_TIMER_IMMEDIATE);
+(3) 2026-10-02: the grace never fires in a private match (intro without |rated|).
 Everything is driven with fakes — no Playwright, no server."""
 from __future__ import annotations
 
@@ -188,6 +189,44 @@ def test_grace_mode_stays_the_default_and_the_sweep_is_the_backstop_under_immedi
     frames = [(0.0, f">{A}\n|request|{{\"teamPreview\":true}}")]
     page, _ = asyncio.run(_drive(frames, total_s=1.0))
     assert _timer_sends(page) == [A]                       # immediate sent it; the sweep did NOT double
+
+
+# ── 2026-10-02: a private match (no |rated|) never gets the grace timer ───────
+_INTRO = "\n|gametype|doubles\n|tier|[Gen 9 Champions] VGC 2026 Reg M-B"
+
+
+def test_grace_timer_never_fires_in_a_private_match(capsys):
+    # USER 10-02: the box unticked vs a friend, the bot still started the timer. A challenge's intro has
+    # |tier| but no |rated| → the grace skips the room (logged once), however long the friend thinks.
+    frames = [(0.0, f">{A}{_INTRO}"), (0.02, f">{A}\n|request|{{\"teamPreview\":true}}")]
+    page, _ = asyncio.run(_drive(frames, total_s=2.4))     # two idle ticks past the 0.4 s grace
+    assert _timer_sends(page) == []
+    assert capsys.readouterr().out.count("private match (unrated)") == 1
+
+
+def test_grace_timer_still_fires_in_a_rated_ladder_game():
+    frames = [(0.0, f">{A}{_INTRO}\n|rated|"), (0.02, f">{A}\n|request|{{\"teamPreview\":true}}")]
+    page, _ = asyncio.run(_drive(frames, total_s=1.7))
+    assert _timer_sends(page) == [A]
+
+
+def test_private_check_keys_the_base_room_and_rated_is_sticky():
+    # the intro may arrive on the bare id and our decisions on the private-suffixed one (the panel's
+    # stall-#2 naming); a later |tier| frame without |rated| never downgrades a rated room.
+    Bp = B + "-abc123pw"
+    frames = [(0.0, f">{B}{_INTRO}"), (0.02, f">{Bp}\n|request|{{\"teamPreview\":true}}"),
+              (0.0, f">{A}{_INTRO}\n|rated|"), (0.02, f">{A}\n|tier|replayed"),
+              (0.02, f">{A}\n|request|{{\"teamPreview\":true}}")]
+    page, _ = asyncio.run(_drive(frames, total_s=1.7))
+    assert _timer_sends(page) == [A]                       # the ladder room only
+
+
+def test_immediate_mode_still_times_private_matches(monkeypatch):
+    monkeypatch.setattr(_pvhb, "TIMER_IMMEDIATE", True)    # box ticked = a timer in every game
+    frames = [(0.0, f">{A}\n|init|battle"), (0.02, f">{A}{_INTRO}"),
+              (0.02, f">{A}\n|request|{{\"teamPreview\":true}}")]
+    page, _ = asyncio.run(_drive(frames, total_s=0.6))
+    assert _timer_sends(page) == [A]
 
 
 # ── panel / Mission Control / launch plumbing ───────────────────────────────

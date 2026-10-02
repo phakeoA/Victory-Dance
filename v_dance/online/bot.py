@@ -83,7 +83,8 @@ def _timer_banner(immediate: bool, grace_s: float) -> str:
         return ("[online] battle timer: IMMEDIATE — /timer on at the first frame of every game "
                 "(VD_TIMER_IMMEDIATE=1; toggle live in the panel / Mission Control)")
     return (f"[online] battle timer: GRACE — /timer on once our decision sat unanswered {grace_s:.0f}s, "
-            f"judged per room (VD_TIMER_IMMEDIATE=1 = at the first frame; toggle live in the panel)")
+            f"judged per room, ladder games only — never in a private match (VD_TIMER_IMMEDIATE=1 = at the first "
+            f"frame; toggle live in the panel)")
 
 
 def _ots_accept_env() -> bool:
