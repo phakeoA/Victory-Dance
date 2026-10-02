@@ -56,6 +56,7 @@ from v_dance.encoders.state_encoder import (
 from v_dance.encoders.battle_mechanics import (
     move_redundant_condition, move_redundant_status, _REDUNDANT_OWN_SIDE_NAMES,
     charge_skipped_now, weather_accuracy, weather_bp_mult,
+    terrain_bp_mult, terrain_priority, terrain_spread,       # v19d: terrain move mechanics (shared)
 )
 from v_dance.encoders.state_encoder import _TWO_TURN_CHARGE_IDX  # v19c: dynamic-tag slot (shared)
 from v_dance.encoders import damage_mechanics as _DMG
@@ -1052,7 +1053,11 @@ class LiveStateEncoder:
                    "scope_lens": _it in ("scopelens", "razorclaw"),  # v11 N4: +1 crit stage (P5: gated via _it)
                    # v11: Victory Star ×1.1 accuracy — the holder OR its active ally has the ability.
                    "victory_star": abil_id == "victorystar" or ally_ability == "victorystar",
-                   "side_active": side_active}      # v18 (Option 1): this mon's own-side active conditions
+                   "side_active": side_active,      # v18 (Option 1): this mon's own-side active conditions
+                   # v19d: is the ATTACKER grounded (parity twin of the offline att_ctx — the same _is_grounded
+                   # call + inputs as the volatile block below)
+                   "grounded": _is_grounded(_live_eff_types(mon), abil_id, self._live_item(mon, is_own)[0],
+                                            vf["levitating"], vf["force_grounded"] or gravity)}
         for m_idx in range(NUM_MOVES):
             if m_idx < len(move_list):
                 self._write_move(vec, i, move_list[m_idx], mon, enemy_defenders, att_ctx,
@@ -1305,7 +1310,9 @@ class LiveStateEncoder:
 
         # is_spread (gap #6): hits both foes — poke-env Move.target enum, mapped to
         # the same id as the offline data/moves.json target by is_spread_target.
-        _spread = is_spread_target(getattr(move, "target", None))
+        # v19d: DYNAMIC for Expanding Force under Psychic Terrain with a grounded user (parity twin of offline).
+        _spread = is_spread_target(getattr(move, "target", None)) or terrain_spread(
+            _mid, field_mods[1] if field_mods else None, (att_ctx or {}).get("grounded"))
         vec[i] = 1.0 if _spread else 0.0
         i += 1
 
@@ -1342,7 +1349,8 @@ class LiveStateEncoder:
             _hmin = 4
         # v11 N4: expected-crit multiplier (parity twin of offline — defender-independent, computed once).
         _crit = _expected_crit_mult(_mid, ability_id, _ac.get("scope_lens"))
-        _prio = getattr(move, "priority", 0) or 0      # move priority (damage block + B.1b below; parity twin)
+        # move priority (damage block + B.1b below; parity twin); v19d: Grassy Glide +1 under Grassy Terrain
+        _prio = terrain_priority(_mid, getattr(move, "priority", 0) or 0, _terrain, _ac.get("grounded"))
         for e in range(2):
             d = enemy_defenders[e] if (enemy_defenders and e < len(enemy_defenders)) else None
             if d and not _move_immune(_mt, d, ability_id, _mid) \
@@ -1361,10 +1369,12 @@ class LiveStateEncoder:
                 _sit = _situational_damage_mult(_mt, _phys, _weather, _terrain, d,
                                                 _ac.get("burned"), _ac.get("life_orb"), _ac.get("choice"),
                                                 hits_def=_hits_def,
-                                                grassy_eq=_mid in _GRASSY_WEAKENED) * _abm  # v11 G7
+                                                grassy_eq=_mid in _GRASSY_WEAKENED,          # v11 G7
+                                                attacker_grounded=_ac.get("grounded")) * _abm  # v19d
                 # v19c: per-MOVE weather BP hooks (Solar Beam/Blade · Weather Ball · Hydro Steam) —
                 # parity twin of the offline writer; charge-turn cost = the dynamic tag below.
                 _sit *= weather_bp_mult(_mid, _weather)
+                _sit *= terrain_bp_mult(_mid, _terrain, _ac.get("grounded"))   # v19d: Expanding Force ×1.5
                 # v11 B3 attacker item band mults + B3b defender resist berry (parity twin of the offline writer).
                 if _ac.get("type_boost") == _mt:
                     _sit *= _BAND_ITEM_MULT

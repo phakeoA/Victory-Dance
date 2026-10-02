@@ -463,7 +463,7 @@ _GRASSY_WEAKENED = frozenset({"earthquake", "bulldoze", "magnitude"})
 
 def _situational_damage_mult(move_type, is_physical, weather, terrain, defender,
                              att_burned, att_life_orb, att_choice, hits_def=None,
-                             grassy_eq: bool = False) -> float:
+                             grassy_eq: bool = False, attacker_grounded: Optional[bool] = None) -> float:
     """B1.2b damage situational multiplier: weather (Sun/Rain on Fire/Water) · terrain ×1.3 (grounded
     defender, matching type) + Misty ×0.5 Dragon (grounded; v11 G4) + Grassy ×0.5 Earthquake/Bulldoze/
     Magnitude (grounded; v11 G7) · N3 DEFENSIVE weather (Sand ×2/3 on the SpD-side vs a ROCK defender,
@@ -472,7 +472,12 @@ def _situational_damage_mult(move_type, is_physical, weather, terrain, defender,
     v11 B.2: ``hits_def`` selects the SCREEN side — None keeps the legacy category-based pick, True forces
     the physical (Reflect) side for a special move that hits Def (Psyshock/Psystrike/Secret Sword).
     v11 G7: ``grassy_eq`` (caller: move_id in _GRASSY_WEAKENED) → ×0.5 under Grassy Terrain vs a grounded
-    defender (the semi-invulnerable exemption is a rare two-turn state the band does not model)."""
+    defender (the semi-invulnerable exemption is a rare two-turn state the band does not model).
+    v19d (2026-10-02): the Electric / Grassy / Psychic terrain ×1.3 keys on the ATTACKER being grounded
+    (conditions in data/moves.ts: ``attacker.isGrounded()``) — it keyed on the DEFENDER before, so a grounded
+    Indeedee's Psychic hit into Corviknight / Salamence lost its boost and a Flying attacker gained one. Misty's
+    Dragon ×0.5 and Grassy's Earthquake ×0.5 stay on the DEFENDER (as the server has them). ``attacker_grounded``
+    None = a caller that does not know → the pre-v19d defender-keyed behaviour."""
     mult = 1.0
     mt = (move_type or "").upper()
     # audit: extreme weather (Desolate Land harsh sun / Primordial Sea heavy rain) acts like Sun/Rain for
@@ -484,12 +489,14 @@ def _situational_damage_mult(move_type, is_physical, weather, terrain, defender,
     elif weather in ("RAINDANCE", "PRIMORDIALSEA"):
         _opp = 0.0 if weather == "PRIMORDIALSEA" else 0.5
         mult *= 1.5 if mt == "WATER" else (_opp if mt == "FIRE" else 1.0)
+    _att_g = (attacker_grounded if attacker_grounded is not None
+              else bool(defender and defender.get("grounded")))          # v19d: the ATTACKER (legacy: defender)
+    if _att_g and ((terrain == "ELECTRIC_TERRAIN" and mt == "ELECTRIC")
+                   or (terrain == "GRASSY_TERRAIN" and mt == "GRASS")
+                   or (terrain == "PSYCHIC_TERRAIN" and mt == "PSYCHIC")):
+        mult *= 1.3
     if defender and defender.get("grounded"):
-        if (terrain == "ELECTRIC_TERRAIN" and mt == "ELECTRIC") \
-                or (terrain == "GRASSY_TERRAIN" and mt == "GRASS") \
-                or (terrain == "PSYCHIC_TERRAIN" and mt == "PSYCHIC"):
-            mult *= 1.3
-        elif terrain == "MISTY_TERRAIN" and mt == "DRAGON":
+        if terrain == "MISTY_TERRAIN" and mt == "DRAGON":
             mult *= 0.5                                # v11 gap-scan G4: Misty Terrain halves Dragon (grounded)
         if grassy_eq and terrain == "GRASSY_TERRAIN":
             mult *= 0.5                                # v11 G7: Grassy Terrain halves EQ/Bulldoze/Magnitude (grounded)
@@ -1408,6 +1415,33 @@ def weather_bp_mult(move_id: Optional[str], weather) -> float:
     if mid == "hydrosteam":
         return 3.0 if _weather_key(weather) == "sun" else 1.0
     return 1.0
+
+
+# v19d (2026-10-02, USER: "terrain wars and weather wars are concepts it doesn't understand") — the TERRAIN twin
+# of the v19c weather hooks. VALUE-only (no slot change, no STATE_LAYOUT_VERSION bump, _CACHE_SCHEMA 5). Every
+# rule read from the pinned server (data/moves.ts); ``attacker_grounded`` None = unknown → treated as grounded.
+def terrain_bp_mult(move_id: Optional[str], terrain, attacker_grounded: Optional[bool] = None) -> float:
+    """moves.ts expandingforce.onBasePower: ×1.5 under Psychic Terrain when its USER is grounded (the Indeedee
+    staple — before v19d the band priced it as a plain 80-BP single-target move). 1.0 for every other move."""
+    if (move_id or "") == "expandingforce" and terrain == "PSYCHIC_TERRAIN" and attacker_grounded is not False:
+        return 1.5
+    return 1.0
+
+
+def terrain_spread(move_id: Optional[str], terrain, attacker_grounded: Optional[bool] = None) -> bool:
+    """moves.ts expandingforce.onModifyMove: under Psychic Terrain with a grounded user the move's target becomes
+    allAdjacentFoes — it hits BOTH foes (and takes the doubles spread ×0.75). Makes the is_spread channel dynamic."""
+    return (move_id or "") == "expandingforce" and terrain == "PSYCHIC_TERRAIN" and attacker_grounded is not False
+
+
+def terrain_priority(move_id: Optional[str], priority, terrain, attacker_grounded: Optional[bool] = None) -> int:
+    """moves.ts grassyglide.onModifyPriority: +1 under Grassy Terrain when its USER is grounded (Rillaboom's
+    Grassy Glide moves first). Feeds the who-moves-first channel + the Psychic-Terrain / Dazzling priority block;
+    the raw priority channel stays the move-data value (same convention as the raw BP channel)."""
+    p = int(priority or 0)
+    if (move_id or "") == "grassyglide" and terrain == "GRASSY_TERRAIN" and attacker_grounded is not False:
+        return p + 1
+    return p
 
 
 def charge_skipped_now(move_id: Optional[str], weather) -> bool:

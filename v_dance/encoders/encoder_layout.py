@@ -246,6 +246,14 @@ STATE_DIM = (ACTIVE_SLOTS + BENCH_SLOTS + OPP_BENCH_SLOTS) * POKEMON_FEATURES + 
 #       accuracy (rain/snow bypass → always-hit, sun Thunder/Hurricane → 50%). The band stopped selling a
 #       rain Solar Beam as a full instant nuke (the 2026-07-10 online rain-loss defect). See
 #       battle_mechanics.weather_bp_mult / charge_skipped_now / weather_accuracy.
+#       ALSO bundled post-hoc in v19 (v19d 2026-10-02, VALUE-only, no slot change; _CACHE_SCHEMA 5; USER: "terrain
+#       wars"): TERRAIN-CONDITIONAL move mechanics — the Electric/Grassy/Psychic terrain ×1.3 now keys on the
+#       ATTACKER being grounded (it keyed on the defender: a grounded Indeedee's Psychic hit into Corviknight lost
+#       it); Expanding Force ×1.5 + is_spread under Psychic Terrain (grounded user); Grassy Glide +1 priority under
+#       Grassy Terrain (grounded user) in the who-moves-first channel + the priority block. Served checkpoints keep
+#       loading (same dims); both encoders share battle_mechanics.terrain_bp_mult / terrain_spread /
+#       terrain_priority. (white_box_sim — the dead-end search's forward model — deliberately NOT updated: it
+#       passes no attacker_grounded, so _situational_damage_mult keeps its pre-v19d behaviour there.)
 # train_bc stamps this into the checkpoint config; model_io.load_bc_policy asserts
 # it (and the dim) match the running code.
 STATE_LAYOUT_VERSION = 19

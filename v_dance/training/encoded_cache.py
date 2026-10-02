@@ -68,7 +68,10 @@ from v_dance.training.bc_dataset import (
 )
 
 _CACHE_DIRNAME = ".encoded_cache"
-_CACHE_SCHEMA = 4          # 4 (2026-07-24): futility-mask batch — transition_to_example now ANDs
+_CACHE_SCHEMA = 5          # 5 (2026-10-02): v19d terrain move mechanics — the terrain ×1.3 keys on the
+                           # ATTACKER being grounded; Expanding Force ×1.5 + spread under Psychic Terrain;
+                           # Grassy Glide +1 priority under Grassy Terrain (same dims, new values).
+                           # 4 (2026-07-24): futility-mask batch — transition_to_example now ANDs
                            # the recomputed codec mask into the stored row, so baked masks change.
                            # bump when the serialized schema OR encoder SEMANTICS change without
                            # a layout/dim bump (schema 2 = 2026-07-10 priority-block: blocked
