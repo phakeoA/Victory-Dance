@@ -62,6 +62,12 @@ class ChunkSpec:
     # (rlspawn plugin; spawn_client.play_pairing_spawned) keeping this many rooms alive, instead of the
     # challenge protocol. 0 = challenge path, byte-identical. Picklable primitive like the rest.
     spawn_rooms: int = 0
+    # 2026-10-02 DRILLS (v_dance/selfplay/drills.py): ``pressure`` = an opponent bias NAME (field_fight.BIASES) +
+    # its strength — stamped ONLY on model opponents that do not record (snapshot / clone); ``score`` = return this
+    # chunk's battle logs for the main-process drill scoreboard. Defaulted primitives → positional ctors + pickle OK.
+    pressure: Optional[str] = None
+    pressure_bias: float = 0.0
+    score: bool = False
 
 
 @dataclass
@@ -74,6 +80,8 @@ class WorkerResult:
     pfsp: List[Tuple[str, bool]] = field(default_factory=list)
     n_games: int = 0
     kind_games: dict = field(default_factory=dict)   # finished games per league.opp_key (preflight coverage)
+    drill_rows: list = field(default_factory=list)   # 2026-10-02: per-game logs for the drill scoreboard
+    pressure_stats: dict = field(default_factory=dict)   # opponents' drill-pressure fired / taken (NOT source_counts)
 
 
 def _spec_from_sample(sample, team_a: str, team_b: str, n: int, uid: int, gen: int) -> ChunkSpec:
@@ -91,7 +99,8 @@ def _spec_from_sample(sample, team_a: str, team_b: str, n: int, uid: int, gen: i
 def build_chunk_specs(league, team_pool, n_games: int, *, chunk_size: int = 10,
                       matchup_seed: int = 0, seed: int = 0, gen: int = 0,
                       spawn_rooms: int = 0, own_team=None, own_mirror_frac: float = 0.2,
-                      opp_weights=None) -> List[ChunkSpec]:
+                      opp_weights=None, pressure: Optional[str] = None, pressure_bias: float = 0.0,
+                      score: bool = False, opp_draw: str = "largest_remainder") -> List[ChunkSpec]:
     """Plan the collection batch as a flat list of PICKLABLE ChunkSpecs — the multiprocessing
     analogue of ``generation.build_collection_chunks``. League sampling + uid assignment happen
     HERE, in the main process (race-free), so the workers never touch league state. ``gen`` (22d)
@@ -107,7 +116,7 @@ def build_chunk_specs(league, team_pool, n_games: int, *, chunk_size: int = 10,
     for team_a, team_b, n in collection_pairings(team_pool, n_games, seed=matchup_seed,
                                                  own_team=own_team,
                                                  own_mirror_frac=own_mirror_frac,
-                                                 opp_weights=opp_weights):
+                                                 opp_weights=opp_weights, opp_draw=opp_draw):
         remaining = n
         while remaining > 0:
             cn = min(chunk_size, remaining)
@@ -117,6 +126,14 @@ def build_chunk_specs(league, team_pool, n_games: int, *, chunk_size: int = 10,
             tb = league.opponent_team(sample, team_b, rng) if hasattr(league, "opponent_team") else team_b
             spec = _spec_from_sample(sample, team_a, tb, cn, uid, gen)
             spec.spawn_rooms = max(0, int(spawn_rooms or 0))
+            spec.score = bool(score)
+            # drill pressure: only NON-recording model opponents (latest records what PPO trains on; scripted
+            # has no model to bias)
+            # review RL-2: and never a MIRROR chunk — a pressured copy of OUR team would distort the own-mirror
+            # games PPO trains on (and the scoreboard drops mirrors, so it would never show)
+            if pressure and float(pressure_bias or 0) > 0 and spec.kind in ("snapshot", "clone") \
+                    and Path(str(spec.team_a)).name.lower() != Path(str(spec.team_b)).name.lower():
+                spec.pressure, spec.pressure_bias = str(pressure), float(pressure_bias)
             specs.append(spec)
     return specs
 
@@ -141,6 +158,8 @@ def merge_results(results) -> WorkerResult:
     pfsp: List[Tuple[str, bool]] = []
     games = 0
     kinds: Counter = Counter()
+    rows: list = []
+    pstats: Counter = Counter()
     for r in results:
         if r is None:
             continue
@@ -149,7 +168,67 @@ def merge_results(results) -> WorkerResult:
         pfsp.extend(r.pfsp)
         games += r.n_games
         kinds.update(getattr(r, "kind_games", None) or {})
-    return WorkerResult(trajs, dict(sc), pfsp, games, dict(kinds))
+        rows.extend(getattr(r, "drill_rows", None) or [])
+        pstats.update(getattr(r, "pressure_stats", None) or {})
+    return WorkerResult(trajectories=trajs, source_counts=dict(sc), pfsp=pfsp, n_games=games,
+                        kind_games=dict(kinds), drill_rows=rows, pressure_stats=dict(pstats))
+
+
+def _drill_rows(our, opp, our_trajs: dict, spec: "ChunkSpec") -> List[dict]:
+    """One row per finished game of this chunk for the main-process drill scoreboard: the battle LOG (poke-env's
+    ``_replay_data`` — every protocol message incl. |win|, kept after the finish callback; what the saved HTML replays
+    are rendered from), our player name, the opponent kind / team and the mirror / fallback flags. Pure (no poke-env
+    import); works with save_replays OFF."""
+    from v_dance.selfplay.replay_html import battle_replay_lines
+    battles = getattr(our, "battles", None) or {}
+    forfeited = set(getattr(opp, "_forfeited_tags", None) or ())
+    rows = []
+    for tag, t in our_trajs.items():
+        b = battles.get(tag) or battles.get(str(tag).lstrip(">"))
+        if b is None:
+            continue
+        rows.append({"our": getattr(our, "username", ""),
+                     "text": "\n".join(battle_replay_lines(b)),
+                     "kind": spec.kind,
+                     "opp_ref": spec.opp_ref if spec.kind in ("clone", "scripted") else None,
+                     "team_b": spec.team_b,
+                     "mirror": spec.team_a == spec.team_b,
+                     "fallback": (getattr(t.meta, "terminal_type", None) == "fallback"
+                                  or str(tag).lstrip(">").strip() in forfeited),
+                     "pressure": bool(spec.pressure),
+                     # review F6: what the team preview actually BROUGHT / LED (a back-line mon that never
+                     # switched in is still brought) — the focus drill scores 'brought' from these
+                     "tp_brought": _tp_species(t.meta, "tp_bring"),
+                     "tp_led": _tp_species(t.meta, "tp_leads")})
+    return rows
+
+
+def _tp_species(meta, key: str) -> Optional[List[str]]:
+    """Species ids picked by the team preview (``meta.own_team`` indexed by ``meta.tp_bring`` / ``tp_leads``)."""
+    import re as _re
+    team, idx = getattr(meta, "own_team", None), getattr(meta, key, None)
+    if not team or idx is None:
+        return None
+    out = []
+    for i in idx:
+        try:
+            out.append(_re.sub(r"[^a-z0-9]", "", str(team[int(i)]).split("-")[0].lower()))
+        except (IndexError, TypeError, ValueError):
+            continue
+    return out
+
+
+_WARNED: set = set()
+
+
+def _warn_once(key: str, msg: str) -> None:
+    """WARNING with the traceback the FIRST time per process (spawn workers never configure logging, so DEBUG is
+    lost — review F4), DEBUG afterwards (a per-turn failure must not flood the log)."""
+    if key in _WARNED:
+        log.debug(msg, exc_info=True)
+        return
+    _WARNED.add(key)
+    log.warning(msg, exc_info=True)
 
 
 # ── collection dispatch (injected player factory → offline-testable) ───────────
@@ -183,6 +262,8 @@ async def _collect_specs(ac, specs: List[ChunkSpec], *, tau: float, seed: int,
     pfsp: List[Tuple[str, bool]] = []
     games = {"n": 0}
     kind_games: Counter = Counter()
+    drill_rows: list = []
+    pressure_stats: Counter = Counter()
     _spawn_fn = play_spawned or _play_spawned_real
 
     async def _run(spec: ChunkSpec):
@@ -223,6 +304,13 @@ async def _collect_specs(ac, specs: List[ChunkSpec], *, tau: float, seed: int,
             trajectories.extend(our_trajs.values())
             games["n"] += len(our_trajs)
             kind_games[opp_key(spec.kind, spec.opp_ref)] += len(our_trajs)
+            if getattr(spec, "score", False):            # 2026-10-02 drills: the logs go home for the scoreboard
+                try:
+                    drill_rows.extend(_drill_rows(our, opp, our_trajs, spec))
+                except Exception:
+                    _warn_once("drill rows", "drill rows failed — this chunk's games are missing from the "
+                               "DRILL scoreboard (non-fatal)")
+            pressure_stats.update(getattr(opp, "_pressure_stats", None) or {})
             if spec.kind == "latest":
                 source_counts.update(getattr(opp, "_source_counts", {}) or {})
                 opp_trajs = opp.finished_trajectories()
@@ -230,7 +318,9 @@ async def _collect_specs(ac, specs: List[ChunkSpec], *, tau: float, seed: int,
                 # (shared battle_tag). In-place -> the our_trajs already extended above update too.
                 align_paired_trajectories(our_trajs, opp_trajs)
                 trajectories.extend(opp_trajs.values())
-            elif spec.kind == "snapshot":
+            elif spec.kind == "snapshot" and not getattr(spec, "pressure", None):
+                # review RL-1: a PRESSURED snapshot is not the real snapshot — its results must not steer PFSP
+                # (wins_vs_latest is persisted, so a later non-drill resume would inherit the skew)
                 for t in our_trajs.values():
                     # #1: skip a FALLBACK (opp backstop-forfeit) game — dropped from PPO, so it must
                     # not bias PFSP either. Gate on is_trainable (same as the PPO buffer). getattr keeps
@@ -240,7 +330,9 @@ async def _collect_specs(ac, specs: List[ChunkSpec], *, tau: float, seed: int,
             await close_players(our, opp)
 
     await run_jobs([lambda s=s: _run(s) for s in specs], workers=async_workers)
-    return WorkerResult(trajectories, dict(source_counts), pfsp, games["n"], dict(kind_games))
+    return WorkerResult(trajectories=trajectories, source_counts=dict(source_counts), pfsp=pfsp,
+                        n_games=games["n"], kind_games=dict(kind_games), drill_rows=drill_rows,
+                        pressure_stats=dict(pressure_stats))
 
 
 def _build_players_real(ac, spec: ChunkSpec, tau: float, seed: int, team_chooser, live_dir=None,
@@ -287,7 +379,10 @@ def _build_players_real(ac, spec: ChunkSpec, tau: float, seed: int, team_chooser
     elif spec.kind in ("snapshot", "clone"):
         opp = R.make_player(opp_name, tb, model_path=spec.opp_ref,
                             team_chooser_path=team_chooser, max_concurrent_battles=_mcb,
-                            port=port)
+                            port=port,
+                            # 2026-10-02 drill pressure (opponent-only; None/0 = off, byte-identical)
+                            pressure=getattr(spec, "pressure", None),
+                            pressure_bias=getattr(spec, "pressure_bias", 0.0))
     else:   # scripted
         opp = _make_opponent(spec.opp_ref, opp_name, tb,
                              max_concurrent_battles=_mcb, port=port)
@@ -480,7 +575,10 @@ def collect_with_pool(ac, league, n_games: int, *, team_pool, ckpt_path,
                       team_chooser=None, battle_timeout: Optional[float] = 90.0, status=None,
                       live_dir=None, save_replays: bool = False, generation: int = 0,
                       ports=None, spawn_rooms: int = 0, own_team=None,
-                      own_mirror_frac: float = 0.2, opp_weights=None):
+                      own_mirror_frac: float = 0.2, opp_weights=None,
+                      pressure: Optional[str] = None, pressure_bias: float = 0.0, score: bool = False,
+                      drill_sink: Optional[Callable[[list, dict], None]] = None,
+                      opp_draw: str = "largest_remainder"):
     """Multiprocess analogue of ``generation.collect_with_league`` (task #14b.2).
 
     Plans the batch + samples the league in the MAIN process (race-free), freezes the current
@@ -500,7 +598,9 @@ def collect_with_pool(ac, league, n_games: int, *, team_pool, ckpt_path,
     specs = build_chunk_specs(league, team_pool, n_games, chunk_size=chunk_size,
                               matchup_seed=matchup_seed, seed=seed, gen=generation,
                               spawn_rooms=spawn_rooms, own_team=own_team,
-                              own_mirror_frac=own_mirror_frac, opp_weights=opp_weights)
+                              own_mirror_frac=own_mirror_frac, opp_weights=opp_weights,
+                              pressure=pressure, pressure_bias=pressure_bias, score=score,
+                              opp_draw=opp_draw)
     batches = partition_specs(specs, n_procs)
     _ld = str(live_dir) if live_dir else None
     # 22f: spread the worker batches round-robin across the pool servers (batch i -> ports[i % K]);
@@ -539,6 +639,11 @@ def collect_with_pool(ac, league, n_games: int, *, team_pool, ckpt_path,
         _accepts = False
     raw = submit_fn(payloads, on_result=_on_result) if _accepts else submit_fn(payloads)
     merged = merge_results(raw)
+    if drill_sink is not None:                           # 2026-10-02 drills: the logs → the main-process scoreboard
+        try:
+            drill_sink(merged.drill_rows, merged.pressure_stats)
+        except Exception:
+            log.warning("drill scoreboard sink failed (non-fatal)", exc_info=True)
     for snapshot_id, won in merged.pfsp:                 # PFSP update in MAIN (league stays here)
         league.record_result(snapshot_id, won)
     if hasattr(league, "note_played"):                   # preflight coverage (offline fakes may lack it)

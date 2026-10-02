@@ -277,6 +277,9 @@ def print_generation_report(rep: dict) -> None:
         per = "  ".join(f"{n} {pw}/{pf}" for n, (pw, pf) in rep["panel"].items())
         print(f"        PANEL {w}/{f} = {w / f * 100 if f else 0:.1f}%"
               f" {'BEATS THE PANEL' if panel_passed(rep['panel']) else '(not above 50 % yet)'} | {per}")
+    if rep.get("drill"):                               # 2026-10-02: the drill scoreboard
+        from v_dance.selfplay.drills import format_gen_line
+        print("        " + format_gen_line(rep["drill"]))
     # fs-monitor: only surface the edge tally when something actually fired (keeps the happy path quiet).
     # Display-order keys first, then any dynamically-captured non-model label not in the known set.
     fs = rep.get("fs_monitor") or {}
@@ -753,7 +756,7 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                          panel_patience: int = 5, panel_team_pool=None,
                          register_arms: bool = False,
                          register_prefix: str = "era5b_g",
-                         bandit_config=None) -> dict:
+                         bandit_config=None, drill=None) -> dict:
     """Run real generations end-to-end (collect via the league -> PPO update -> gauntlet
     eval -> promotion gate -> admit/refresh/revert), RESUMABLY (3c.4 / #20): a PER-GENERATION
     snapshot (``snap_gen{N}.pt`` in ``archive/sub_checkpoints/``) is written after every generation, so a later run
@@ -807,6 +810,11 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
         print("[gen] FATAL: --panel needs --collect-procs >= 2 (its games run in parallel on the worker "
               "pool; the single-process path has no panel)", file=sys.stderr)
         sys.exit(2)
+    if drill is not None and not _mp:                  # 2026-10-02 drills ride the multiprocess collection
+        print("[gen] FATAL: --drill needs --collect-procs >= 2 (the drill's pressure + scoreboard live in the "
+              "multiprocess collector)", file=sys.stderr)
+        sys.exit(2)
+    _drill_gen: dict = {}                              # gen -> (drill rows, pressure stats) from collect_fn
     pool = MP.CollectionPool(int(collect_procs)) if _mp else None
     if _mp:
         MP.sweep_mp_ckpts(archive)   # reclaim any per-gen worker ckpts orphaned by a prior crash
@@ -871,6 +879,16 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
         # 10-01: a snapshot can list league members whose checkpoint a LATER generation evicted (resume --resume-gen N
         # after the run went past N). Playing them = an opponent with no model that never moves ("NO model loaded")
         # → stalled chunks + junk PFSP. Drop them LOUDLY; champions are never evicted, so the gate target survives.
+        # review F5 (10-02): the drill is rebuilt from the CLI only — say so when a resume changes it
+        _prev_drill = next((r.drill.get("drill") for r in reversed(history.records)
+                            if isinstance(getattr(r, "drill", None), dict) and r.drill.get("drill")), None)
+        if _prev_drill and drill is None:
+            print(f"[resume] ⚠ this run was a DRILL ({_prev_drill}); resumed WITHOUT --drill — from here it is a "
+                  f"plain run (no drill pool, no pressure, no DRILL line)", file=sys.stderr)
+        elif drill is not None and _prev_drill and _prev_drill != drill.drill.name:
+            print(f"[resume] note: the drill changes {_prev_drill} -> {drill.drill.name}; the DRILL curve mixes the two")
+        elif drill is not None and history.records and not _prev_drill:
+            print(f"[resume] note: a plain run continues as DRILL {drill.drill.name} from here")
         _gone = league.drop_missing()
         if _gone:
             print(f"[resume] ⚠ dropped {len(_gone)} league member(s) whose checkpoint no longer exists: "
@@ -931,7 +949,14 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                     ports=_pool_ports,                           # 22f: spread workers across the pool
                     spawn_rooms=_spawn,                          # W2: server-side spawner per pair
                     own_team=own_team, own_mirror_frac=own_mirror_frac,
-                    opp_weights=opp_weights)                     # W2: own seat every game
+                    opp_weights=opp_weights,                     # W2: own seat every game
+                    # 2026-10-02 drills: opponent pressure (snapshot/clone only) + the logs for the scoreboard
+                    pressure=(drill.pressure if drill is not None else None),
+                    pressure_bias=(drill.bias if drill is not None else 0.0),
+                    score=drill is not None,
+                    opp_draw=("multinomial" if drill is not None else "largest_remainder"),
+                    drill_sink=((lambda rows, ps, _g=gen: _drill_gen.__setitem__(_g, (rows, ps)))
+                                if drill is not None else None))
             finally:
                 # ALWAYS drop the per-gen ckpt — even if collection raised (Ctrl-C lands inside the
                 # blocking submit) — else a full-weight file orphans each crashed gen (review fix).
@@ -1133,6 +1158,17 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                                  cleanup_fn=cleanup_fn,
                                  hof_eval_fn=(hof_run if gen_cfg.hof.enabled else None),
                                  status=status, cfg=gen_cfg, keep_fn=(keep_fn if panel else None))
+            if drill is not None:                      # 2026-10-02: the drill scoreboard, scored in MAIN
+                _rows, _ps = _drill_gen.pop(rep["generation"], ([], {}))
+                try:
+                    from v_dance.selfplay import drills as _DR
+                    _sb = _DR.gen_scoreboard(drill, _rows, _ps)
+                except Exception as exc:               # a scoreboard bug must never cost a generation
+                    _sb = {"drill": getattr(getattr(drill, "drill", None), "name", "?"), "games": 0,
+                           "error": repr(exc)}
+                rep["drill"] = _sb
+                if history.records:
+                    history.records[-1].drill = _sb
             print_generation_report(rep)
             if register_arms and rep.get("promoted"):
                 # W2: hand the PROMOTED snapshot to the serve-side bandit as an argmax arm, so the
@@ -1380,6 +1416,24 @@ def _launch_live_core(args):
         _own = canonical_own_team(_own, train_pool)
         if args.opp_weights == "observed":
             _opp_w = observed_team_weights([t for t in train_pool if t != _own])
+    # 2026-10-02 DRILLS (v_dance/selfplay/drills.py): a targeted opponent pool (+ opponent pressure + a scoreboard)
+    _drill = None
+    if getattr(args, "drill", None):
+        if not _own:
+            print("[gen] FATAL: --drill needs --own-team (the drill is built around OUR team's weaknesses)",
+                  file=sys.stderr)
+            sys.exit(2)
+        import v_dance.play.run_local_battle as _RD
+        from v_dance.selfplay.drills import setup_drill
+        try:
+            _drill = setup_drill(args.drill, own_team_path=str(_RD.resolve_team_path(_own)),
+                                 team_pool=train_pool, bias=float(getattr(args, "drill_bias", 2.5)))
+        except (ValueError, OSError, SystemExit) as exc:
+            print(f"[gen] FATAL: --drill {args.drill!r}: {exc}", file=sys.stderr)
+            sys.exit(2)
+        if args.opp_weights == "observed":
+            print("[gen] note: --drill replaces --opp-weights observed (the drill sets the opponent weights)")
+        _opp_w = _drill.opp_weights
     print(f"== Live generation run: {n_gen if n_gen else 'until-stop'} gen x "
           f"{args.games} games (eval {args.eval_battles if args.eval_battles is not None else 'auto'}/opp"
           f"{f', max {args.hours}h' if args.hours else ''}) ==")
@@ -1421,6 +1475,15 @@ def _launch_live_core(args):
         print(f"   W2 own seat (2026-09-03): {Path(_own).name} on the MODEL seat every game; "
               f"collection mirror {args.own_mirror:.0%}; opponent seat = {args.opp_weights}"
               + (f" (heaviest: {', '.join(Path(k).name for _v, k in _top)})" if _top else ""))
+        if _drill is not None:
+            print(f"   DRILL (10-02): {_drill.drill.name} — {_drill.pool.summary()}")
+            print(f"   DRILL pressure: " + (f"{_drill.pressure} @ +{_drill.bias:g} on snapshot/clone opponents "
+                                                "(the recording learner + 'latest' are never biased)"
+                                                if _drill.pressure else "OFF (--drill-bias 0 or the drill has none)")
+                  + "; the DRILL scoreboard prints under every generation")
+            if args.league_clones and bool(getattr(args, "clone_own_teams", True)):
+                print("[gen] WARNING: --drill with --league-clones: mapped clones play THEIR archetype teams, "
+                      "not the drill's — add --no-clone-own-teams for a pure drill pool", file=sys.stderr)
         print(f"   W2 eval: own seat vs the {len(eval_pool)}-team eval pool; champion mirror + HoF "
               f"own-vs-own. Promoted gens "
               + (f"REGISTERED as bandit arms '{args.register_prefix}<N>' in "
@@ -1475,7 +1538,7 @@ def _launch_live_core(args):
         panel=_panel or None, panel_battles=int(getattr(args, "panel_battles", 100) or 0),
         panel_patience=int(getattr(args, "panel_patience", 0) or 0), panel_team_pool=_panel_pool,
         register_arms=args.register_arms, register_prefix=args.register_prefix,
-        bandit_config=args.bandit_config,
+        bandit_config=args.bandit_config, drill=_drill,
         snapshot_path=args.snapshot, max_hours=args.hours)
 
 
@@ -1781,6 +1844,14 @@ if __name__ == "__main__":
                     help="with --own-team: how the OPPONENT seat is drawn from the training pool. "
                          "'observed' weights each team by the mean ladder usage of its six species "
                          "(data/observed_meta_<reg>.json, floored at 3%%); 'uniform' = equal shares.")
+    ap.add_argument("--drill", default=None,
+                    help="2026-10-02 DRILL league: a targeted opponent pool (+ opponent pressure + a per-gen "
+                         "scoreboard) around --own-team. 'field' = weather + terrain control; "
+                         "'focus:opp=rillaboom,mon=salamence' = a species drill; args after ':' (e.g. "
+                         "'field:neutral=0.2'). Needs --own-team and --collect-procs >= 2.")
+    ap.add_argument("--drill-bias", type=float, default=2.5,
+                    help="strength of the drill's OPPONENT pressure (a logit nudge on snapshot/clone opponents; "
+                         "0 = off). The learner is never biased.")
     ap.add_argument("--register-arms", action="store_true",
                     help="register every PROMOTED generation in config/serve_bandit.json as a "
                          "serve-side bandit arm (tau 0, adapt-rules off) so the LADDER judges it "

@@ -370,6 +370,7 @@ class GenerationRecord:
     hof: Optional[dict] = None               # the Phase-2 HoF breadth-veto result this gen (None = not run)
     reason: Optional[str] = None             # the gate reason (beat_champion / plateau_reanchor / hold / ...)
     panel: Optional[dict] = None             # PANEL (2026-10-01): {name: (wins, finished)} vs the fixed checkpoints
+    drill: Optional[dict] = None             # DRILL (2026-10-02): the generation's drill scoreboard (drills.gen_scoreboard)
 
     def to_obj(self) -> dict:
         return {"generation": self.generation, "n_trajectories": self.n_trajectories,
@@ -378,6 +379,7 @@ class GenerationRecord:
                 "promoted": self.promoted, "champion_elo": self.champion_elo, "hof": self.hof,
                 "reason": self.reason,
                 "panel": {k: list(v) for k, v in self.panel.items()} if self.panel else None,
+                "drill": self.drill,
                 "update_stats": {k: v for k, v in self.update_stats.items()
                                  if isinstance(v, (int, float))}}
 
@@ -390,6 +392,7 @@ class GenerationRecord:
                    promoted=bool(d.get("promoted", False)),
                    champion_elo=d.get("champion_elo"), hof=d.get("hof"), reason=d.get("reason"),
                    panel={k: tuple(v) for k, v in d["panel"].items()} if d.get("panel") else None,
+                   drill=d.get("drill"),
                    update_stats=d.get("update_stats", {}))
 
 

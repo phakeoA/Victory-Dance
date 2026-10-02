@@ -53,9 +53,13 @@ def model_driven_fraction(source_counts: Dict[str, int]) -> float:
     fire/fallback) are excluded from the denominator — they are NOT per-turn decision sources — so a
     legitimate resample burst or a belief/search-diagnostic burst can't trip the guard. 1.0 when
     there are no decisions. Matches game_runner.phase0_report's de-duped MODEL-DRIVEN measure."""
+    # 2026-10-02 (drill review RL-3, pre-existing since 09-03): spawn_* are the server-side spawner's BOOKKEEPING
+    # (pairs / decisions / elapsed_s …), stripped exactly like game_runner.phase0_report strips them — counted as
+    # non-model steps they dragged the fraction under 0.5 and the 0.75 guard aborted every --spawn-rooms run.
     turn = {k: v for k, v in source_counts.items()
             if not k.startswith("tp_") and not k.startswith("belief_")
-            and not k.startswith("search_") and k not in _NON_DECISION_COUNTERS}
+            and not k.startswith("search_") and not k.startswith("spawn_")
+            and k not in _NON_DECISION_COUNTERS}
     total = sum(turn.values())
     if total <= 0:
         return 1.0

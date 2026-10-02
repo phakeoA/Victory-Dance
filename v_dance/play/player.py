@@ -161,6 +161,19 @@ def _stash_sampling(player, battle, decision_type: str, fallback_masks, dec: dic
         log.debug("sampling stash failed (non-fatal)", exc_info=True)
 
 
+_PRESSURE_WARNED: set = set()
+
+
+def _warn_pressure_once(what: str) -> None:
+    """2026-10-02 drill review F4: a drill-pressure failure must be VISIBLE (spawn workers drop DEBUG) — WARNING
+    with the traceback the first time per process, DEBUG afterwards (it can fire every turn)."""
+    if what in _PRESSURE_WARNED:
+        log.debug(what + " (non-fatal)", exc_info=True)
+        return
+    _PRESSURE_WARNED.add(what)
+    log.warning(what + " (non-fatal; the opponent plays unbiased)", exc_info=True)
+
+
 class VGCPlayer(VGCPlayerBase):
     """
     VGC player driven by a trained PyTorch model, with the gap-#6 opponent
@@ -331,6 +344,17 @@ class VGCPlayer(VGCPlayerBase):
                     bias0, bias1 = action_biases(self, battle)
                 except Exception:
                     log.debug("adapt-rules bias failed (non-fatal)", exc_info=True)
+            # 2026-10-02 drill PRESSURE (opponent-only self-play nudge, v_dance/play/field_fight.py): summed with any
+            # adapt-rules bias, so it reaches both decodes (+ the slot-1 dedup re-decode). Never a mask edit.
+            pb0 = pb1 = None
+            if getattr(self, "_pressure", None):
+                try:
+                    from v_dance.play.field_fight import add_bias, pressure_biases
+                    pb0, pb1 = pressure_biases(self._pressure, battle, getattr(self, "_pressure_bias", 0.0))
+                    bias0, bias1 = add_bias(bias0, pb0), add_bias(bias1, pb1)
+                except Exception:
+                    pb0 = pb1 = None
+                    _warn_pressure_once("drill pressure bias failed")
             # T3 joint futility (2026-07-24): game-knowledge rule for the sequential
             # pair decode (HH-when-partner-chose-status). None for non-pair models
             # or when VD_FUTILITY_MASK=0 — bc_action_indices ignores it then.
@@ -360,6 +384,12 @@ class VGCPlayer(VGCPlayerBase):
                 )
                 # W3b-1a: slot 0's term from the first decode, slot 1's from the re-decode
                 dec = _M.merge_dedup_records(dec, _M.decode_record())
+            if pb0 is not None or pb1 is not None:      # drill pressure: fired / taken counts (never _source_counts)
+                try:
+                    from v_dance.play.field_fight import note_pressure
+                    note_pressure(self, (pb0, pb1), (mask0, mask1), (a0, a1))
+                except Exception:
+                    _warn_pressure_once("drill pressure count failed")
             # 2026-09-02 (USER): "what the nets are thinking" — narrate the decode just made
             # (reads model_io.LAST_DECODE; no extra forward; no-op without an installed feed).
             _TF.tap_turn(self, battle, a0, a1, wp, decode=_M.LAST_DECODE)
@@ -490,6 +520,20 @@ class VGCPlayer(VGCPlayerBase):
         try:
             force = list(getattr(battle, "force_switch", []) or [])
             l0, l1 = _M.head_logits(self._model, self._model_heads, state_vec, self._device)
+            # 2026-10-02 drill PRESSURE on the post-faint replacement too (send the setter back in after a KO)
+            r0 = r1 = None
+            if getattr(self, "_pressure", None):
+                try:
+                    from v_dance.play.field_fight import add_bias, pressure_biases
+                    r0, r1 = pressure_biases(self._pressure, battle, getattr(self, "_pressure_bias", 0.0),
+                                             replacement=True)
+                    if r0 is not None:
+                        l0 = add_bias(l0, r0)
+                    if r1 is not None:
+                        l1 = add_bias(l1, r1)
+                except Exception:
+                    r0 = r1 = None
+                    _warn_pressure_once("drill pressure replacement bias failed")
             logits = (l0, l1)
             out: List[Optional[int]] = [None, None]
             rep_masks: List = [None, None]   # #11: per-slot mask actually argmaxed under (with dedup)
@@ -521,6 +565,12 @@ class VGCPlayer(VGCPlayerBase):
                 taken.add(a - SWITCH_OFFSET)
             if not forced_any:
                 return None         # nothing to replace → defer (defensive; caller gates on any(force))
+            if r0 is not None or r1 is not None:        # drill pressure: fired / taken counts
+                try:
+                    from v_dance.play.field_fight import note_pressure
+                    note_pressure(self, (r0, r1), (rep_masks[0], rep_masks[1]), (out[0], out[1]))
+                except Exception:
+                    _warn_pressure_once("drill pressure count failed")
             if getattr(self, "_record_masks", False):
                 _stash_sampling(self, battle, "replacement", (rep_masks[0], rep_masks[1]),
                                 {"masks": (rep_masks[0], rep_masks[1]), "logp": tuple(rep_logp),

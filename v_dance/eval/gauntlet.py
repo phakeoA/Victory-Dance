@@ -280,7 +280,7 @@ def canonical_own_team(own_team, team_pool):
 
 def own_team_matchups(own_team, team_pool: Sequence[str], n_battles: int, *,
                       mirror_frac: float = 0.2, weights: Optional[Dict[str, float]] = None,
-                      seed: int = 0) -> List[Tuple[str, str, int]]:
+                      seed: int = 0, draw: str = "largest_remainder") -> List[Tuple[str, str, int]]:
     """Split ``n_battles`` with the OWN team ALWAYS on the model seat (``team_a``).
 
     ``round(mirror_frac * n)`` games are the mirror ``(own, own, k)`` (where Trick Room / Helping
@@ -308,6 +308,17 @@ def own_team_matchups(own_team, team_pool: Sequence[str], n_battles: int, *,
     if sum(w) <= 0.0:
         w = [1.0] * len(opps)
     tot = sum(w)
+    if draw == "multinomial":
+        # 2026-10-02 (drills): an UNBIASED seeded draw per game. The largest-remainder split floors every
+        # small weight to 0 and hands it no remainder either — with ~180 drill weights and --games 100 the
+        # advertised 20 % neutral share played 0 games in every generation. Reproducible per seed.
+        picks = random.Random(seed).choices(range(len(opps)), weights=w, k=rest) if rest > 0 else []
+        cnt = [0] * len(opps)
+        for i in picks:
+            cnt[i] += 1
+        out_m: List[Tuple[str, str, int]] = [(own, own, k)] if k > 0 else []
+        out_m.extend((own, t, c) for t, c in zip(opps, cnt) if c > 0)
+        return out_m
     exact = [rest * wi / tot for wi in w]
     counts = [int(math.floor(e)) for e in exact]
     rem = rest - sum(counts)
@@ -425,12 +436,13 @@ def subdivide_pairings(matchups, target_chunks):
 
 
 def collection_pairings(team_pool: Sequence[str], n_games: int, *, seed: int = 0, own_team=None,
-                        own_mirror_frac: float = 0.2, opp_weights=None) -> List[Tuple[str, str, int]]:
+                        own_mirror_frac: float = 0.2, opp_weights=None,
+                        opp_draw: str = "largest_remainder") -> List[Tuple[str, str, int]]:
     """The collection batch's ``(team_a, team_b, n)`` plan: symmetric ``team_matchups`` by default;
     with ``own_team`` the W2 own-seat split (``own_team_matchups``)."""
     if own_team:
         return own_team_matchups(own_team, team_pool, n_games, mirror_frac=own_mirror_frac,
-                                 weights=opp_weights, seed=seed)
+                                 weights=opp_weights, seed=seed, draw=opp_draw)
     return team_matchups(team_pool, n_games, seed=seed)
 
 

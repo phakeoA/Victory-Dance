@@ -484,6 +484,8 @@ def make_player(
     port: int | None = None,
     adapt_rules: bool = False,
     use_dossier: bool = False,   # S1 L2b: dossier→snapshot warm-start (default OFF)
+    pressure: str | None = None,  # 2026-10-02 drill pressure name (field_fight.BIASES) — OPPONENT model players only
+    pressure_bias: float = 0.0,
 ) -> VGCPlayer:
     """Build a (gap-#6 spliced) player.  model_path=None → random fallback.
     ``max_concurrent_battles`` > 1 lets poke-env run that many battles of this player
@@ -524,6 +526,7 @@ def make_player(
         replay_dir=replay_dir, replay_label=replay_label,
         adapt_rules=adapt_rules,
         use_dossier=use_dossier,
+        pressure=pressure, pressure_bias=pressure_bias,
         ping_timeout=WS_PING_TIMEOUT, ping_interval=WS_PING_INTERVAL,
         open_timeout=WS_OPEN_TIMEOUT,
         **_server,

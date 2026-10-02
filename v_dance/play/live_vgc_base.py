@@ -184,9 +184,19 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
         # S1 L2b (dossier warm-start, 2026-07-12): fill unknown opp item/ability/moves from the
         # per-opponent dossier BEFORE belief enrichment. OFF by default → prod byte-identical.
         use_dossier = kwargs.pop("use_dossier", False)
+        # 2026-10-02 drill PRESSURE (OPPONENT-only; v_dance/play/field_fight.py): a named logit bias that makes a
+        # self-play opponent play a situation hard. Popped here (before poke-env sees it). OFF by default.
+        pressure = kwargs.pop("pressure", None)
+        pressure_bias = kwargs.pop("pressure_bias", 0.0)
         super().__init__(*args, **kwargs)
         self._adapt_rules = bool(adapt_rules)
         self._use_dossier = bool(use_dossier)
+        try:
+            self._pressure_bias = float(pressure_bias or 0.0)
+        except (TypeError, ValueError):
+            self._pressure_bias = 0.0
+        self._pressure = str(pressure) if pressure and self._pressure_bias > 0 else None
+        self._pressure_stats = {"fired": 0, "taken": 0}
         # raw protocol lines accumulated per battle tag (real-time)
         self._proto_log: Dict[str, List[str]] = {}
         # Level C / A3: per-battle within-game opponent belief, keyed by battle tag like _proto_log (the

@@ -159,6 +159,10 @@ class SelfPlayVGCPlayer(VGCPlayer):
 
     def __init__(self, actor_critic, *, tau: float = 1.0,
                  sample_seed: Optional[int] = None, live_dir=None, save_replays=False, **kwargs):
+        # 2026-10-02 drill PRESSURE is OPPONENT-only: this class RECORDS (the learner, and the 'latest' opponent PPO
+        # also trains on) the UNBIASED behaviour log-prob — a biased recorder would make PPO silently off-policy.
+        if kwargs.get("pressure") or float(kwargs.get("pressure_bias") or 0):
+            raise ValueError("drill pressure is opponent-only — a recording SelfPlayVGCPlayer must never be biased")
         # #18: live_dir / save_replays flow to the BASE, which owns the spectate feed (self._live)
         # — so collection AND eval players share one implementation. No-op when live_dir is unset.
         super().__init__(model_path=None, temperature=tau, sample_seed=sample_seed,

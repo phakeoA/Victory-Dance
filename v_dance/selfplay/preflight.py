@@ -91,7 +91,8 @@ def _short(key: str) -> str:
 
 def check(fresh: Optional[dict], resumed: Optional[dict], *, hof_on: bool = False,
           arm_names: Optional[List[str]] = None, register_on: bool = False,
-          panel_names: Optional[List[str]] = None) -> Tuple[List[str], List[str], dict]:
+          panel_names: Optional[List[str]] = None, drill_on: bool = False,
+          pressure_on: bool = False) -> Tuple[List[str], List[str], dict]:
     """``(problems, warnings, played)`` from the two run results. Any problem = FAIL."""
     problems: List[str] = []
     warns: List[str] = []
@@ -135,6 +136,20 @@ def check(fresh: Optional[dict], resumed: Optional[dict], *, hof_on: bool = Fals
         warns.append("the Hall-of-Fame check never ran (needs 2 past champions) — not exercised")
     if register_on and not arm_names:
         warns.append("--register-arms: no arm reached the sandbox bandit config")
+    if drill_on:                                       # 2026-10-02 drills: every gen (incl. the resumed one,
+        allr = rrecs or recs                           # loaded back from the snapshot) must carry a scoreboard
+        for r in allr:
+            sb = getattr(r, "drill", None) or {}
+            if int(sb.get("games", 0) or 0) <= 0:
+                problems.append(f"gen {r.generation}: the drill scoreboard scored 0 games"
+                                + (f" ({sb['error']})" if sb.get("error") else ""))
+        if any("targets" in (getattr(r, "drill", None) or {}) for r in allr) and \
+                sum(int(((getattr(r, "drill", None) or {}).get("targets") or {}).get("games", 0) or 0)
+                    for r in allr) <= 0:
+            problems.append("the drill never played one of its TARGET teams (the drill pool did not reach collection)")
+        if pressure_on and sum(int(((getattr(r, "drill", None) or {}).get("pressure") or {}).get("fired", 0) or 0)
+                               for r in allr) <= 0:
+            warns.append("the drill pressure never fired (no snapshot/clone opponent met a bench setter) — not exercised")
     return problems, warns, played
 
 
@@ -147,6 +162,19 @@ def _registered_arms(path: Path) -> List[str]:
             else list(arms.keys()) if isinstance(arms, dict) else []
     except Exception:
         return []
+
+
+def _drill_has_pressure(args) -> bool:
+    """True only for a drill that HAS an opponent pressure at a bias > 0 (review F3: 'focus' and 'field:pressure=off'
+    have none — the 'never fired' warning on them carried no signal)."""
+    spec = getattr(args, "drill", None)
+    if not spec or float(getattr(args, "drill_bias", 0) or 0) <= 0:
+        return False
+    try:
+        from v_dance.selfplay.drills import get_drill
+        return get_drill(spec).pressure is not None
+    except Exception:
+        return False
 
 
 def run_preflight(args, launch_fn) -> bool:
@@ -184,7 +212,9 @@ def run_preflight(args, launch_fn) -> bool:
     problems, warns, played = check(fresh, resumed, hof_on=bool(getattr(args, "hof", False)),
                                     arm_names=[n for n in arms if n not in arms_before],
                                     register_on=arm_file is not None,
-                                    panel_names=[str(p).partition("=")[0] for p in (getattr(args, "panel", None) or [])])
+                                    panel_names=[str(p).partition("=")[0] for p in (getattr(args, "panel", None) or [])],
+                                    drill_on=bool(getattr(args, "drill", None)),
+                                    pressure_on=_drill_has_pressure(args))
     mins = (time.perf_counter() - t0) / 60.0
     print("\n" + "=" * 78)
     print(f"PREFLIGHT {'PASS' if not problems else 'FAIL'} in {mins:.1f} min")
