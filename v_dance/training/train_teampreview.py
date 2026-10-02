@@ -123,6 +123,16 @@ def _norm_uname(name) -> str:
     return "".join(ch for ch in str(name or "").lower() if ch.isalnum())
 
 
+def _uname_set(own_username) -> Optional[set]:
+    """``--own-username`` as a set of normalised names: one name, a list, or a comma list (2026-10-02: the bot ladders
+    on TWO accounts — VictoriousDancing + EncoreFN — and both are "own"). None when unset."""
+    if not own_username:
+        return None
+    items = [own_username] if isinstance(own_username, str) else list(own_username)
+    names = {_norm_uname(p) for it in items for p in str(it).split(",") if _norm_uname(p)}
+    return names or None
+
+
 def compute_tp_weights(examples: Sequence[dict],
                        outcome_weight: bool = False, loss_weight: float = 0.5,
                        own_folders: Optional[Sequence[str]] = None,
@@ -148,13 +158,13 @@ def compute_tp_weights(examples: Sequence[dict],
     if not outcome_weight and not own_folders and not own_set:
         return None
     own = tuple(os.path.normcase(os.path.abspath(f)) for f in (own_folders or ()))
-    uname_want = _norm_uname(own_username) if own_username else None
+    uname_want = _uname_set(own_username)
     w = np.ones(len(examples), dtype=np.float64)
     n_own = n_boost = n_lost = n_opp_perspective = 0
     for i, ex in enumerate(examples):
         src = os.path.normcase(os.path.abspath(str(ex.get("source_file") or "")))
         is_own = bool(own) and src.startswith(own)
-        if is_own and uname_want is not None and _norm_uname(ex.get("username")) != uname_want:
+        if is_own and uname_want is not None and _norm_uname(ex.get("username")) not in uname_want:
             n_opp_perspective += 1
             is_own = False
         if is_own:
@@ -451,11 +461,11 @@ def train(args: argparse.Namespace) -> dict:
         if not args.own_folders:
             raise SystemExit("[train_teampreview] --select-own-val requires --own-folders")
         _own = tuple(os.path.normcase(os.path.abspath(f)) for f in args.own_folders)
-        _want = _norm_uname(args.own_username) if args.own_username else None
+        _want = _uname_set(args.own_username)
         own_val_ex = [e for e in val_ex
                       if os.path.normcase(os.path.abspath(str(e.get("source_file") or "")))
                       .startswith(_own)
-                      and (_want is None or _norm_uname(e.get("username")) == _want)]
+                      and (_want is None or _norm_uname(e.get("username")) in _want)]
         if len(own_val_ex) < 25:
             raise SystemExit(f"[train_teampreview] --select-own-val: only {len(own_val_ex)} "
                              f"own val examples (<25) — selection would be noise. Grow the "
@@ -726,10 +736,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap.add_argument("--own-boost", type=float, default=15.0,
                     help="TP-N3: weight multiplier for WON --own-folders examples "
                          "(lost/unknown own rows stay unboosted).")
-    ap.add_argument("--own-username", default=None,
+    ap.add_argument("--own-username", default=None, nargs="+",
                     help="TP-N3 re-run: restrict the own-boost to rows whose PERSPECTIVE "
                          "username matches (normalized). Without this, opponent-perspective "
-                         "wins in own folders get boosted too — the n=171 parking root cause.")
+                         "wins in own folders get boosted too — the n=171 parking root cause. "
+                         "2026-10-02: several names (space or comma separated) — the bot ladders "
+                         "on two accounts: --own-username VictoriousDancing EncoreFN.")
     ap.add_argument("--own-team", default=None,
                     help="era-5 W1 specialist: a team (paste file / pool name / text); every TRAIN "
                          "example is weighted 1 + --own-team-weight × (fraction of this team's six "

@@ -382,3 +382,30 @@ def test_load_arms_reads_adapt_rules_from_the_config(tmp_path: Path):
     assert arms["inc"].adapt_rules is None and arms["tau"].adapt_rules is False
     assert arms["tau_on"].adapt_rules is True
 
+
+
+def test_two_search_triggers_a_moment_apart_send_one_search():
+    """2026-10-02 (USER popup on EncoreFN: "Couldn't search: You are already searching"): the second trigger came
+    while the first was still awaiting its /utm send — both passed the guard and both sent /search."""
+    class SlowPage(FakePage):
+        async def evaluate(self, js, arg=None):
+            await asyncio.sleep(0.02)                     # a real page call takes a moment
+            self.sent.append((js, arg))
+
+    async def main():
+        page = SlowPage()
+        c = _ctrl(asyncio.get_running_loop(), page, lanes_default=5)
+        c.run_active, c.run_target = True, 50
+        await asyncio.gather(c._do_search(), c._do_search())
+        assert _searches(page) == 1
+        assert any("already searching" in e for e in c.events)
+
+        class BrokenPage(FakePage):                       # a failed send frees the slot again
+            async def evaluate(self, js, arg=None):
+                raise RuntimeError("page gone")
+        c2 = _ctrl(asyncio.get_running_loop(), BrokenPage(), lanes_default=5)
+        with pytest.raises(RuntimeError):
+            await c2._do_search()
+        assert c2._search_outstanding is False
+
+    asyncio.run(main())

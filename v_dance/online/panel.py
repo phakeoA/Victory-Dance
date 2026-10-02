@@ -657,9 +657,17 @@ class BotController:
             if self.run_active:                    # a guarded skip must not kill an active run
                 self._schedule_resume(_LIVE_RETRY_S)
             return
-        name, src = await self._utm_current_team()
-        await self._send_global(f"/search {self.fmt}", "(f) => app.socket.send('|/search ' + f)", self.fmt)
+        # 2026-10-02 (USER popup on EncoreFN: "Couldn't search: You are already searching"): claim the single
+        # search slot BEFORE the first await — two resume triggers a moment apart both passed the guard above
+        # while the first was still sending /utm, and both sent /search.
         self._search_outstanding = True
+        self._search_sent_at = self.loop.time()
+        try:
+            name, src = await self._utm_current_team()
+            await self._send_global(f"/search {self.fmt}", "(f) => app.socket.send('|/search ' + f)", self.fmt)
+        except BaseException:
+            self._search_outstanding = False      # nothing was sent → the slot is free again
+            raise
         self._search_sent_at = self.loop.time()
         self._search_times.append(self._search_sent_at)   # prep-rate guard (lanes)
         if self.prep_ledger is not None:

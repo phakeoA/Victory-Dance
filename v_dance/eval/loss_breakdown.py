@@ -74,15 +74,26 @@ def load_games(team: str, since_iso: str, dossier_dir: Path) -> dict:
     return games
 
 
+def _our_ids() -> set:
+    """Every ladder account in .env (2026-10-02: a second account — its games were invisible to the side lookup)."""
+    try:
+        from v_dance.online.accounts import our_userids
+        ids = our_userids()
+    except Exception:
+        ids = set()
+    return ids | {BOT}
+
+
 def join_replays(games: dict, replay_dir: Path) -> None:
-    """Our leads / brought four / mega, from the saved replays (side found by the bot's player name)."""
+    """Our leads / brought four / mega, from the saved replays (side found by our accounts' player names)."""
+    ours = _our_ids()
     for f in glob.glob(str(replay_dir / "*.html")):
         m = re.search(r"(battle-gen9[a-z0-9]+-\d+)", f)
         if not m or m.group(1) not in games:
             continue
         lines = open(f, encoding="utf-8", errors="replace").read().splitlines()
         side = next((mm.group(1) for ln in lines for mm in [re.match(r"\|player\|(p[12])\|([^|]*)\|", ln)]
-                     if mm and _id(mm.group(2)) == BOT), None)
+                     if mm and _id(mm.group(2)) in ours), None)
         if not side:
             continue
         g, leads, brought, mega, started = games[m.group(1)], [], [], None, False

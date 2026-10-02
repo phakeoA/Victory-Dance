@@ -30,23 +30,23 @@ _ARCH = ["--d-model", "256", "--n-heads", "8", "--n-layers", "4", "--aux-opp-hea
 
 
 def bot_accounts() -> set[str]:
-    """Lower-cased account names the bot has played as (.env PS_USERNAME + the historical one)."""
-    names = {"victoriousdancing"}
-    env = _REPO / ".env"
-    if env.exists():
-        for line in env.read_text(encoding="utf-8").splitlines():
-            if line.startswith("PS_USERNAME="):
-                names.add(line.split("=", 1)[1].strip().lower())
-    return names
+    """Userids the bot has played as: EVERY ladder account in .env (2026-10-02: EncoreFN next to VictoriousDancing —
+    before, only PS_USERNAME counted, so an EncoreFN WIN read as a human's win and entered the nemesis pool) + the
+    historical one."""
+    from v_dance.online.accounts import our_userids
+    return {"victoriousdancing"} | our_userids()
 
 
 def loss_files(typec_dir: Path, bots: set[str]) -> list[Path]:
-    """Files whose first row's ``winner`` is NOT the bot = the human side of a bot loss."""
+    """Files whose first row's ``winner`` is NOT the bot = the human side of a bot loss. Names compared as Showdown
+    userids (``Encore FN`` == ``encorefn``)."""
+    from v_dance.online.accounts import userid
+    bots = {userid(b) for b in bots}
     out = []
     for f in sorted(typec_dir.glob("*.jsonl")):
         try:
             with open(f, encoding="utf-8") as fh:
-                winner = (json.loads(fh.readline()).get("winner") or "").lower()
+                winner = userid(json.loads(fh.readline()).get("winner") or "")
         except (OSError, ValueError):
             continue
         if winner and winner not in bots:

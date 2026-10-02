@@ -34,12 +34,14 @@ def ladder_matchups(team_path: Path, replay_glob: str, since: float):
     """[(opp_species[6], actually_brought_set)] for every replay after ``since`` where the bot fielded this team."""
     ours = None
     out = []
+    from v_dance.online.accounts import our_userids
+    bots = our_userids() | {BOT}                       # 2026-10-02: every .env ladder account (EncoreFN too)
     for f in glob.glob(replay_glob):
         if os.path.getmtime(f) <= since:
             continue
         lines = open(f, encoding="utf-8", errors="replace").read().splitlines()
         side = next((m.group(1) for ln in lines for m in [re.match(r"\|player\|(p[12])\|([^|]*)\|", ln)]
-                     if m and _id(m.group(2)) == BOT), None)
+                     if m and _id(m.group(2)) in bots), None)
         if not side:
             continue
         other = "p2" if side == "p1" else "p1"

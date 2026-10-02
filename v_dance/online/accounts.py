@@ -137,6 +137,19 @@ def primary_userid(env: Mapping[str, str]) -> str:
     return userid(env.get("PS_USERNAME"))
 
 
+def our_userids(env: Optional[Mapping[str, str]] = None) -> set:
+    """The userid of EVERY ladder account in .env — what any tool reading a replay, a bench row or a training file
+    must treat as "the bot" (2026-10-02, USER: "EncoreFN now also functions the same as VictoriousDancing")."""
+    env = read_env() if env is None else env
+    ids = set()
+    for s in configured_slots(env):
+        try:
+            ids.add(load_account(env, s).userid)
+        except ValueError:
+            continue
+    return ids
+
+
 def row_account(row: Mapping, primary: str) -> str:
     """The account a bench row belongs to — rows from before 2026-10-02 carry none = slot 1's."""
     return userid(row.get("account") or "") or primary

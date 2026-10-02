@@ -267,3 +267,33 @@ def test_a_game_against_our_own_other_account_is_flagged_never_counted_silently(
     assert [(r["opponent"], r.get("self_match", False), r["account"]) for r in rows] == \
         [("EncoreFN", True, "victoriousdancing"), ("SomeHuman", False, "victoriousdancing")]
     assert "SELF-MATCH" in (tmp_path / "online_s1.log").read_text(encoding="utf-8")
+
+
+# ── every tool treats BOTH accounts as the bot (USER 2026-10-02) ─────────────
+def test_our_userids_is_every_env_account():
+    assert A.our_userids(ENV) == {"victoriousdancing", "victorydancetwo"}
+    assert A.our_userids({"PS_USERNAME": "X", "PS_PASSWORD": "y"}) == {"x"}
+
+
+def test_the_nemesis_pool_never_counts_a_win_by_our_other_account_as_a_human_win(tmp_path, monkeypatch):
+    from v_dance.selfplay import build_clone as BC
+    monkeypatch.setattr(A, "read_env", lambda path=None: {"PS_USERNAME": "VictoriousDancing", "PS_PASSWORD": "a",
+                                                          "PS2_USERNAME": "EncoreFN", "PS2_PASSWORD": "b"})
+    for name, winner in (("a.jsonl", "EncoreFN"), ("b.jsonl", "Victorious Dancing"), ("c.jsonl", "SomeHuman")):
+        (tmp_path / name).write_text(json.dumps({"winner": winner}) + "\n", encoding="utf-8")
+    bots = BC.bot_accounts()
+    assert {"victoriousdancing", "encorefn"} <= bots
+    assert [f.name for f in BC.loss_files(tmp_path, bots)] == ["c.jsonl"]      # only the human's win
+
+
+def test_the_team_picker_own_username_takes_both_accounts():
+    from v_dance.training.train_teampreview import _uname_set, compute_tp_weights
+    assert _uname_set(None) is None
+    assert _uname_set("VictoriousDancing") == {"victoriousdancing"}
+    assert _uname_set(["VictoriousDancing", "Encore FN"]) == {"victoriousdancing", "encorefn"}
+    assert _uname_set(["VictoriousDancing,EncoreFN"]) == {"victoriousdancing", "encorefn"}
+    ex = [{"source_file": "C:/own/a.json", "username": u, "won": True} for u in ("VictoriousDancing", "EncoreFN",
+                                                                                 "SomeHuman")]
+    w = compute_tp_weights(ex, own_folders=["C:/own"], own_boost=10.0,
+                           own_username=["VictoriousDancing", "EncoreFN"])
+    assert w[0] == w[1] > w[2]                                                  # both accounts boosted, the human not
