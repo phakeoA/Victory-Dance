@@ -80,8 +80,13 @@ from v_dance.encoders.live_state_encoder import (
     LiveStateEncoder, own_bench_mons, own_active_move_list, own_switch_slot,
     team_has_megaed_live, team_has_teraed_live,
 )
+from v_dance.play import mega_forme_fix
 
 log = logging.getLogger(__name__)
+
+# 2026-10-02 (mega audit gap 1): poke-env's |-mega| handler overwrote an opponent's Z-mega with the regular
+# mega (it never sees the stone).  Patch it for every player built on this base — ladder, self-play, eval.
+mega_forme_fix.install()
 
 # ── Default Pikalytics belief (shared, loaded once) ───────────────────────────
 # The trained nets were fit on belief-ENRICHED state vectors (opponent mons carry
@@ -303,6 +308,16 @@ def _has_effect(effects, *tokens) -> bool:
     return any(any(tok in str(e).upper() for tok in tokens) for e in (effects or {}))
 
 
+def _enum_name(x) -> str:
+    """A poke-env enum's NAME ('DARK', 'PSYCHIC_TERRAIN', 'TAILWIND', 'PAR'); plain strings pass through.
+    2026-10-02 (mega-fix review): the pinned poke-env renders str(enum) as 'DARK (pokemon type) object', so the
+    old ``str(x).split('.')[-1]`` never matched — the live futility mask silently skipped every type / field /
+    side-condition / status rule (Prankster into Dark, Spore into Grass, a second Tailwind, Psychic Terrain
+    priority …) that TRAINING masks (bc_dataset masks the same buckets)."""
+    nm = getattr(x, "name", None)
+    return nm if isinstance(nm, str) and nm else str(x).split(".")[-1]
+
+
 def _futile_buckets_serve(battle, mon, move) -> set:
     """Extract the futility context from live poke-env objects and delegate to the
     shared rule core. Every unknown fact degrades to fail-open inside the core."""
@@ -316,26 +331,26 @@ def _futile_buckets_serve(battle, mon, move) -> set:
     terrain = None
     gravity_on = False
     for f in fields:
-        nm = str(f).split(".")[-1].upper()
+        nm = _enum_name(f).upper()
         if nm.endswith("_TERRAIN"):
             terrain = nm[: -len("_TERRAIN")].lower()
         elif nm == "GRAVITY":
             gravity_on = True
-    weather = next((str(w).split(".")[-1].lower()
+    weather = next((_enum_name(w).lower()
                     for w in (getattr(battle, "weather", {}) or {})), None)
     if weather in ("snow", "hail"):
         weather = "snowscape"
 
-    our_conds = frozenset(str(c).split(".")[-1].lower()
+    our_conds = frozenset(_enum_name(c).lower()
                           for c in (getattr(battle, "side_conditions", {}) or {}))
-    opp_safeguard = any(str(c).split(".")[-1].lower() == "safeguard"
+    opp_safeguard = any(_enum_name(c).lower() == "safeguard"
                         for c in (getattr(battle, "opponent_side_conditions", {}) or {}))
 
     def _fctx(fmon):
         if fmon is None or getattr(fmon, "fainted", False):
             return None
         try:
-            types = tuple(str(t).split(".")[-1].lower() for t in (fmon.types or ()) if t) or None
+            types = tuple(_enum_name(t).lower() for t in (fmon.types or ()) if t) or None
         except Exception:
             types = None
         fe = getattr(fmon, "effects", {}) or {}
@@ -350,14 +365,14 @@ def _futile_buckets_serve(battle, mon, move) -> set:
         else:
             fab = getattr(fmon, "ability", None)
             if fab:
-                grounded = str(fab).lower().replace(" ", "") != "levitate"
+                grounded = str(fab).lower().replace(" ", "") not in ("levitate", "eelevate")   # Eelevate 10-02
             elif _species_can_have_levitate(getattr(fmon, "species", None)):
                 grounded = None                      # hidden Levitate possible → fail open
             else:
                 grounded = types is not None
         status = getattr(fmon, "status", None)
         return {"types": types,
-                "status": str(status).split(".")[-1].lower() if status else None,
+                "status": _enum_name(status).lower() if status else None,
                 "encored": _has_effect(fe, "ENCORE"),
                 "confused": _has_effect(fe, "CONFUSION"),
                 "grounded": grounded}

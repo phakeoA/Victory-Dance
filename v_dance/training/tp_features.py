@@ -52,7 +52,13 @@ from v_dance.training.teampreview_dataset import (
     mon_dex_features, MON_FEAT_DIM, NUM_TYPES, _TYPE_IDX, _canon_type,
 )
 
-FEATURE_SCHEMA_VERSION = "tpfeat-v8"   # v8 (2026-07-23): +12 base channels (+10 overlay twins) —
+FEATURE_SCHEMA_VERSION = "tpfeat-v9"   # v9 (2026-10-02, mega audit gap 3): +67 base MEGA-FORME channels
+                                       # (stone-share-weighted types / def-eff / immunities / base stats /
+                                       # expected speed of the forme each stone makes) + 66 overlay twins
+                                       # (a KNOWN stone, p=1). Every v8 channel keeps its VALUE; a v8
+                                       # checkpoint serves through schema_columns("tpfeat-v8") (a column
+                                       # subset of the v9 vector — no frozen copy needed).
+# v8 (2026-07-23): +12 base channels (+10 overlay twins) —
                                        # intimidate punish/immune, priority-block, weather-negate,
                                        # sleep, phys-share, expected-speed, 6 item tags — plus the
                                        # canonical name matching + mega-stone ability fixes above.
@@ -138,7 +144,7 @@ TYPE_IMMUNITY = {
 }
 # Immunity ABILITIES (ability -> attacking type it nullifies on the holder).
 IMMUNITY_ABILITY = {
-    "Levitate": "Ground", "Earth Eater": "Ground",
+    "Levitate": "Ground", "Earth Eater": "Ground", "Eelevate": "Ground",   # Eelevate = Mega Eelektross
     "Flash Fire": "Fire", "Well-Baked Body": "Fire",
     "Water Absorb": "Water", "Storm Drain": "Water", "Dry Skin": "Water",
     "Volt Absorb": "Electric", "Lightning Rod": "Electric", "Motor Drive": "Electric",
@@ -187,7 +193,13 @@ OFF_ITEMS = OFF_EXPSPE + 1                    # item tags (len ITEM_TAGS)
 OFF_DEFEFF = OFF_ITEMS + _I                   # def_eff[NUM_TYPES]: signed typing defensive effectiveness
 OFF_HASDATA = OFF_DEFEFF + _T                 # belief.known(species) (1)
 OFF_USAGE = OFF_HASDATA + 1                   # usage_pct/100 (1)
-BASE_DIM = OFF_USAGE + 1                       # ── end of the SYMMETRIC base block
+# ── v9 MEGA-FORME block (base, symmetric): Σ over the species' stones of share(stone) × the forme it makes ──
+OFF_MTYPE = OFF_USAGE + 1                     # mega forme typing multi-hot (NUM_TYPES)
+OFF_MDEFEFF = OFF_MTYPE + _T                  # mega forme signed defensive effectiveness (NUM_TYPES)
+OFF_MIMMUNE = OFF_MDEFEFF + _T                # mega forme immunities: typing 0x + its fixed ability (NUM_TYPES)
+OFF_MSTATS = OFF_MIMMUNE + _T                 # mega forme base stats /255 (6)
+OFF_MEXPSPE = OFF_MSTATS + 6                  # mega forme spread-weighted expected speed /255 (1)
+BASE_DIM = OFF_MEXPSPE + 1                     # ── end of the SYMMETRIC base block
 OFF_GK = BASE_DIM                              # gimmick_kind one-hot (4) — mega prior since v8
 OFF_TERA = OFF_GK + _G                        # tera_type one-hot (NUM_TYPES) — reserved, zero in M-A
 GIMMICK_END = OFF_TERA + _T
@@ -213,7 +225,34 @@ OFF_KEXPSPE = OFF_KPHYSSH + 1                  # exact own speed /255 (OwnKnown.
 OFF_KITEMS = OFF_KEXPSPE + 1                   # hard known item tags (len ITEM_TAGS)
 OFF_KGK = OFF_KITEMS + _I
 OFF_KTERA = OFF_KGK + _G
-FEAT_DIM = OFF_KTERA + _T
+# ── v9 hard-known MEGA-FORME twins (a sheet-revealed / own stone: the forme it makes, p=1) ──
+OFF_KMTYPE = OFF_KTERA + _T
+OFF_KMDEFEFF = OFF_KMTYPE + _T
+OFF_KMIMMUNE = OFF_KMDEFEFF + _T
+OFF_KMSTATS = OFF_KMIMMUNE + _T
+FEAT_DIM = OFF_KMSTATS + 6
+
+# ── older schemas served as a COLUMN SUBSET of the current vector (v9 only inserted blocks) ──
+# v8 = v9 minus the base mega block [OFF_MTYPE, BASE_DIM) minus the overlay mega twins [OFF_KMTYPE, FEAT_DIM):
+# every v8 channel is computed by the same code with the same value, so model_io / tp_val_report / the surgery
+# feed a v8 checkpoint exactly the vector it trained on.
+_V8_COLUMNS = np.r_[0:OFF_MTYPE, BASE_DIM:OFF_KMTYPE].astype(np.int64)
+SCHEMA_DIMS = {"tpfeat-v8": int(len(_V8_COLUMNS)), FEATURE_SCHEMA_VERSION: FEAT_DIM}
+
+
+def schema_columns(schema):
+    """Index array that turns a CURRENT (v9) feature vector into ``schema``'s, or None for the current schema."""
+    if schema == FEATURE_SCHEMA_VERSION:
+        return None
+    if schema == "tpfeat-v8":
+        return _V8_COLUMNS
+    raise ValueError(f"no column view from {FEATURE_SCHEMA_VERSION} to {schema!r}")
+
+
+def view_for_schema(feats, schema):
+    """``feats[..., cols]`` for an older schema (v8), ``feats`` unchanged for the current one."""
+    cols = schema_columns(schema)
+    return feats if cols is None else np.asarray(feats)[..., cols]
 
 
 @dataclass
@@ -327,8 +366,12 @@ def _species_types(species):
 
 
 def _typing_immune(species):
+    return _typing_immune_types(_species_types(species))
+
+
+def _typing_immune_types(types):
     v = np.zeros(_T, np.float32)
-    for tc in _species_types(species):
+    for tc in types:
         for atk in _TYPE_IMMUNITY_C.get(tc, ()):
             idx = _TYPE_IDX.get(atk)
             if idx is not None:
@@ -366,8 +409,12 @@ def def_eff_profile(species):
     clamped to [-1,1] (negative = resists incoming, positive = weak to it; immune -> -1). Pure typing
     (public, both sides) — the substrate for type complementarity (A covers B's weaknesses) and for
     "does my mon resist their threats". 15b-feat.defense."""
+    return def_eff_from_types(_species_types(species))   # canonical (uppercase), matches poke-env chart keys
+
+
+def def_eff_from_types(types):
+    """def_eff_profile for an explicit TYPE LIST (v9: the mega forme's typing)."""
     v = np.zeros(_T, np.float32)
-    types = _species_types(species)            # canonical (uppercase), matches poke-env chart keys
     if not types:
         return v
     tc = _type_chart()
@@ -489,7 +536,11 @@ def expected_speed(species, belief) -> float:
     """Spread-weighted expected in-battle speed /255 (base-stat fallback) — the
     Trick-Room / tailwind decision axis (base speed alone hides EV investment)."""
     from v_dance.parser.belief_state import dex_base_stats
-    base = dex_base_stats(species) or {}
+    return expected_speed_from_base(species, dex_base_stats(species) or {}, belief)
+
+
+def expected_speed_from_base(species, base, belief) -> float:
+    """expected_speed with explicit BASE stats (v9: the species' EV/nature spreads on its mega forme's stats)."""
     fn = getattr(belief, "expected_stats_weighted", None)   # stub beliefs may omit it
     if callable(fn):
         try:
@@ -547,13 +598,16 @@ def _stone_augmented_abilities(species, ability_probs, item_probs):
         ip[k] = max(ip.get(k, 0.0), float(i["p"]))
     ab_aug = list(ability_probs)
     p_mega = 0.0
+    counted = set()
     for fm in formes:
         fe = dex.entry(fm["forme"]) or {}
         req, mega_ab = _canon_name(fe.get("requiredItem")), fm.get("ability")
         p = ip.get(req, 0.0)
         if not req or not mega_ab or p <= 0.0:
             continue
-        p_mega += p
+        if req not in counted:          # one stone, one share: Meowsticite serves M-Mega AND F-Mega (10-02)
+            counted.add(req)
+            p_mega += p
         ck, merged, out = _canon_name(mega_ab), False, []
         for e in ab_aug:
             if _canon_name(e["name"]) == ck:
@@ -565,6 +619,88 @@ def _stone_augmented_abilities(species, ability_probs, item_probs):
             out.append({"name": mega_ab, "p": p})
         ab_aug = out
     return ab_aug, float(min(p_mega, 1.0))
+
+
+# ── v9: the MEGA FORME each stone makes (mega audit gap 3, 2026-10-02) ───────────────────────
+def mega_forme_for_stone(species, stone):
+    """``(forme_name, dex_entry, fixed_ability_or_None)`` of the mega forme ``stone`` turns ``species`` into, or
+    None. One stone can serve several formes (Meowsticite → M-Mega / F-Mega; Tatsugirinite → Curly / Droopy /
+    Stretchy): narrow by the species' own id ('meowsticf' → F-Mega), then the default (non-'F-') forme."""
+    dex = get_pokedex()
+    if not dex or not stone or not species:
+        return None
+    sid, st = norm_species(species), _canon_name(stone)
+    cands = []
+    from v_dance.encoders.mega_preview import mega_reachable   # Raichu-Alola never megas (review 10-02)
+    for fm in dex.mega_formes_for(species):
+        fe = dex.entry(fm["forme"]) or {}
+        if _canon_name(fe.get("requiredItem")) == st and mega_reachable(sid, fe):
+            cands.append((fm["forme"], fe, fm.get("ability")))
+    if len(cands) > 1:
+        pref = [c for c in cands if norm_species(c[0]).startswith(sid)]
+        cands = pref or cands
+    if len(cands) > 1:
+        cands = [c for c in cands if not (c[1].get("forme") or "").startswith("F-")] or cands
+    return sorted(cands, key=lambda c: norm_species(c[0]))[0] if cands else None
+
+
+def species_stones(species):
+    """The distinct mega stones of ``species`` (canon names), in dex order."""
+    from v_dance.encoders.mega_preview import mega_reachable
+    dex = get_pokedex()
+    out = []
+    for fm in (dex.mega_formes_for(species) if dex else []):
+        fe = dex.entry(fm["forme"]) or {}
+        st = _canon_name(fe.get("requiredItem"))
+        if st and st not in out and mega_reachable(norm_species(species), fe):
+            out.append(st)
+    return out
+
+
+def mega_profile(species, stone_probs, belief=None):
+    """Stone-share-weighted MEGA-FORME channels: ``(mtype, mdefeff, mimmune, mstats, mexpspe)``.
+
+    ``stone_probs`` = {canon stone: p} (belief item shares, or {stone: 1.0} for a known held stone). Each stone
+    counts ONCE with its forme (Garchompite Z 0.45 → Dragon / Levitate / Spe 151; Garchompite 0.02 → Dragon /
+    Ground / Sand Force). All zeros for a mon with no stone — a non-mega mon keeps exactly its v8 values."""
+    mtype = np.zeros(_T, np.float32)
+    mdef = np.zeros(_T, np.float32)
+    mimm = np.zeros(_T, np.float32)
+    mst = np.zeros(6, np.float32)
+    mspe = 0.0
+    if not stone_probs:
+        return mtype, mdef, mimm, mst, mspe
+    from v_dance.parser.belief_state import STAT_ORDER, dex_base_stats
+    for st in species_stones(species):
+        p = float(stone_probs.get(st, 0.0))
+        if p <= 0.0:
+            continue
+        hit = mega_forme_for_stone(species, st)
+        if hit is None:
+            continue
+        forme, fe, mega_ab = hit
+        types = [_canon_type(t) for t in (fe.get("types") or [])]
+        for t in types:
+            if t in _TYPE_IDX:
+                mtype[_TYPE_IDX[t]] += p
+        mdef += p * def_eff_from_types(types)
+        imm = _typing_immune_types(types)
+        if mega_ab:
+            imm = np.maximum(imm, _ability_immune([{"name": mega_ab, "p": 1.0}]))
+        mimm += p * imm
+        base = dex_base_stats(forme) or {}         # short keys (atk/def/…); the raw dex says 'attack'/'speed'
+        mst += p * np.array([(base.get(k, 0) or 0) / 255.0 for k in STAT_ORDER], np.float32)
+        mspe += p * expected_speed_from_base(species, base, belief)
+    return (np.clip(mtype, 0.0, 1.0), np.clip(mdef, -1.0, 1.0), np.clip(mimm, 0.0, 1.0),
+            np.clip(mst, 0.0, 1.0), float(np.clip(mspe, 0.0, 1.0)))
+
+
+def _stone_probs(item_probs):
+    ip = {}
+    for i in item_probs or ():
+        k = _canon_name(i["name"])
+        ip[k] = max(ip.get(k, 0.0), float(i["p"]))
+    return ip
 
 
 # ── the two public extractors (single source of truth for train + serve) ─────────
@@ -605,6 +741,14 @@ def _fill_base(f, species, belief):
     # gimmick prior: mega mass = summed mega-stone item share (0 when no stones / no data)
     f[OFF_GK + GIMMICK_KINDS.index("none")] = 1.0 - p_mega
     f[OFF_GK + GIMMICK_KINDS.index("mega")] = p_mega
+    # v9: the forme(s) those stones make — typing / matchups / stats the picker scored as the BASE forme before
+    if has and p_mega > 0.0:
+        mt, md, mi, ms, mspe = mega_profile(species, _stone_probs(items), belief)
+        f[OFF_MTYPE:OFF_MTYPE + _T] = mt
+        f[OFF_MDEFEFF:OFF_MDEFEFF + _T] = md
+        f[OFF_MIMMUNE:OFF_MIMMUNE + _T] = mi
+        f[OFF_MSTATS:OFF_MSTATS + 6] = ms
+        f[OFF_MEXPSPE] = mspe
 
 
 def _stone_ability_for(species, item) -> Optional[str]:
@@ -652,6 +796,12 @@ def _fill_overlay(f, species, known: OwnKnown):
         f[OFF_KITEMS:OFF_KITEMS + _I] = item_tags([{"name": known.item, "p": 1.0}])
     will_mega = bool(known.will_mega or stone_ab)              # a held stone implies the mega
     f[OFF_KGK + GIMMICK_KINDS.index("mega" if will_mega else "none")] = 1.0
+    if known.item:                                             # v9: the forme a KNOWN stone makes (p=1)
+        mt, md, mi, ms, _spe = mega_profile(species, {_canon_name(known.item): 1.0})
+        f[OFF_KMTYPE:OFF_KMTYPE + _T] = mt
+        f[OFF_KMDEFEFF:OFF_KMDEFEFF + _T] = md
+        f[OFF_KMIMMUNE:OFF_KMIMMUNE + _T] = mi
+        f[OFF_KMSTATS:OFF_KMSTATS + 6] = ms
     if known.tera:
         ti = _TYPE_IDX.get(_canon_type(known.tera))
         if ti is not None:

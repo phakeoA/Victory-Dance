@@ -71,6 +71,17 @@ def load_into(path, *, actor_critic, trainer, device: str = "cpu"):
     and the frozen-BC reference already match). Returns ``(league, history, snap)`` rebuilt
     from the file."""
     snap = torch.load(path, map_location=device, weights_only=False)
+    # 2026-10-02 layout v20: a v19 snapshot lifts in place (zero mega-preview columns in policy + critic
+    # mon_enc.0 AND zero Adam moments for them) — the run continues with the identical policy.
+    from v_dance.models import layout_upgrade as _LU
+    if _LU.upgrade_state_dict(snap["ac_state"]):
+        _names = {id(p): n for n, p in actor_critic.named_parameters()}
+
+        def _order(opt):        # the optimizer's params, by name, in state-index order (same build as the run's)
+            return [_names.get(id(p), "") for g in opt.param_groups for p in g["params"]]
+
+        _LU.upgrade_optimizer_state(snap["actor_opt"], _order(trainer.actor_opt))
+        _LU.upgrade_optimizer_state(snap["critic_opt"], _order(trainer.critic_opt))
     actor_critic.load_state_dict(snap["ac_state"])
     trainer.actor_opt.load_state_dict(snap["actor_opt"])
     trainer.critic_opt.load_state_dict(snap["critic_opt"])

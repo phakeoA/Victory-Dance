@@ -182,10 +182,11 @@ def _tp_margin(model, vocab, cfg, our_species, opp_species, belief) -> float:
     from v_dance.play.model_io import _pack_side, uses_tp_features
     from v_dance.training.train_teampreview import SET_SUBSETS
     use_tp = uses_tp_features(cfg)
+    _schema = cfg.get("feature_schema")          # 2026-10-02: a v8 ckpt packs its v8 column view of v9
     oi, of = _pack_side(our_species, vocab, cfg["feat_dim"], belief=belief,
-                        use_tp_features=use_tp)
+                        use_tp_features=use_tp, tp_schema=_schema)
     pi, pf = _pack_side(opp_species, vocab, cfg["feat_dim"], belief=belief,
-                        use_tp_features=use_tp)
+                        use_tp_features=use_tp, tp_schema=_schema)
     aff_t = None
     if use_tp and getattr(model, "use_teammate_bias", False):
         from v_dance.training.tp_features import teammate_affinity_matrix

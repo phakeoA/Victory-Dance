@@ -411,7 +411,8 @@ def test_live_mask_target_buckets_match_training_kinds(name):
     action must decode to a non-None order.  (Pre-fix the live mask marked ALL
     present-target buckets for EVERY move, far broader than training.)"""
     _repo_root_on_path()
-    from v_dance.play.vgc_base import build_legal_action_mask, action_to_order
+    from v_dance.play.vgc_base import (build_legal_action_mask, action_to_order, _futile_buckets_serve,
+                                       _futility_enabled)
     from v_dance.encoders.state_encoder import (
         _move_target_kind, _CHOOSABLE_SINGLE, _ALLY_KINDS, ACTIONS_PER_SLOT,
         SWITCH_OFFSET,
@@ -438,11 +439,14 @@ def test_live_mask_target_buckets_match_training_kinds(name):
                         continue
                     kind = _move_target_kind(mv.id)
                     buckets = {t for t in range(3) if mask[m_idx * 3 + t]}
+                    # the rules-exact futility mask (training masks the same buckets) also applies live since the
+                    # 2026-10-02 enum fix — e.g. a second Tailwind under Tailwind loses its only bucket
+                    fut = _futile_buckets_serve(battle, mon, mv) if _futility_enabled() else set()
                     if kind in _ALLY_KINDS:
-                        exp = {2} if (kind == "adjacentAllyOrSelf" or ally_alive) else set()
+                        exp = ({2} if (kind == "adjacentAllyOrSelf" or ally_alive) else set()) - fut
                         assert buckets == exp, f"{mv.id} ({kind}) buckets {buckets} != {exp}"
                     elif kind not in _CHOOSABLE_SINGLE:
-                        assert buckets == {0}, f"{mv.id} ({kind}) buckets {buckets} != {{0}}"
+                        assert buckets == {0} - fut, f"{mv.id} ({kind}) buckets {buckets} != {{0}} - {fut}"
                     # single-target buckets are presence-dependent → decodability below
                 moves_here = list(mon.moves.values())[:4]
                 opp_present = any(

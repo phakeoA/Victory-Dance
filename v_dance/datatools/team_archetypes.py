@@ -51,6 +51,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from v_dance.encoders.state_encoder import POKEMON_FEATURES, StateEncoder
+from v_dance.encoders.encoder_layout import MEGA_PREVIEW_FEATURES, MEGA_PREVIEW_REL, V19_POKEMON_FEATURES
 from v_dance.dex.pokedex import norm_species
 from v_dance.training.bc_dataset import iter_jsonl_files
 
@@ -59,7 +60,11 @@ PLAY_STATS = ("switch_rate", "protect_rate", "fakeout_rate",
               "trickroom_rate", "mean_turns")
 PLAY_STATS_DIM = len(PLAY_STATS)
 # Team feature layout: [mean-pool P | max-pool P | play stats].
-MON_FEATURE_DIM = 2 * POKEMON_FEATURES
+# v20 (2026-10-02): a mon's archetype features are written in a NEUTRAL context (no enemies, no stone shares) so
+# its mega-preview block is always zero — they keep the v19 per-mon width (the block dropped), which keeps every
+# fitted archetype artifact (centroids / mu / sd sized 2·413 + 5) and the z-checkpoints that embed one valid.
+ARCHETYPE_MON_FEATURES = V19_POKEMON_FEATURES
+MON_FEATURE_DIM = 2 * ARCHETYPE_MON_FEATURES
 TEAM_FEATURE_DIM = MON_FEATURE_DIM + PLAY_STATS_DIM
 
 _ARTIFACT_SCHEMA = 1
@@ -75,7 +80,7 @@ def mon_feature_vector(encoder: StateEncoder, mon: dict) -> np.ndarray:
     vec = np.zeros(POKEMON_FEATURES, dtype=np.float32)
     if mon:
         encoder._write_pokemon_json(vec, 0, mon, is_active=False)
-    return vec
+    return np.concatenate([vec[:MEGA_PREVIEW_REL], vec[MEGA_PREVIEW_REL + MEGA_PREVIEW_FEATURES:]])
 
 
 def team_feature_vector(mon_vecs: Sequence[np.ndarray],
@@ -339,7 +344,7 @@ def build_archetypes(folders: Sequence[str], k: int = 10, seed: int = 0,
         "schema": _ARTIFACT_SCHEMA, "k": int(k), "seed": int(seed),
         "feature_dim": int(TEAM_FEATURE_DIM),
         "mon_feature_dim": int(MON_FEATURE_DIM),
-        "pokemon_features": int(POKEMON_FEATURES),
+        "pokemon_features": int(ARCHETYPE_MON_FEATURES),
         "play_stats": list(PLAY_STATS),
         "inertia": float(inertia),
         "n_teams": len(keys),

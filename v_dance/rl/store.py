@@ -76,6 +76,12 @@ def iter_trajectories(path, *, expected_state_dim: Optional[int] = None) -> Iter
             traj = Trajectory.from_obj(json.loads(line))
             if expected_state_dim is not None:
                 for t in traj.transitions:
+                    if t.state.shape != (expected_state_dim,):
+                        # 2026-10-02 layout v20: a recorded v19 state gets the zero mega-preview block — the
+                        # exact input the auto-upgraded (v19-trained) net saw, so its recorded log-prob holds.
+                        from v_dance.models import layout_upgrade as _LU
+                        if t.state.shape == (_LU.V19_STATE_DIM,) and expected_state_dim == _LU.STATE_DIM:
+                            t.state = _LU.pad_states(t.state)
                     assert t.state.shape == (expected_state_dim,), (
                         f"{p}:{ln} state dim {t.state.shape} != ({expected_state_dim},) "
                         f"— stale-layout buffer?")

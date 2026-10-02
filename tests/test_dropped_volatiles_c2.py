@@ -130,6 +130,6 @@ def test_encoder_channels_placement():
 def test_layout():
     # C.2 added 3 volatile channels; C.2b's gap-fix added a 4th (drowsy) → v14.
     assert VOLATILE_FEATURES == 12
-    assert POKEMON_FEATURES == 413       # v16 (B2b: +2 per-move hit-chance channels)
-    assert get_state_dim() == 5057
-    assert get_state_layout_version() == 19
+    assert POKEMON_FEATURES == 523       # v16 (B2b: +2 per-move hit-chance channels)
+    assert get_state_dim() == 6377
+    assert get_state_layout_version() == 20

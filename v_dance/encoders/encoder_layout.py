@@ -139,6 +139,15 @@ MOVE_FEATURES  = 28 + NUM_MOVE_TAGS + 1 + 1   # v9/v11: 25 core feats (base_powe
                       # this PURE status move is wasted on enemy[e] (already-statused / type-or-ability immune))
                       # + 29 effect-tags + 1 identity index + is_known(last) = 28+29+1+1 = 59
 
+# v20 (2026-10-02, mega audit gap 2) — the MEGA PREVIEW block (v_dance/encoders/mega_preview.py): what a mon that
+# has not mega'd yet is about to become. MON part: p_mega + the forme's typing (conditional) + Δbase/255 + its
+# ability's mechanic tags; PER-MOVE part (per move, per enemy active e): [signed type-eff, band max, moves-first]
+# of the move into e's most likely MEGA forme, then [band max, moves-first] of the move used AS this mon's own
+# most likely mega forme. Sits AFTER the tera block and BEFORE the 4 trailing slot flags (negative offsets).
+MEGA_PREVIEW_MON_FEATURES = 1 + 20 + 6 + NUM_ABILITY_TAGS        # p_mega · types · Δbase · ability tags (70)
+MEGA_PREVIEW_PER_MOVE = 3 * 2 + 2 * 2                             # vs e's mega ×2 enemies · as own mega ×2 (10)
+MEGA_PREVIEW_FEATURES = MEGA_PREVIEW_MON_FEATURES + 4 * MEGA_PREVIEW_PER_MOVE   # 110
+
 POKEMON_FEATURES = (
     1               # hp_frac
     + NUM_TYPES     # type1 one-hot   (20)
@@ -156,6 +165,7 @@ POKEMON_FEATURES = (
     + ABILITY_BLOCK_V9          # v9: ability tags + identity index + known
     + VOLATILE_FEATURES         # v9: per-mon volatile block (6)
     + NUM_TYPES     # v11 Phase D (D9): tera_type one-hot (20) — REVEALED tera type; 0 while tera mod-disabled
+    + MEGA_PREVIEW_FEATURES      # v20: the mega preview block (110)
     + 1             # is_active
     + 1             # is_revealed
     + 1             # is_fainted      (layout-v2: see/count KO'd mons)
@@ -254,9 +264,24 @@ STATE_DIM = (ACTIVE_SLOTS + BENCH_SLOTS + OPP_BENCH_SLOTS) * POKEMON_FEATURES + 
 #       loading (same dims); both encoders share battle_mechanics.terrain_bp_mult / terrain_spread /
 #       terrain_priority. (white_box_sim — the dead-end search's forward model — deliberately NOT updated: it
 #       passes no attacker_grounded, so _situational_damage_mult keeps its pre-v19d behaviour there.)
+#  20 → STATE_DIM 6377 (2026-10-02, mega audit gap 2; USER "fix 1-5"): +MEGA_PREVIEW_FEATURES (110) per mon,
+#       inserted AFTER the tera block and BEFORE the 4 trailing slot flags → POKEMON_FEATURES 413→523,
+#       +110×12 = +1320. Every positive offset (moves / item / ability identity columns) is unchanged and the
+#       flags keep their negative offsets. ⚠ NOT a retrain-to-load bump: a v19 checkpoint AUTO-UPGRADES at load
+#       (v_dance/models/layout_upgrade.py inserts ZERO input columns into mon_enc.0 at the block → bit-for-bit
+#       the same policy until training lights the new channels up), so the era chain does NOT restart.
 # train_bc stamps this into the checkpoint config; model_io.load_bc_policy asserts
 # it (and the dim) match the running code.
-STATE_LAYOUT_VERSION = 19
+STATE_LAYOUT_VERSION = 20
+
+# The v19 per-mon width / state dim (the auto-upgrade source) and where the v20 block starts within a mon row.
+V19_POKEMON_FEATURES = POKEMON_FEATURES - MEGA_PREVIEW_FEATURES                       # 413
+V19_STATE_DIM = (ACTIVE_SLOTS + BENCH_SLOTS + OPP_BENCH_SLOTS) * V19_POKEMON_FEATURES + GLOBAL_FEATURES   # 5057
+MEGA_PREVIEW_REL = POKEMON_FEATURES - 4 - MEGA_PREVIEW_FEATURES                       # 409 (= v19's flag start)
+# Within-move-block channel offsets the preview re-reads from a scratch move write (see state_encoder's writer):
+_MV_SIGNED = (9, 11)       # type-eff signed vs enemy 0 / 1
+_MV_BAND_MAX = (14, 16)    # damage-band max vs enemy 0 / 1
+_MV_FIRST = (17, 18)       # who-moves-first vs enemy 0 / 1
 
 # ── Action space ───────────────────────────────────────────────────────────────
 ACTIONS_PER_SLOT = 16    # 12 move-target + 4 switch

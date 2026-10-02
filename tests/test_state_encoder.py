@@ -51,10 +51,10 @@ def _snap():
 
 # ── Dimension / structure ───────────────────────────────────────────────────
 def test_state_dim_is_layout_v14():
-    assert POKEMON_FEATURES == 413      # v16 (B2b: +2 per-move per-enemy hit-chance channels)
+    assert POKEMON_FEATURES == 523      # v16 (B2b: +2 per-move per-enemy hit-chance channels)
     assert (ACTIVE_SLOTS, BENCH_SLOTS, OPP_BENCH_SLOTS) == (4, 4, 4)
     assert GLOBAL_FEATURES == 101       # v10: +11 field-duration age channels
-    assert get_state_dim() == 5057      # 12*381 + 101  (layout v16)
+    assert get_state_dim() == 6377      # 12*381 + 101  (layout v16)
 
 
 def test_encode_shape_and_finite():

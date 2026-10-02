@@ -17,11 +17,12 @@ from v_dance.encoders.state_encoder import (
     MOVE_FEATURES, _MOVE_BLOCK_REL, move_slots_for_mon, norm_species, _GRAVITY_ACC_MULT,
 )
 from v_dance.encoders.live_state_encoder import LiveStateEncoder
+from v_dance.encoders.encoder_layout import MEGA_PREVIEW_FEATURES  # v20: the mega preview sits before the flags
 
 # GRAVITY presence channel: field block sits after 12 mon blocks + the weather block.
 _GRAVITY_CH = 12 * POKEMON_FEATURES + NUM_WEATHER + _FIELD_IDX["GRAVITY"]
 # can_switch = 5th slot of the volatile block (mirror test_ability_trap_b3).
-CAN_SWITCH = POKEMON_FEATURES - 4 - NUM_TYPES - VOLATILE_FEATURES + 4   # v11 Phase D D9: tera one-hot before flags
+CAN_SWITCH = POKEMON_FEATURES - 4 - MEGA_PREVIEW_FEATURES - NUM_TYPES - VOLATILE_FEATURES + 4   # v11 Phase D D9: tera one-hot before flags
 
 HEADER = """|player|p1|Alice|1|
 |player|p2|Bob|1|

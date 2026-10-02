@@ -26,9 +26,9 @@ def _h(base=1.0, ab=None, stage=0, wl=False, phys=False, oh=False, d=None, mid="
 # ════════════════════════════ layout pin ════════════════════════════
 def test_b2b_layout_v16():
     assert MOVE_FEATURES == 59
-    assert POKEMON_FEATURES == 413
-    assert get_state_dim() == 5057
-    assert get_state_layout_version() == 19
+    assert POKEMON_FEATURES == 523
+    assert get_state_dim() == 6377
+    assert get_state_layout_version() == 20
 
 
 # ════════════════════════════ _per_enemy_hit_chance unit ════════════════════════════

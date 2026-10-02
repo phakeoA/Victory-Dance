@@ -197,6 +197,10 @@ def load_bc_policy(path, device: str = "cpu", _ckpt=None):
             ckpt.eval()
             return ckpt, None
         raise ValueError(f"unrecognised BC checkpoint at {path}: {type(ckpt)}")
+    # 2026-10-02 layout v20: a v19 checkpoint is lifted IN PLACE (zero mega-preview input columns → the same
+    # policy bit-for-bit) BEFORE the stale-layout guard, so every served / league / panel ckpt keeps loading.
+    from v_dance.models import layout_upgrade as _LU
+    _LU.note(path, _LU.upgrade_checkpoint(ckpt))
     cfg = ckpt.get("config", {})
     from v_dance.encoders.state_encoder import get_gimmick_dim, get_state_dim, get_state_layout_version
 
@@ -587,10 +591,13 @@ def load_team_chooser(path, device: str = "cpu"):
         # v7 extractor (tp_features_v7 — the exact code they trained on, dead tags and all;
         # serving them through the fixed v8 channels would be train/serve drift, not a fix).
         # _pack_side dispatches on the checkpoint schema.
+        # v9 (2026-10-02) only INSERTED channels, so a v8 checkpoint serves through a column subset of the v9
+        # vector (tp_features.schema_columns) — same code, same values, no frozen v8 copy.
+        from v_dance.training.tp_features import SCHEMA_DIMS
         if schema in _TP_LEGACY_SCHEMAS:
             from v_dance.training.tp_features_v7 import FEAT_DIM as expected_dim
-        elif schema == FEATURE_SCHEMA_VERSION:
-            expected_dim = FEAT_DIM
+        elif schema in SCHEMA_DIMS:
+            expected_dim = SCHEMA_DIMS[schema]
         else:
             expected_dim = None
         if expected_dim is None or int(cfg.get("feat_dim", 0)) != expected_dim:
@@ -739,14 +746,19 @@ def _pack_side(species: Sequence[str], vocab: dict, feat_dim: int, *,
     if use_tp_features:
         # Schema dispatch (v8): a v6/v7 checkpoint is served through the FROZEN v7 extractor —
         # the exact channels it trained on — while v8+ uses the current tp_features.
+        cols = None
         if tp_schema in _TP_LEGACY_SCHEMAS:
             from v_dance.training.tp_features_v7 import (
                 FEAT_DIM, own_mon_features, opp_mon_features,
             )
         else:
             from v_dance.training.tp_features import (
-                FEAT_DIM, own_mon_features, opp_mon_features,
+                FEAT_DIM, own_mon_features, opp_mon_features, schema_columns,
             )
+            if tp_schema:                         # v8 ckpt → the v8 columns of the v9 vector (see load guard)
+                cols = schema_columns(tp_schema)
+                if cols is not None:
+                    FEAT_DIM = int(len(cols))
         # LOCKSTEP guard (15b-io.1): the checkpoint's feat_dim MUST equal its extractor's
         # FEAT_DIM, else a schema drift would silently zero-pad the synergy channels (the
         # exact failure the handoff warned about).  Fail loud instead.
@@ -762,9 +774,10 @@ def _pack_side(species: Sequence[str], vocab: dict, feat_dim: int, *,
             ns = norm_species(sp)
             idx[i] = int(vocab.get(ns, 0))     # 0 = PAD / unseen
             if own_known is not None:
-                feat[i] = own_mon_features(ns, b, own_known.get(ns))
+                row = own_mon_features(ns, b, own_known.get(ns))
             else:
-                feat[i] = opp_mon_features(ns, b)
+                row = opp_mon_features(ns, b)
+            feat[i] = row if cols is None else row[cols]
         return idx, feat
 
     # legacy dex-only path (unchanged) ─────────────────────────────────────────

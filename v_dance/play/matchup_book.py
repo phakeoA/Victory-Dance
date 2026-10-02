@@ -157,7 +157,7 @@ def mega_of(species, ability=None, *, is_mega: Optional[bool] = None) -> Optiona
         return None
     try:
         e0 = dx.entry(species) or {}
-        if (e0.get("forme") or "").startswith("Mega"):         # already a mega forme id
+        if "Mega" in (e0.get("forme") or ""):                  # already a mega forme id (incl. M-Mega)
             is_mega = True
             species = e0.get("baseSpecies") or species
         megas = dx.mega_formes_for(species)

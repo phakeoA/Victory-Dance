@@ -46,8 +46,8 @@ def test_statdrop_and_reactive_are_distinct_categories():
 
 def test_layout_v14_dims():
     assert NUM_ABILITY_EFFECTS == 17     # the v8 effect helper is unchanged (still used internally)
-    assert get_state_dim() == 5057       # layout v16 (B2b: +2 per-move hit-chance channels)
-    assert get_state_layout_version() == 19
+    assert get_state_dim() == 6377       # layout v16 (B2b: +2 per-move hit-chance channels)
+    assert get_state_layout_version() == 20
 
 
 # ── end-to-end: the encoder writes the right ability TAG bit (v9) ──────────────

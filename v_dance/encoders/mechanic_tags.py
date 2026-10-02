@@ -260,7 +260,7 @@ _ABILITY_TAG_SETS: Dict[str, Set[str]] = {
     "booster_ability": {"protosynthesis", "quarkdrive"},
     "weather_speed": {"swiftswim", "chlorophyll", "sandrush", "slushrush"},
     "speed_control": {"speedboost", "unburden", "motordrive", "quickfeet"},
-    "type_immunity": {"levitate", "voltabsorb", "waterabsorb", "flashfire", "sapsipper", "lightningrod",
+    "type_immunity": {"levitate", "eelevate", "voltabsorb", "waterabsorb", "flashfire", "sapsipper", "lightningrod",
                       "stormdrain", "motordrive", "dryskin", "eartheater", "wellbakedbody", "windrider",
                       "purifyingsalt", "soundproof", "bulletproof", "overcoat", "wonderguard"},
     "damage_boost": {"adaptability", "toughclaws", "sheerforce", "technician", "ironfist", "strongjaw",

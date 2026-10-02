@@ -1,0 +1,549 @@
+{
+ "formats": {
+  "regma": {
+   "aerodactyl": {
+    "aerodactylite": 0.6316
+   },
+   "aggron": {
+    "aggronite": 1.0
+   },
+   "audino": {
+    "audinite": 1.0
+   },
+   "banette": {
+    "banettite": 1.0
+   },
+   "blastoise": {
+    "blastoisinite": 1.0
+   },
+   "camerupt": {
+    "cameruptite": 1.0
+   },
+   "charizard": {
+    "charizarditex": 0.0588,
+    "charizarditey": 0.9412
+   },
+   "crabominable": {
+    "crabominite": 1.0
+   },
+   "delphox": {
+    "delphoxite": 1.0
+   },
+   "dragonite": {
+    "dragoninite": 0.6667
+   },
+   "drampa": {
+    "drampanite": 1.0
+   },
+   "floetteeternal": {
+    "floettite": 0.96
+   },
+   "froslass": {
+    "froslassite": 1.0
+   },
+   "garchomp": {
+    "garchompite": 0.0238
+   },
+   "gardevoir": {
+    "gardevoirite": 1.0
+   },
+   "gengar": {
+    "gengarite": 0.8571
+   },
+   "glimmora": {
+    "glimmoranite": 0.3
+   },
+   "gyarados": {
+    "gyaradosite": 1.0
+   },
+   "hawlucha": {
+    "hawluchanite": 1.0
+   },
+   "kangaskhan": {
+    "kangaskhanite": 0.7143
+   },
+   "lopunny": {
+    "lopunnite": 1.0
+   },
+   "lucario": {
+    "lucarionite": 1.0
+   },
+   "manectric": {
+    "manectite": 1.0
+   },
+   "meganium": {
+    "meganiumite": 1.0
+   },
+   "scizor": {
+    "scizorite": 0.8
+   },
+   "scovillain": {
+    "scovillainite": 1.0
+   },
+   "skarmory": {
+    "skarmorite": 1.0
+   },
+   "starmie": {
+    "starminite": 1.0
+   },
+   "tyranitar": {
+    "tyranitarite": 0.7143
+   },
+   "venusaur": {
+    "venusaurite": 0.75
+   }
+  },
+  "regmb": {
+   "abomasnow": {
+    "abomasite": 0.971
+   },
+   "aerodactyl": {
+    "aerodactylite": 0.3308
+   },
+   "aggron": {
+    "aggronite": 0.986
+   },
+   "alakazam": {
+    "alakazite": 0.2381
+   },
+   "altaria": {
+    "altarianite": 0.6648
+   },
+   "ampharos": {
+    "ampharosite": 0.986
+   },
+   "audino": {
+    "audinite": 0.3409
+   },
+   "banette": {
+    "banettite": 1.0
+   },
+   "barbaracle": {
+    "barbaracite": 0.966
+   },
+   "beedrill": {
+    "beedrillite": 1.0
+   },
+   "blastoise": {
+    "blastoisinite": 0.6871
+   },
+   "blaziken": {
+    "blazikenite": 0.51
+   },
+   "camerupt": {
+    "cameruptite": 0.8864
+   },
+   "chandelure": {
+    "chandelurite": 0.3982
+   },
+   "charizard": {
+    "charizarditex": 0.0159,
+    "charizarditey": 0.3894
+   },
+   "chesnaught": {
+    "chesnaughtite": 0.3857
+   },
+   "chimecho": {
+    "chimechite": 1.0
+   },
+   "clefable": {
+    "clefablite": 0.1526
+   },
+   "crabominable": {
+    "crabominite": 1.0
+   },
+   "delphox": {
+    "delphoxite": 0.7685
+   },
+   "dragalge": {
+    "dragalgite": 0.7104
+   },
+   "dragonite": {
+    "dragoninite": 0.5642
+   },
+   "drampa": {
+    "drampanite": 0.7
+   },
+   "eelektross": {
+    "eelektrossite": 0.998
+   },
+   "excadrill": {
+    "excadrite": 0.0342
+   },
+   "falinks": {
+    "falinksite": 0.9124
+   },
+   "feraligatr": {
+    "feraligite": 0.5991
+   },
+   "floetteeternal": {
+    "floettite": 0.7363
+   },
+   "froslass": {
+    "froslassite": 0.9055
+   },
+   "gallade": {
+    "galladite": 0.0875
+   },
+   "gardevoir": {
+    "gardevoirite": 0.7817
+   },
+   "gengar": {
+    "gengarite": 0.6752
+   },
+   "glalie": {
+    "glalitite": 1.0
+   },
+   "glimmora": {
+    "glimmoranite": 0.152
+   },
+   "golurk": {
+    "golurkite": 0.99
+   },
+   "greninja": {
+    "greninjite": 0.5409
+   },
+   "gyarados": {
+    "gyaradosite": 0.581
+   },
+   "hawlucha": {
+    "hawluchanite": 0.9276
+   },
+   "heracross": {
+    "heracronite": 0.9091
+   },
+   "houndoom": {
+    "houndoominite": 0.824
+   },
+   "kangaskhan": {
+    "kangaskhanite": 0.4727
+   },
+   "lopunny": {
+    "lopunnite": 0.9486
+   },
+   "lucario": {
+    "lucarionite": 0.441
+   },
+   "malamar": {
+    "malamarite": 0.6575
+   },
+   "manectric": {
+    "manectite": 0.8067
+   },
+   "mawile": {
+    "mawilite": 0.8696
+   },
+   "medicham": {
+    "medichamite": 0.6635
+   },
+   "meganium": {
+    "meganiumite": 0.8696
+   },
+   "meowstic": {
+    "meowsticite": 0.0333
+   },
+   "metagross": {
+    "metagrossite": 0.8591
+   },
+   "pidgeot": {
+    "pidgeotite": 1.0
+   },
+   "pinsir": {
+    "pinsirite": 1.0
+   },
+   "pyroar": {
+    "pyroarite": 0.8687
+   },
+   "raichu": {
+    "raichunitex": 0.1213,
+    "raichunitey": 0.4033
+   },
+   "sableye": {
+    "sablenite": 0.001
+   },
+   "sceptile": {
+    "sceptilite": 0.982
+   },
+   "scizor": {
+    "scizorite": 0.535
+   },
+   "scolipede": {
+    "scolipite": 0.505
+   },
+   "scovillain": {
+    "scovillainite": 0.8635
+   },
+   "scrafty": {
+    "scraftinite": 0.7125
+   },
+   "sharpedo": {
+    "sharpedonite": 0.713
+   },
+   "skarmory": {
+    "skarmorite": 1.0
+   },
+   "slowbro": {
+    "slowbronite": 0.9
+   },
+   "staraptor": {
+    "staraptite": 0.4725
+   },
+   "starmie": {
+    "starminite": 0.6975
+   },
+   "steelix": {
+    "steelixite": 0.778
+   },
+   "swampert": {
+    "swampertite": 0.5794
+   },
+   "tyranitar": {
+    "tyranitarite": 0.3778
+   },
+   "venusaur": {
+    "venusaurite": 0.43
+   },
+   "victreebel": {
+    "victreebelite": 0.9524
+   }
+  },
+  "regmc": {
+   "abomasnow": {
+    "abomasite": 0.737
+   },
+   "absol": {
+    "absolite": 0.004,
+    "absolitez": 0.975
+   },
+   "aerodactyl": {
+    "aerodactylite": 0.369
+   },
+   "aggron": {
+    "aggronite": 0.878
+   },
+   "alakazam": {
+    "alakazite": 0.711
+   },
+   "altaria": {
+    "altarianite": 0.318
+   },
+   "ampharos": {
+    "ampharosite": 0.773
+   },
+   "audino": {
+    "audinite": 0.267
+   },
+   "banette": {
+    "banettite": 0.955
+   },
+   "barbaracle": {
+    "barbaracite": 0.591
+   },
+   "baxcalibur": {
+    "baxcalibrite": 0.765
+   },
+   "beedrill": {
+    "beedrillite": 0.874
+   },
+   "blastoise": {
+    "blastoisinite": 0.907
+   },
+   "blaziken": {
+    "blazikenite": 0.534
+   },
+   "camerupt": {
+    "cameruptite": 0.978
+   },
+   "chandelure": {
+    "chandelurite": 0.375
+   },
+   "charizard": {
+    "charizarditex": 0.047,
+    "charizarditey": 0.933
+   },
+   "chesnaught": {
+    "chesnaughtite": 0.803
+   },
+   "chimecho": {
+    "chimechite": 0.908
+   },
+   "clefable": {
+    "clefablite": 0.182
+   },
+   "crabominable": {
+    "crabominite": 0.89
+   },
+   "delphox": {
+    "delphoxite": 0.842
+   },
+   "dragalge": {
+    "dragalgite": 0.661
+   },
+   "dragonite": {
+    "dragoninite": 0.684
+   },
+   "drampa": {
+    "drampanite": 0.539
+   },
+   "eelektross": {
+    "eelektrossite": 0.839
+   },
+   "emboar": {
+    "emboarite": 0.688
+   },
+   "excadrill": {
+    "excadrite": 0.01
+   },
+   "feraligatr": {
+    "feraligite": 0.649
+   },
+   "floetteeternal": {
+    "floettite": 0.984
+   },
+   "froslass": {
+    "froslassite": 0.99
+   },
+   "gallade": {
+    "galladite": 0.167
+   },
+   "garchomp": {
+    "garchompite": 0.021,
+    "garchompitez": 0.452
+   },
+   "gardevoir": {
+    "gardevoirite": 0.969
+   },
+   "gengar": {
+    "gengarite": 0.889
+   },
+   "glalie": {
+    "glalitite": 0.855
+   },
+   "glimmora": {
+    "glimmoranite": 0.486
+   },
+   "golisopod": {
+    "golisopite": 0.984
+   },
+   "golurk": {
+    "golurkite": 0.742
+   },
+   "greninja": {
+    "greninjite": 0.503
+   },
+   "gyarados": {
+    "gyaradosite": 0.499
+   },
+   "hawlucha": {
+    "hawluchanite": 0.563
+   },
+   "heracross": {
+    "heracronite": 0.837
+   },
+   "houndoom": {
+    "houndoominite": 0.77
+   },
+   "kangaskhan": {
+    "kangaskhanite": 0.438
+   },
+   "lopunny": {
+    "lopunnite": 0.954
+   },
+   "lucario": {
+    "lucarionite": 0.032,
+    "lucarionitez": 0.931
+   },
+   "malamar": {
+    "malamarite": 0.492
+   },
+   "manectric": {
+    "manectite": 0.698
+   },
+   "mawile": {
+    "mawilite": 0.984
+   },
+   "medicham": {
+    "medichamite": 0.455
+   },
+   "meganium": {
+    "meganiumite": 0.989
+   },
+   "meowstic": {
+    "meowsticite": 0.154
+   },
+   "metagross": {
+    "metagrossite": 0.901
+   },
+   "pidgeot": {
+    "pidgeotite": 0.878
+   },
+   "pinsir": {
+    "pinsirite": 0.85
+   },
+   "pyroar": {
+    "pyroarite": 0.97
+   },
+   "raichu": {
+    "raichunitex": 0.143,
+    "raichunitey": 0.829
+   },
+   "sableye": {
+    "sablenite": 0.028
+   },
+   "salamence": {
+    "salamencite": 0.978
+   },
+   "sceptile": {
+    "sceptilite": 0.796
+   },
+   "scizor": {
+    "scizorite": 0.319
+   },
+   "scolipede": {
+    "scolipite": 0.48
+   },
+   "scovillain": {
+    "scovillainite": 0.926
+   },
+   "scrafty": {
+    "scraftinite": 0.711
+   },
+   "sharpedo": {
+    "sharpedonite": 0.549
+   },
+   "skarmory": {
+    "skarmorite": 0.796
+   },
+   "slowbro": {
+    "slowbronite": 0.727
+   },
+   "staraptor": {
+    "staraptite": 0.833
+   },
+   "starmie": {
+    "starminite": 0.774
+   },
+   "steelix": {
+    "steelixite": 0.632
+   },
+   "swampert": {
+    "swampertite": 0.903
+   },
+   "tyranitar": {
+    "tyranitarite": 0.714
+   },
+   "venusaur": {
+    "venusaurite": 0.173
+   },
+   "victreebel": {
+    "victreebelite": 0.759
+   }
+  }
+ },
+ "sources": {
+  "regma": "data/pikalytics_regma.json",
+  "regmb": "data/pikalytics_regmb_blend_2026-07-11.json",
+  "regmc": "data/belief_regmc.json"
+ },
+ "version": 1
+}

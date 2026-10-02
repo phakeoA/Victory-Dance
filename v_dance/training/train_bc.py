@@ -758,6 +758,9 @@ def train(args: argparse.Namespace) -> dict:
         from v_dance.models.bc_model_attn import (
             init_extended_model_from_ckpt, init_pair_model_from_ckpt)
         ck = torch.load(args.warm_start, map_location=device, weights_only=False)
+        from v_dance.models import layout_upgrade as _LU          # 2026-10-02: a v19 donor lifts to v20
+        if not _LU.upgrade_checkpoint(ck):
+            _LU.upgrade_state_dict(ck.get("model_state", ck) if isinstance(ck, dict) else None)
         state = ck.get("model_state", ck)
         ck_cfg = (ck.get("config") or {}) if isinstance(ck, dict) else {}
         extra = ((model.memory_dim + model.z_dim)

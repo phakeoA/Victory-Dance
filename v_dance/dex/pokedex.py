@@ -98,7 +98,9 @@ class Pokedex:
         e = self.entry(species)
         if e is not None:
             forme = (e.get("forme") or "")
-            return forme.startswith("Mega")
+            # 'Mega' ANYWHERE in the forme: Mega / Mega-X / Mega-Z AND M-Mega / F-Mega (Meowstic) and
+            # Curly/Droopy/Stretchy-Mega (Tatsugiri) — a startswith check missed those (mega audit 10-02).
+            return "Mega" in forme
         # Unknown to the dex — fall back to the name heuristic
         return is_mega_species_name(species)
 
@@ -130,7 +132,7 @@ class Pokedex:
         out = []
         for forme_name in e.get("otherFormes", []) or []:
             fe = self.entry(forme_name)
-            if fe and (fe.get("forme") or "").startswith("Mega"):
+            if fe and "Mega" in (fe.get("forme") or ""):         # incl. M-Mega / F-Mega / Curly-Mega
                 out.append({
                     "forme": forme_name,
                     "ability": self.mega_ability_for(forme_name),

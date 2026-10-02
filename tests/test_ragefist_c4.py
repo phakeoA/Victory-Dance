@@ -137,6 +137,6 @@ def test_encoder_band_scales_with_times_attacked():
 
 def test_layout_unchanged_value_only():
     # C.4 adds NO channel; layout later bumped to v16 by B2b (+2 per-move hit-chance channels).
-    assert get_state_dim() == 5057
-    assert get_state_layout_version() == 19
-    assert POKEMON_FEATURES == 413
+    assert get_state_dim() == 6377
+    assert get_state_layout_version() == 20
+    assert POKEMON_FEATURES == 523

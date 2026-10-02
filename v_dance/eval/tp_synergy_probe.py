@@ -87,8 +87,10 @@ def make_score_fn(model, vocab, cfg, device: str = "cpu", belief=None):
         from v_dance.training.tp_features import teammate_affinity_matrix
 
     def score(own, opp):
-        oi, of = _pack_side(own, vocab, fd, belief=belief, use_tp_features=use_tp)
-        pi, pf = _pack_side(opp, vocab, fd, belief=belief, use_tp_features=use_tp)
+        oi, of = _pack_side(own, vocab, fd, belief=belief, use_tp_features=use_tp,
+                            tp_schema=cfg.get("feature_schema"))      # 2026-10-02: v8 view of the v9 vector
+        pi, pf = _pack_side(opp, vocab, fd, belief=belief, use_tp_features=use_tp,
+                            tp_schema=cfg.get("feature_schema"))
         aff = None
         if use_bias:
             aff = torch.as_tensor(teammate_affinity_matrix(own, belief, n=6)[None], device=device)

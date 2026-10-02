@@ -15,9 +15,9 @@ from v_dance.encoders.state_encoder import StateEncoder
 
 def test_layout_v19():
     assert MOVE_FEATURES == 59             # v18's 57 + 2 per-move redundant-status bits
-    assert POKEMON_FEATURES == 413         # +2 × 4 moves
-    assert get_state_dim() == 5057         # +2 × 4 moves × 12 mon slots = +96 over v18's 4961
-    assert get_state_layout_version() == 19
+    assert POKEMON_FEATURES == 523         # +2 × 4 moves
+    assert get_state_dim() == 6377         # +2 × 4 moves × 12 mon slots = +96 over v18's 4961
+    assert get_state_layout_version() == 20
 
 
 def test_pure_status_move_detection():

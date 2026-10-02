@@ -123,5 +123,5 @@ def test_drowsy_channel_placement():
 
 def test_layout_v14():
     assert VOLATILE_FEATURES == 12
-    assert get_state_dim() == 5057       # v16 (B2b: +2 per-move hit-chance channels)
-    assert get_state_layout_version() == 19
+    assert get_state_dim() == 6377       # v16 (B2b: +2 per-move hit-chance channels)
+    assert get_state_layout_version() == 20

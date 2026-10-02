@@ -10,7 +10,8 @@ import numpy as np
 from typing import Optional, Sequence
 from v_dance.encoders.mechanic_tags import NUM_ABILITY_TAGS
 from v_dance.dex.pokedex import get_pokedex, norm_species
-from v_dance.encoders.encoder_layout import (ACTIONS_PER_SLOT, BENCH_SLOTS, GIMMICK_DIM, GIMMICK_MEGA, GIMMICK_NONE, GIMMICK_TERA, ITEM_BLOCK_V9, MOVE_FEATURES, NUM_BOOSTS, NUM_MOVES, NUM_STATUS, NUM_TYPES, POKEMON_FEATURES, SWITCH_OFFSET, WEIGHT_FEATURES)
+from v_dance.encoders.encoder_layout import (ACTIONS_PER_SLOT, BENCH_SLOTS, GIMMICK_DIM, GIMMICK_MEGA, GIMMICK_NONE, GIMMICK_TERA, ITEM_BLOCK_V9, MOVE_FEATURES, NUM_BOOSTS, NUM_MOVES, NUM_STATUS, NUM_TYPES, POKEMON_FEATURES, SWITCH_OFFSET, WEIGHT_FEATURES,
+    MEGA_PREVIEW_MON_FEATURES, MEGA_PREVIEW_PER_MOVE, MEGA_PREVIEW_REL)   # v20 mega preview (move permutation)
 from v_dance.encoders.battle_mechanics import (_gen9_moves, _get_moves_data, pp_max)
 
 
@@ -227,6 +228,12 @@ def permute_move_slots(vec: np.ndarray, slot: int, perm: Sequence[int]) -> None:
               for m in range(NUM_MOVES)]
     for i, src in enumerate(perm):
         vec[base + i * MOVE_FEATURES: base + (i + 1) * MOVE_FEATURES] = blocks[src]
+    # v20: the mega preview's PER-MOVE sub-blocks belong to the same move slots — permute them with the moves
+    pb = slot * POKEMON_FEATURES + MEGA_PREVIEW_REL + MEGA_PREVIEW_MON_FEATURES
+    pblocks = [vec[pb + m * MEGA_PREVIEW_PER_MOVE: pb + (m + 1) * MEGA_PREVIEW_PER_MOVE].copy()
+               for m in range(NUM_MOVES)]
+    for i, src in enumerate(perm):
+        vec[pb + i * MEGA_PREVIEW_PER_MOVE: pb + (i + 1) * MEGA_PREVIEW_PER_MOVE] = pblocks[src]
 
 
 def permute_action_index(idx: Optional[int], perm: Sequence[int]) -> Optional[int]:
@@ -366,7 +373,8 @@ def _species_can_have_levitate(species: Optional[str]) -> bool:
     dex = get_pokedex()
     if not dex or not species:
         return True                                 # unknown → fail open (treat as maybe-floating)
-    return any(norm_species(a) == "levitate" for a in dex.abilities_for(species))
+    # Eelevate (Mega Eelektross, Champions) floats exactly like Levitate (sim/pokemon.ts isGrounded) — 10-02.
+    return any(norm_species(a) in ("levitate", "eelevate") for a in dex.abilities_for(species))
 
 
 def _foe_ctx(mon: Optional[dict], gravity_on: bool) -> Optional[dict]:
@@ -391,7 +399,7 @@ def _foe_ctx(mon: Optional[dict], gravity_on: bool) -> Optional[dict]:
         grounded = False
     elif mon.get("known_ability") is None and _species_can_have_levitate(mon.get("species")):
         grounded = None                             # hidden Levitate possible → fail open
-    elif norm_species(mon.get("known_ability")) == "levitate":
+    elif norm_species(mon.get("known_ability")) in ("levitate", "eelevate"):
         grounded = False
     else:
         grounded = types is not None                # typing known, no float source → grounded

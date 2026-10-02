@@ -67,8 +67,11 @@ def test_role_tags_moves_ability_clamp():
 
 # ── layout + channel order ────────────────────────────────────────────────────
 def test_layout_consistent():
-    assert T.FEAT_DIM == T.OFF_KTERA + T.NUM_TYPES
-    assert T.BASE_DIM == T.OFF_USAGE + 1
+    # v9 (2026-10-02): the mega-forme block closes the base, its known twins close the overlay
+    assert T.FEAT_DIM == T.OFF_KMSTATS + 6
+    assert T.OFF_KMTYPE == T.OFF_KTERA + T.NUM_TYPES
+    assert T.BASE_DIM == T.OFF_MEXPSPE + 1 and T.OFF_MTYPE == T.OFF_USAGE + 1
+    assert T.SCHEMA_DIMS == {"tpfeat-v8": 285, "tpfeat-v9": T.FEAT_DIM}
     f = T.own_mon_features("X", _StubBelief())
     assert f.shape == (T.FEAT_DIM,) and f.dtype == np.float32
 

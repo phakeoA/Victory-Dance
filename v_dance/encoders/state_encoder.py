@@ -95,6 +95,9 @@ list is the authoritative per-field breakdown in WRITE order — keep it in sync
                               (grounding/negation/embargo flags are helper-only, NOT all channels)
     tera_type one-hot(20)   ← v11 Phase D (D9): REVEALED tera type — PERMANENTLY ZERO (tera mod-disabled),
                               forward-compat plumbing
+    mega preview    (110)   ← v20: p_mega · the forme's types · Δbase · its ability tags (70) + per move ×
+                              per enemy: [type-eff, band max, moves-first] INTO the enemy's mega + [band max,
+                              moves-first] AS our own mega (4 × 10) — see v_dance/encoders/mega_preview.py
     is_active        (1)
     is_revealed      (1)    ← always 1 for own mons
     is_fainted       (1)    ← layout-v2; KO flag (opp bench / counting)
@@ -180,6 +183,8 @@ _SCRIPTS_DIR = str(Path(__file__).resolve().parent)
 # ── v17 split: re-export every name moved to the sibling modules so this
 #    module's public import surface is byte-identical to before the split. ──
 from v_dance.encoders.encoder_layout import (  # noqa: F401
+    MEGA_PREVIEW_FEATURES, MEGA_PREVIEW_MON_FEATURES, MEGA_PREVIEW_PER_MOVE,   # v20 mega preview
+    _MV_SIGNED, _MV_BAND_MAX, _MV_FIRST,
     ABILITY_BLOCK_V9, ABILITY_EFFECT_NAMES, ABILITY_FEATURES, ACTIONS_PER_SLOT, ACTION_DIM,
     ACTIVE_SLOTS, BENCH_SLOTS, FIELD_NAMES, GIMMICK_DIM, GIMMICK_MEGA, GIMMICK_NONE,
     GIMMICK_TERA, GLOBAL_FEATURES, ITEM_BLOCK_V9, ITEM_EFFECT_NAMES, ITEM_FEATURES,
@@ -217,7 +222,9 @@ from v_dance.encoders.battle_mechanics import (  # noqa: F401
     priority_blocked, resolve_ability_json, resolve_active_ability_json, resolve_item_json,
     terrain_bp_mult, terrain_priority, terrain_spread,
     weather_accuracy, weather_bp_mult,
+    attacker_weather, aura_mult, field_auras,     # 2026-10-02 mega audit gap 4: Mega Sol + Fairy/Dark Aura
 )
+from v_dance.encoders import mega_preview as _MP  # v20 (2026-10-02, mega audit gap 2): the mega preview block
 from v_dance.encoders.action_codec import (  # noqa: F401
     ABILITY_ID_REL, ABILITY_KNOWN_REL, ITEM_ID_REL, MOVE_ID_RELS, OPP_HEADS,
     _ABILITY_BLOCK_REL, _ALLY_KINDS, _CHOICE_ITEMS, _CHOOSABLE_SINGLE, _FIRST_TURN_ONLY,
@@ -274,7 +281,7 @@ class VodStateEncoder:
     # ══════════════════════════════════════════════════════════════════════════
     # OFFLINE PATH — parsed / belief-enriched VOD JSON
     # ══════════════════════════════════════════════════════════════════════════
-    def encode_snapshot(self, snap: dict, turn: int = 0) -> np.ndarray:
+    def encode_snapshot(self, snap: dict, turn: int = 0, fmt: Optional[str] = None) -> np.ndarray:
         """
         Encode one perspective snapshot (the value of state_before_actions /
         state_after_actions for one player) into the same (STATE_DIM,) layout
@@ -320,8 +327,35 @@ class VodStateEncoder:
                      _defender_profile(opp_active.get("opp_b"), _opp_scr, _opp_tw, _weather, _gravity, _magic_room)]
         opp_enemy = [_defender_profile(our_active.get("our_a"), _our_scr, _our_tw, _weather, _gravity, _magic_room),
                      _defender_profile(our_active.get("our_b"), _our_scr, _our_tw, _weather, _gravity, _magic_room)]
+        # 2026-10-02 (mega audit gap 4): Fairy / Dark Aura + Aura Break act on EVERY move of that type while the
+        # holder is active (either side) → resolved once from the 4 actives' abilities (live twin: the same).
+        _auras = field_auras(resolve_active_ability_json(m)[0]
+                             for m in (our_active.get("our_a"), our_active.get("our_b"),
+                                       opp_active.get("opp_a"), opp_active.get("opp_b")) if m)
+        # v20 (mega audit gap 2): the MEGA PREVIEW — who may still mega (a side megas once per game), into what
+        # (``fmt`` picks the regulation's frozen stone shares), and each enemy active's MEGA-forme defender
+        # profile for the per-move preview channels. Live twin: LiveStateEncoder.encode (same table + rules).
+        _our_megaed = _MP.side_has_megaed(list(our_active.values()) + list(snap.get("our_bench") or []))
+        _opp_megaed = _MP.side_has_megaed(list(opp_active.values()) + list(snap.get("opp_bench") or []))
+
+        def _mopts(m, megaed):
+            if not m or megaed or m.get("is_mega") or m.get("is_transformed") or m.get("is_fainted"):
+                return []
+            return _MP.mega_options(m.get("species"), _MP.offline_known_item(m), fmt)
+
+        def _mprof(m, prof, megaed):
+            o = _mopts(m, megaed)
+            return (_MP.mega_defender_profile(prof, _MP.forme_view(norm_species(m.get("species")),
+                                                                   _MP.best_forme(o)), _weather) if o else None)
+
+        own_enemy_mega = [_mprof(opp_active.get("opp_a"), own_enemy[0], _opp_megaed),
+                          _mprof(opp_active.get("opp_b"), own_enemy[1], _opp_megaed)]
+        opp_enemy_mega = [_mprof(our_active.get("our_a"), opp_enemy[0], _our_megaed),
+                          _mprof(our_active.get("our_b"), opp_enemy[1], _our_megaed)]
         for key_map, prefix in ((our_active, "our"), (opp_active, "opp")):
             enemy = own_enemy if prefix == "our" else opp_enemy
+            enemy_mega = own_enemy_mega if prefix == "our" else opp_enemy_mega
+            _megaed = _our_megaed if prefix == "our" else _opp_megaed
             _tw = _our_tw if prefix == "our" else _opp_tw
             _fnt = _own_fnt if prefix == "our" else _opp_fnt
             _side_act = _our_side_active if prefix == "our" else _opp_side_active
@@ -334,7 +368,8 @@ class VodStateEncoder:
                                          field_mods=field_mods, side_tailwind=_tw, trick_room=_trick_room,
                                          gravity=_gravity, fainted_allies=_fnt,
                                          magic_room=_magic_room, wonder_room=_wonder_room,
-                                         ally_ability=_ally_ab, side_active=_side_act)
+                                         ally_ability=_ally_ab, side_active=_side_act, field_auras=_auras,
+                                         enemy_mega_defenders=enemy_mega, mega_opts=_mopts(mon, _megaed))
                 cursor += POKEMON_FEATURES
 
         # ── [B] Own bench (fainted excluded — matches the live path; the
@@ -348,7 +383,8 @@ class VodStateEncoder:
                                      field_mods=field_mods, side_tailwind=_our_tw, trick_room=_trick_room,
                                      gravity=_gravity, fainted_allies=_own_fnt,
                                      magic_room=_magic_room, wonder_room=_wonder_room,
-                                     side_active=_our_side_active)
+                                     side_active=_our_side_active, field_auras=_auras,
+                                     enemy_mega_defenders=own_enemy_mega, mega_opts=_mopts(mon, _our_megaed))
             cursor += POKEMON_FEATURES
 
         # ── [B2] Opponent bench (layout-v2): opp non-active roster mons.
@@ -365,7 +401,8 @@ class VodStateEncoder:
                                      field_mods=field_mods, side_tailwind=_opp_tw, trick_room=_trick_room,
                                      gravity=_gravity, fainted_allies=_opp_fnt,
                                      magic_room=_magic_room, wonder_room=_wonder_room,
-                                     side_active=_opp_side_active)
+                                     side_active=_opp_side_active, field_auras=_auras,
+                                     enemy_mega_defenders=opp_enemy_mega, mega_opts=_mopts(mon, _opp_megaed))
             cursor += POKEMON_FEATURES
 
         # ── [C] Global features ──────────────────────────────────────────────
@@ -491,6 +528,7 @@ class VodStateEncoder:
         return self.encode_snapshot(
             transition.get("state_before_actions") or {},
             turn=transition.get("turn") or 0,
+            fmt=transition.get("format"),           # v20: the regulation's mega-stone shares
         )
 
     def encode_transitions_inplace(self, transitions: list[dict]) -> list[dict]:
@@ -516,6 +554,9 @@ class VodStateEncoder:
         wonder_room: bool = False,
         ally_ability: Optional[str] = None,
         side_active: frozenset = frozenset(),
+        field_auras: frozenset = frozenset(),
+        enemy_mega_defenders: Optional[list] = None,
+        mega_opts=(),
     ) -> None:
         """JSON twin of _write_pokemon — same POKEMON_FEATURES layout. ``enemy_defenders`` = the 2 enemy
         actives' defender profiles; ``field_mods`` = (weather, terrain) for the B1.2b damage modifiers;
@@ -645,8 +686,17 @@ class VodStateEncoder:
                    # (same _is_grounded call + inputs as the volatile block below; live twin = the same).
                    "grounded": _is_grounded(types, abil_id, resolve_item_json(mon)[0],
                                             bool(vol.get("levitating")),
-                                            bool(vol.get("force_grounded")) or gravity)}
+                                            bool(vol.get("force_grounded")) or gravity),
+                   "auras": field_auras,             # 2026-10-02 gap 4: Fairy/Dark Aura on the field (both sides)
+                   # v20: the mega preview's own-mega transform (mega_preview.mega_att_ctx) needs the raw speed
+                   # estimate + the grounding inputs (item, levitating, force-grounded, ability) — helper-only keys
+                   "spe": _est.get("spe"),
+                   "speed_parts": (_est.get("spe"), (mon.get("boosts") or {}).get("spe", 0) or 0,
+                                   _canon(mon.get("status")) or "", bool(side_tailwind)),
+                   "ground_args": (resolve_item_json(mon)[0], bool(vol.get("levitating")),
+                                   bool(vol.get("force_grounded")) or gravity, abil_id)}
         slots = move_slots_for_mon(mon)
+        _mv_args = []                                   # v20: (slot, name, confidence, pp_used) for the preview
         for m_idx in range(NUM_MOVES):
             if m_idx < len(slots):
                 name, confidence = slots[m_idx]
@@ -654,6 +704,7 @@ class VodStateEncoder:
                 self._write_move_json(vec, i, name, confidence, types, pp_used,
                                       enemy_defenders, att_ctx, field_mods, ability_id=abil_id,
                                       gravity=gravity)
+                _mv_args.append((m_idx, name, confidence, pp_used))
             i += MOVE_FEATURES
 
         # ── v9 ITEM block: identity index + effect-tag multi-hot + known ──
@@ -719,6 +770,26 @@ class VodStateEncoder:
                 vec[i + _tt] = 1.0
         i += NUM_TYPES
 
+        # ── v20 MEGA PREVIEW block (mega audit gap 2; see v_dance/encoders/mega_preview.py). The per-move part
+        # re-runs THIS writer into a scratch row with the enemy actives' MEGA profiles / this mon's own MEGA
+        # attacker context, so every damage rule applies unchanged (live twin: the same over _write_move). ──
+        _MP.write_mon_part(vec, i, mon.get("species") or "", mega_opts)
+        _pm = i + MEGA_PREVIEW_MON_FEATURES
+        _mview = (_MP.forme_view(norm_species(mon.get("species")), _MP.best_forme(mega_opts))
+                  if mega_opts else None)
+        _mac = _MP.mega_att_ctx(att_ctx, _mview, field_mods[0] if field_mods else None)
+
+        def _wm(scr, arg, enemies, ctx, fmods, ab, utypes):
+            name, confidence, pp_used = arg
+            self._write_move_json(scr, 0, name, confidence, list(utypes), pp_used, enemies, ctx, fmods,
+                                  ability_id=ab, gravity=gravity)
+
+        _MP.write_move_part(vec, _pm, [(m, (n, c, p)) for m, n, c, p in _mv_args], _wm, att_ctx=att_ctx,
+                            enemy_defenders=enemy_defenders, enemy_mega=enemy_mega_defenders,
+                            field_mods=field_mods, mview=_mview, mac=_mac, ability_id=abil_id,
+                            user_types=tuple(types))
+        i += MEGA_PREVIEW_FEATURES
+
         # is_active / is_revealed / is_fainted / is_transformed (layout-v2)
         vec[i] = 1.0 if is_active else 0.0
         i += 1
@@ -750,6 +821,10 @@ class VodStateEncoder:
         ``gravity`` (v11 C.2e) boosts numeric-accuracy moves ×6840/4096 (the Gravity-Hypnosis payoff)."""
         i = start
         _mid = norm_species(move_name)             # v11 N1: move-id key (Champions overrides + the type-eff cross)
+        # 2026-10-02 (mega audit gap 4): Mega Sol — THIS mon's moves see sun whatever the field weather; the
+        # redundant-condition bit below keeps the FIELD weather (Mega Sol never sets sun). Live twin: the same.
+        _field_weather = field_mods[0] if field_mods else None
+        field_mods = (attacker_weather(_field_weather, ability_id, _mid), field_mods[1] if field_mods else None)
         data = _get_moves_data().get(_mid)
         if not data:
             # Unknown move id: only the is_known confidence is encoded
@@ -880,6 +955,7 @@ class VodStateEncoder:
                 # full instant nuke. The charge-turn cost lives in the DYNAMIC two_turn_charge tag below.
                 _sit *= weather_bp_mult(_mid, _weather)
                 _sit *= terrain_bp_mult(_mid, _terrain, _ac.get("grounded"))   # v19d: Expanding Force ×1.5
+                _sit *= aura_mult(mtype, _ac.get("auras"))     # 2026-10-02 gap 4: Fairy/Dark Aura (+Aura Break)
                 # v11 B3 attacker item band mults (×4915/4096): type-boost on a matching-type move + Expert
                 # Belt on a super-effective hit. v11 B3b: defender resist berry ×0.5 on a SE hit of its type
                 # (Chilan = all Normal — Normal is never SE). _tmult = the resolved per-enemy type multiplier.
@@ -974,7 +1050,7 @@ class VodStateEncoder:
         # A pure feature: no action is masked, so a deliberate re-cast stays learnable. ``side_active`` is
         # the mon's own-side conditions (att_ctx); _weather/_terrain are the global field (field_mods).
         vec[i] = move_redundant_condition(_mid, (att_ctx or {}).get("side_active") or frozenset(),
-                                          _weather, _terrain)
+                                          _field_weather, _terrain)     # the FIELD weather (not Mega Sol's)
         i += 1
 
         # v19 (Option 1c): per-ENEMY REDUNDANT-STATUS bits (2). 1.0 if this PURE status move is WASTED on

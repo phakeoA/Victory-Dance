@@ -34,6 +34,7 @@ from v_dance.play.vgc_base import (
     build_legal_action_mask,
     build_replacement_mask,
     build_gimmick_legal_mask,
+    _live_can_mega,
     random_legal_action,
     VGC_TEAM_SIZE,
 )
@@ -101,10 +102,12 @@ def ots_opp_known(player, battle) -> Optional[dict]:
         from v_dance.training.tp_features import OwnKnown
         out = {}
         for m in opp:
-            sp, ab = m.get("species"), m.get("ability")
+            sp, ab, it = m.get("species"), m.get("ability"), m.get("item")
             mv = [x for x in (m.get("moves") or []) if x]
-            if sp and (ab or mv):                    # nothing revealed → no overlay
-                out[norm_species(sp)] = OwnKnown(ability=ab, moves=mv)
+            if sp and (ab or mv or it):              # nothing revealed → no overlay
+                # the sheet's ITEM rides too (2026-10-02 mega audit): training's _ots_known passes known_item,
+                # so a sheet-revealed stone (Golisopite, Garchompite Z) reached the picker in training only.
+                out[norm_species(sp)] = OwnKnown(ability=ab, moves=mv, item=it or None)
         return out or None
     except Exception as exc:                          # noqa: BLE001 — never break TP
         log.warning("OTS opp_known build failed (%s) — serving without overlay.", exc)
@@ -467,6 +470,13 @@ class VGCPlayer(VGCPlayerBase):
                 if new != out:
                     _TF.note(self, battle, f"MATCHUP RULE {_rule['name']}: mega picks {out} -> {new}")
                     out = new
+            # 2026-10-02 (mega-fix review): a mega the item-aware FINAL gate (_live_can_mega) will refuse never
+            # enters the dedup below — so a stoneless mega-CAPABLE partner (Meowstic / Tatsugiri are now detected;
+            # any capable species holding another item) cannot take the turn's one mega from the stone holder.
+            if getattr(battle, "can_mega_evolve", None) is not None:   # a real battle reports it (doubles: none)
+                for _s in (0, 1):
+                    if out[_s] == GIMMICK_MEGA and not _live_can_mega(battle, _s):
+                        out[_s] = GIMMICK_NONE
             # Cross-slot mega dedup: Showdown allows only ONE Mega Evolution per
             # BATTLE (so at most one per turn).  The two gimmick heads decide
             # independently and build_gimmick_legal_mask only blocks mega once the

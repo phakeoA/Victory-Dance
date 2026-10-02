@@ -22,7 +22,7 @@ The frozen layout makes this a MODEL-ONLY change — no encoder change, no data
 re-export (the model auto-sizes from get_state_dim() — see encoder_layout.py for the
 live constants; do NOT hardcode them here, they rot at every layout bump):
 
-    STATE_DIM = NUM_MON_SLOTS x POKEMON_FEATURES + GLOBAL_FEATURES  (5057 at layout v19)
+    STATE_DIM = NUM_MON_SLOTS x POKEMON_FEATURES + GLOBAL_FEATURES  (6377 at layout v20)
 
     slot 0  own active a   (our_a)        slots 4-7   own bench
     slot 1  own active b   (our_b)        slots 8-11  opp bench
@@ -96,7 +96,8 @@ class AttnBCPolicy(nn.Module):
     action + gimmick heads + a pooled value head.
 
     Args:
-        state_dim:    input width (frozen STATE_DIM from get_state_dim(); 5057 at layout v19).
+        state_dim:    input width (frozen STATE_DIM from get_state_dim(); 6377 at layout v20 — a v19
+                      checkpoint auto-upgrades at load, see models/layout_upgrade.py).
         action_dim:   move/switch logits per head (frozen ACTION_DIM == 16).
         gimmick_dim:  gimmick logits per head (GIMMICK_DIM == 3, {none, mega, tera}; v11 Phase D).
         d_model:      per-mon token width (default 128).

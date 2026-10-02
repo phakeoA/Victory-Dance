@@ -15,9 +15,9 @@ from v_dance.encoders.encoder_layout import (
 
 def test_layout_v18():
     assert MOVE_FEATURES == 59            # +1 redundant-condition bit over v17's 56
-    assert POKEMON_FEATURES == 413        # +1 per-move × 4 moves
-    assert get_state_dim() == 5057
-    assert get_state_layout_version() == 19
+    assert POKEMON_FEATURES == 523        # +1 per-move × 4 moves
+    assert get_state_dim() == 6377
+    assert get_state_layout_version() == 20
 
 
 # ── own-side conditions (screens / tailwind / safeguard / mist / lucky chant) ──

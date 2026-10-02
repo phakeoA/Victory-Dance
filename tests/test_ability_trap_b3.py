@@ -9,10 +9,11 @@ from __future__ import annotations
 from v_dance.encoders.state_encoder import (
     StateEncoder, POKEMON_FEATURES, VOLATILE_FEATURES, NUM_TYPES, _ability_trapped,
 )
+from v_dance.encoders.encoder_layout import MEGA_PREVIEW_FEATURES  # v20: the mega preview sits before the flags
 
 # can_switch is the 5th slot (+4) of the 7-feature volatile block, which sits just before the 4 trailing
 # slot flags → index within a mon block = POKEMON_FEATURES - 4 - VOLATILE_FEATURES + 4.
-CAN_SWITCH = POKEMON_FEATURES - 4 - NUM_TYPES - VOLATILE_FEATURES + 4   # v11 Phase D D9: tera one-hot before flags
+CAN_SWITCH = POKEMON_FEATURES - 4 - MEGA_PREVIEW_FEATURES - NUM_TYPES - VOLATILE_FEATURES + 4   # v11 Phase D D9: tera one-hot before flags
 
 
 def _f(*a, **k):

@@ -253,7 +253,8 @@ def transition_to_example(
         return None
 
     x = encoder.encode_snapshot(
-        t.get("state_before_actions") or {}, turn=t.get("turn") or 0
+        t.get("state_before_actions") or {}, turn=t.get("turn") or 0,
+        fmt=t.get("format"),          # v20: the regulation's mega-stone shares (mega preview block)
     )
     rating, rating_delta, won = _our_player_meta(t)
     ex = {

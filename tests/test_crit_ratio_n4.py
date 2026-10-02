@@ -82,4 +82,4 @@ def test_high_crit_move_band_above_normal_crit():
 
 # ════════════════════════════ layout (value-only) ════════════════════════════
 def test_layout_unchanged():
-    assert get_state_dim() == 5057
+    assert get_state_dim() == 6377

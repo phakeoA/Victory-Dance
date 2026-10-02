@@ -12,12 +12,13 @@ from v_dance.parser.vod_parser.replay_parser import ShowdownReplayParser
 from v_dance.encoders.state_encoder import (
     StateEncoder, get_state_dim, get_state_layout_version, POKEMON_FEATURES, VOLATILE_FEATURES, NUM_TYPES,
 )
+from v_dance.encoders.encoder_layout import MEGA_PREVIEW_FEATURES  # v20: the mega preview sits before the flags
 
 # the 3 first-turn-gated moves (pinned for documentation; the channel is per-mon, not per-move)
 GATED_MOVES = frozenset({"fakeout", "firstimpression", "matblock"})
 
 # first_turn = 12th volatile channel (index +11); volatile block sits at POKEMON_FEATURES-4-VOLATILE_FEATURES.
-FIRST_TURN_CH = POKEMON_FEATURES - 4 - NUM_TYPES - VOLATILE_FEATURES + 11   # v11 Phase D D9: tera one-hot before flags
+FIRST_TURN_CH = POKEMON_FEATURES - 4 - MEGA_PREVIEW_FEATURES - NUM_TYPES - VOLATILE_FEATURES + 11   # v11 Phase D D9: tera one-hot before flags
 
 HEADER = """|player|p1|Alice|1|
 |player|p2|Bob|1|
@@ -112,6 +113,6 @@ def test_encoder_channel_reflects_first_turn():
 # ════════════════════════════ layout pins ════════════════════════════
 def test_layout_v15():
     assert VOLATILE_FEATURES == 12
-    assert POKEMON_FEATURES == 413       # v16 (B2b: +2 per-move hit-chance channels)
-    assert get_state_dim() == 5057
-    assert get_state_layout_version() == 19
+    assert POKEMON_FEATURES == 523       # v16 (B2b: +2 per-move hit-chance channels)
+    assert get_state_dim() == 6377
+    assert get_state_layout_version() == 20

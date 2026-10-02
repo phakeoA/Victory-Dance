@@ -411,6 +411,11 @@ def _defender_profile(mon: Optional[dict], side_screens: tuple = (False, False),
     _dex_sp = (mon["transformed_into"] if (mon.get("is_transformed") and mon.get("transformed_into"))
                else mon.get("species"))
     return {"types": types, "def": est.get("def"), "spd": est.get("spd"), "hp": est.get("hp"),
+            "spe": est.get("spe"),          # v20: helper-only (mega preview)
+            # v20 helper-only: the mega preview recomputes speed / grounding for the forme from these
+            "speed_parts": (est.get("spe"), (mon.get("boosts") or {}).get("spe", 0) or 0,
+                            _canon(mon.get("status")) or "", bool(side_tailwind)),
+            "ground_args": (_item, _levit, _fg_g, _active_ab),
             "hp_frac": hp_frac, "grounded": grounded, "ability": _active_ab,
             "status": mon.get("status"),    # v19 Option 1c: token ('brn'/…); helper lowercases (live = enum.name)
             "screen_phys": side_screens[0], "screen_spec": side_screens[1],
@@ -872,14 +877,18 @@ _SPEED_CTRL_AB   = frozenset({"speedboost", "unburden"})
 _TYPE_IMMUNE_AB  = frozenset({
     "levitate", "voltabsorb", "waterabsorb", "flashfire", "sapsipper",
     "lightningrod", "stormdrain", "motordrive", "dryskin", "eartheater",
-    "wellbakedbody", "windrider", "purifyingsalt",
+    "wellbakedbody", "windrider", "purifyingsalt", "eelevate",
 })
+# Abilities that make the holder AIRBORNE (sim/pokemon.ts isGrounded: hasAbility(['levitate', 'eelevate'])) —
+# Eelevate = Mega Eelektross (Champions), added 2026-10-02 (mega audit gap 4).
+_AIRBORNE_AB = frozenset({"levitate", "eelevate"})
 _DMG_BOOST_AB    = frozenset({
     "adaptability", "toughclaws", "sheerforce", "technician", "ironfist",
     "strongjaw", "reckless", "pixilate", "refrigerate", "aerilate",
     "galvanize", "steelworker", "punkrock", "sharpness", "rockypayload",
     "transistor", "dragonsmaw", "steelyspirit", "hugepower", "purepower",
     "hustle", "guts", "tintedlens", "parentalbond", "supremeoverlord", "sandforce", "solarpower",
+    "firemane", "dragonize",       # 2026-10-02 mega audit gap 4: Champions mega abilities (Mega Pyroar / Feraligatr)
 })
 _REGENERATOR_AB  = frozenset({"regenerator"})
 _PRANKSTER_AB    = frozenset({"prankster"})
@@ -914,7 +923,7 @@ _GUTS_AB         = frozenset({"guts", "quickfeet", "marvelscale", "flareboost", 
 # deferred to A.1b; Purifying Salt is a Ghost ×0.5 RESIST not an immunity → handled in the damage
 # multiplier, not here.) An attacker with Mold Breaker / Teravolt / Turboblaze IGNORES these.
 _ABILITY_TYPE_IMMUNITY = {
-    "levitate": "GROUND", "eartheater": "GROUND",
+    "levitate": "GROUND", "eartheater": "GROUND", "eelevate": "GROUND",
     "voltabsorb": "ELECTRIC", "lightningrod": "ELECTRIC", "motordrive": "ELECTRIC",
     "waterabsorb": "WATER", "stormdrain": "WATER", "dryskin": "WATER",
     "flashfire": "FIRE", "wellbakedbody": "FIRE",
@@ -958,7 +967,7 @@ def _is_grounded(types, ability, item, levitating: bool, force_grounded: bool) -
     Telekinesis/Air Balloon). SHARED by the offline + live paths (only the property extraction differs)."""
     if force_grounded or item == "ironball":
         return True
-    if "FLYING" in types or ability == "levitate" or item == "airballoon" or levitating:
+    if "FLYING" in types or ability in _AIRBORNE_AB or item == "airballoon" or levitating:
         return False
     return True
 
@@ -983,8 +992,8 @@ def _move_immune(move_type, defender, attacker_ability, move_id) -> bool:
         return False
     _ab = defender.get("ability")
     if move_type == "GROUND" and (defender.get("force_grounded") or _move_ground_pierces(move_id)):
-        if _ab == "levitate":
-            return False                                          # airborne ability negated
+        if _ab in _AIRBORNE_AB:
+            return False                                          # airborne ability negated (Levitate/Eelevate)
         if _ability_immunizes(move_type, _ab, attacker_ability, move_id):
             return True                                           # Earth Eater etc. still absorb
         return False                                              # Air Balloon / Magnet Rise negated
@@ -1011,8 +1020,10 @@ _M_1_3 = 5325 / 4096   # 1.30005…  toughclaws, punkrock(off), transistor, shee
 # side.totalFainted per USE so its current-count is EXACT). Documented approximation; see _ability_damage_mult.
 _SUPREME_OVERLORD_MULT = tuple(v / 4096 for v in (4096, 4506, 4915, 5325, 5734, 6144))
 
-# The 4 -ate abilities that ALSO grant a ×1.2 BP boost to the Normal move they convert (in _DMG_BOOST_AB).
-_ATE_BOOST_AB = frozenset({"pixilate", "refrigerate", "aerilate", "galvanize"})
+# The -ate abilities that ALSO grant a ×1.2 BP boost to the Normal move they convert (in _DMG_BOOST_AB).
+# Dragonize (Champions, Mega Feraligatr) added 2026-10-02 — its retype was already in effective_move_type,
+# its abilities.ts onBasePower chainModify([4915, 4096]) was not (mega audit gap 4).
+_ATE_BOOST_AB = frozenset({"pixilate", "refrigerate", "aerilate", "galvanize", "dragonize"})
 # Moves whose type the -ate abilities do NOT convert (abilities.ts noModifyType) → no boost either.
 _ATE_NOMODIFY = frozenset({"judgment", "multiattack", "naturalgift", "revelationdance",
                            "technoblast", "terrainpulse", "weatherball"})
@@ -1136,6 +1147,9 @@ def _ability_damage_mult(move_id: Optional[str], attacker_ability: Optional[str]
                 mult *= _M_1_3
         elif a == "solarpower":                      # v11 gap-scan G6: ×1.5 SPECIAL damage in Sun
             if weather in ("SUNNYDAY", "DESOLATELAND") and not is_physical:   # audit: harsh sun counts as Sun
+                mult *= 1.5
+        elif a == "firemane":                        # 2026-10-02 gap 4 (Mega Pyroar): Atk AND SpA ×1.5 on Fire
+            if mt == "FIRE":                         # moves (abilities.ts onModifyAtk / onModifySpA)
                 mult *= 1.5
     elif a == "waterbubble":                         # v11 A.1b: Water Bubble offensive Water ×2
         if mt == "WATER":
@@ -1442,6 +1456,42 @@ def terrain_priority(move_id: Optional[str], priority, terrain, attacker_grounde
     if (move_id or "") == "grassyglide" and terrain == "GRASSY_TERRAIN" and attacker_grounded is not False:
         return p + 1
     return p
+
+
+# ── 2026-10-02 (mega audit gap 4): field-wide AURAS + Mega Sol — the Champions megas' damage effects that the
+# band missed. VALUE-only (no slot change), shared by both writers → parity by construction; _CACHE_SCHEMA 6.
+_AURA_TYPE = {"fairyaura": "FAIRY", "darkaura": "DARK"}
+_AURA_MULT = 5448 / 4096          # abilities.ts fairyaura / darkaura onAnyBasePower chainModify([5448, 4096])
+_AURA_BROKEN_MULT = 3072 / 4096   # … with Aura Break on the field: chainModify([3072, 4096])
+
+
+def field_auras(abilities) -> frozenset:
+    """The aura-relevant abilities among the ACTIVE mons' (both sides) resolved ability ids."""
+    return frozenset(a for a in (abilities or ()) if a in _AURA_TYPE or a == "aurabreak")
+
+
+def aura_mult(move_type, auras) -> float:
+    """Fairy Aura / Dark Aura: every damaging move of that type used by ANY mon on the field — the holder, its
+    partner AND the opponents — gets ×5448/4096 (≈1.33) while an aura holder is active; ×3072/4096 (0.75)
+    when Aura Break is also out (Mega Floette's Fairy Aura is the M-C case; Mega Zygarde has Aura Break)."""
+    if not auras:
+        return 1.0
+    mt = (move_type or "").upper()
+    for ab, t in _AURA_TYPE.items():
+        if mt == t and ab in auras:
+            return _AURA_BROKEN_MULT if "aurabreak" in auras else _AURA_MULT
+    return 1.0
+
+
+def attacker_weather(weather, ability_id: Optional[str], move_id: Optional[str]):
+    """The weather THIS attacker's move sees. Mega Sol (Mega Meganium): while the holder acts, every
+    effectiveWeather() check returns sun (sim/pokemon.ts — except Electro Shot), so its Fire moves get ×1.5, its
+    Water moves ×0.5, Solar Beam fires at once, Weather Ball turns Fire and Thunder / Hurricane drop to 50 % —
+    whatever the field weather is. Every other mon sees the field weather. (Speed / the redundant-condition bit
+    keep the FIELD weather: Mega Sol does not set sun.)"""
+    if ability_id == "megasol" and (move_id or "") != "electroshot":
+        return "SUNNYDAY"
+    return weather
 
 
 def charge_skipped_now(move_id: Optional[str], weather) -> bool:

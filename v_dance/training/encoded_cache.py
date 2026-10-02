@@ -68,7 +68,10 @@ from v_dance.training.bc_dataset import (
 )
 
 _CACHE_DIRNAME = ".encoded_cache"
-_CACHE_SCHEMA = 5          # 5 (2026-10-02): v19d terrain move mechanics — the terrain ×1.3 keys on the
+_CACHE_SCHEMA = 6          # 6 (2026-10-02, mega audit): Fairy/Dark Aura + Fire Mane + Mega Sol + Dragonize ×1.2
+                           # in the damage band, Eelevate airborne / Ground-immune / type_immunity tag, Meowstic +
+                           # Tatsugiri megas mega-capable in the gimmick mask (same dims, new values).
+                           # 5 (2026-10-02): v19d terrain move mechanics — the terrain ×1.3 keys on the
                            # ATTACKER being grounded; Expanding Force ×1.5 + spread under Psychic Terrain;
                            # Grassy Glide +1 priority under Grassy Terrain (same dims, new values).
                            # 4 (2026-07-24): futility-mask batch — transition_to_example now ANDs
@@ -91,9 +94,10 @@ _DTYPE_DT = "<U16"
 
 def folder_fingerprint(folder: str) -> str:
     """Content fingerprint of a corpus folder for cache keying."""
+    from v_dance.encoders.mega_preview import TABLE_FINGERPRINT   # v20: the frozen stone shares the rows read
     h = hashlib.sha1()
     h.update(f"schema={_CACHE_SCHEMA};layout={get_state_layout_version()};"
-             f"dim={get_state_dim()}".encode())
+             f"dim={get_state_dim()};mega_stones={TABLE_FINGERPRINT}".encode())
     base = Path(folder)
     for f in iter_jsonl_files(str(folder)):
         st = os.stat(f)

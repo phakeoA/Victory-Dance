@@ -88,5 +88,5 @@ def test_negative_priority_move_reads_last():
 # ── layout ────────────────────────────────────────────────────────────────────
 def test_layout_v12():
     assert MOVE_FEATURES == 59           # v16 (B2b: +2 per-move per-enemy hit-chance channels)
-    assert get_state_dim() == 5057
-    assert get_state_layout_version() == 19
+    assert get_state_dim() == 6377
+    assert get_state_layout_version() == 20

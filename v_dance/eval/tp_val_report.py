@@ -100,7 +100,8 @@ def main(argv=None) -> int:
             from v_dance.training.tp_features import teammate_affinity_matrix
             from v_dance.training.teampreview_dataset import TEAM_SIZE
             affinity_fn = lambda sp: teammate_affinity_matrix(sp, belief, n=TEAM_SIZE)  # noqa: E731
-        loader = DataLoader(TeamPreviewDataset(val_ex, vocab, feat_dim=feat_dim,
+        ck_ex, ck_dim = _examples_for_ckpt(cfg, val_ex, feat_dim)
+        loader = DataLoader(TeamPreviewDataset(ck_ex, vocab, feat_dim=ck_dim,
                                                affinity_fn=affinity_fn,
                                                with_set_ctx=cfg.get("use_set_ctx", False)),
                             batch_size=args.batch_size, shuffle=False)
@@ -138,6 +139,22 @@ def main(argv=None) -> int:
     return 0
 
 
+def _examples_for_ckpt(cfg: dict, val_ex, feat_dim: int):
+    """``(examples, feat_dim)`` for one checkpoint. 2026-10-02: an older-schema ckpt (tpfeat-v8) scores on
+    the SAME examples through its column view of the current (v9) vectors, so the served v8 picker and a v9
+    candidate share one val set. The current schema (and v6/v7, which have no view) pass through unchanged."""
+    from v_dance.training.tp_features import FEATURE_SCHEMA_VERSION, schema_columns
+    ck_schema = (cfg or {}).get("feature_schema")
+    if not ck_schema or ck_schema == FEATURE_SCHEMA_VERSION:
+        return val_ex, feat_dim
+    try:
+        cols = schema_columns(ck_schema)
+    except ValueError:
+        return val_ex, feat_dim
+    return ([dict(e, our_feat=e["our_feat"][:, cols], opp_feat=e["opp_feat"][:, cols]) for e in val_ex],
+            int(len(cols)))
+
+
 def _set_ab(ckpt_path: str, val_ex, belief, feat_dim: int, args) -> None:
     """Serve-faithful decode A/B for the contrastive set head: greedy per-mon top-k vs the
     set-head subset decode on ONE checkpoint, on the SAME filtered rows as ``_decode_ab`` —
@@ -156,6 +173,7 @@ def _set_ab(ckpt_path: str, val_ex, belief, feat_dim: int, args) -> None:
         from v_dance.training.teampreview_dataset import TEAM_SIZE
         affinity_fn = lambda sp: teammate_affinity_matrix(sp, belief, n=TEAM_SIZE)  # noqa: E731
     use_ctx = bool(cfg.get("use_set_ctx", False))
+    val_ex, feat_dim = _examples_for_ckpt(cfg, val_ex, feat_dim)
     loader = _DL(TeamPreviewDataset(val_ex, vocab, feat_dim=feat_dim, affinity_fn=affinity_fn,
                                     with_set_ctx=use_ctx),
                  batch_size=args.batch_size, shuffle=False)
@@ -239,6 +257,7 @@ def _decode_ab(ckpt_path: str, val_ex, belief, feat_dim: int, args) -> None:
     if cfg.get("use_teammate_bias"):
         from v_dance.training.teampreview_dataset import TEAM_SIZE
         affinity_fn = lambda sp: teammate_affinity_matrix(sp, belief, n=TEAM_SIZE)  # noqa: E731
+    val_ex, feat_dim = _examples_for_ckpt(cfg, val_ex, feat_dim)
     loader = _DL(TeamPreviewDataset(val_ex, vocab, feat_dim=feat_dim, affinity_fn=affinity_fn),
                  batch_size=args.batch_size, shuffle=False)
 

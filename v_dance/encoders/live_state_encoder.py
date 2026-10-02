@@ -57,8 +57,14 @@ from v_dance.encoders.battle_mechanics import (
     move_redundant_condition, move_redundant_status, _REDUNDANT_OWN_SIDE_NAMES,
     charge_skipped_now, weather_accuracy, weather_bp_mult,
     terrain_bp_mult, terrain_priority, terrain_spread,       # v19d: terrain move mechanics (shared)
+    attacker_weather, aura_mult, field_auras,                # 2026-10-02 gap 4: Mega Sol + Fairy/Dark Aura
 )
 from v_dance.encoders.state_encoder import _TWO_TURN_CHARGE_IDX  # v19c: dynamic-tag slot (shared)
+# v20 (2026-10-02, mega audit gap 2): the mega preview block — shared table / rules / transforms (parity twin).
+from v_dance.encoders import mega_preview as _MP
+from v_dance.encoders.encoder_layout import (
+    MEGA_PREVIEW_FEATURES, MEGA_PREVIEW_MON_FEATURES, MEGA_PREVIEW_PER_MOVE, _MV_SIGNED, _MV_BAND_MAX, _MV_FIRST,
+)
 from v_dance.encoders import damage_mechanics as _DMG
 from v_dance.parser.vod_parser.battle_models import volatile_flags
 
@@ -152,6 +158,31 @@ def _base_species_of(mon) -> str:
     return (getattr(mon, "base_species", None) or getattr(mon, "species", "") or "")
 
 
+_MEGA_STATS_BY_BASE: dict = {}     # id(dex) -> {base species id: [baseStats of every mega forme]}
+
+
+def _mega_stats_by_base(dex) -> dict:
+    """{base species id: [baseStats dict of each MEGA forme]} for ``dex`` (cached per dex object).
+
+    2026-10-02 (mega audit gap 5): a forme is mega iff its dex ``forme`` CONTAINS 'Mega' — Mega / Mega-X /
+    Mega-Y AND the Champions formes the old ``<base>mega/megax/megay`` suffix probe missed: Mega-Z
+    (Garchomp / Absol / Lucario — our own Z-megas encoded is_mega=0 and kept the partner's mega option
+    open), M-Mega (``meowsticmmega``), Curly/Droopy/Stretchy-Mega (Tatsugiri)."""
+    key = id(dex)
+    got = _MEGA_STATS_BY_BASE.get(key)
+    if got is None:
+        got = {}
+        for e in dex.values():
+            if "Mega" not in (e.get("forme") or ""):
+                continue
+            stats = e.get("baseStats")
+            base = to_id_str(e.get("baseSpecies") or "")
+            if stats and base:
+                got.setdefault(base, []).append(dict(stats))
+        _MEGA_STATS_BY_BASE[key] = got
+    return got
+
+
 def is_mega_forme_live(mon, dex=None) -> bool:
     """Whether ``mon`` is CURRENTLY mega-evolved (gap #5), as a free function so
     the encoder and the serve codec share one detection."""
@@ -167,18 +198,54 @@ def is_mega_forme_live(mon, dex=None) -> bool:
     cur = getattr(mon, "base_stats", None)
     if not cur:
         return False
-    for suf in _MEGA_SUFFIXES:
-        entry = dex.get(base + suf)
-        stats = entry.get("baseStats") if entry else None
-        if stats and dict(stats) == dict(cur):
-            return True
-    return False
+    cur = dict(cur)
+    # poke-env's base_species is the dex ``baseSpecies``; a caller may hand a forme id ('meowsticf') → try both.
+    bases = {base, to_id_str((dex.get(base) or {}).get("baseSpecies") or base)}
+    by_base = _mega_stats_by_base(dex)
+    return any(stats == cur for b in bases for stats in by_base.get(b, ()))
+
+
+def _battle_format(battle) -> Optional[str]:
+    """The battle's format id (poke-env) — picks the regulation's mega-stone shares; None = the active format."""
+    for attr in ("format", "_format"):
+        f = getattr(battle, attr, None)
+        if isinstance(f, str) and f:
+            return f
+    return None
+
+
+def _inject_own_items(snapshot: Optional[dict], battle) -> None:
+    """v20: stamp OUR true held item ('' = none) onto our side of the per-turn reconstruction under the
+    PREVIEW-ONLY key ``preview_item`` (read by mega_preview.offline_known_item and nothing else), so the spliced
+    opponent rows' "vs our mega" preview knows what Type A/C training rows know: our Garchompite Z → p=1, our
+    Choice Scarf Garchomp → no mega. No other byte of the spliced rows changes (review 10-02)."""
+    if not snapshot:
+        return
+    try:
+        held = {}
+        for p in (getattr(battle, "team", None) or {}).values():
+            it = getattr(p, "item", None)
+            if it != "unknown_item" and it is not None:
+                held[norm_species(getattr(p, "species", ""))] = it
+        if not held:
+            return
+        mons = list((snapshot.get("our_active") or {}).values()) + list(snapshot.get("our_bench") or [])
+        for m in mons:
+            if m and not m.get("is_mega"):
+                sid = norm_species(m.get("species") or "")
+                if sid in held:
+                    m["preview_item"] = held[sid]
+    except Exception:  # pragma: no cover - never break a live turn
+        pass
 
 
 def team_has_megaed_live(battle) -> bool:
     """True iff any own mon has already mega-evolved this game (a team megas at
     most once per game).  Live analogue of state_encoder._own_team_has_megaed,
-    which reads the offline ``is_mega`` flag."""
+    which reads the offline ``is_mega`` flag.  poke-env's own ``used_mega_evolve``
+    (set on our side's ``|-mega|``) also counts — it survives a fainted mega."""
+    if getattr(battle, "used_mega_evolve", False) is True:     # `is True`: a test double's attr is not a flag
+        return True
     team = getattr(battle, "team", None) or {}
     dex = _default_live_pokedex()
     return any(is_mega_forme_live(m, dex) for m in team.values())
@@ -381,6 +448,10 @@ class LiveStateEncoder:
         # tests/test_redundant_condition_v18.py; the underlying presence bits are already global-SC parity-proven).
         _our_side_active = self._active_side_conditions_live(battle.side_conditions)
         _opp_side_active = self._active_side_conditions_live(battle.opponent_side_conditions)
+        # 2026-10-02 (mega audit gap 4): Fairy / Dark Aura + Aura Break on the field — the 4 actives' resolved
+        # abilities (parity twin of the offline encode_snapshot _auras).
+        _auras = field_auras([self._live_ability(m, True)[0] for m in _wa if m is not None]
+                             + [self._live_ability(m, False)[0] for m in _oa if m is not None])
 
         def _prof(mon, is_own):
             if mon is None:
@@ -409,6 +480,11 @@ class LiveStateEncoder:
                     # HP stat, so the old fallback both broke train/serve parity AND fed a wrong number
                     # into the L50 damage formula. (Own-side defenders get a real est["hp"] upstream.)
                     "hp": est.get("hp"),
+                    "spe": est.get("spe"),      # v20: helper-only (mega preview; parity twin)
+                    "speed_parts": (est.get("spe"), (getattr(mon, "boosts", None) or {}).get("spe", 0) or 0,
+                                    getattr(getattr(mon, "status", None), "name", None) or "",
+                                    bool(_own_tw if is_own else _opp_tw)),
+                    "ground_args": (_it, _levit, _fg_g, _ab),
                     "hp_frac": (mon.current_hp_fraction if mon.revealed else 1.0),
                     # v11 A.1: the ACTIVE ability (belief-aware) for damage-band immunity — parity twin
                     # of the offline _defender_profile's resolve_active_ability_json.
@@ -455,6 +531,49 @@ class LiveStateEncoder:
 
         own_active_set = {p for p in own_active if p is not None}
 
+        # v20 (mega audit gap 2): the MEGA PREVIEW — parity twin of the offline encode_snapshot block (same
+        # stone-share table, same gating: a side megas once; a mega'd / transformed / fainted mon never previews).
+        _fmt = _battle_format(battle)
+        _own_megaed = team_has_megaed_live(battle)
+        _opp_megaed = (getattr(battle, "opponent_used_mega_evolve", False) is True
+                       or any(self._is_mega_forme(p) for p in (getattr(battle, "opponent_team", {}) or {}).values()))
+
+        def _mopts(m, megaed):
+            if (m is None or megaed or self._is_mega_forme(m) or getattr(m, "transformed", False)
+                    or getattr(m, "fainted", False)):
+                return []
+            return _MP.mega_options(getattr(m, "species", None), _MP.live_known_item(m), _fmt)
+
+        def _mprof(m, prof, megaed):
+            o = _mopts(m, megaed)
+            return (_MP.mega_defender_profile(prof, _MP.forme_view(norm_species(m.species), _MP.best_forme(o)),
+                                              _weather) if o else None)
+
+        # The opponent's item knowledge for OUR rows' "into e's mega" channels comes from the per-turn
+        # reconstruction when there is one — the parser's item_consumed / sheet items, exactly what training reads
+        # (poke-env nulls a consumed item and never reads |showteam|; review 10-02). Its opp_a / opp_b are the
+        # same slots the splice writes.
+        _snap = opp_snapshot if isinstance(opp_snapshot, dict) else None
+        if _snap is not None:
+            _sa = _snap.get("opp_active") or {}
+            _s_megaed = _MP.side_has_megaed(list(_sa.values()) + list(_snap.get("opp_bench") or []))
+
+            def _snap_prof(k):
+                sm = _sa.get(("opp_a", "opp_b")[k])
+                if (not sm or _s_megaed or sm.get("is_mega") or sm.get("is_transformed")
+                        or sm.get("is_fainted") or own_enemy[k] is None):
+                    return None
+                o = _MP.mega_options(sm.get("species"), _MP.offline_known_item(sm), _fmt)
+                return (_MP.mega_defender_profile(own_enemy[k], _MP.forme_view(norm_species(sm.get("species")),
+                                                                               _MP.best_forme(o)), _weather)
+                        if o else None)
+
+            own_enemy_mega = [_snap_prof(k) for k in range(2)]
+        else:
+            own_enemy_mega = [_mprof(_oa[k] if len(_oa) > k else None, own_enemy[k], _opp_megaed)
+                              for k in range(2)]
+        opp_enemy_mega = [_mprof(_wa[k] if len(_wa) > k else None, opp_enemy[k], _own_megaed) for k in range(2)]
+
         # v11 B.2 gap-fix (Last Respects): per-side fainted count for the move's BP (50+50×faints). SAME
         # logic as the parity-proven team-count block below (own brought/request fainted; opp seen-fainted —
         # opp actives are alive at decision time, so the active-exclusion there is a no-op for the count).
@@ -485,7 +604,8 @@ class LiveStateEncoder:
                                 side_tailwind=_own_tw, trick_room=_tr, gravity=_gravity,
                                 fainted_allies=_own_fnt, times_attacked=_own_ta.get(slot, 0),
                                 magic_room=_magic_room, wonder_room=_wonder_room, ally_ability=_ally_ab,
-                                side_active=_our_side_active)
+                                side_active=_our_side_active, field_auras=_auras,
+                                enemy_mega_defenders=own_enemy_mega, mega_opts=_mopts(mon, _own_megaed))
             cursor += POKEMON_FEATURES
         _opp_list = list(opp_active)
         for slot, mon in enumerate(_opp_list):
@@ -495,7 +615,8 @@ class LiveStateEncoder:
                                 field_mods=field_mods, side_tailwind=_opp_tw, trick_room=_tr, gravity=_gravity,
                                 fainted_allies=_opp_fnt,
                                 magic_room=_magic_room, wonder_room=_wonder_room, ally_ability=_ally_ab,
-                                side_active=_opp_side_active)
+                                side_active=_opp_side_active, field_auras=_auras,
+                                enemy_mega_defenders=opp_enemy_mega, mega_opts=_mopts(mon, _opp_megaed))
             cursor += POKEMON_FEATURES
 
         # ── [B] Bench slots ──────────────────────────────────────────────────
@@ -514,7 +635,8 @@ class LiveStateEncoder:
                                 field_mods=field_mods, side_tailwind=_own_tw, trick_room=_tr, gravity=_gravity,
                                 fainted_allies=_own_fnt,
                                 magic_room=_magic_room, wonder_room=_wonder_room,
-                                side_active=_our_side_active)
+                                side_active=_our_side_active, field_auras=_auras,
+                                enemy_mega_defenders=own_enemy_mega, mega_opts=_mopts(mon, _own_megaed))
             cursor += POKEMON_FEATURES
 
         # ── [B2] Opponent bench (layout-v2): the opponent's FULL teampreview
@@ -533,7 +655,8 @@ class LiveStateEncoder:
                                 field_mods=field_mods, side_tailwind=_opp_tw, trick_room=_tr, gravity=_gravity,
                                 fainted_allies=_opp_fnt,
                                 magic_room=_magic_room, wonder_room=_wonder_room,
-                                side_active=_opp_side_active)
+                                side_active=_opp_side_active, field_auras=_auras,
+                                enemy_mega_defenders=opp_enemy_mega, mega_opts=_mopts(mon, _opp_megaed))
             cursor += POKEMON_FEATURES
 
         # ── [C] Global features ──────────────────────────────────────────────
@@ -700,7 +823,8 @@ class LiveStateEncoder:
         # of leaving those features zeroed at serve time — see _enrich_opp_snapshot.
         if opp_snapshot is not None:
             opp_snapshot = self._enrich_opp_snapshot(opp_snapshot)
-            self._splice_opponent(vec, opp_snapshot, turn=getattr(battle, "turn", 0))
+            _inject_own_items(opp_snapshot, battle)        # v20: the opp rows' "vs our mega" preview
+            self._splice_opponent(vec, opp_snapshot, turn=getattr(battle, "turn", 0), fmt=_fmt)
 
         return vec
 
@@ -737,13 +861,14 @@ class LiveStateEncoder:
                     pass
         return opp_snapshot
 
-    def _splice_opponent(self, vec: np.ndarray, opp_snapshot: dict, turn: int) -> None:
+    def _splice_opponent(self, vec: np.ndarray, opp_snapshot: dict, turn: int,
+                         fmt: Optional[str] = None) -> None:
         """Overwrite the opponent byte ranges of ``vec`` with the offline
         encoding of ``opp_snapshot`` (gap #6).  Only the opponent-owned features
         are touched: active slots 2,3, bench slots 8-11, and the opp_live /
         opp_fnt team-count globals.  The own side, globals, weather/field and
         opp side-conditions are left as the poke-env-derived live values."""
-        off = self._vod_enc.encode_snapshot(opp_snapshot, turn=turn)
+        off = self._vod_enc.encode_snapshot(opp_snapshot, turn=turn, fmt=fmt)
         vec[_OPP_ACTIVE_LO:_OPP_ACTIVE_HI] = off[_OPP_ACTIVE_LO:_OPP_ACTIVE_HI]
         vec[_OPP_BENCH_LO:_OPP_BENCH_HI]   = off[_OPP_BENCH_LO:_OPP_BENCH_HI]
         vec[_G_OPP_LIVE] = off[_G_OPP_LIVE]
@@ -927,6 +1052,9 @@ class LiveStateEncoder:
         wonder_room: bool = False,
         ally_ability: Optional[str] = None,
         side_active: frozenset = frozenset(),
+        field_auras: frozenset = frozenset(),
+        enemy_mega_defenders: Optional[list] = None,
+        mega_opts=(),
     ) -> None:
         """Write POKEMON_FEATURES floats into vec starting at `start`.
 
@@ -1057,7 +1185,15 @@ class LiveStateEncoder:
                    # v19d: is the ATTACKER grounded (parity twin of the offline att_ctx — the same _is_grounded
                    # call + inputs as the volatile block below)
                    "grounded": _is_grounded(_live_eff_types(mon), abil_id, self._live_item(mon, is_own)[0],
-                                            vf["levitating"], vf["force_grounded"] or gravity)}
+                                            vf["levitating"], vf["force_grounded"] or gravity),
+                   "auras": field_auras,             # 2026-10-02 gap 4: Fairy/Dark Aura (parity twin)
+                   # v20: helper-only keys for the mega preview's own-mega transform (parity twin of offline)
+                   "spe": _est.get("spe"),
+                   "speed_parts": (_est.get("spe"), (mon.boosts or {}).get("spe", 0) or 0,
+                                   getattr(getattr(mon, "status", None), "name", None) or "",
+                                   bool(side_tailwind)),
+                   "ground_args": (self._live_item(mon, is_own)[0], vf["levitating"],
+                                   vf["force_grounded"] or gravity, abil_id)}
         for m_idx in range(NUM_MOVES):
             if m_idx < len(move_list):
                 self._write_move(vec, i, move_list[m_idx], mon, enemy_defenders, att_ctx,
@@ -1130,6 +1266,23 @@ class LiveStateEncoder:
             if _tt is not None:
                 vec[i + _tt] = 1.0
         i += NUM_TYPES
+
+        # ── v20 MEGA PREVIEW block — parity twin of the offline writer (mega_preview.py): the per-move part
+        # re-runs _write_move into a scratch row with the enemies' MEGA profiles / this mon's own MEGA context. ──
+        _MP.write_mon_part(vec, i, getattr(mon, "species", "") or "", mega_opts)
+        _pm = i + MEGA_PREVIEW_MON_FEATURES
+        _mview = (_MP.forme_view(norm_species(getattr(mon, "species", "") or ""), _MP.best_forme(mega_opts))
+                  if mega_opts else None)
+        _mac = _MP.mega_att_ctx(att_ctx, _mview, field_mods[0] if field_mods else None)
+
+        def _wm(scr, arg, enemies, ctx, fmods, ab, utypes):
+            self._write_move(scr, 0, arg, mon, enemies, ctx, fmods, ability_id=ab, gravity=gravity,
+                             user_types=None if utypes is None else set(utypes))
+
+        _MP.write_move_part(vec, _pm, [(m, move_list[m]) for m in range(min(NUM_MOVES, len(move_list)))], _wm,
+                            att_ctx=att_ctx, enemy_defenders=enemy_defenders, enemy_mega=enemy_mega_defenders,
+                            field_mods=field_mods, mview=_mview, mac=_mac, ability_id=abil_id, user_types=None)
+        i += MEGA_PREVIEW_FEATURES
 
         # is_active slot flag
         vec[i] = 1.0 if is_active else 0.0
@@ -1225,6 +1378,7 @@ class LiveStateEncoder:
         field_mods: tuple = (None, None),
         ability_id: Optional[str] = None,
         gravity: bool = False,
+        user_types: Optional[set] = None,
     ) -> None:
         """Write MOVE_FEATURES floats into vec starting at `start`. ``enemy_defenders`` = defender
         profiles; ``att_ctx`` = attacker stats/burn/item; ``field_mods`` = (weather, terrain);
@@ -1232,6 +1386,10 @@ class LiveStateEncoder:
         boosts numeric move accuracy ×6840/4096 (the Gravity-Hypnosis payoff)."""
         i = start
         _mid = getattr(move, "id", None)           # v11 N1: move-id key (Champions overrides + the type-eff cross)
+        # 2026-10-02 (mega audit gap 4): Mega Sol — THIS mon's moves see sun (parity twin of the offline writer);
+        # the redundant-condition bit keeps the FIELD weather.
+        _field_weather = field_mods[0] if field_mods else None
+        field_mods = (attacker_weather(_field_weather, ability_id, _mid), field_mods[1] if field_mods else None)
 
         # Base power (cap at 250 since a few moves are absurdly high). v11 N1: Champions BP override.
         vec[i] = min(champ_bp(_mid, move.base_power), 250) / 150.0
@@ -1244,7 +1402,8 @@ class LiveStateEncoder:
                      field_mods[0] if field_mods else None,        #        weather / terrain (parity twin of offline)
                      field_mods[1] if field_mods else None))
         _mt = _DMG.effective_move_type(_mid, _mt, ability_id)
-        _user_types = {t.name for t in user.types if t}
+        _user_types = (set(user_types) if user_types is not None          # v20: the own-mega preview's forme
+                       else {t.name for t in user.types if t})
         if _mt in _TYPE_IDX:
             vec[i] = _TYPE_IDX[_mt] / (NUM_TYPES - 1)
         i += 1
@@ -1375,6 +1534,7 @@ class LiveStateEncoder:
                 # parity twin of the offline writer; charge-turn cost = the dynamic tag below.
                 _sit *= weather_bp_mult(_mid, _weather)
                 _sit *= terrain_bp_mult(_mid, _terrain, _ac.get("grounded"))   # v19d: Expanding Force ×1.5
+                _sit *= aura_mult(_mt, _ac.get("auras"))       # 2026-10-02 gap 4: Fairy/Dark Aura (+Aura Break)
                 # v11 B3 attacker item band mults + B3b defender resist berry (parity twin of the offline writer).
                 if _ac.get("type_boost") == _mt:
                     _sit *= _BAND_ITEM_MULT
@@ -1450,7 +1610,7 @@ class LiveStateEncoder:
         # v18 (Option 1): REDUNDANT-CONDITION bit (parity twin of the offline _write_move_json) — 1.0 if
         # this move re-sets a screen/weather/terrain already active on the caster's side. Pure feature.
         vec[i] = move_redundant_condition(_mid, (att_ctx or {}).get("side_active") or frozenset(),
-                                          field_mods[0] if field_mods else None,
+                                          _field_weather,                  # the FIELD weather (not Mega Sol's)
                                           field_mods[1] if field_mods else None)
         i += 1
 

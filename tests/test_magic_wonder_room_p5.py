@@ -167,4 +167,4 @@ def test_magic_room_lifts_choice_lock():
 
 # ════════════════════════════ layout (value-only) ════════════════════════════
 def test_layout_unchanged():
-    assert get_state_dim() == 5057
+    assert get_state_dim() == 6377

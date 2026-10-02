@@ -301,3 +301,22 @@ def test_end_to_end_gimmick_head_to_mega_order():
     # 2) …and _safe_order threads it into a real mega order.
     order = VGCPlayerBase._safe_order(None, 0, battle, 0, g0)
     assert "mega" in order.message, f"expected a mega order: {order.message!r}"
+
+
+def test_select_gimmicks_never_gives_the_mega_to_a_stoneless_slot(monkeypatch):
+    """2026-10-02 (mega-fix review): Meowstic / Tatsugiri are now mega-CAPABLE, so a stoneless one gets an open
+    (capability-based) mega option. A mega the item-aware final gate will refuse must not win the cross-slot
+    dedup: slot 0 (no stone, can_mega False) + slot 1 (stone) both picking mega → slot 1 keeps it."""
+    _setup_path()
+    import types
+    import numpy as np
+    import v_dance.play.player as P
+    from v_dance.encoders.state_encoder import STATE_DIM, GIMMICK_MEGA, GIMMICK_NONE
+
+    monkeypatch.setattr(P, "build_gimmick_legal_mask", lambda b, s: [True, True, True])
+    fake = types.SimpleNamespace(_model=_mega_favoring_model(),
+                                 _model_heads=("our_a", "our_b"), _device="cpu")
+    battle = _DBattle([_DMon("meowstic"), _DMon("garchomp")])
+    battle.can_mega_evolve = [False, True]
+    g0, g1 = P.VGCPlayer._select_gimmicks(fake, battle, np.zeros(STATE_DIM, np.float32), 0, 0)
+    assert (g0, g1) == (GIMMICK_NONE, GIMMICK_MEGA)

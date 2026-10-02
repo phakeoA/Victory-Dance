@@ -159,5 +159,5 @@ def test_offline_live_agree_on_typechange():
 
 # ════════════════════════════ layout (value-only) ════════════════════════════
 def test_layout_unchanged():
-    assert get_state_dim() == 5057
-    assert get_state_layout_version() == 19
+    assert get_state_dim() == 6377
+    assert get_state_layout_version() == 20

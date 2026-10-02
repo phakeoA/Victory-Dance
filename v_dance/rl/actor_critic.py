@@ -272,6 +272,8 @@ class ActorCritic(nn.Module):
         """Reload BOTH policy and critic from a ``state_checkpoint`` (collapse-revert /
         resume). A plain BC checkpoint with no ``critic_state`` reverts the policy only."""
         ck = torch.load(path, map_location=device, weights_only=False)
+        from v_dance.models import layout_upgrade as _LU          # 2026-10-02: a v19 ckpt lifts to v20
+        _LU.note(path, _LU.upgrade_checkpoint(ck))
         self.policy.load_state_dict(ck["model_state"])
         if "critic_state" in ck:
             self.critic.load_state_dict(ck["critic_state"])

@@ -28,14 +28,18 @@ from v_dance.encoders.state_encoder import (  # noqa: E402
     ITEM_BLOCK_V9, ABILITY_BLOCK_V9, VOLATILE_FEATURES, _MOVE_BLOCK_REL,
     SWITCH_OFFSET, move_slots_for_mon, _move_target_kind, _ALLY_KINDS,
 )
+from v_dance.encoders.encoder_layout import (  # noqa: E402  (v20 mega preview)
+    MEGA_PREVIEW_FEATURES, MEGA_PREVIEW_MON_FEATURES, MEGA_PREVIEW_PER_MOVE, MEGA_PREVIEW_REL,
+)
 
 # Offset of the first MOVE feature block within a POKEMON slot — the CANONICAL value from the encoder
 # (v9: after the per-mon weight feature), so it can't silently drift from POKEMON_FEATURES.
 MOVE_BLOCK_START = _MOVE_BLOCK_REL
 # Sanity (v9; v11 Phase D D9): the 4 move blocks are followed by the item + ability blocks (identity + tags
-# + known), the volatile block, the tera_type one-hot (NUM_TYPES), then exactly 4 tail flags.
+# + known), the volatile block, the tera_type one-hot (NUM_TYPES), the v20 mega preview, then exactly 4 tail flags.
 assert (MOVE_BLOCK_START + NUM_MOVES * MOVE_FEATURES
-        + ITEM_BLOCK_V9 + ABILITY_BLOCK_V9 + VOLATILE_FEATURES + NUM_TYPES + 4 == POKEMON_FEATURES), (
+        + ITEM_BLOCK_V9 + ABILITY_BLOCK_V9 + VOLATILE_FEATURES + NUM_TYPES + MEGA_PREVIEW_FEATURES + 4
+        == POKEMON_FEATURES), (
     f"move-block offset {MOVE_BLOCK_START} inconsistent with POKEMON_FEATURES "
     f"{POKEMON_FEATURES}"
 )
@@ -78,6 +82,12 @@ def permute_move_slots(vec: np.ndarray, slot_index: int, perm: Sequence[int]) ->
         src = base + perm[m] * MOVE_FEATURES
         dst = base + m * MOVE_FEATURES
         out[dst:dst + MOVE_FEATURES] = vec[src:src + MOVE_FEATURES]
+    # v20: the mega preview's per-move sub-blocks move with their move slots
+    pb = slot_index * POKEMON_FEATURES + MEGA_PREVIEW_REL + MEGA_PREVIEW_MON_FEATURES
+    for m in range(NUM_MOVES):
+        src = pb + perm[m] * MEGA_PREVIEW_PER_MOVE
+        dst = pb + m * MEGA_PREVIEW_PER_MOVE
+        out[dst:dst + MEGA_PREVIEW_PER_MOVE] = vec[src:src + MEGA_PREVIEW_PER_MOVE]
     return out
 
 

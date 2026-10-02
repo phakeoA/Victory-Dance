@@ -14,9 +14,10 @@ from v_dance.encoders.state_encoder import (
     StateEncoder, get_state_dim, get_state_layout_version, POKEMON_FEATURES, NUM_TYPES,
     GIMMICK_DIM, GIMMICK_TERA, GIMMICK_MEGA, GIMMICK_NONE, _TYPE_IDX,
 )
+from v_dance.encoders.encoder_layout import MEGA_PREVIEW_FEATURES  # v20: the mega preview sits before the flags
 
 # tera_type one-hot block = the NUM_TYPES slot right before the 4 trailing flags (per-mon).
-_TERA_BLOCK = POKEMON_FEATURES - 4 - NUM_TYPES
+_TERA_BLOCK = POKEMON_FEATURES - 4 - MEGA_PREVIEW_FEATURES - NUM_TYPES
 
 
 def _mon(species, *, is_terastallized=False, known_tera_type=None):
@@ -39,9 +40,9 @@ def _vec(our_a):
 def test_phase_d_layout():
     assert GIMMICK_DIM == 3 and GIMMICK_TERA == 2
     assert NUM_TYPES == 20
-    assert POKEMON_FEATURES == 413
-    assert get_state_dim() == 5057
-    assert get_state_layout_version() == 19
+    assert POKEMON_FEATURES == 523
+    assert get_state_dim() == 6377
+    assert get_state_layout_version() == 20
 
 
 # ════════════════════════════ D9 tera_type one-hot ════════════════════════════
