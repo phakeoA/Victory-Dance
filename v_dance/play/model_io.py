@@ -192,7 +192,7 @@ def load_bc_policy(path, device: str = "cpu", _ckpt=None):
     Returns ``(model, head_names)``.  Back-compat: if ``path`` is a pickled
     nn.Module it is returned as-is with head_names=None. ``_ckpt`` (internal): an
     already-loaded checkpoint dict to reuse instead of re-reading ``path`` from disk
-    (avoids a double torch.load when the caller has the dict, e.g. C51 auto-detect)."""
+    (avoids a double torch.load when the caller has the dict, e.g. ActorCritic.from_bc_checkpoint)."""
     if not _TORCH:
         raise RuntimeError("PyTorch unavailable")
     ckpt = _ckpt if _ckpt is not None else torch.load(path, map_location=device, weights_only=False)

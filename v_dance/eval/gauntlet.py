@@ -497,21 +497,22 @@ def eval_replay_routing(kind: str, candidate_gen, *, opp_ref=None):
 
 
 def _make_opponent(kind: str, username: str, team: str, model_path=None,
-                   team_chooser_path=None, max_concurrent_battles: int = 1, port=None):
+                   team_chooser_path=None, max_concurrent_battles: int = 1, port=None, trace: bool = True):
     """Construct one opponent player of the given ``kind``. ``max_concurrent_battles`` > 1
     enables parallel battles vs this opponent (3c.8c). ``port`` (22f) binds it to the assigned
-    pool server (``None`` = poke-env's localhost:8000 default)."""
+    pool server (``None`` = poke-env's localhost:8000 default). ``trace`` False = no per-turn
+    trace file (every eval opponent, 2026-10-04)."""
     import v_dance.play.run_local_battle as R
     from poke_env import AccountConfiguration
     if kind == "random":
         return R.make_player(username, team, model_path=None,
-                             max_concurrent_battles=max_concurrent_battles, port=port)
+                             max_concurrent_battles=max_concurrent_battles, port=port, trace=trace)
     if kind in ("max_damage", "heuristic"):
         from v_dance.eval.eval_opponents import MaxDamageVGCPlayer, HeuristicVGCPlayer
         cls = MaxDamageVGCPlayer if kind == "max_damage" else HeuristicVGCPlayer
         _server = {"server_configuration": R.localhost_server_config(port)} if port is not None else {}
         return cls(
-            replay_path=_REPO_ROOT / "artifacts" / "replay_buffer" / f"{username}.jsonl",
+            replay_path=_REPO_ROOT / "artifacts" / "replay_buffer" / f"{username}.jsonl", trace=trace,
             account_configuration=AccountConfiguration(username, None),
             battle_format=R.BATTLE_FORMAT, team=team,
             max_concurrent_battles=max_concurrent_battles,
@@ -521,7 +522,7 @@ def _make_opponent(kind: str, username: str, team: str, model_path=None,
     if kind == "prev_best":
         return R.make_player(username, team, model_path=model_path,
                              team_chooser_path=team_chooser_path,
-                             max_concurrent_battles=max_concurrent_battles, port=port)
+                             max_concurrent_battles=max_concurrent_battles, port=port, trace=trace)
     raise ValueError(f"unknown opponent kind: {kind}")
 
 
@@ -633,10 +634,10 @@ async def run_gauntlet(
             model_player = R.make_player(
                 model_name, model_team, model_path=ckpt, team_chooser_path=_cand_tc,
                 live_dir=live_dir, save_replays=save_replays,   # #18b: eval match spectate
-                replay_dir=_rdir, replay_label=_label)
+                replay_dir=_rdir, replay_label=_label, trace=False)
             opp = _make_opponent(
                 kind, opp_name, opp_team,
-                model_path=prev_best_ckpt, team_chooser_path=_opp_tc)
+                model_path=prev_best_ckpt, team_chooser_path=_opp_tc, trace=False)
             if spect["open"]:                 # atomic check+clear (no await between)
                 spect["open"] = False
                 asyncio.ensure_future(_open_spectator(model_player))

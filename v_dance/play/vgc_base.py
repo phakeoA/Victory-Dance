@@ -136,17 +136,20 @@ VGC_TEAM_SIZE = 4
 
 class ReplayBuffer:
     """
-    Appends transitions to a JSON-lines file.
-    Each line is one turn.  On battle end, outcome is written back to all
-    turns from that battle by rewriting only the relevant lines.
+    Appends transitions to a JSON-lines file, one line per turn.
+
+    2026-10-04: a battle's turns are held in memory and appended ONCE, when the battle ends, with the outcome
+    already filled in. Before, every turn was written at once and every battle end READ AND REWROTE THE WHOLE
+    FILE to back-fill the outcome — O(file size) per battle. panel_eval re-uses its player names on every call,
+    so its trace files grew to 200-330 MB and each re-test call ran ~40 s slower than the one before. Same line
+    format as before; a battle that never finishes is written with ``"outcome": null`` on ``close``.
     """
 
     def __init__(self, path: Path):
         self.path = path
         path.parent.mkdir(parents=True, exist_ok=True)
         self._handle = path.open("a", encoding="utf-8")
-        self._battle_line_indices: dict[str, list[int]] = {}
-        self._line_count = _count_lines(path)
+        self._pending: dict[str, list[dict]] = {}
 
     def record(
         self,
@@ -157,7 +160,7 @@ class ReplayBuffer:
         action_s1: int,
         source: str,
     ) -> None:
-        entry = {
+        self._pending.setdefault(battle_id, []).append({
             "battle_id": battle_id,
             "turn":      turn,
             "state":     state.tolist(),
@@ -165,37 +168,47 @@ class ReplayBuffer:
             "action_s1": action_s1,
             "source":    source,
             "outcome":   None,
-        }
-        self._handle.write(json.dumps(entry) + "\n")
-        self._handle.flush()
-        self._battle_line_indices.setdefault(battle_id, []).append(self._line_count)
-        self._line_count += 1
+        })
+
+    def _write(self, entries: list) -> None:
+        if entries:
+            self._handle.write("".join(json.dumps(e) + "\n" for e in entries))
+            self._handle.flush()
 
     def finalise(self, battle_id: str, outcome: int) -> None:
-        """Back-fill outcome (1=win, 0=loss, -1=draw) for all turns of a battle."""
-        indices = self._battle_line_indices.pop(battle_id, [])
-        if not indices:
-            return
+        """Write the battle's turns with their outcome (1=win, 0=loss, -1=draw)."""
+        entries = self._pending.pop(battle_id, [])
+        for e in entries:
+            e["outcome"] = outcome
         try:
-            lines = self.path.read_text(encoding="utf-8").splitlines()
-            for idx in indices:
-                if idx < len(lines):
-                    obj = json.loads(lines[idx])
-                    obj["outcome"] = outcome
-                    lines[idx] = json.dumps(obj)
-            self.path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            self._write(entries)
         except Exception as exc:
             log.warning("ReplayBuffer.finalise failed for %s: %s", battle_id, exc)
 
     def close(self) -> None:
-        self._handle.close()
+        """Write the turns of any battle that never finished (outcome null), then close the file."""
+        try:
+            for battle_id in list(self._pending):
+                self._write(self._pending.pop(battle_id))
+        except Exception as exc:
+            log.warning("ReplayBuffer.close could not write the unfinished battles: %s", exc)
+        finally:
+            self._handle.close()
 
 
-def _count_lines(path: Path) -> int:
-    if not path.exists():
-        return 0
-    with path.open("r", encoding="utf-8") as f:
-        return sum(1 for _ in f)
+class NullReplayBuffer:
+    """The trace switched OFF (``trace=False`` — every eval player, 2026-10-04): records nothing, opens no file."""
+
+    path = None
+
+    def record(self, *args, **kwargs) -> None:
+        pass
+
+    def finalise(self, battle_id: str, outcome: int) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
 
 
 def prune_replay_buffer(buffer_dir, keep: int = 200) -> int:
@@ -904,18 +917,20 @@ class VGCPlayerBase(Player):
     replay_path : Path or None
         Where to write the JSON-lines replay buffer.
         Defaults to artifacts/replay_buffer/replay.jsonl
+    trace : bool
+        False = write no replay buffer at all (eval players; nothing reads their traces).
     **kwargs
         Forwarded to poke_env.player.Player.
     """
 
-    def __init__(self, replay_path: Optional[Path] = None, **kwargs):
+    def __init__(self, replay_path: Optional[Path] = None, trace: bool = True, **kwargs):
         super().__init__(**kwargs)
         # Give the live encoder the SAME BeliefState the training data was
         # enriched with, so opponent est-stats + predicted move slots are
         # populated at serve time (matching the net's training distribution).
         self._encoder = LiveStateEncoder(belief=_default_belief())
         _rp = replay_path or Path("artifacts/replay_buffer/replay.jsonl")
-        self._replay  = ReplayBuffer(_rp)
+        self._replay  = ReplayBuffer(_rp) if trace else NullReplayBuffer()
         # Per-(battle,turn,force_switch) handling count — used to detect a forced-
         # switch request poke-env re-sends because Showdown REJECTED our last order
         # (an infinite-loop / battle-hang risk).  See _force_switch_escape.

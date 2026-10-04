@@ -486,6 +486,7 @@ def make_player(
     use_dossier: bool = False,   # S1 L2b: dossier→snapshot warm-start (default OFF)
     pressure: str | None = None,  # 2026-10-02 drill pressure name (field_fight.BIASES) — OPPONENT model players only
     pressure_bias: float = 0.0,
+    trace: bool = True,
 ) -> VGCPlayer:
     """Build a (gap-#6 spliced) player.  model_path=None → random fallback.
     ``max_concurrent_battles`` > 1 lets poke-env run that many battles of this player
@@ -494,13 +495,14 @@ def make_player(
     keeps them on finish. ``replay_dir`` / ``replay_label`` (task E) route the SAVED html into a
     sub-folder with a descriptive name (e.g. ``eval/heuristic/gen3_vs_heuristic_<tag>.html``).
     ``port`` (22f) binds this player to the Showdown server on that port (a specific pool member);
-    ``None`` keeps poke-env's default (localhost:8000), so the single-server path is unchanged."""
+    ``None`` keeps poke-env's default (localhost:8000), so the single-server path is unchanged.
+    ``trace`` False = no per-turn trace in artifacts/replay_buffer (every eval player, 2026-10-04)."""
     replay_path = _REPO_ROOT / "artifacts" / "replay_buffer" / f"{username}.jsonl"
     # 22f: bind to the assigned pool server when a port is given (else poke-env's localhost default).
     _server = {"server_configuration": localhost_server_config(port)} if port is not None else {}
     if model_path is None:
         return RandomVGCPlayer(
-            replay_path=replay_path,
+            replay_path=replay_path, trace=trace,
             account_configuration=AccountConfiguration(username, None),
             battle_format=BATTLE_FORMAT,
             team=team,
@@ -515,7 +517,7 @@ def make_player(
     return VGCPlayer(
         model_path=model_path,
         team_chooser_path=team_chooser_path,
-        replay_path=replay_path,
+        replay_path=replay_path, trace=trace,
         device="cpu",
         account_configuration=AccountConfiguration(username, None),
         battle_format=BATTLE_FORMAT,

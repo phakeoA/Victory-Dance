@@ -128,7 +128,6 @@ class AttnBCPolicy(nn.Module):
         heads: Sequence[str] = DEFAULT_HEADS,
         gimmick_heads: Optional[Sequence[str]] = None,
         value_readout: str = "mean",
-        n_value_atoms: int = 0,
         pair_cond: bool = False,
     ):
         super().__init__()
@@ -245,20 +244,12 @@ class AttnBCPolicy(nn.Module):
             self.value_attn = nn.MultiheadAttention(
                 d_model, n_heads, dropout=dropout, batch_first=True)
         self.value_head = nn.Linear(val_in, 1)
-        # C51 distributional value head (opt-in): a per-atom head over the value support,
-        # reading the SAME readout vector as the scalar value_head. n_value_atoms=0 (default)
-        # builds NO extra module -> existing checkpoints / the scalar critic stay byte-identical.
-        self.n_value_atoms = int(n_value_atoms)
-        self.value_atoms_head = (nn.Linear(val_in, self.n_value_atoms)
-                                 if self.n_value_atoms else None)
 
         self._init_weights()
 
     def _encode_single_turn(self, x: torch.Tensor):
-        """PER-TURN encoder body: (B, state_dim) | (state_dim,) -> (enc, present, g, single).
-
-        Factored out of ``forward`` so the C51 value-atoms head reuses the IDENTICAL
-        mon-encoder + self-attention + global stack without duplicating it."""
+        """PER-TURN encoder body: (B, state_dim) | (state_dim,) -> (enc, present, g, single) — the
+        mon-encoder + self-attention + global stack that ``forward`` reads every head from."""
         single = x.dim() == 1
         if single:
             x = x.unsqueeze(0)
@@ -374,25 +365,6 @@ class AttnBCPolicy(nn.Module):
             gimmicks = {k: v.squeeze(0) for k, v in gimmicks.items()}
             value = value.squeeze(0)
         return actions, gimmicks, value
-
-    def value_atoms_logits(self, x: torch.Tensor) -> torch.Tensor:
-        """C51 per-atom value logits — (B, n_value_atoms) | (n_value_atoms,). Uses the SAME
-        readout vector as the scalar value head. Raises if no atoms head was built."""
-        if self.value_atoms_head is None:
-            raise RuntimeError(
-                "value_atoms_logits: no atoms head (construct with n_value_atoms>0)")
-        enc, present, g, single = self._encode_single_turn(x)
-        feat = self._value_feature(enc, present, g)
-        logits = self.value_atoms_head(feat)                                   # (B, n_atoms)
-        return logits.squeeze(0) if single else logits
-
-    def add_value_atoms_head(self, n_atoms: int) -> None:
-        """Attach a C51 per-atom value head AFTER construction (e.g. onto a deep-copy of a scalar BC
-        policy when building a distributional critic). Sized to the scalar value head's input so it
-        reads the SAME value readout. Cold-initialised — the caller warm-starts it
-        (init_value_atoms_from_scalar) and the critic warm-up sharpens it."""
-        self.n_value_atoms = int(n_atoms)
-        self.value_atoms_head = nn.Linear(self.value_head.in_features, int(n_atoms))
 
     def _value_feature(
         self, enc: torch.Tensor, present: torch.Tensor, g: torch.Tensor

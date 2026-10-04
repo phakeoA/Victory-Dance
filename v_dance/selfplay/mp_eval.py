@@ -201,20 +201,23 @@ def _build_eval_players_real(candidate, prev_best, team_chooser, spec: EvalSpec,
                                             opp_ref=(prev_best if spec.kind == "prev_best" else None))
     rdir = str(Path(live_dir) / subdir) if (live_dir and save_replays) else None
     cand_tc = candidate_overrides(getattr(spec, "cand_tp", None) or team_chooser)
+    # 2026-10-04: trace=False — eval players write no per-turn trace (nothing reads them; panel_eval's re-used
+    # names grew those files to 200-330 MB and slowed every later re-test call)
     model_player = R.make_player(model_name, model_team, model_path=candidate,
                                  team_chooser_path=cand_tc,
                                  live_dir=live_dir, save_replays=save_replays,
-                                 replay_dir=rdir, replay_label=label, port=port)
+                                 replay_dir=rdir, replay_label=label, port=port, trace=False)
     # 2026-10-03: a past self (prev_best / the champion mirror, or a run ckpt on the panel) plays with ITS co-trained
     # picker when it has one (picker-in-the-loop runs); every other opponent keeps the shared picker.
     from v_dance.selfplay.tp_learning import paired_tp_for
     if spec.opp_ckpt:
         opp = R.make_player(opp_name, opp_team, model_path=spec.opp_ckpt,
-                            team_chooser_path=(paired_tp_for(spec.opp_ckpt) or team_chooser), port=port)
+                            team_chooser_path=(paired_tp_for(spec.opp_ckpt) or team_chooser), port=port,
+                            trace=False)
     else:
         opp = _make_opponent(spec.kind, opp_name, opp_team, model_path=prev_best,
                              team_chooser_path=((paired_tp_for(prev_best) if prev_best else None) or team_chooser),
-                             port=port)
+                             port=port, trace=False)
     return model_player, opp
 
 

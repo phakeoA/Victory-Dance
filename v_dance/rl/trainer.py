@@ -180,17 +180,10 @@ class PPOTrainer:
                 old_v = torch.as_tensor(np.array([txns[i].value for i in mb], np.float32),
                                         device=self.device)
                 tgt = torch.as_tensor(ret[mb].astype(np.float32), device=self.device)
-                # C51: regress the distributional CE on the per-atom head; else the scalar value loss.
-                atoms_logits = None
-                if self.cfg.value_loss_mode == "c51":
-                    atoms_logits = self.ac.critic.value_atoms_logits(states)
-                    value_pm = (atoms_logits.softmax(dim=-1) * self.ac.critic.support).sum(dim=-1)
-                else:
-                    value_pm = self.ac.value_pm(states)                # critic only
+                value_pm = self.ac.value_pm(states)                    # critic only
                 # clip=False: the warm-up regresses on a FIXED cold-start anchor, so the
                 # value-clip would freeze V within ±value_clip of the BC value (3b.4 bug fix).
-                vloss = P.value_loss(value_pm, old_v, tgt, self.cfg, clip=False, atoms_logits=atoms_logits,
-                                     support=(self.ac.critic.support if atoms_logits is not None else None))
+                vloss = P.value_loss(value_pm, old_v, tgt, self.cfg, clip=False)
                 self.critic_opt.zero_grad()
                 vloss.backward()
                 clip_grad_norm_(self.ac.critic_parameters(), self.tcfg.max_grad_norm)

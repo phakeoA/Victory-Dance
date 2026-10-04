@@ -71,6 +71,10 @@ def load_into(path, *, actor_critic, trainer, device: str = "cpu"):
     and the frozen-BC reference already match). Returns ``(league, history, snap)`` rebuilt
     from the file."""
     snap = torch.load(path, map_location=device, weights_only=False)
+    if any(k.startswith("critic.net.value_atoms_head.") or k == "critic.support" for k in snap["ac_state"]):
+        raise ValueError(
+            f"resume snapshot {path} carries a C51 (distributional) critic — a REMOVED feature (cleanup pass 2 "
+            f"step 3, 2026-10-04). Start a new run from one of its checkpoints/genN.pt instead.")
     # 2026-10-02 layout v20: a v19 snapshot lifts in place (zero mega-preview columns in policy + critic
     # mon_enc.0 AND zero Adam moments for them) — the run continues with the identical policy.
     from v_dance.models import layout_upgrade as _LU
@@ -91,31 +95,6 @@ def load_into(path, *, actor_critic, trainer, device: str = "cpu"):
     league = OpponentLeague.from_obj(snap["league"])
     history = GenerationHistory.from_obj(snap["history"])
     return league, history, snap
-
-
-def peek_value_config(path) -> Optional[dict]:
-    """Read a resume snapshot's VALUE-HEAD config without mutating anything, so the resume path can
-    ALIGN the live config to the snapshot BEFORE building the actor-critic + optimisers. The C51 critic
-    head is launch-config-dependent and resume rebuilds the architecture from the SCALAR base anchor, so
-    without this a C51 resume would crash unless the operator re-passed --value-loss-mode. Returns
-    ``{value_loss_mode, n_atoms, v_min, v_max}`` (read from the saved critic head, falling back to the
-    persisted ppo_cfg), or ``None`` if unreadable."""
-    try:
-        snap = torch.load(path, map_location="cpu", weights_only=False)
-    except Exception:
-        return None
-    acs = snap.get("ac_state") or {}
-    ppo = snap.get("ppo_cfg") or {}
-    atoms_key = "critic.net.value_atoms_head.weight"
-    if atoms_key in acs:                                   # the snapshot carries a c51 critic head
-        n = int(acs[atoms_key].shape[0])
-        sup = acs.get("critic.support")
-        vmin = float(sup[0]) if sup is not None else float(ppo.get("v_min", -1.0))
-        vmax = float(sup[-1]) if sup is not None else float(ppo.get("v_max", 1.0))
-        return {"value_loss_mode": "c51", "n_atoms": n, "v_min": vmin, "v_max": vmax}
-    return {"value_loss_mode": ppo.get("value_loss_mode", "bce"),
-            "n_atoms": int(ppo.get("n_atoms", 51)),
-            "v_min": float(ppo.get("v_min", -1.0)), "v_max": float(ppo.get("v_max", 1.0))}
 
 
 # ── per-generation snapshots (task #20: resume from any generation) ────────────

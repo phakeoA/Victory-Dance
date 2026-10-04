@@ -370,9 +370,6 @@ def evaluate_actions(
             ac.policy, states, action_logits, sb, transitions, ac.head_names, order, device)
     lp, ent = _joint_logprob_entropy(action_logits, gimmick_logits, sb, tau)
     lp, ent = _apply_policy_mask(policy_mask, lp, ent)
-    # C51: collection records the distribution MEAN as value_pm (still in [-1,1]); scalar keeps win-prob.
-    if getattr(ac, "critic", None) is not None and ac.critic.is_c51:
-        return lp, ent, ac.critic.value_pm(states)
     return lp, ent, 2.0 * torch.sigmoid(value_logit) - 1.0
 
 
@@ -384,7 +381,6 @@ class PPOEval:
     value_pm: torch.Tensor     # (B,) critic value in [-1,1]
     kl_to_ref: Optional[torch.Tensor]  # (B,) KL(BC||new), or None if no reference given
     opp_ce: Optional[torch.Tensor] = None  # 0-dim aux opp-prediction CE, or None (no opp head / no target)
-    atoms_logits: Optional[torch.Tensor] = None  # (B, n_atoms) C51 per-atom value logits, or None (scalar critic)
     pair_flips: Optional[float] = None  # W3b-1b pair mode: fraction of two-pick rows whose recomputed
                                         # decode order differs from the recorded one (parity diagnostic)
 
@@ -405,16 +401,7 @@ def ppo_forward(
         z = torch.zeros(0, device=device)
         return PPOEval(z, z, z, None if ref_policy is None else z)
     states = _states_tensor(transitions, device)
-    # C51: a full ac(states) runs the critic trunk to produce a SCALAR value_logit that the C51 branch
-    # below DISCARDS, then value_atoms_logits(states) runs that same trunk AGAIN — two critic passes for one
-    # value. Run the ACTOR alone for the policy heads (action_logits are IDENTICAL — ac.forward delegates
-    # them to self.policy) and the critic ONCE for the atoms. The scalar path keeps the single ac() call, so
-    # it is byte-identical (audit 2026-06-30 — perf, C51-only).
-    is_c51 = getattr(ac, "critic", None) is not None and ac.critic.is_c51
-    if is_c51:
-        action_logits, gimmick_logits, _ = ac.policy(states)   # actor only; the critic runs once below
-    else:
-        action_logits, gimmick_logits, value_logit = ac(states)
+    action_logits, gimmick_logits, value_logit = ac(states)
     A = next(iter(action_logits.values())).shape[-1]
     G = next(iter(gimmick_logits.values())).shape[-1] if gimmick_logits else 0
     sb = _slot_batches(transitions, ac.head_names, ac.gimmick_head_names, A, G, device)
@@ -427,14 +414,7 @@ def ppo_forward(
         action_logits, first, partner, flips = _pair_setup(
             ac.policy, states, action_logits, sb, transitions, ac.head_names, order, device)
     lp, ent = _joint_logprob_entropy(action_logits, gimmick_logits, sb, tau)
-    # C51: the value baseline is the distribution MEAN and the loss needs the raw per-atom logits;
-    # the scalar critic keeps the win-prob path. value_pm stays in [-1,1] either way.
-    atoms_logits = None
-    if is_c51:
-        atoms_logits = ac.critic.value_atoms_logits(states)
-        value_pm = (atoms_logits.softmax(dim=-1) * ac.critic.support).sum(dim=-1)
-    else:
-        value_pm = 2.0 * torch.sigmoid(value_logit) - 1.0
+    value_pm = 2.0 * torch.sigmoid(value_logit) - 1.0
 
     kl = None
     if ref_policy is not None:
@@ -444,8 +424,7 @@ def ppo_forward(
         kl = _joint_kl(action_logits, gimmick_logits, ref_a, ref_g, sb, tau, gimmick_kl_weight)
     lp, ent, kl = _apply_policy_mask(policy_mask, lp, ent, kl)
     opp_ce, _ = opp_aux_ce(zero_logits, transitions, ac.head_names, device)
-    return PPOEval(lp, ent, value_pm, kl, opp_ce=opp_ce, atoms_logits=atoms_logits,
-                   pair_flips=flips)
+    return PPOEval(lp, ent, value_pm, kl, opp_ce=opp_ce, pair_flips=flips)
 
 
 # ── data-integrity guard (mirrors corpus_qa's "illegal under mask") ───────────

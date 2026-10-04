@@ -616,8 +616,6 @@ def build_train_configs(*, kl_coef: Optional[float] = None, target_kl_bc: Option
     if target_kl_max is not None:
         train_kw["target_kl_max"] = target_kl_max
     ppo_cfg = PPOConfig(**ppo_kw)
-    if ppo_cfg.value_loss_mode == "c51" and int(ppo_cfg.n_atoms) < 2:   # C51 sanity (wired end-to-end in B2/B3)
-        raise SystemExit(f"value_loss_mode='c51' needs n_atoms >= 2 (got {ppo_cfg.n_atoms}).")
     return ppo_cfg, TrainConfig(**train_kw)
 
 
@@ -851,10 +849,7 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
     # resume snapshot's trained state if present (sec 17 — ref/arch re-derived, not stored).
     # 3c.8b: the actor-critic + optimisers live on `device` (cuda => GPU PPO update); collection
     # uses a CPU inference-copy (see collect_fn). Resume maps the snapshot onto `device` too.
-    # Resolve the resume snapshot FIRST so a C51 run's value config can be ALIGNED to the snapshot
-    # BEFORE the actor-critic + optimisers are built (the c51 critic head + the critic_opt param groups
-    # must match the snapshot, or load_into's strict load fails — resume rebuilds arch from the SCALAR
-    # base anchor, so a c51 resume must not depend on the operator re-passing --value-loss-mode).
+    # Resolve the resume snapshot FIRST: a bad --resume-gen fails before the actor-critic is built.
     try:
         _resume_path = RS.resolve_resume(archive, resume_gen=resume_gen, explicit_path=resume_from)
     except (ValueError, TypeError):
@@ -865,23 +860,8 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
         print(f"[resume] snapshot not found: {_resume_path}  (available generations: "
               f"{avail if avail else 'none'})", file=sys.stderr)
         sys.exit(2)
-    if _resume_path is not None:                            # align the value-head config to the snapshot
-        _vc = RS.peek_value_config(_resume_path)
-        if _vc and _vc["value_loss_mode"] == "c51" and ppo_cfg.value_loss_mode != "c51":
-            print(f"[resume] snapshot is C51 (n_atoms={_vc['n_atoms']}) — aligning value config "
-                  f"(was {ppo_cfg.value_loss_mode!r}).")
-            ppo_cfg.value_loss_mode = "c51"
-            ppo_cfg.n_atoms, ppo_cfg.v_min, ppo_cfg.v_max = _vc["n_atoms"], _vc["v_min"], _vc["v_max"]
-        elif _vc and _vc["value_loss_mode"] != "c51" and ppo_cfg.value_loss_mode == "c51":
-            print("[resume] snapshot is a SCALAR critic — aligning value config to 'bce'.", file=sys.stderr)
-            ppo_cfg.value_loss_mode = "bce"
 
-    # C51: build a DISTRIBUTIONAL critic from the (scalar) BC anchor when value_loss_mode='c51' (now
-    # aligned to the snapshot above on resume); else the scalar critic. mp / collapse-revert cold loads
-    # auto-detect a saved c51 critic via from_bc_checkpoint.
-    _c51_atoms = ppo_cfg.n_atoms if ppo_cfg.value_loss_mode == "c51" else 0
-    ac = ActorCritic.from_bc_checkpoint(ckpt, device=device, n_value_atoms=_c51_atoms,
-                                        v_min=ppo_cfg.v_min, v_max=ppo_cfg.v_max)
+    ac = ActorCritic.from_bc_checkpoint(ckpt, device=device)
     trainer = PPOTrainer(ac, ppo_cfg, train_cfg, seed=seed, device=device)
     # Base KL-to-BC early-halt threshold (the relax schedule rises from this each gen; sec 12).
     _base_target_kl = trainer.tcfg.target_kl_from_bc
@@ -1514,8 +1494,6 @@ def _launch_live_core(args):
     _ppo_ov = dict(getattr(args, "run_cfg_ppo", None) or {})    # CLI > --config ppo section
     if args.value_loss_mode is not None:
         _ppo_ov["value_loss_mode"] = args.value_loss_mode
-    if args.value_atoms is not None:
-        _ppo_ov["n_atoms"] = int(args.value_atoms)
     ppo_cfg, train_cfg = build_train_configs(
         kl_coef=args.kl_coef, target_kl_bc=args.target_kl_bc,
         tau=args.tau_start, min_ev=args.min_ev,
@@ -1968,12 +1946,9 @@ if __name__ == "__main__":
                     help="Level-A aux opponent-prediction CE weight (>0 shapes the trunk to be "
                          "opponent-predictive; needs an --aux-opp-head anchor). Default None = "
                          "use the --config value, else PPOConfig's 0.0 (off).")
-    ap.add_argument("--value-loss-mode", default=None, choices=["bce", "huber", "c51"],
-                    help="critic value loss: 'bce' (win-prob, default) | 'huber' | 'c51' (distributional "
-                         "value head, the Phase-2 A/B). Default None = use the --config ppo value, else 'bce'.")
-    ap.add_argument("--value-atoms", type=int, default=None,
-                    help="C51 number of value atoms over [-1,1] (value-loss-mode=c51). Default None = "
-                         "use the --config value, else PPOConfig's 51.")
+    ap.add_argument("--value-loss-mode", default=None, choices=["bce", "huber"],
+                    help="critic value loss: 'bce' (win-prob, default) | 'huber'. Default None = use the "
+                         "--config ppo value, else 'bce'.")
     ap.add_argument("--target-kl-bc", type=float, default=None,
                     help="early-halt a generation if mean KL(BC||new) exceeds this "
                          "(warm-start-collapse guard); <=0 disables. Default unset -> --config train "
