@@ -147,7 +147,7 @@ The agent's skill is **behavior cloning (BC)** sharpened by **offline advantage 
 - **Behavior cloning** is the backbone: ~1.4M human decisions as `(state → the action the human took)`, trained to maximize the log-probability of that action under per-slot legality masks, jointly with the value head (did this player go on to win?) and the auxiliary heads. BC gives a strong, human-like prior for free, and it is the honest ceiling of the data: val top-1 saturated at ~0.61 because the available ladder replays average ~1600 Elo, not because the model ran out of capacity.
 - **Advantage weighting** is the only reward-driven step: the ±1 win/loss outcome, compared to the value head's prediction, up-weights the decisions that beat expectation and down-weights the ones that didn't. It's a light, offline form of RL that never leaves the demonstration data — the property that makes it safe (a hand-built forward-model *search* was tried and dropped precisely because evaluating the value head on synthetic states it never trained on pulled the policy off-manifold).
 
-**Online reinforcement learning is not part of the shipped agent.** A full PPO/self-play stack with a principled reward (sparse ±1 terminal, γ=0.997 discounting for speed-without-a-stall-penalty, a KL-to-BC anchor, and gated potential-based shaping off the win-prob value head) exists in `selfplay/`, but at this corpus scale it plateaued at the BC anchor's strength, so the deployed model does not use it. The strength levers that actually shipped are **data, offline advantage weighting, the contrastive set-preview head, and serve-time adaptation**.
+**Online reinforcement learning is not part of the shipped agent.** A full PPO/self-play stack with a principled reward (sparse ±1 terminal, γ=0.997 discounting for speed-without-a-stall-penalty, and a KL-to-BC anchor) exists in `selfplay/`, but at this corpus scale it plateaued at the BC anchor's strength, so the deployed model does not use it. The strength levers that actually shipped are **data, offline advantage weighting, the contrastive set-preview head, and serve-time adaptation**.
 
 ### The exploiter — the agent's robustness meter
 
@@ -176,7 +176,6 @@ Static policies get exploited — our own benchmark proved it (the creator found
 
 - **Serve-time pattern tilt** (`play/adapt_rules.py`): when the opponent shows a high-confidence repeated pattern (e.g. Wide Guard multiple turns running), a small logit bias tilts the policy toward single-target play. A tilt, not an override — the model still chooses, and an overwhelming preference survives.
 - **Per-opponent dossiers** (`play/opponent_dossier.py`): every finished game updates a JSON dossier per opponent — revealed sets, items, abilities, W-L history — and can **warm-start the belief** in later games (`apply_dossier`, flag-gated): unknown items/abilities/moves fill from what that opponent showed before, with in-battle evidence always winning.
-- **Between-game team routing** (`play/team_router.py`): against a known opponent we just lost to, pick the pool team with the best prior against their revealed archetype — priors seeded from a 172k-sample archetype-vs-archetype win matrix computed over the corpus, never hand-waved.
 - **Best-of-3 set state** (`play/bo3_state.py`): games of a Bo3 are linked (protocol-verified on the pinned server); brings, leads, and the opponent's shown Pokémon carry across games into the team-preview net's set-context input.
 
 How well the whole stack resists a *learning* opponent is quantified by the **exploiter** described in the training section — the worst-case robustness meter, run per era against a frozen copy of the deployed net.
@@ -233,7 +232,7 @@ Victory-Dance/
 │   ├── encoders/           # snapshot -> 5057-dim state (layout v19); white-box forward model
 │   ├── models/             # AttnBCPolicy set-attention battle net + SBDA team-preview net
 │   ├── training/           # BC trainer, streaming memmap cache, advantage weights, z-archetypes
-│   ├── rl/                 # PPO core: schema, collector, store, reward, GAE, PBRS, actor-critic, trainer
+│   ├── rl/                 # PPO core: schema, collector, store, reward, GAE, actor-critic, trainer
 │   ├── selfplay/           # A/B game runner, league/gate machinery, multiprocess collection, exploiter
 │   ├── ladder/             # learning from the ladder (W3b): recorder, update, the chain CLI
 │   ├── play/               # the serve core: model_io, player, vgc_base, adapt_rules, dossiers, bandit
@@ -321,7 +320,7 @@ python -m v_dance.online.bot --dry-run
 python -m v_dance.online.bot --adapt-rules --bench-note online_v1
 ```
 
-Once it's live, a **control panel** comes up (its own local page, and mirrored into Mission Control's *Online bot* tab — which is also where you set the format + launch config and start the bot in the first place, with `--adapt-rules` and `--dossier` on by default) where you drive matchmaking without touching the browser: start a **ladder run of N rated games** (it re-queues after each finished game until the target is hit), toggle **auto-accept** for incoming challenges, send **private challenges** by username, pin the AI's team, and watch the live rating / W–L tally / activity feed. `--dossier` warm-starts the belief against opponents you've faced before; `VD_ROUTE_TEAMS=1` lets the bot pick its best-matchup pool team against a known opponent on challenge-accepts.
+Once it's live, a **control panel** comes up (its own local page, and mirrored into Mission Control's *Online bot* tab — which is also where you set the format + launch config and start the bot in the first place, with `--adapt-rules` and `--dossier` on by default) where you drive matchmaking without touching the browser: start a **ladder run of N rated games** (it re-queues after each finished game until the target is hit), toggle **auto-accept** for incoming challenges, send **private challenges** by username, pin the AI's team, and watch the live rating / W–L tally / activity feed. `--dossier` warm-starts the belief against opponents you've faced before.
 
 **Training & evaluation** (the research side):
 

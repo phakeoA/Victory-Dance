@@ -48,10 +48,6 @@ def main(argv=None) -> int:
                     help="after the split, score ONLY val examples whose replay_id contains SUBSTR (e.g. 'regmc'). "
                          "Pass --val-data = the TRAINER's exact --data list so the split is the trainer's; the filter "
                          "then isolates replays NO compared ckpt trained on (2026-10-01, the M-C TP retrain gate).")
-    ap.add_argument("--joint-ab", action="store_true",
-                    help="decode-level A/B on the FIRST ckpt: serve-faithful greedy top-k vs the "
-                         "joint conditional subset re-decode (model_io._joint_bring_order). The "
-                         "adoption gate for TP_JOINT_BRING.")
     ap.add_argument("--set-ab", action="store_true",
                     help="decode-level A/B per ckpt: serve-faithful greedy vs the contrastive "
                          "set-head decode (model_io._set_head_order). Non-set ckpts report "
@@ -130,9 +126,6 @@ def main(argv=None) -> int:
     print(f"  (bring n={base['bring_n']}, lead n={base['lead_n']} — shared val split, seed {args.seed})")
     print("═" * 72)
 
-    if args.joint_ab:
-        for p in args.ckpt:                       # per-ckpt decode A/B (v6 vs an aug retrain in one run)
-            _decode_ab(p, val_ex, belief, feat_dim, args)
     if args.set_ab:
         for p in args.ckpt:                       # v6 greedy + set-ckpt greedy/set on the SAME rows
             _set_ab(p, val_ex, belief, feat_dim, args)
@@ -157,7 +150,7 @@ def _examples_for_ckpt(cfg: dict, val_ex, feat_dim: int):
 
 def _set_ab(ckpt_path: str, val_ex, belief, feat_dim: int, args) -> None:
     """Serve-faithful decode A/B for the contrastive set head: greedy per-mon top-k vs the
-    set-head subset decode on ONE checkpoint, on the SAME filtered rows as ``_decode_ab`` —
+    set-head subset decode on ONE checkpoint, on the SAME filtered rows for every ckpt —
     so numbers are comparable across every ckpt in the run (a non-set ckpt, e.g. v6, prints
     greedy only and supplies the cross-ckpt baseline). Gate (design §6): set ≥ same-ckpt
     greedy AND ≥ the base ckpt's greedy on bring-set exact, no lead-pair regression."""
@@ -238,79 +231,6 @@ def _set_ab(ckpt_path: str, val_ex, belief, feat_dim: int, args) -> None:
     if has_set:
         print("  GATE: set adopted iff bring-set exact ≥ same-ckpt greedy AND ≥ the base "
               "ckpt's greedy, without a lead-pair regression.")
-    print("═" * 72)
-
-
-def _decode_ab(ckpt_path: str, val_ex, belief, feat_dim: int, args) -> None:
-    """Serve-faithful decode A/B on ONE checkpoint: greedy per-mon top-k (the current
-    ``team_order`` decode) vs the joint conditional subset re-decode. Both sides constrain the
-    leads WITHIN the chosen bring (exactly what serve emits), so the numbers here are the real
-    serve-behavior delta — run_epoch's table above scores raw logits and is NOT comparable.
-    Rows with a non-standard label shape (≠4 brought / ≠2 leads / invalid masks) are skipped."""
-    from v_dance.play.model_io import _joint_bring_order, load_team_chooser
-    from v_dance.training.teampreview_dataset import TeamPreviewDataset, BRING_K, LEAD_K
-    from v_dance.training.tp_features import teammate_affinity_matrix
-    from torch.utils.data import DataLoader as _DL
-
-    model, vocab, cfg = load_team_chooser(ckpt_path, device=args.device)
-    affinity_fn = None
-    if cfg.get("use_teammate_bias"):
-        from v_dance.training.teampreview_dataset import TEAM_SIZE
-        affinity_fn = lambda sp: teammate_affinity_matrix(sp, belief, n=TEAM_SIZE)  # noqa: E731
-    val_ex, feat_dim = _examples_for_ckpt(cfg, val_ex, feat_dim)
-    loader = _DL(TeamPreviewDataset(val_ex, vocab, feat_dim=feat_dim, affinity_fn=affinity_fn),
-                 batch_size=args.batch_size, shuffle=False)
-
-    stats = {"greedy": [0, 0.0, 0], "joint": [0, 0.0, 0]}   # [bring_exact, bring_overlap, lead_exact]
-    n_rows = n_skipped = 0
-    t0 = time.time()
-    with torch.no_grad():
-        for batch in loader:
-            bl_g, ll_g = model(batch["our_idx"].to(args.device), batch["opp_idx"].to(args.device),
-                               batch["our_feat"].to(args.device), batch["opp_feat"].to(args.device),
-                               batch.get("our_affinity").to(args.device)
-                               if batch.get("our_affinity") is not None else None)
-            bl_g, ll_g = np.asarray(bl_g.cpu()), np.asarray(ll_g.cpu())
-            for r in range(bl_g.shape[0]):
-                bring_lab = set(np.flatnonzero(np.asarray(batch["bring"][r]) > 0.5).tolist())
-                lead_lab = set(np.flatnonzero(np.asarray(batch["lead"][r]) > 0.5).tolist())
-                of_r = np.asarray(batch["our_feat"][r])
-                valid_n = int((np.abs(of_r).sum(axis=-1) > 0).sum())
-                if (len(bring_lab) != BRING_K or len(lead_lab) != LEAD_K
-                        or float(batch["valid_bring"][r]) < 0.5
-                        or float(batch["valid_lead"][r]) < 0.5 or valid_n < 5):
-                    n_skipped += 1
-                    continue
-                # greedy-serve: top-k marginal bring, leads = top lead logits WITHIN the bring
-                by_bring = sorted(range(valid_n), key=lambda i: -bl_g[r, i])
-                g_bring = by_bring[:BRING_K]
-                g_leads = sorted(g_bring, key=lambda i: -ll_g[r, i])[:LEAD_K]
-                # joint-serve: the shared serve helper (single source of truth with team_order)
-                aff_r = (batch["our_affinity"][r][None].to(args.device)
-                         if batch.get("our_affinity") is not None else None)
-                order, ok = _joint_bring_order(
-                    model, np.asarray(batch["our_idx"][r]), of_r,
-                    np.asarray(batch["opp_idx"][r]), np.asarray(batch["opp_feat"][r]),
-                    aff_r, valid_n, BRING_K, LEAD_K, BRING_K, args.device)
-                if not ok:
-                    n_skipped += 1
-                    continue
-                j_bring, j_leads = order[:BRING_K], order[:LEAD_K]
-                for key, bset, lset in (("greedy", set(g_bring), set(g_leads)),
-                                        ("joint", set(j_bring), set(j_leads))):
-                    stats[key][0] += int(bset == bring_lab)
-                    stats[key][1] += len(bset & bring_lab) / BRING_K
-                    stats[key][2] += int(lset == lead_lab)
-                n_rows += 1
-    print(f"\n  ── decode A/B (serve-faithful) on {ckpt_path} — {n_rows} rows "
-          f"({n_skipped} skipped, {time.time()-t0:.1f}s) ──")
-    g, j = stats["greedy"], stats["joint"]
-    nz = max(n_rows, 1)
-    for label, gi, ji in (("bring-set exact", g[0] / nz, j[0] / nz),
-                          ("bring overlap", g[1] / nz, j[1] / nz),
-                          ("lead-pair exact", g[2] / nz, j[2] / nz)):
-        print(f"  {label:<16} greedy {gi:7.4f}   joint {ji:7.4f}   ({ji - gi:+.4f})")
-    print("  GATE: joint adopted iff bring-set exact improves without a lead-pair regression.")
     print("═" * 72)
 
 

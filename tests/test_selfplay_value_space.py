@@ -56,7 +56,6 @@ def test_assert_gae_value_space_sparse_bound():
     big_val = np.array([0.9, 0.9]); big_ret = adv + big_val  # ret[0] = 1.4 > 1
     with pytest.raises(AssertionError, match="GAE returns"):
         vs.assert_gae_value_space(adv, big_ret, big_val)
-    vs.assert_gae_value_space(adv, big_ret, big_val, allow_shaping=True)  # PBRS skips bound
 
 
 # ── win-prob distribution heuristic ───────────────────────────────────────────

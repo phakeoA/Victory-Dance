@@ -333,11 +333,11 @@ def mega_defender_profile(d: Optional[dict], view: Optional[dict], field_weather
 
 def mega_att_ctx(ac: Optional[dict], view: Optional[dict], field_weather=None) -> Optional[dict]:
     """The attacker context (both encoders' ``att_ctx``) for this mon AS its mega forme: stats += Δbase, speed
-    recomputed, grounding re-derived, the forme's aura on the field, and every held-item effect dropped (Life
-    Orb / Choice / Expert Belt / type-boost / Scope Lens / Loaded Dice / Wide Lens — it holds its stone)."""
+    recomputed, the forme's aura on the field, and every held-item effect dropped (Life Orb / Choice / Expert
+    Belt / type-boost / Scope Lens / Loaded Dice / Wide Lens — it holds its stone)."""
     if ac is None or view is None:
         return None
-    from v_dance.encoders.battle_mechanics import _is_grounded, field_auras
+    from v_dance.encoders.battle_mechanics import field_auras
     c = dict(ac)
     ab = view["ability"] or ((ac.get("ground_args") or (None,) * 4)[3])
     dl = view["delta"]
@@ -354,9 +354,6 @@ def mega_att_ctx(ac: Optional[dict], view: Optional[dict], field_weather=None) -
         c["weight"] = view["weight"]
     c.update(life_orb=False, choice=False, expert_belt=False, type_boost=None, scope_lens=False,
              loaded_dice=False, wide_lens=False)
-    ga = ac.get("ground_args")
-    if ga is not None:
-        c["grounded"] = _is_grounded(list(view["types"]), ab, "", ga[1], ga[2])
     if ab in _AURA_ABILITIES:
         c["auras"] = field_auras(set(ac.get("auras") or ()) | {ab})
     if ab == "victorystar":

@@ -170,17 +170,13 @@ async def _eval_specs(candidate, prev_best, team_chooser, specs: List[EvalSpec],
 
 
 def candidate_overrides(team_chooser):
-    """2026-10-03 diagnostic knobs for the CANDIDATE side only (``panel_eval --candidate-tp / --candidate-rules``
-    set them as env vars, so every spawned worker sees them; unset = byte-identical). ``VD_EVAL_CANDIDATE_TP``:
-    ``none`` = no team picker → the first-4 roster heuristic (what the self-play LEARNER uses: both collection
-    paths build it without a team chooser), a path = that picker. ``VD_EVAL_CANDIDATE_RULES``: comma-separated
-    matchup rules (v_dance/play/matchup_rules.py) — they act through the team picker, so they need one.
-    Returns ``(team_chooser_path, rules_tuple)``."""
+    """2026-10-03 diagnostic knob for the CANDIDATE side only (``panel_eval --candidate-tp`` sets it as an env
+    var, so every spawned worker sees it; unset = byte-identical). ``VD_EVAL_CANDIDATE_TP``: ``none`` = no team
+    picker → the first-4 roster heuristic (what the self-play LEARNER uses: both collection paths build it
+    without a team chooser), a path = that picker. Returns the candidate's team-chooser path."""
     import os as _os
     tp = (_os.environ.get("VD_EVAL_CANDIDATE_TP") or "").strip()
-    tc = team_chooser if not tp else (None if tp.lower() == "none" else tp)
-    rules = tuple(r.strip() for r in (_os.environ.get("VD_EVAL_CANDIDATE_RULES") or "").split(",") if r.strip())
-    return tc, rules
+    return team_chooser if not tp else (None if tp.lower() == "none" else tp)
 
 
 def _build_eval_players_real(candidate, prev_best, team_chooser, spec: EvalSpec,
@@ -204,13 +200,11 @@ def _build_eval_players_real(candidate, prev_best, team_chooser, spec: EvalSpec,
         subdir, label = eval_replay_routing(spec.kind, _ckpt_gen(candidate),
                                             opp_ref=(prev_best if spec.kind == "prev_best" else None))
     rdir = str(Path(live_dir) / subdir) if (live_dir and save_replays) else None
-    cand_tc, cand_rules = candidate_overrides(getattr(spec, "cand_tp", None) or team_chooser)
+    cand_tc = candidate_overrides(getattr(spec, "cand_tp", None) or team_chooser)
     model_player = R.make_player(model_name, model_team, model_path=candidate,
                                  team_chooser_path=cand_tc,
                                  live_dir=live_dir, save_replays=save_replays,
                                  replay_dir=rdir, replay_label=label, port=port)
-    if cand_rules:
-        model_player._matchup_rules = cand_rules
     # 2026-10-03: a past self (prev_best / the champion mirror, or a run ckpt on the panel) plays with ITS co-trained
     # picker when it has one (picker-in-the-loop runs); every other opponent keeps the shared picker.
     from v_dance.selfplay.tp_learning import paired_tp_for

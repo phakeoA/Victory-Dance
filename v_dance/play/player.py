@@ -459,25 +459,6 @@ class VGCPlayer(VGCPlayerBase):
                 _MH.apply(self, battle, glog, out, (a0, a1), none=GIMMICK_NONE, mega=GIMMICK_MEGA,
                           switch_offset=SWITCH_OFFSET, tau=float(self._temperature),
                           build_mask=build_gimmick_legal_mask)
-            # 2026-10-01 matchup rule (set at team preview for this battle): the rule's mon megas whenever it moves
-            # and can; every other slot's mega is held until it has mega'd or fainted.
-            _rule = (getattr(self, "_rule_battles", None) or {}).get(getattr(battle, "battle_tag", None))
-            if _rule:
-                from v_dance.play.matchup_rules import mega_override
-                _act = list(getattr(battle, "active_pokemon", None) or [])[:2]
-                _act += [None] * (2 - len(_act))
-                _alive = [m.species for m in (getattr(battle, "team", None) or {}).values()
-                          if not getattr(m, "fainted", False)]
-                _can = []
-                for slot in (0, 1):
-                    _gm = build_gimmick_legal_mask(battle, slot)
-                    _can.append(bool(_gm is not None and len(_gm) > GIMMICK_MEGA and _gm[GIMMICK_MEGA]))
-                new = mega_override(_rule, _alive, [getattr(m, "species", None) if m else None for m in _act],
-                                    [a is not None and a < SWITCH_OFFSET for a in (a0, a1)], _can, out,
-                                    mega=GIMMICK_MEGA, none=GIMMICK_NONE)
-                if new != out:
-                    _TF.note(self, battle, f"MATCHUP RULE {_rule['name']}: mega picks {out} -> {new}")
-                    out = new
             # 2026-10-02 (mega-fix review): a mega the item-aware FINAL gate (_live_can_mega) will refuse never
             # enters the dedup below — so a stoneless mega-CAPABLE partner (Meowstic / Tatsugiri are now detected;
             # any capable species holding another item) cannot take the turn's one mega from the stone holder.
@@ -661,11 +642,6 @@ class VGCPlayer(VGCPlayerBase):
                         "item": getattr(m, "item", None),
                         "moves": list(getattr(m, "moves", {}) or {}),
                     }
-            # 2026-10-01 matchup rules (per bandit arm; v_dance/play/matchup_rules.py): a rule that holds for this
-            # preview REQUIRES its mon in the bring set (the net still picks the other three + the leads) and holds
-            # the battle's mega for it (``_select_gimmicks``).
-            from v_dance.play.matchup_rules import active_rule
-            _rule = active_rule(getattr(self, "_matchup_rules", ()), our_species, opp_species)
             order = _M.team_order(
                 self._team_chooser, self._tc_vocab, self._tc_cfg,
                 our_species, opp_species, n, self._device, belief=belief,
@@ -673,20 +649,12 @@ class VGCPlayer(VGCPlayerBase):
                 own_build=own_build,
                 our_set_ctx=_ctx[0] if _ctx else None,
                 opp_set_ctx=_ctx[1] if _ctx else None,
-                require=([_rule["bring_index"]] if _rule else ()),
-                require_lead=([_rule["bring_index"]] if _rule and _rule.get("lead") else ()),
                 # 2026-10-03 (picker in the self-play loop): the self-play learner samples + records its pick
                 explore=getattr(self, "_tp_explore", None),
             )
             _tp_rec = (dict(_M.LAST_TP_EXPLORE)
                        if getattr(self, "_tp_explore", None) and _M.LAST_TP_EXPLORE else None)
-            if _rule:
-                self.__dict__.setdefault("_rule_battles", {})[battle.battle_tag] = _rule
-                log.info("Team-preview [%s] MATCHUP RULE %s: bring + mega %s", battle.battle_tag,
-                         _rule["name"], _rule["bring"])
-                _TF.note(self, battle, f"MATCHUP RULE {_rule['name']}: {_rule['bring']} is brought and holds the "
-                                       f"mega ({_rule['why']})")
-            valid = [i for i in order if 0 <= i < len(team)]
+            valid =[i for i in order if 0 <= i < len(team)]
             if valid and len(set(valid)) == len(valid):
                 # pad with unchosen roster slots if the model returned < n
                 used = set(valid)

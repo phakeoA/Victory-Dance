@@ -202,13 +202,13 @@ def tp_text(our: Sequence[str], opp: Sequence[str], picks: Sequence[int], lead_k
     picks = list(picks)
     lines.append(f"{source}: bring {names(picks)} — leads {names(picks[:lead_k])}")
     path = (stash or {}).get("path")
-    if path in ("set_head", "joint") and stash.get("subsets") and stash.get("scores"):
+    if path == "set_head" and stash.get("subsets") and stash.get("scores"):
         subsets, scores = stash["subsets"], [float(x) for x in stash["scores"]]
         order = sorted(range(len(scores)), key=lambda i: -scores[i])
         best = order[0]
         chosen = stash.get("set") or []
         ci = next((i for i, s in enumerate(subsets) if sorted(s) == sorted(chosen)), best)
-        line = f"{'set head' if path == 'set_head' else 'joint decode'}: {names(sorted(chosen))} {scores[ci]:.2f}"
+        line = f"set head: {names(sorted(chosen))} {scores[ci]:.2f}"
         line += " (best)" if ci == best else f" (best was {names(sorted(subsets[best]))} {scores[best]:.2f})"
         runner = next((i for i in order if i != ci), None)
         if runner is not None:

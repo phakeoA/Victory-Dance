@@ -90,9 +90,6 @@ class Arm:
     # era2 (the live control in the same band). Shares summing to 1 leave Thompson nothing; above 1 they are
     # scaled. Fixed-share arms are retire-EXEMPT (a human benches an instrument, the rule never does).
     share: Optional[float] = None
-    # 2026-10-01 (USER): named matchup rules (``v_dance/play/matchup_rules.RULES``) this arm plays with — e.g.
-    # ["rillaboom_salamence"]. Opt-in per arm so the ladder A/Bs a rule against the same checkpoint without it.
-    matchup_rules: tuple = ()
 
     def adapt_rules_for(self, launch_default: bool) -> bool:
         if self.adapt_rules is not None:
@@ -145,16 +142,15 @@ def load_arms(path: Path, *, exists=None) -> List[Arm]:
                 adapt_rules=(None if raw.get("adapt_rules") is None else bool(raw["adapt_rules"])),
                 learning=bool(raw.get("learning", False)),
                 prior_from=(str(raw["prior_from"]) if raw.get("prior_from") else None),
-                share=(None if raw.get("share") is None else float(raw["share"])),
-                matchup_rules=tuple(str(x) for x in (raw.get("matchup_rules") or ())))
+                share=(None if raw.get("share") is None else float(raw["share"])))
         missing = [w for w, v in (("battle", a.battle_ckpt), ("tp", a.tp_ckpt))
                    if not a.uses_default(w) and not (w == "tp" and a.uses_no_tp()) and not exists(_resolve(v))]
         if missing:
             print(f"[bandit] arm {a.name!r} DROPPED — missing {missing} checkpoint file(s)")
             continue
-        if a.uses_no_tp() and a.matchup_rules:
-            print(f"[bandit] arm {a.name!r}: tp_ckpt 'none' — its matchup rules {list(a.matchup_rules)} never "
-                  f"fire (rules act through the team picker)")
+        if raw.get("matchup_rules"):                  # the hand-written matchup rules were removed 2026-10-04
+            print(f"[bandit] arm {a.name!r}: 'matchup_rules' {list(raw['matchup_rules'])} IGNORED — the rule code "
+                  f"was removed (2026-10-04); the arm plays without it")
         arms.append(a)
     if arms and not any(a.incumbent for a in arms):
         arms[0].incumbent = True
@@ -206,17 +202,16 @@ def load_bundle(arm: Arm, cache: dict, *, default_battle, default_tp, device: st
             "cfg": cfg, "tau": float(arm.tau), "top_p": float(arm.top_p),
             "tp_tie_eps": arm.tp_tie_eps,
             "adapt_rules": arm.adapt_rules_for(adapt_rules_default),
-            "matchup_rules": tuple(arm.matchup_rules or ()),
             "rng": (np.random.default_rng(seed) if arm.tau > 0.0 else None)}
 
 
 _PLAYER_FIELDS = ("_model", "_model_heads", "_team_chooser", "_tc_vocab", "_tc_cfg",
-                  "_temperature", "_top_p", "_rng", "_arm_name", "_adapt_rules", "_matchup_rules")
+                  "_temperature", "_top_p", "_rng", "_arm_name", "_adapt_rules")
 
 
 def _bundle_values(b: dict) -> tuple:
     return (b["model"], b["heads"], b["chooser"], b["vocab"], b["cfg"], b["tau"], b["top_p"],
-            b["rng"], b["name"], bool(b.get("adapt_rules", False)), tuple(b.get("matchup_rules") or ()))
+            b["rng"], b["name"], bool(b.get("adapt_rules", False)))
 
 
 def apply_bundle(player, bundle: dict) -> None:

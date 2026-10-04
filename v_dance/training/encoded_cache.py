@@ -76,7 +76,8 @@ _CACHE_SCHEMA = 7          # 7 (2026-10-02, bisect): futility per-foe rules only
                            # Tatsugiri megas mega-capable in the gimmick mask (same dims, new values).
                            # 5 (2026-10-02): v19d terrain move mechanics — the terrain ×1.3 keys on the
                            # ATTACKER being grounded; Expanding Force ×1.5 + spread under Psychic Terrain;
-                           # Grassy Glide +1 priority under Grassy Terrain (same dims, new values).
+                           # Grassy Glide +1 priority under Grassy Terrain (same dims, new values). Default-OFF
+                           # the same day, REMOVED 2026-10-04 (the pre-v19d values are the only values now).
                            # 4 (2026-07-24): futility-mask batch — transition_to_example now ANDs
                            # the recomputed codec mask into the stored row, so baked masks change.
                            # bump when the serialized schema OR encoder SEMANTICS change without
@@ -98,10 +99,11 @@ _DTYPE_DT = "<U16"
 def folder_fingerprint(folder: str) -> str:
     """Content fingerprint of a corpus folder for cache keying."""
     from v_dance.encoders.mega_preview import TABLE_FINGERPRINT   # v20: the frozen stone shares the rows read
-    from v_dance.encoders.battle_mechanics import TERRAIN_V19D    # VD_TERRAIN_V19D=0 = pre-v19d terrain values
     h = hashlib.sha1()
+    # 'terrain_v19d=False' stays a LITERAL: the v19d switch was removed 2026-10-04 (its values were never used), and
+    # keeping the old key text keeps every existing cache's fingerprint — no re-encode.
     h.update(f"schema={_CACHE_SCHEMA};layout={get_state_layout_version()};"
-             f"dim={get_state_dim()};mega_stones={TABLE_FINGERPRINT};terrain_v19d={TERRAIN_V19D}".encode())
+             f"dim={get_state_dim()};mega_stones={TABLE_FINGERPRINT};terrain_v19d=False".encode())
     base = Path(folder)
     for f in iter_jsonl_files(str(folder)):
         st = os.stat(f)

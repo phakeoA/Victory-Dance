@@ -480,8 +480,7 @@ REGISTRY = [
                dict(name="bench-note", type="text", label="--bench-note", default="online"),
                dict(name="ckpt", type="ckpt", label="Battle ckpt override (optional)"),
                dict(name="tp-ckpt", type="tpckpt", label="TP ckpt override (optional)")],
-         envopts=[dict(key="VD_ROUTE_TEAMS", label="VD_ROUTE_TEAMS=1 (4b router, challenge-accepts)"),
-                  dict(key="VD_TP_OTS_OVERLAY", label="VD_TP_OTS_OVERLAY=1 (force the TP sheet overlay ON; unset = AUTO — a certified OTS-trained TP ckpt already uses the sheets)")]),
+         envopts=[dict(key="VD_TP_OTS_OVERLAY", label="VD_TP_OTS_OVERLAY=1 (force the TP sheet overlay ON; unset = AUTO — a certified OTS-trained TP ckpt already uses the sheets)")]),
     dict(id="play_vs_human_browser", cat="play", heavy=False, title="Play vs human (browser, local)",
          module="v_dance.online.play_vs_human_browser",
          desc="Local Showdown in a headed browser: you in one tab, the bot in the other.",
@@ -656,9 +655,9 @@ REGISTRY = [
     dict(id="corpus_qa", cat="data", heavy=False, title="Corpus QA",
          module="v_dance.datatools.corpus_qa",
          opts=[dict(name="strict", type="flag", label="--strict")]),
-    dict(id="seed_router", cat="data", heavy=False, title="Seed router priors (4b + matrix sidecar)",
-         module="v_dance.datatools.seed_router_priors",
-         desc="Re-seeds data/router_priors.json AND writes data/router_matrix.json (M4 sidecar).",
+    dict(id="seed_matrix", cat="data", heavy=False, title="Seed the archetype matchup matrix (team builder)",
+         module="v_dance.datatools.seed_matchup_matrix",
+         desc="Writes data/router_matrix.json — the cluster-vs-cluster win matrix the team builder's matchup prior reads.",
          opts=[]),
 
     # ---- EVAL ----

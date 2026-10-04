@@ -94,11 +94,10 @@ def read_trajectories(path, *, expected_state_dim: Optional[int] = None) -> List
 
 
 def assert_terminal_rewards_clean(trajectories: Iterable[Trajectory], tol: float = 1e-6) -> None:
-    """Data-integrity guard (sec 3/sec 13) for a SPARSE-phase buffer (PBRS off): every
+    """Data-integrity guard (sec 3/sec 13) for the sparse (terminal-only) reward: every
     per-step reward is 0 except the LAST, and the last is the clean terminal value in
     [-1, 1] (+-1 win/loss/adjudicated, 0 draw/horizon). Catches a reward-normalization
-    wrapper or a misplaced reward. NOTE: do NOT run this once PBRS shaping is enabled
-    (intermediate F_t rewards are then nonzero by design)."""
+    wrapper or a misplaced reward."""
     for traj in trajectories:
         ts = traj.transitions
         if not ts:

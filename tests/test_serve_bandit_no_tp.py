@@ -65,9 +65,11 @@ def test_none_arm_loads_no_picker_and_the_player_falls_to_first4():
     assert _heuristic_team_order(battle)[:4] == [0, 1, 2, 3]          # what a picker-less player brings
 
 
-def test_none_arm_with_matchup_rules_warns(tmp_path: Path, capsys):
+def test_an_arm_still_listing_matchup_rules_loads_and_says_they_are_ignored(tmp_path: Path, capsys):
+    # the hand-written matchup rules were removed 2026-10-04: an old config arm keeps loading, the key is ignored
     p = tmp_path / "bandit.json"
-    p.write_text(json.dumps({"arms": [{"name": "x", "battle_ckpt": "default", "tp_ckpt": "none",
+    p.write_text(json.dumps({"arms": [{"name": "x", "battle_ckpt": "default", "tp_ckpt": "default",
                                        "matchup_rules": ["rillaboom_salamence"]}]}), encoding="utf-8")
-    SB.load_arms(p, exists=lambda q: True)
-    assert "never fire" in capsys.readouterr().out
+    arms = SB.load_arms(p, exists=lambda q: True)
+    assert [a.name for a in arms] == ["x"] and not hasattr(arms[0], "matchup_rules")
+    assert "IGNORED" in capsys.readouterr().out

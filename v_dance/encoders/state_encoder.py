@@ -220,7 +220,6 @@ from v_dance.encoders.battle_mechanics import (  # noqa: F401
     field_duration_scalars, is_spread_target,
     item_effect_indices, move_redundant_condition, move_redundant_status, pp_max,
     priority_blocked, resolve_ability_json, resolve_active_ability_json, resolve_item_json,
-    terrain_bp_mult, terrain_priority, terrain_spread,
     weather_accuracy, weather_bp_mult,
     attacker_weather, aura_mult, field_auras,     # 2026-10-02 mega audit gap 4: Mega Sol + Fairy/Dark Aura
 )
@@ -682,12 +681,7 @@ class VodStateEncoder:
                    # v11: Victory Star ×1.1 accuracy — the holder OR its active ally has the ability.
                    "victory_star": abil_id == "victorystar" or ally_ability == "victorystar",
                    "side_active": side_active,      # v18 (Option 1): this mon's own-side active conditions
-                   # v19d: is the ATTACKER grounded — terrain ×1.3 / Expanding Force / Grassy Glide key on it
-                   # (same _is_grounded call + inputs as the volatile block below; live twin = the same).
-                   "grounded": _is_grounded(types, abil_id, resolve_item_json(mon)[0],
-                                            bool(vol.get("levitating")),
-                                            bool(vol.get("force_grounded")) or gravity),
-                   "auras": field_auras,             # 2026-10-02 gap 4: Fairy/Dark Aura on the field (both sides)
+                   "auras": field_auras,            # 2026-10-02 gap 4: Fairy/Dark Aura on the field (both sides)
                    # v20: the mega preview's own-mega transform (mega_preview.mega_att_ctx) needs the raw speed
                    # estimate + the grounding inputs (item, levitating, force-grounded, ability) — helper-only keys
                    "spe": _est.get("spe"),
@@ -885,10 +879,8 @@ class VodStateEncoder:
         vec[i] = 1.0 if mtype in user_types else 0.0
         i += 1
 
-        # is_spread (gap #6): hits both foes (the core doubles tradeoff). v19d: DYNAMIC for Expanding Force — under
-        # Psychic Terrain with a grounded user it hits both foes (terrain_spread).
-        _spread = is_spread_target(data.get("target")) or terrain_spread(
-            _mid, field_mods[1] if field_mods else None, (att_ctx or {}).get("grounded"))
+        # is_spread (gap #6): hits both foes (the core doubles tradeoff).
+        _spread = is_spread_target(data.get("target"))
         vec[i] = 1.0 if _spread else 0.0
         i += 1
 
@@ -928,8 +920,8 @@ class VodStateEncoder:
         # v11 N4: expected-crit multiplier (Super Luck / Sniper / Scope Lens + high-crit moves) — the band is
         # otherwise crit-blind. Defender-independent → computed once; folded into each enemy's _sit below.
         _crit = _expected_crit_mult(_mid, ability_id, _ac.get("scope_lens"))
-        # move-data priority (damage block + B.1b below); v19d: Grassy Glide +1 under Grassy Terrain (grounded user)
-        _prio = terrain_priority(_mid, data.get("priority") or 0, _terrain, _ac.get("grounded"))
+        # move-data priority (damage block + B.1b below)
+        _prio = int(data.get("priority") or 0)
         for e in range(2):
             d = enemy_defenders[e] if (enemy_defenders and e < len(enemy_defenders)) else None
             if d and not _move_immune(mtype, d, ability_id, _mid) \
@@ -948,13 +940,11 @@ class VodStateEncoder:
                 _sit = _situational_damage_mult(mtype, _phys, _weather, _terrain, d,
                                                 _ac.get("burned"), _ac.get("life_orb"), _ac.get("choice"),
                                                 hits_def=_hits_def,
-                                                grassy_eq=_mid in _GRASSY_WEAKENED,          # v11 G7
-                                                attacker_grounded=_ac.get("grounded")) * _abm  # v19d
+                                                grassy_eq=_mid in _GRASSY_WEAKENED) * _abm   # v11 G7
                 # v19c: per-MOVE weather BP hooks (Solar Beam/Blade halved in rain/sand/snow · Weather
                 # Ball ×2 in any weather · Hydro Steam sun) — the band was selling rain Solar Beam as a
                 # full instant nuke. The charge-turn cost lives in the DYNAMIC two_turn_charge tag below.
                 _sit *= weather_bp_mult(_mid, _weather)
-                _sit *= terrain_bp_mult(_mid, _terrain, _ac.get("grounded"))   # v19d: Expanding Force ×1.5
                 _sit *= aura_mult(mtype, _ac.get("auras"))     # 2026-10-02 gap 4: Fairy/Dark Aura (+Aura Break)
                 # v11 B3 attacker item band mults (×4915/4096): type-boost on a matching-type move + Expert
                 # Belt on a super-effective hit. v11 B3b: defender resist berry ×0.5 on a SE hit of its type

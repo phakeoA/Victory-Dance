@@ -10,7 +10,7 @@ The single importable package for the project. Subpackages:
 - ``play``      the serve / decision core + local harnesses (vgc_base, live_vgc_base, player, model_io)
 - ``online``    the ladder bot + its ops (bot, panel, play_vs_human_browser, send_gate, browser/)
 - ``eval``      gauntlet + scripted opponents
-- ``rl``        the PPO core (schema, collector, store, reward, gae, pbrs, actor_critic, ppo, trainer)
+- ``rl``        the PPO core (schema, collector, store, reward, gae, actor_critic, ppo, trainer)
 - ``selfplay``  the era loop, collection infra and the exploiter (uses ``rl``)
 - ``ladder``    learning from the ladder (W3b): recorder, update, the chain / B4 CLIs
 - ``datatools`` data prep + team tools (+ ``scrapers/``: manual scraper scripts, run by path)

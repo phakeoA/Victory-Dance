@@ -787,8 +787,6 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
 
     archive = Path(archive_dir)
     archive.mkdir(parents=True, exist_ok=True)
-    from v_dance.encoders.battle_mechanics import terrain_values_banner
-    print("   " + terrain_values_banner())                # 2026-10-02 launch echo (VD_TERRAIN_V19D)
     # #18b spectate: a per-RUN folder live/<start-stamp>/gen_<N>/{replays,eval}. In-flight battles
     # write there; on finish they're SAVED (save_replays) or deleted. Each run = a fresh folder, so
     # no clearing needed; the dashboard recursively globs live/ for the currently-live battles.

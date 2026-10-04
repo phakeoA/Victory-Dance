@@ -136,8 +136,8 @@ def update_from_battle(battle, result: str, our_team: Optional[str] = None,
             ability = getattr(mon, "ability", None)
             if ability:
                 rec["ability"] = ability
-        # Per-game revealed species (the 4b router uses THIS game's team, not the all-time
-        # union of every mon this opponent ever showed — a chimera if they switch teams).
+        # Per-game revealed species (THIS game's team, not the all-time union of every mon this
+        # opponent ever showed — a chimera if they switch teams).
         revealed = sorted({_toid(getattr(mon, "species", "") or "")
                            for mon in (getattr(battle, "opponent_team", None) or {}).values()
                            if getattr(mon, "species", None)})

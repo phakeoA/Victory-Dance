@@ -5,7 +5,6 @@
 - ``store``         JSON-lines trajectory store (``write_trajectories`` / ``iter_trajectories``)
 - ``reward``        the reward bible: terminal ±1 only, model-driven-source accounting
 - ``gae``           GAE + the default gamma / lambda
-- ``pbrs``          gated potential-based shaping off the win-prob value head
 - ``value_space``   the value-space identities the trainer asserts
 - ``actor_critic``  ActorCritic (BC-net backbone + critic head; ``from_bc_checkpoint``)
 - ``policy_eval``   the pair-mode evaluator (the served 2b decode) + legality asserts

@@ -30,13 +30,11 @@ def test_filter_pool_keeps_matching_opponents_and_the_own_team():
 
 def test_candidate_overrides_default_none_and_path(monkeypatch):
     monkeypatch.delenv("VD_EVAL_CANDIDATE_TP", raising=False)
-    monkeypatch.delenv("VD_EVAL_CANDIDATE_RULES", raising=False)
-    assert ME.candidate_overrides("tp.pt") == ("tp.pt", ())             # unset = the eval default, byte-identical
+    assert ME.candidate_overrides("tp.pt") == "tp.pt"                   # unset = the eval default, byte-identical
     monkeypatch.setenv("VD_EVAL_CANDIDATE_TP", "none")
-    assert ME.candidate_overrides("tp.pt") == (None, ())                # the self-play learner's first-4 heuristic
+    assert ME.candidate_overrides("tp.pt") is None                      # the self-play learner's first-4 heuristic
     monkeypatch.setenv("VD_EVAL_CANDIDATE_TP", "other.pt")
-    monkeypatch.setenv("VD_EVAL_CANDIDATE_RULES", "rillaboom_salamence, ")
-    assert ME.candidate_overrides("tp.pt") == ("other.pt", ("rillaboom_salamence",))
+    assert ME.candidate_overrides("tp.pt") == "other.pt"
 
 
 def test_build_eval_players_overrides_only_the_candidate(monkeypatch):
@@ -58,8 +56,7 @@ def test_build_eval_players_overrides_only_the_candidate(monkeypatch):
     monkeypatch.setattr(R, "resolve_team_path", lambda t: t)
     monkeypatch.setattr(G, "_make_opponent", lambda *a, **k: pytest.fail("panel specs never build a scripted opp"))
     monkeypatch.setenv("VD_EVAL_CANDIDATE_TP", "none")
-    monkeypatch.setenv("VD_EVAL_CANDIDATE_RULES", "rillaboom_salamence")
     spec = ME.EvalSpec(ME.PANEL_PREFIX + "era2", "Baltimore_Sand_Psy", "Rilla_A", 4, 1, 900, opp_ckpt="era2.pt")
     cand, opp = ME._build_eval_players_real("g50.pt", None, "tp.pt", spec)
-    assert cand.tc is None and cand._matchup_rules == ("rillaboom_salamence",)
-    assert opp.tc == "tp.pt" and not hasattr(opp, "_matchup_rules")   # the opponent is untouched
+    assert cand.tc is None
+    assert opp.tc == "tp.pt"                                           # the opponent is untouched

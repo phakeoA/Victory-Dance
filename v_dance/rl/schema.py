@@ -57,7 +57,7 @@ class Transition:
     opp_b_action: int = PASS_ACTION
     logprob: float = 0.0             # joint log-prob of (a0,g0,a1,g1) under the BEHAVIOUR policy
     value: float = 0.0               # critic V(s) at collection time (value_pm space, [-1,1])
-    reward: float = 0.0              # per-step reward (0 except terminal; + PBRS F_t if enabled)
+    reward: float = 0.0              # per-step reward (0 except terminal)
     done: bool = False               # True only on the last transition
     decision_type: str = "turn"      # "turn" | "replacement"
     turn: int = 0                    # Showdown turn (shared clock across both perspectives)

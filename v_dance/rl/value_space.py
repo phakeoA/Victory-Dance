@@ -67,14 +67,11 @@ def assert_gae_identity(advantages, returns, values, tol: float = 1e-3) -> None:
         "value-space mismatch between returns and values (sec 3).")
 
 
-def assert_gae_value_space(advantages, returns, values, tol: float = 1e-3,
-                           allow_shaping: bool = False) -> None:
-    """Phase-0 / sparse-phase check: the GAE identity PLUS the sparse-phase bound
-    ``|return| <= 1`` (a ±1 terminal with gamma<=1 and pm values can't discount past
-    ±1). ``allow_shaping=True`` skips the bound (PBRS adds the shaping term, 3b.7)."""
+def assert_gae_value_space(advantages, returns, values, tol: float = 1e-3) -> None:
+    """The GAE identity PLUS the sparse-reward bound ``|return| <= 1`` (a ±1 terminal with gamma<=1 and pm
+    values can't discount past ±1; the reward is terminal-only — the PBRS shaping option was removed 2026-10-04)."""
     assert_gae_identity(advantages, returns, values, tol)
-    if not allow_shaping:
-        assert_value_pm(returns, "GAE returns", tol=tol)
+    assert_value_pm(returns, "GAE returns", tol=tol)
 
 
 def looks_like_winprob(values, n_min: int = 50, neg_tol: float = 1e-3) -> bool:

@@ -172,7 +172,6 @@ def test_eval_candidate_plays_with_its_picker(monkeypatch):
     import v_dance.play.run_local_battle as R
     from v_dance.selfplay import mp_eval as ME
     monkeypatch.delenv("VD_EVAL_CANDIDATE_TP", raising=False)
-    monkeypatch.delenv("VD_EVAL_CANDIDATE_RULES", raising=False)
 
     class P:
         pass

@@ -4,8 +4,8 @@ Belief-driven, not neural: rosters grow by beam search over the blend's teammate
 co-occurrence × usage (B1); sets fill from the belief's top ability/item/moves/spread (B2);
 legality is Showdown's own validator (B3, node subprocess — no server); scoring reuses the
 deployed pieces (B4): archetype coherence (k10_full distance), the TP set-head's decision
-margin vs a meta sample, and the 4b cluster-vs-cluster matchup prior when the matrix sidecar
-exists (regenerate via python -m v_dance.datatools.seed_router_priors; absent → None, surfaced not silent).
+margin vs a meta sample, and the cluster-vs-cluster matchup prior when the matrix sidecar
+exists (regenerate via python -m v_dance.datatools.seed_matchup_matrix; absent → None, surfaced not silent).
 
 The rollout scorer is DEFERRED v2 — see the marker in score_team.  # TODO(M4-v2)
 """
@@ -20,7 +20,7 @@ from typing import Dict, List, Optional, Sequence
 log = logging.getLogger(__name__)
 _REPO = Path(__file__).resolve().parents[2]
 ARTIFACT_PATH = _REPO / "ai_train_scripts" / "BC_model" / "team_archetypes_k10_full.npz"
-MATRIX_PATH = _REPO / "data" / "router_matrix.json"     # written by seed_router_priors.py
+MATRIX_PATH = _REPO / "data" / "router_matrix.json"     # written by seed_matchup_matrix.py
 _STATS = ("hp", "atk", "def", "spa", "spd", "spe")
 _STAT_LABEL = {"hp": "HP", "atk": "Atk", "def": "Def", "spa": "SpA", "spd": "SpD", "spe": "Spe"}
 
@@ -138,7 +138,7 @@ _MATRIX_CACHE: dict = {"mtime": None, "data": None}
 
 
 def _matrix() -> Optional[dict]:
-    """The cluster-vs-cluster matchup sidecar, reloaded when seed_router_priors.py
+    """The cluster-vs-cluster matchup sidecar, reloaded when seed_matchup_matrix.py
     rewrites it (mtime-keyed — a long-running server picks up a regen without restart)."""
     try:
         mt = MATRIX_PATH.stat().st_mtime
@@ -240,7 +240,7 @@ def score_team(mons: Sequence[dict], belief, opp_rosters=None,
             out["matchup_prior"] = round(sum(wrs) / len(wrs), 4)
     elif mat is None:
         out["matchup_note"] = ("no data/router_matrix.json — regenerate via "
-                               "python -m v_dance.datatools.seed_router_priors")
+                               "python -m v_dance.datatools.seed_matchup_matrix")
     # TODO(M4-v2): rollout scorer — N quick self-play games per candidate on the
     # multi-server harness (DS-M4 deferred; do not build without a new gate).
     return out

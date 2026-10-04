@@ -106,21 +106,12 @@ def main(argv=None) -> int:
                          "learner's team preview), a path = that picker, 'default' = the eval default picker; "
                          "unset = the PAIR rule (2026-10-03): the candidate's co-trained picker when it has one, "
                          "else the eval default")
-    ap.add_argument("--candidate-rules", default=None,
-                    help="comma-separated matchup rules for the CANDIDATE (e.g. rillaboom_salamence; needs a picker)")
     a = ap.parse_args(argv)
     if "own" in a.modes and not a.own_team:
         ap.error("--modes own needs --own-team")
     cands, opp = parse_panel(a.candidates), parse_panel([a.opponent])
     import os
-    if a.candidate_rules:
-        from v_dance.play.matchup_rules import RULES
-        bad = [r for r in a.candidate_rules.split(",") if r.strip() and r.strip() not in RULES]
-        if bad:
-            ap.error(f"unknown matchup rule(s) {bad}; known: {sorted(RULES)}")
-        if (a.candidate_tp or "").strip().lower() == "none":
-            ap.error("--candidate-rules act through the team picker — drop --candidate-tp none")
-    try:                                               # 2026-10-03 USER RULE: a pair plays as a pair
+    try:                                              # 2026-10-03 USER RULE: a pair plays as a pair
         a.candidate_tp, _note = resolve_candidate_tp(cands, a.candidate_tp)
     except ValueError as exc:
         ap.error(str(exc))
@@ -129,8 +120,6 @@ def main(argv=None) -> int:
     # set BEFORE the worker pool exists: spawned workers inherit the environment (mp_eval.candidate_overrides)
     if a.candidate_tp:
         os.environ["VD_EVAL_CANDIDATE_TP"] = a.candidate_tp
-    if a.candidate_rules:
-        os.environ["VD_EVAL_CANDIDATE_RULES"] = a.candidate_rules
 
     import v_dance.play.run_local_battle as R
     from v_dance.formats import default_format
@@ -148,10 +137,7 @@ def main(argv=None) -> int:
     (oname, _), = opp.items()
     print(f"[panel_eval] {len(cands)} candidate(s) x {a.modes} x {a.battles} games vs {oname}; {len(teams)} "
           f"{default_format()} teams; {a.procs} procs x {a.async_per_proc} async, {a.servers} server(s); seed {a.seed}")
-    from v_dance.encoders.battle_mechanics import terrain_values_banner
-    print("[panel_eval] " + terrain_values_banner())          # 2026-10-02 (VD_TERRAIN_V19D)
-    print(f"[panel_eval] candidate team picker: {a.candidate_tp or 'default (' + str(DEFAULT_TP_CHECKPOINT.name) + ')'}"
-          f" · candidate matchup rules: {a.candidate_rules or 'none'}")
+    print(f"[panel_eval] candidate team picker: {a.candidate_tp or 'default (' + str(DEFAULT_TP_CHECKPOINT.name) + ')'}")
     pool = MP.CollectionPool(a.procs)
     servers = R.ServerPool(max(1, a.servers), manage=True).start_all()
     ports = servers.ports if a.servers > 1 else None

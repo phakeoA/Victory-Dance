@@ -1,4 +1,4 @@
-"""#23 integration — the AttnBCPolicy plugs into the serve/load + actor-critic + PBRS
+"""#23 integration — the AttnBCPolicy plugs into the serve/load + actor-critic
 infra as a drop-in for the flat BCPolicy:
 
   * model_io.load_bc_policy arch-dispatches on config model_type=='attn'
@@ -6,7 +6,6 @@ infra as a drop-in for the flat BCPolicy:
   * the shared-trunk AttnCritic is LEAK-FREE: a critic step leaves the actor
     bit-identical and an actor step leaves the critic bit-identical
   * ActorCritic.save(verify=True) round-trips an attn checkpoint through the loader
-  * PBRS (default-OFF) does not crash with an attn critic
 The flat BCPolicy was retired in the attn-only refactor (#27); a legacy flat checkpoint is rejected.
 """
 from __future__ import annotations
@@ -116,14 +115,3 @@ def test_attn_state_checkpoint_roundtrips(tmp_path):
     pol, _heads = M.load_bc_policy(out)
     assert isinstance(pol, AttnBCPolicy) and pol.value_readout == "concat_active"
     ac.restore_from(out)                              # policy + critic restore (no raise)
-
-
-# ── PBRS (default-OFF) must not crash with an attn critic ─────────────────────
-def test_pbrs_from_attn_critic_no_crash(tmp_path):
-    from v_dance.rl.actor_critic import ActorCritic
-    from v_dance.rl.pbrs import PotentialShaper
-    ac = ActorCritic.from_bc_checkpoint(_save_attn_ckpt(tmp_path), require_value_trained=False)
-    shaper = PotentialShaper.from_critic(ac.critic, coef=0.2)
-    phi = shaper.phi_values(np.zeros((3, SD), dtype=np.float32))
-    assert phi.shape == (3,) and np.isfinite(phi).all() and (np.abs(phi) <= 0.2 + 1e-6).all()
-    assert all(not p.requires_grad for p in shaper.parameters())   # frozen

@@ -413,20 +413,11 @@ async def _ai_selected_team(page) -> str | None:
         return None
 
 
-async def _pick_ai_team(page, ai_pool: list[str], pin: str | None,
-                        route_for: str | None = None) -> tuple[str, str]:
+async def _pick_ai_team(page, ai_pool: list[str], pin: str | None) -> tuple[str, str]:
     """Choose the AI's team for the next battle, returning (name, source): a PINNED ``--ai-team`` →
-    the Phase-4b router vs a KNOWN opponent (``route_for``, flag-gated VD_ROUTE_TEAMS=1, default
-    OFF = byte-identical) → the team you have OPEN in the AI Teambuilder → a random team."""
+    the team you have OPEN in the AI Teambuilder → a random team."""
     if pin:
         return pin, "pinned"
-    if route_for:
-        from v_dance.play import team_router
-        if team_router.ROUTE_TEAMS:
-            routed, why = team_router.route(route_for, ai_pool)
-            if routed:
-                print(f"[ai] team router: {why}")
-                return routed, "routed"
     picked = await _ai_selected_team(page)
     if picked and picked in ai_pool:
         return picked, "your pick"
@@ -529,8 +520,7 @@ async def _ai_consumer(page, host: BattleHost, frame_q: asyncio.Queue,
             try:
                 busy, busy_since, active_tag = True, loop.time(), None
                 hb_next = busy_since + 15.0                           # first heartbeat 15s after accept
-                ai_name, src = await _pick_ai_team(page, ai_pool, ai_team_pin,
-                                                   route_for=challenger)
+                ai_name, src = await _pick_ai_team(page, ai_pool, ai_team_pin)
                 # audit: resolve the AI team WITHIN the active reg. A bare name through resolve_team_path
                 # cross-reg rglobs and returns the alphabetically-first match (M-A sorts before M-B), so a
                 # same-named paste in two reg folders would load the wrong-reg (possibly illegal) team. Map

@@ -256,13 +256,9 @@ STATE_DIM = (ACTIVE_SLOTS + BENCH_SLOTS + OPP_BENCH_SLOTS) * POKEMON_FEATURES + 
 #       accuracy (rain/snow bypass → always-hit, sun Thunder/Hurricane → 50%). The band stopped selling a
 #       rain Solar Beam as a full instant nuke (the 2026-07-10 online rain-loss defect). See
 #       battle_mechanics.weather_bp_mult / charge_skipped_now / weather_accuracy.
-#       ALSO bundled post-hoc in v19 (v19d 2026-10-02, VALUE-only, no slot change; _CACHE_SCHEMA 5; USER: "terrain
-#       wars"): TERRAIN-CONDITIONAL move mechanics — the Electric/Grassy/Psychic terrain ×1.3 now keys on the
-#       ATTACKER being grounded (it keyed on the defender: a grounded Indeedee's Psychic hit into Corviknight lost
-#       it); Expanding Force ×1.5 + is_spread under Psychic Terrain (grounded user); Grassy Glide +1 priority under
-#       Grassy Terrain (grounded user) in the who-moves-first channel + the priority block. Served checkpoints keep
-#       loading (same dims); both encoders share battle_mechanics.terrain_bp_mult / terrain_spread /
-#       terrain_priority.
+#       (v19d 2026-10-02 bundled VALUE-only TERRAIN move mechanics here — attacker-keyed terrain ×1.3, Expanding
+#       Force ×1.5 + spread, Grassy Glide +1 priority. They cost g50 ~8 pp on inputs no served checkpoint had seen,
+#       went default-OFF the same day and were REMOVED 2026-10-04: the values are the pre-v19d ones.)
 #  20 → STATE_DIM 6377 (2026-10-02, mega audit gap 2; USER "fix 1-5"): +MEGA_PREVIEW_FEATURES (110) per mon,
 #       inserted AFTER the tera block and BEFORE the 4 trailing slot flags → POKEMON_FEATURES 413→523,
 #       +110×12 = +1320. Every positive offset (moves / item / ability identity columns) is unchanged and the

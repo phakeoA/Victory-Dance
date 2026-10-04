@@ -65,9 +65,7 @@ for _k in ("VD_SERVE_TAU", "VD_SERVE_TOP_P", "VD_TP_TIE_EPS", "VD_PAIR_DECODE",
            # 2026-09-02 (USER): battle-timer mode at launch (1 = /timer on at every game's first frame)
            "VD_TIMER_IMMEDIATE",
            # 2026-09-03 (USER): open team sheets at launch (1 = accept the server's team-preview offer)
-           "VD_OTS_ACCEPT",
-           # 2026-10-02: terrain encoder values (unset/0 = pre-v19d, what the served checkpoints know; 1 = v19d)
-           "VD_TERRAIN_V19D"):
+           "VD_OTS_ACCEPT"):
     if _ENV.get(_k):
         os.environ.setdefault(_k, _ENV[_k])
 
@@ -1075,18 +1073,17 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path,
             print(f"[online] serve bandit failed to start (non-fatal — incumbent only): {exc!r}")
             bandit = None
 
-    async def _pick(page, pool, pin, route_for=None):
-        # ⚠ MUST accept route_for: _ai_consumer's challenge-accept path calls
-        # _pick_ai_team(..., route_for=challenger) (the 4b router param). Without it this
-        # wrapper raised TypeError on every incoming challenge accept (caught + swallowed as
-        # "accept failed"), so the online bot silently declined all direct challenges.
+    async def _pick(page, pool, pin):
+        # ⚠ MUST match _pvhb._pick_ai_team's signature: _ai_consumer's challenge-accept path calls it,
+        # and a mismatch raises TypeError on every accept (caught + swallowed as "accept failed"), so
+        # the online bot would silently decline all direct challenges.
         c = ctrl_ref.get("c")
         if c is not None and getattr(c, "bandit", None) is not None:
             c.apply_next_arm("challenge")          # idempotent: the panel's search path already did
         if c is not None and c.team_pin and c.team_pin in pool:
             host.player._team_name = c.team_pin
             return c.team_pin, "control panel"
-        nm, src = await _orig_pick(page, pool, pin, route_for=route_for)
+        nm, src = await _orig_pick(page, pool, pin)
         if src == "random" and default_team in pool:
             nm, src = default_team, ".env default"
         host.player._team_name = nm
@@ -1185,11 +1182,6 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path,
             _ob = _ots_banner(_pvhb.OTS_ACCEPT)
             print(_ob)
             _slog(session_log, "    " + _ob)
-            # 2026-10-02: which terrain values the battle net is fed (launch echo)
-            from v_dance.encoders.battle_mechanics import terrain_values_banner
-            _trb = "[online] " + terrain_values_banner()
-            print(_trb)
-            _slog(session_log, "    " + _trb)
 
             # 2026-07-10 (USER): local control server — ladder-run count / team pin / private
             # challenges / auto-accept, all without touching the bot window. Its HTTP API must keep

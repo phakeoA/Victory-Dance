@@ -4,7 +4,7 @@ Implements docs/ppo_reward_design.md sec 1: the terminal reward goes on the LAST
 only (sparse), driven by the terminal type; FALLBACK trajectories are discarded; and
 the collector HARD-FAILS if MODEL-DRIVEN% drops below threshold (a self-play corpus
 with fallbacks is corrupted — fallbacks reward the wrong action and break on-policy
-assumptions). PBRS shaping (sec 4) is NOT added here — it is a gated 3b.7 concern.
+assumptions). No shaping: the reward is terminal-only (the gated PBRS option, sec 4, was removed 2026-10-04).
 """
 from __future__ import annotations
 
