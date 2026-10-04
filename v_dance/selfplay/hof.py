@@ -29,7 +29,8 @@ async def hof_eval(candidate_path, suspects, *, team_pool, team_chooser,
                    games_per_snapshot: int = 60, matchup_seed: int = 0,
                    battle_timeout: Optional[float] = 90.0, n_workers: int = 1,
                    manage_server: bool = False, gauntlet_fn=None,
-                   live_dir=None, save_replays: bool = False, own_team=None):
+                   live_dir=None, save_replays: bool = False, own_team=None,
+                   candidate_team_chooser=None):
     """Play the CANDIDATE vs each HoF SUSPECT (a frozen past-champion checkpoint) for
     ``games_per_snapshot`` side-balanced battles, returning ``[(snapshot_id, wins, games), ...]``.
 
@@ -40,7 +41,10 @@ async def hof_eval(candidate_path, suspects, *, team_pool, team_chooser,
     pre-validated (``load_bc_policy``) so a missing/corrupt snapshot SKIPS rather than silently
     falling back to a no-model picker and FALSE-vetoing on garbage. ``gauntlet_fn`` is injectable so
     the aggregation unit-tests offline without a server. ``own_team`` (W2): forwarded to the
-    gauntlet only when set (the candidate and the suspect both play it - ``eval_pairings``)."""
+    gauntlet only when set (the candidate and the suspect both play it - ``eval_pairings``).
+    ``candidate_team_chooser`` (2026-10-03, picker in the self-play loop): the candidate plays with its co-trained
+    picker, and every suspect with ITS paired picker (``tp_learning.paired_tp_for``) when it has one — else the
+    shared ``team_chooser`` (byte-identical for every run without --tp-learn)."""
     import v_dance.play.model_io as model_io
     import v_dance.play.run_local_battle as R
     from v_dance.eval.gauntlet import _ckpt_gen        # candidate/suspect gen for 22d name salts
@@ -48,6 +52,9 @@ async def hof_eval(candidate_path, suspects, *, team_pool, team_chooser,
         import v_dance.eval.gauntlet as GA
         gauntlet_fn = GA.run_gauntlet
     model_io.load_bc_policy(str(candidate_path))       # fail LOUD if the candidate won't load
+    if candidate_team_chooser:
+        model_io.load_team_chooser(str(candidate_team_chooser))   # and its picker
+    from v_dance.selfplay.tp_learning import paired_tp_for
     cand_gen = _ckpt_gen(candidate_path)               # N in checkpoints/genN.pt (None if unnamed)
     server = R.start_showdown() if manage_server else None
     results: list = []
@@ -66,6 +73,12 @@ async def hof_eval(candidate_path, suspects, *, team_pool, team_chooser,
             if _sg is None:
                 _sg = "".join(ch for ch in str(suspect.snapshot_id) if ch.isdigit()) or "x"
             _salt = f"{cand_gen if cand_gen is not None else 'c'}h{_sg}"
+            _tc_kw = {}
+            if candidate_team_chooser:
+                _tc_kw["candidate_team_chooser"] = Path(candidate_team_chooser)
+            _susp_tc = paired_tp_for(suspect.path)
+            if _susp_tc:
+                _tc_kw["opponent_team_chooser"] = Path(_susp_tc)
             res, _sources = await gauntlet_fn(
                 opponents=["prev_best"], team_pool=list(team_pool),
                 battles_per_opponent=int(games_per_snapshot),
@@ -76,7 +89,7 @@ async def hof_eval(candidate_path, suspects, *, team_pool, team_chooser,
                 # task E: the candidate-vs-past-champion battles also save to eval/league/ named
                 # gen<N>_vs_gen<M> (M = the suspect's gen, parsed from its checkpoint path).
                 live_dir=live_dir, save_replays=save_replays,
-                **({"own_team": own_team} if own_team else {}))
+                **({"own_team": own_team} if own_team else {}), **_tc_kw)
             wins, games = res.get("prev_best", (0, 0))
             results.append((suspect.snapshot_id, int(wins), int(games)))
     finally:

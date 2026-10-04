@@ -7,14 +7,27 @@ Value-only fixes (no layout change; _CACHE_SCHEMA 5), every rule read from the p
   · Expanding Force ×1.5 AND hits both foes (is_spread → the doubles ×0.75) under Psychic Terrain, grounded user
   · Grassy Glide +1 priority under Grassy Terrain (grounded user) → the who-moves-first channel
 Offline↔live parity is by construction (shared battle_mechanics helpers) + tests/test_encoder_parity.py.
+
+2026-10-02 (bisect): the v19d values are now OPT-IN (VD_TERRAIN_V19D=1) — they cost the served g50 ~8 pp on
+Baltimore because it was trained on the pre-v19d values. These locks run with the switch ON; the last test locks
+the default (pre-v19d) values.
 """
 from __future__ import annotations
 
 import math
 
+import pytest
+
+import v_dance.encoders.battle_mechanics as _BM
 from v_dance.encoders.battle_mechanics import (
     _situational_damage_mult, terrain_bp_mult, terrain_priority, terrain_spread,
 )
+
+
+@pytest.fixture(autouse=True)
+def _v19d_on(request, monkeypatch):
+    if "pre_v19d" not in request.node.name:
+        monkeypatch.setattr(_BM, "TERRAIN_V19D", True)   # the helpers read the module flag at call time
 from v_dance.encoders.state_encoder import (
     StateEncoder, MOVE_FEATURES, _MOVE_BLOCK_REL, move_slots_for_mon, norm_species,
 )
@@ -133,3 +146,17 @@ def test_grassy_glide_moves_first_in_grassy_terrain():
     assert float(clear[OFF_FIRST]) < 0                                     # slower, same bracket
     assert float(gt[OFF_FIRST]) == 1.0                                     # priority bracket: moves first
     assert float(gt[OFF_PRIO]) == float(clear[OFF_PRIO]) == 0.0           # the raw data channel is unchanged
+
+
+def test_default_is_the_pre_v19d_values(monkeypatch):
+    # the name carries "pre_v19d" → the autouse fixture leaves the module default (OFF) in place
+    monkeypatch.delenv("VD_TERRAIN_V19D", raising=False)
+    assert _BM.TERRAIN_V19D is False
+    assert terrain_bp_mult("expandingforce", "PSYCHIC_TERRAIN", True) == 1.0      # a plain single-target move
+    assert terrain_spread("expandingforce", "PSYCHIC_TERRAIN", True) is False
+    assert terrain_priority("grassyglide", 0, "GRASSY_TERRAIN", True) == 0
+    flying = {"grounded": False, "types": ["FLYING"]}
+    # the terrain x1.3 keys on the DEFENDER again: a grounded attacker's Psychic hit into a Flying target gets none
+    assert _situational_damage_mult("PSYCHIC", False, None, "PSYCHIC_TERRAIN", flying,
+                                    False, False, False, attacker_grounded=True) == 1.0
+    assert "PRE-v19d" in _BM.terrain_values_banner()

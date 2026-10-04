@@ -92,7 +92,8 @@ def _short(key: str) -> str:
 def check(fresh: Optional[dict], resumed: Optional[dict], *, hof_on: bool = False,
           arm_names: Optional[List[str]] = None, register_on: bool = False,
           panel_names: Optional[List[str]] = None, drill_on: bool = False,
-          pressure_on: bool = False) -> Tuple[List[str], List[str], dict]:
+          pressure_on: bool = False, tp_learn_on: bool = False,
+          learner_tp_on: bool = False, mega_hold_on: bool = False) -> Tuple[List[str], List[str], dict]:
     """``(problems, warnings, played)`` from the two run results. Any problem = FAIL."""
     problems: List[str] = []
     warns: List[str] = []
@@ -150,6 +151,43 @@ def check(fresh: Optional[dict], resumed: Optional[dict], *, hof_on: bool = Fals
         if pressure_on and sum(int(((getattr(r, "drill", None) or {}).get("pressure") or {}).get("fired", 0) or 0)
                                for r in allr) <= 0:
             warns.append("the drill pressure never fired (no snapshot/clone opponent met a bench setter) — not exercised")
+    if tp_learn_on:                                    # 2026-10-03 picker in the loop (Stage 2)
+        for res, label in ((fresh, "fresh"), (resumed, "resumed")):
+            st = (res or {}).get("tp") or []
+            gens = {s.get("generation") for s in st}
+            want = {r.generation for r in ((res or {}).get("history").records if (res or {}).get("history") else [])}
+            if label == "resumed":
+                want = {max(want)} if want else set()
+            for g in sorted(want - gens):
+                problems.append(f"{label} gen {g}: the team picker did not update")
+            if label == "fresh" and st and all(s.get("skipped") for s in st):
+                problems.append("fresh run: every picker update was SKIPPED — the training step never ran")
+            if label == "resumed" and st and not st[0].get("opt_restored"):
+                problems.append("resumed run: the picker's optimizer state was NOT restored")
+            for s in st:
+                if s.get("skipped"):
+                    warns.append(f"{label} gen {s.get('generation')}: picker update skipped ({s['skipped']})")
+                elif int(s.get("n", 0) or 0) <= 0:
+                    problems.append(f"{label} gen {s.get('generation')}: the picker update saw 0 records")
+    elif learner_tp_on:
+        if not (fresh or {}).get("tp_path"):
+            problems.append("--learner-tp: the run reports no learner picker")
+    if mega_hold_on:                                   # 2026-10-03 mega-hold exploration
+        for res, label in ((fresh, "fresh"), (resumed, "resumed")):
+            st = (res or {}).get("mega_hold") or []
+            if not st:
+                problems.append(f"{label} run: the mega-hold exploration reported nothing (not wired?)")
+                continue
+            if sum(int(s.get("decided", 0) or 0) for s in st) <= 0:
+                problems.append(f"{label} run: no learner game made a mega-hold decision")
+        st = (fresh or {}).get("mega_hold") or []
+        if st and sum(int(s.get("held", 0) or 0) for s in st) <= 0:
+            problems.append("fresh run: no learner game was a HOLD game (the exploration never fired)")
+        elif st and sum(int(s.get("weighted_steps", 0) or 0) for s in st) <= 0:
+            problems.append("fresh run: hold games ran but no step carried an importance weight (nothing forced)")
+        if st and sum(int(s.get("conflict", 0) or 0) for s in st) <= 0:
+            warns.append("mega-hold: no learner game met a weather setter that fights ours — the weather rate "
+                         "(--mega-hold-p-weather) was not exercised")
     return problems, warns, played
 
 
@@ -162,6 +200,13 @@ def _registered_arms(path: Path) -> List[str]:
             else list(arms.keys()) if isinstance(arms, dict) else []
     except Exception:
         return []
+
+
+def _mega_hold_on(args) -> bool:
+    """2026-10-03: the run explores the mega hold (either probability > 0)."""
+    p = float(getattr(args, "mega_hold_p", 0.0) or 0.0)
+    pw = getattr(args, "mega_hold_p_weather", None)
+    return p > 0.0 or (pw is not None and float(pw) > 0.0)
 
 
 def _drill_has_pressure(args) -> bool:
@@ -214,7 +259,10 @@ def run_preflight(args, launch_fn) -> bool:
                                     register_on=arm_file is not None,
                                     panel_names=[str(p).partition("=")[0] for p in (getattr(args, "panel", None) or [])],
                                     drill_on=bool(getattr(args, "drill", None)),
-                                    pressure_on=_drill_has_pressure(args))
+                                    pressure_on=_drill_has_pressure(args),
+                                    tp_learn_on=bool(getattr(args, "tp_learn", False)),
+                                    learner_tp_on=bool(getattr(args, "learner_tp", None)),
+                                    mega_hold_on=_mega_hold_on(args))
     mins = (time.perf_counter() - t0) / 60.0
     print("\n" + "=" * 78)
     print(f"PREFLIGHT {'PASS' if not problems else 'FAIL'} in {mins:.1f} min")

@@ -2003,20 +2003,6 @@ def reconstruct_for_decision(
     return _opp_snapshot_of(parser, own_role), (turns[-1] if turns else None)
 
 
-def reconstruct_full_for_decision(log: str, own_role: str, turn: int) -> Optional[dict]:
-    """The FULL both-sides start-of-turn snapshot (``state_before_actions`` shape) from the SAME prefix parse as
-    ``reconstruct_for_decision`` — the Level-C B1 search needs our side AND the (reconstructed) opp side, not just
-    the opp splice. Our side is the public-log view (estimated stats, exactly what the B0d gate validated on).
-    ``None`` when the prefix lacks the ``|turn|`` marker."""
-    parser = _parse_log_prefix(log, own_role, turn)
-    if parser is None:
-        return None
-    try:
-        return parser._snapshot_state(own_role)
-    except Exception:
-        return None
-
-
 def opp_snapshot_current(log: str, own_role: str) -> Optional[dict]:
     """Reconstruct the OPPONENT side as of the END of the given log (the CURRENT
     board), for MID-TURN decisions where the start-of-turn snapshot is stale.

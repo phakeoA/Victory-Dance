@@ -262,8 +262,7 @@ STATE_DIM = (ACTIVE_SLOTS + BENCH_SLOTS + OPP_BENCH_SLOTS) * POKEMON_FEATURES + 
 #       it); Expanding Force ×1.5 + is_spread under Psychic Terrain (grounded user); Grassy Glide +1 priority under
 #       Grassy Terrain (grounded user) in the who-moves-first channel + the priority block. Served checkpoints keep
 #       loading (same dims); both encoders share battle_mechanics.terrain_bp_mult / terrain_spread /
-#       terrain_priority. (white_box_sim — the dead-end search's forward model — deliberately NOT updated: it
-#       passes no attacker_grounded, so _situational_damage_mult keeps its pre-v19d behaviour there.)
+#       terrain_priority.
 #  20 → STATE_DIM 6377 (2026-10-02, mega audit gap 2; USER "fix 1-5"): +MEGA_PREVIEW_FEATURES (110) per mon,
 #       inserted AFTER the tera block and BEFORE the 4 trailing slot flags → POKEMON_FEATURES 413→523,
 #       +110×12 = +1320. Every positive offset (moves / item / ability identity columns) is unchanged and the

@@ -598,6 +598,71 @@ def deploy_env_battle_ckpt(env_path, ckpt, *, key: str = ENV_BATTLE_KEY, stamp: 
     return {"key": key, "old": old, "new": new, "changed": True}
 
 
+ENV_TP_KEY = "VD_TP_CKPT"
+
+
+def env_default_tp(env_path) -> Path:
+    """The picker a ``tp_ckpt: default`` arm serves: ``.env`` ``VD_TP_CKPT`` (only that key is read), else
+    ``model_io.DEFAULT_TP_CHECKPOINT`` — the bot's own rule (online/bot.py)."""
+    from v_dance.play.model_io import DEFAULT_TP_CHECKPOINT
+    from v_dance.play.serve_bandit import _resolve
+    p = Path(env_path)
+    if p.is_file():
+        for ln in p.read_text(encoding="utf-8").splitlines():
+            if "=" in ln and not ln.lstrip().startswith("#") and ln.split("=", 1)[0].strip() == ENV_TP_KEY:
+                v = ln.split("=", 1)[1].strip()
+                if v:
+                    return _resolve(v)
+    return Path(DEFAULT_TP_CHECKPOINT)
+
+
+def pair_picker(arms: dict, base, played_by: Sequence[str], *, default_tp) -> Tuple[Optional[Path], str]:
+    """2026-10-03 THE PAIR RULE (memory 01: "keep team picker with the battle neural networks in reinforcement learning
+    and treat them like 1 neural network"): the picker the base checkpoint's ladder games were played WITH — the
+    candidate keeps it, so the chain never splits a pair. In order: a verified pairing sidecar on ``base``
+    (``tp_learning.paired_tp_for``); else the ``tp_ckpt`` of the arms in ``played_by`` (the arms whose games train the
+    candidate): 'default' → ``default_tp``, 'none' → None (the first-4 heuristic). Arms that disagree → ValueError
+    (mixed-picker data cannot name ONE pair — narrow ``--arms``). Returns ``(picker or None, how it was found)``."""
+    from v_dance.play.serve_bandit import _resolve
+    from v_dance.selfplay.tp_learning import paired_tp_for
+    tp = paired_tp_for(base)
+    if tp:
+        return Path(tp), "the base checkpoint's verified pairing sidecar"
+    seen: Dict[str, Optional[Path]] = {}
+    for n in played_by:
+        a = arms.get(n)
+        if a is None:
+            continue
+        if a.uses_no_tp():
+            seen[n] = None
+        elif a.uses_default("tp"):
+            seen[n] = Path(default_tp) if default_tp else None
+        else:
+            seen[n] = _resolve(a.tp_ckpt)
+    if not seen:
+        raise ValueError(f"none of the arms {sorted(played_by)} is in the bandit config — which picker played these "
+                         "games is unknown")
+    distinct = {(str(Path(v).resolve()).lower() if v else None) for v in seen.values()}
+    if len(distinct) > 1:
+        raise ValueError("the selected arms played with DIFFERENT pickers "
+                         f"({ {n: (Path(v).name if v else 'first-4') for n, v in seen.items()} }) — one candidate can "
+                         "carry only one; narrow --arms to the arms of one picker")
+    v = next(iter(seen.values()))
+    return (Path(v) if v else None), f"the picker arm(s) {sorted(seen)} played these games with"
+
+
+def _resolve_repo(p) -> Path:
+    """A repo-relative path from the meta / config back to a path (absolute stays absolute)."""
+    p = Path(str(p))
+    return p if p.is_absolute() else (_REPO / p)
+
+
+def describe_pair(tp: Optional[Path], how: str) -> str:
+    return (f"the candidate keeps {repo_relative(tp) if tp else 'the first-4 heuristic (no picker)'} — {how}. The picker "
+            "stays FROZEN in this update (the ladder serves it argmax / near-tie, so there is no picker exploration "
+            "to learn from); the pair is recorded and served together")
+
+
 def learning_head(arms: dict) -> Optional[dict]:
     """``{name, battle_ckpt, tau}`` of the chain head (the ``learning: true`` arm), or None."""
     names = learning_arms(arms)

@@ -64,7 +64,8 @@ STATE_DIR = _REPO / "artifacts" / "bandit"
 class Arm:
     name: str
     battle_ckpt: Optional[str] = None      # None / "default" = the deployed checkpoint
-    tp_ckpt: Optional[str] = None          # None / "default" = the deployed TP checkpoint
+    tp_ckpt: Optional[str] = None          # None / "default" = the deployed TP checkpoint; "none" = NO team picker
+                                           # (2026-10-03: the first-4 roster heuristic the self-play learner trains on)
     tau: float = 0.0                       # battle-policy sampling temperature (0 = argmax)
     top_p: float = 1.0
     tp_tie_eps: Optional[float] = None     # None = leave VD_TP_TIE_EPS as launched
@@ -101,6 +102,13 @@ class Arm:
     def uses_default(self, which: str) -> bool:
         v = self.battle_ckpt if which == "battle" else self.tp_ckpt
         return v is None or str(v).strip().lower() in ("", "default")
+
+    def uses_no_tp(self) -> bool:
+        """2026-10-03: ``tp_ckpt: \"none\"`` — the arm plays WITHOUT a team picker, i.e. the first-4 roster
+        heuristic (``vgc_base._heuristic_team_order``). Both self-play collection paths build the learner without a
+        picker, so this is the team preview every self-play checkpoint trained on (offline vs era2, g50 on
+        Baltimore: 77.5 % first-4 vs 62.7 % with the served picker)."""
+        return str(self.tp_ckpt or "").strip().lower() == "none"
 
 
 @dataclass
@@ -140,10 +148,13 @@ def load_arms(path: Path, *, exists=None) -> List[Arm]:
                 share=(None if raw.get("share") is None else float(raw["share"])),
                 matchup_rules=tuple(str(x) for x in (raw.get("matchup_rules") or ())))
         missing = [w for w, v in (("battle", a.battle_ckpt), ("tp", a.tp_ckpt))
-                   if not a.uses_default(w) and not exists(_resolve(v))]
+                   if not a.uses_default(w) and not (w == "tp" and a.uses_no_tp()) and not exists(_resolve(v))]
         if missing:
             print(f"[bandit] arm {a.name!r} DROPPED — missing {missing} checkpoint file(s)")
             continue
+        if a.uses_no_tp() and a.matchup_rules:
+            print(f"[bandit] arm {a.name!r}: tp_ckpt 'none' — its matchup rules {list(a.matchup_rules)} never "
+                  f"fire (rules act through the team picker)")
         arms.append(a)
     if arms and not any(a.incumbent for a in arms):
         arms[0].incumbent = True
@@ -179,14 +190,18 @@ def load_bundle(arm: Arm, cache: dict, *, default_battle, default_tp, device: st
             return (_M.load_bc_policy(path, device) if kind == "battle"
                     else _M.load_team_chooser(path, device))
     bpath = Path(default_battle) if arm.uses_default("battle") else _resolve(arm.battle_ckpt)
-    tpath = Path(default_tp) if arm.uses_default("tp") else _resolve(arm.tp_ckpt)
-    bkey, tkey = ("battle", str(bpath)), ("tp", str(tpath))
+    bkey = ("battle", str(bpath))
     if bkey not in cache:
         cache[bkey] = loader("battle", bpath)
-    if tkey not in cache:
-        cache[tkey] = loader("tp", tpath)
     model, heads = cache[bkey]
-    chooser, vocab, cfg = cache[tkey]
+    if arm.uses_no_tp():                              # 2026-10-03: no picker → the first-4 heuristic
+        chooser, vocab, cfg = None, None, None
+    else:
+        tpath = Path(default_tp) if arm.uses_default("tp") else _resolve(arm.tp_ckpt)
+        tkey = ("tp", str(tpath))
+        if tkey not in cache:
+            cache[tkey] = loader("tp", tpath)
+        chooser, vocab, cfg = cache[tkey]
     return {"name": arm.name, "model": model, "heads": heads, "chooser": chooser, "vocab": vocab,
             "cfg": cfg, "tau": float(arm.tau), "top_p": float(arm.top_p),
             "tp_tie_eps": arm.tp_tie_eps,

@@ -997,6 +997,9 @@ class VGCPlayerBase(Player):
         # its first two (Showdown leads positions 1-2 in doubles). own_team is captured
         # HERE so the recorded bring indices index the SAME roster they were chosen
         # against. Best-effort — bookkeeping must never disturb the returned /team order.
+        # 2026-10-03 (picker in the self-play loop): the exploring picker's decision record for THIS preview
+        # (player._choose_team_order parks it) — popped FIRST so it can never leak into another battle.
+        _learn = (getattr(self, "_tp_learn_pending", None) or {}).pop(battle.battle_tag, None)
         try:
             store = getattr(self, "_tp_decision", None)
             if store is None:
@@ -1010,6 +1013,8 @@ class VGCPlayerBase(Player):
                 "own_team": [getattr(team[i], "species", None) for i in range(len(team))],
                 "opp_team": [sp for sp in (getattr(m, "species", None) for m in opp_mons) if sp],
             }
+            if _learn is not None:
+                store[battle.battle_tag]["learn"] = _learn
             if len(store) > 256:                     # bound over a long run (defensive)
                 self._tp_decision = {battle.battle_tag: store[battle.battle_tag]}
         except Exception:

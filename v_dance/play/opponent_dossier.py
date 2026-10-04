@@ -19,8 +19,8 @@ stone is proven. Now: ``item`` = the stone id, ``mega`` = the forme ("Gardevoir-
 ``mega_ability`` = its ability, ``mega_seen`` = games seen mega'd, and ``ability`` stays the
 BASE forme's (unknown once mega'd — the L2b warm-start must never feed Pixilate to a pre-mega
 Gardevoir). Each game row also lists ``megas`` (base ids that mega'd in that game). Older
-files keep the old shape until ``python -m v_dance.datatools.dossier_mega_backfill --apply`` rewrites them; every
-reader (matchup book, warm-start) accepts both.
+files were rewritten by the one-off 2026-09-11 backfill (``dossier_mega_backfill``, removed 2026-10-04 — git history);
+every reader (matchup book, warm-start) still accepts both shapes.
 """
 from __future__ import annotations
 

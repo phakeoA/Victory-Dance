@@ -781,10 +781,10 @@ async def run(headed: bool, human_name: str, self_test: bool, ai_team_pin: str |
         _ck["model_path"] = ckpt
     if tp_ckpt is not None:
         _ck["team_chooser_path"] = tp_ckpt
-    # HTML-replay recording (docs/human_benchmark_design.md): same wiring as play_vs_human /
-    # play_ladder, so USER-set games are reviewable + become the Phase-3 adaptation data.
-    # ON for --self-test too — the self-test then proves the whole record path end-to-end.
-    from v_dance.play.play_vs_human import BENCH_DIR, BENCH_LOG
+    # HTML-replay recording (docs/human_benchmark_design.md): USER-set games are reviewable + become the Phase-3
+    # adaptation data. ON for --self-test too — the self-test then proves the whole record path end-to-end.
+    BENCH_DIR = Path(__file__).resolve().parents[2] / "artifacts" / "human_benchmark"
+    BENCH_LOG = BENCH_DIR / "human_bench.jsonl"
     session_id = f"{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}-{os.getpid()}"
     # Type_C training copy (2026-07-10, USER): every REAL game's replay also lands in the
     # corpus folder for later ingest — self-test games are junk data and stay out.

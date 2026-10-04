@@ -2,9 +2,9 @@
 Level C — round-2 codebase-audit fixes (2026-06-30, find->verify Workflow wf_000370a6).
 
 One file collecting the regression tests for the audit findings that don't belong to an existing
-suite: the white_box faint miscount, the direction-tagged damage loglik (+ both narrower guards), the
-live belief-feed species/consumed-item guards, and the de-duplicated belief floor constant. (The
-self-play recording-gate fix is pinned in test_levelC_phase0_search_accounting_2026_06_30.py.)
+suite: the direction-tagged damage loglik (+ both narrower guards), the live belief-feed
+species/consumed-item guards, and the de-duplicated belief floor constant. (The white_box_sim test went
+with the closed search line, 2026-10-04.)
 """
 from __future__ import annotations
 
@@ -13,23 +13,6 @@ import math
 import pytest
 
 pytest.importorskip("numpy")
-
-
-# ── #2 white_box_sim: unrevealed bench (hp_pct=None) is NOT fainted ─────────────
-def test_is_fainted_and_count_fainted_side():
-    from v_dance.encoders.white_box_sim import is_fainted, _count_fainted_side
-    assert is_fainted(None) is False
-    assert is_fainted({"hp_pct": None}) is False                      # unrevealed bench = full HP, not faint
-    assert is_fainted({"hp_pct": None, "is_fainted": False}) is False
-    assert is_fainted({"hp_pct": 100.0}) is False
-    assert is_fainted({"hp_pct": 0.0}) is True                        # real KO
-    assert is_fainted({"is_fainted": True, "hp_pct": 50.0}) is True   # flagged KO
-    snap = {
-        "opp_active": {"opp_a": {"hp_pct": 100.0}, "opp_b": {"hp_pct": 40.0}},
-        "opp_bench": [{"hp_pct": None}, {"hp_pct": None}, {"hp_pct": 0.0, "is_fainted": True}],
-    }
-    # only the one genuinely-KO'd bench mon counts; the two unrevealed (None) bench mons do NOT.
-    assert _count_fainted_side(snap, "opp") == 1
 
 
 # ── #4/#5 direction-tagged damage loglik + direction-aware narrower guards ───────

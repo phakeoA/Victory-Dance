@@ -158,6 +158,14 @@ def main(argv=None) -> int:
     if sel.n_turn_steps < args.min_steps:
         print(f"[ladder-ppo] REFUSED — {sel.n_turn_steps} turn steps < --min-steps {args.min_steps}")
         return 2
+    # 2026-10-03 THE PAIR RULE (memory 01): the candidate is ONE network with the picker these games were played with
+    try:
+        pair_tp, pair_how = LU.pair_picker(arms_cfg, base, sorted(sel.per_arm),
+                                           default_tp=LU.env_default_tp(args.env_path))
+    except ValueError as exc:
+        print(f"[ladder-ppo] REFUSED — the PAIR rule: {exc}")
+        return 2
+    print("[ladder-ppo] the PAIR rule: " + LU.describe_pair(pair_tp, pair_how))
     over = {k: getattr(args, k) for k in LU.RECIPE}
     ppo_cfg, train_cfg = LU.build_configs(sel, **over)
     print("[ladder-ppo] recipe  " + json.dumps({**{k: v for k, v in vars(ppo_cfg).items()
@@ -184,6 +192,8 @@ def main(argv=None) -> int:
     report["selection"] = sel.summary()
     report["opp_weights"] = tw_info
     report["elapsed_s"] = round(time.time() - t0, 1)
+    report["pair_picker"] = LU.repo_relative(pair_tp) if pair_tp else "none"      # 2026-10-03 the PAIR rule
+    report["pair_note"] = LU.describe_pair(pair_tp, pair_how)
     u = report["update"]
     print(f"[ladder-ppo] update  steps {report['n_steps']}  epochs {u.get('epochs_run')}  "
           f"loss {u.get('loss', float('nan')):.4f}  ratio {u.get('ratio_mean', float('nan')):.3f}  "
@@ -195,6 +205,9 @@ def main(argv=None) -> int:
     out_dir = Path(args.out) if args.out else (LU.CKPT_ROOT / f"checkpoints_attn_ladder_ppo_{stamp}")
     ckpt = LU.save_candidate(ac, out_dir, report)
     print(f"[ladder-ppo] candidate -> {ckpt}")
+    if pair_tp:                                    # 2026-10-03 the PAIR rule: a verified sidecar names its picker
+        from v_dance.selfplay.tp_learning import record_pair
+        print(f"[ladder-ppo] pair recorded -> {record_pair(ckpt, pair_tp)}")
     for w in warns:
         print(f"[ladder-ppo] warning: {w}")
     for f in fails:
@@ -251,6 +264,12 @@ def _gates_and_register(args, *, base, anchor, chain, arms_cfg, stamp, out_dir, 
         print("[ladder-ppo] external gates NOT run (add --run-gates) — the commands:\n  " +
               "\n  ".join(cmds.values()))
     print(f"[ladder-ppo] suite: {cmds['suite']}")
+    # 2026-10-03 THE PAIR RULE: the arms + the .env default carry the candidate's picker ('default' = a candidate saved
+    # before the rule — its picker was the deployed default)
+    tp_entry = str(report.get("pair_picker") or "default")
+    if tp_entry == "default":
+        print("[ladder-ppo] ⚠ this candidate predates the PAIR rule (no pair_picker in its meta) — its arms keep the "
+              "deployed default picker")
     if args.register or args.force_register:
         if ok or args.force_register:
             name = args.name or f"ppo_{stamp}"
@@ -263,22 +282,30 @@ def _gates_and_register(args, *, base, anchor, chain, arms_cfg, stamp, out_dir, 
             # 2026-09-04: in chain mode the new head inherits its predecessor's ladder record as a Thompson prior
             # (serve_bandit warm-start) — the arm it was trained from is the previous learning arm.
             entry = LU.register_arm(args.config, name=name, battle_ckpt=ckpt, tau=sel.tau, note=note, learning=chain,
-                                    prior_from=(LU.learning_arms(arms_cfg)[0] if chain else None))
+                                    prior_from=(LU.learning_arms(arms_cfg)[0] if chain else None), tp_ckpt=tp_entry)
             print(f"[ladder-ppo] arm registered: {json.dumps(entry)}")
             if chain and not args.no_rotate:
                 benched = LU.rotate_learning_arm(args.config, keep=name, stamp=stamp)
                 print(f"[ladder-ppo] chain: previous learning arm(s) benched: {benched or 'none'}")
             if args.twin:                                   # 2026-09-04 B3: the argmax twin of the new head
-                tw = LU.register_twin_arm(args.config, head=name, battle_ckpt=ckpt, stamp=stamp)
+                tw = LU.register_twin_arm(args.config, head=name, battle_ckpt=ckpt, stamp=stamp, tp_ckpt=tp_entry)
                 print(f"[ladder-ppo] twin registered: {json.dumps(tw)}")
                 tb = LU.rotate_twin_arm(args.config, keep=tw["name"], stamp=stamp)
                 print(f"[ladder-ppo] twin: previous twin(s) benched: {tb or 'none'}")
             if args.no_deploy_env:
                 print(f"[ladder-ppo] .env {LU.ENV_BATTLE_KEY} left alone (--no-deploy-env)")
+            elif tp_entry == "none":                        # the PAIR rule: .env cannot express 'no picker'
+                print(f"[ladder-ppo] .env left alone — the pair plays WITHOUT a picker (first-4), which the .env "
+                      f"default ({LU.ENV_TP_KEY} must be a file) cannot serve; the arms carry the pair")
             else:
                 dep = LU.deploy_env_battle_ckpt(args.env_path, ckpt, stamp=stamp, arm=name)
                 print(f"[ladder-ppo] .env {dep['key']} -> {dep['new']}"
                       + (f" (was {dep['old']})" if dep["changed"] else " (already current)"))
+                if tp_entry != "default":                   # the PAIR rule: the default stack is a pair too
+                    dtp = LU.deploy_env_battle_ckpt(args.env_path, LU._resolve_repo(tp_entry), key=LU.ENV_TP_KEY,
+                                                    stamp=stamp, arm=name)
+                    print(f"[ladder-ppo] .env {dtp['key']} -> {dtp['new']}"
+                          + (f" (was {dtp['old']})" if dtp["changed"] else " (already current)"))
             print(f"[ladder-ppo] restart the bot (lanes) — the ladder decides (retire at ~40 g, promote at >= 200 g)")
         else:
             print("[ladder-ppo] NOT registered — a gate failed (use --force-register to override)")

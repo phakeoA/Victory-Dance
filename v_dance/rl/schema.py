@@ -73,6 +73,10 @@ class Transition:
     # pair decode (0 / 1), None for an independent decode or a legacy step. policy_eval's pair mode
     # recomputes log p(a_first) · p(a_second | a_first) in that order — exact parity at the warm start.
     pair_first: Optional[int] = None
+    # 2026-10-03 mega-hold exploration (v_dance/selfplay/mega_hold.py): a step whose gimmick was FORCED to 'none' by
+    # the exploration carries the importance weight w = Π π_old(none) over its forced slots; PPO multiplies the step's
+    # clipped surrogate by it. 1.0 = the policy's own step (every other step, every ladder / legacy step).
+    is_weight: float = 1.0
 
     def to_obj(self) -> dict:
         d = {
@@ -88,6 +92,8 @@ class Transition:
         }
         if self.pair_first is not None:                  # only written when it carries information
             d["pair_first"] = int(self.pair_first)
+        if float(self.is_weight) != 1.0:                 # 2026-10-03: only a forced (mega-hold) step writes it
+            d["is_weight"] = float(self.is_weight)
         return d
 
     @classmethod
@@ -104,6 +110,7 @@ class Transition:
             mask_s0=_mask_to_list(d.get("mask_s0")), mask_s1=_mask_to_list(d.get("mask_s1")),
             gmask_s0=_mask_to_list(d.get("gmask_s0")), gmask_s1=_mask_to_list(d.get("gmask_s1")),
             pair_first=(None if d.get("pair_first") is None else int(d["pair_first"])),
+            is_weight=float(d.get("is_weight", 1.0)),
         )
 
 
@@ -124,6 +131,11 @@ class EpisodeMeta:
                                      # seat (logprob stamped 0.0); top_p<1 = the selection was
                                      # nucleus-truncated but the stored logprob is the UNtruncated
                                      # softmax — offline consumers must recompute if they need exact.
+    # 2026-10-03 (picker in the self-play loop): the team-preview decision record of an EXPLORING picker —
+    # the packed picker inputs, subsets / lead pairs, chosen indices + their behaviour probabilities
+    # (model_io._set_head_order). IN-MEMORY ONLY (it carries feature arrays): to_obj never writes it, so the
+    # RL store is unchanged. None = no exploring picker drove this preview.
+    tp_learn: Optional[dict] = None
 
     def to_obj(self) -> dict:
         return {

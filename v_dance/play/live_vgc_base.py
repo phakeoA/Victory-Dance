@@ -74,7 +74,7 @@ import random as _random  # noqa: E402  (retry-exploration on rejected choices)
 
 from v_dance.encoders.live_state_encoder import (  # noqa: E402
     opp_snapshot_from_log_prefix, opp_snapshot_current, own_bench_mons,
-    reconstruct_for_decision, reconstruct_full_for_decision,
+    reconstruct_for_decision,
 )
 from v_dance.encoders.state_encoder import SWITCH_OFFSET, GIMMICK_NONE, _WEATHER_SPEED_ABILITY  # noqa: E402
 from v_dance.dex.pokedex import norm_species  # noqa: E402  (A3 belief-feed species keys)
@@ -175,9 +175,6 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
         # gap-#6 opponent snapshot. OFF by default → prod serving stays byte-identical (the un-spliced
         # static-belief path); the A/B harness / overnight self-play flips it on. See _apply_match_belief.
         use_match_belief = kwargs.pop("use_match_belief", False)
-        # Level C / B1 (search): belief-weighted expectimax in front of the served net. OFF by default →
-        # prod serving stays byte-identical (the policy-argmax path). The A/B harness flips it on.
-        use_search = kwargs.pop("use_search", False)
         # Phase-3 B-L1 (adapt-rules): serve-time pattern tilt (Wide-Guard streak → spread-move
         # logit bias). OFF by default → prod byte-identical. See v_dance/play/adapt_rules.py.
         adapt_rules = kwargs.pop("adapt_rules", False)
@@ -204,16 +201,6 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
         # within-game belief CANNOT live on it). Created lazily per tag in _match_belief_for, reset in
         # _battle_finished_callback. Empty + unused unless use_match_belief is on.
         self._use_match_belief = bool(use_match_belief)
-        # Level C / B1: lazily-built offline encoder + search config; per-battle search/fallback diagnostics.
-        self._use_search = bool(use_search)
-        self._search_encoder = None
-        self._search_cfg = None
-        self._search_counts = {"search": 0, "fallback": 0}
-        if self._use_search:
-            from v_dance.encoders.state_encoder import VodStateEncoder
-            from v_dance.play.search import SearchConfig
-            self._search_encoder = VodStateEncoder()
-            self._search_cfg = SearchConfig()
         self._match_belief: Dict[str, "MatchBelief"] = {}
         # Phase-3 serve-time MEMORY CARRY (frame-stacked, no hidden state): with a
         # memory model (checkpoint memory_dim>0) every decision runs on the battle's
@@ -379,12 +366,7 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
         _oa = (opp_snapshot or {}).get("opp_active") or {}
         opp_present_recon = ({0: bool(_oa.get("opp_a")), 1: bool(_oa.get("opp_b"))}
                              if opp_snapshot else None)
-        if getattr(self, "_use_search", False):
-            # Search is single-frame by design (its leaf evaluator scores synthetic
-            # successor states) — a memory model under search keeps stateless turns.
-            action_s0, action_s1, source = self._search_select(battle, state_vec)
-        else:
-            action_s0, action_s1, source = self._select_actions(battle, state_in)
+        action_s0, action_s1, source = self._select_actions(battle, state_in)
 
         # ── Forced-move escape (no representable legal action) ──────────────
         # If an ACTIVE, non-fainted slot has an EMPTY legal mask, its only usable order is one
@@ -613,40 +595,6 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
         except Exception:
             log.debug("opp_snapshot build failed (degrading to poke-env)", exc_info=True)
             return None
-
-    def _search_select(self, battle: DoubleBattle, state_vec):
-        """Level C / B1 — belief-weighted expectimax → (a0, a1, "search"). Builds the FULL both-sides snapshot
-        (one prefix parse), runs the search over white_box_sim + the value head, decodes the winning joint to
-        serve indices, and VALIDATES them against the live legal masks. ANY failure / illegal action → fall back
-        to the policy argmax (search can never crash or play an illegal order mid-battle)."""
-        try:
-            from v_dance.play.search import search_with_model, parse_label, enrich_snapshot
-            from v_dance.play.vgc_base import build_legal_action_mask
-            log_str, own_role = self._assemble_log(battle)
-            full_snap = reconstruct_full_for_decision(log_str, own_role, battle.turn) if log_str else None
-            if not full_snap or not (full_snap.get("our_active")):
-                raise ValueError("no full snapshot")
-            # CRITICAL: the raw _snapshot_state has NO stats_estimate/belief (those come from fill_blanks in the
-            # export path) → white_box_sim would deal ~zero damage. Enrich both sides before the search.
-            enrich_snapshot(full_snap, getattr(self._encoder, "belief", None))
-            best_label, _act, _ranked = search_with_model(
-                full_snap, self._model, self._search_encoder, cfg=self._search_cfg,
-                device=self._device, turn=battle.turn)
-            if not best_label:
-                raise ValueError("search returned no action")
-            idx = parse_label(best_label)
-            a0, a1 = idx.get("our_a"), idx.get("our_b")
-            m0, m1 = build_legal_action_mask(battle, 0), build_legal_action_mask(battle, 1)
-            if a0 is not None and not (a0 < len(m0) and m0[a0]):
-                raise ValueError(f"a0={a0} illegal at serve")
-            if a1 is not None and not (a1 < len(m1) and m1[a1]):
-                raise ValueError(f"a1={a1} illegal at serve")
-            self._search_counts["search"] += 1
-            return (a0 if a0 is not None else 0, a1 if a1 is not None else 0, "search")
-        except Exception as exc:
-            self._search_counts["fallback"] += 1
-            log.debug("B1 search fell back to policy argmax (%s)", exc)
-            return self._select_actions(battle, state_vec)
 
     def _reconstruct_decision(self, battle: DoubleBattle):
         """``(opp_snapshot start-of-turn, prev_turn T-1)`` from a SINGLE parse of the public log, for a

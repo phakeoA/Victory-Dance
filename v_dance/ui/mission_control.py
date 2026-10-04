@@ -492,15 +492,6 @@ REGISTRY = [
                dict(name="bench-note", type="text", label="--bench-note", default="local-browser"),
                dict(name="ckpt", type="ckpt", label="Battle ckpt override (optional)"),
                dict(name="tp-ckpt", type="tpckpt", label="TP ckpt override (optional)")]),
-    dict(id="play_vs_human", cat="play", heavy=False, title="Play vs human (terminal serve)",
-         module="v_dance.play.play_vs_human",
-         desc="Serves battles on the local Showdown server until Ctrl-C (you join from any browser).",
-         opts=[dict(name="mode", type="choice", label="--mode", choices=["random", "choose"], default="random"),
-               dict(name="ai-team", type="team", label="AI team (choose mode)"),
-               dict(name="human-team", type="team", label="Your team (choose mode)"),
-               dict(name="n-battles", type="int", label="--n-battles (blank = until Ctrl-C)", min=1, max=10000),
-               dict(name="dossier", type="flag", label="--dossier"),
-               dict(name="bench-note", type="text", label="--bench-note", default="")]),
     dict(id="run_local_battle", cat="play", heavy=False, title="AI vs AI local battle (spectate)",
          module="v_dance.play.run_local_battle",
          desc="Bot vs bot on the local server; a spectator tab opens so you can watch.",
@@ -508,12 +499,6 @@ REGISTRY = [
                dict(name="team1", type="team", label="--team1 (optional)"),
                dict(name="team2", type="team", label="--team2 (optional)"),
                dict(name="no-spectate", type="flag", label="--no-spectate")]),
-    dict(id="play_ladder", cat="play", heavy=False, title="Ladder (direct websocket, no browser)",
-         module="v_dance.online.play_ladder",
-         desc="Autonomous ladder mode over the raw websocket (no Playwright, no panel).",
-         opts=[dict(name="games", type="int", label="--games", default=1, min=1, max=200),
-               dict(name="team", type="team", label="--team (optional)"),
-               dict(name="bench-note", type="text", label="--bench-note", default="ladder")]),
 
     # ---- TRAIN (heavy → copy-only) ----
     dict(id="train_bc", cat="train", heavy=True, title="Battle net retrain (era N+1)",
@@ -634,29 +619,6 @@ REGISTRY = [
          note="Exit 0 = candidate saved (+ registered + deployed) · 2 = refused (no trainable data / "
               "below --min-steps) · 3 = a gate failed (candidate saved, NOT registered). Expect KL-to-base "
               "0.01-0.04 at lr 1e-3; the per-epoch approx-KL stop (0.02) may end it early — that is fine."),
-
-    # 2026-09-04 B4 (USER: learning first): the VOLUME complement to the nightly PPO — every rated ladder game's winning
-    # perspective (Type-C) into the era-2 lineage BC fine-tune of the chain head; GPU ~1.5 h; the bot may stay up.
-    dict(id="bc_finetune", cat="train", heavy=True,
-         title="B4 ladder-wins BC fine-tune (Type-C → train_bc)",
-         module="v_dance.ladder.bc_finetune",
-         desc="Exports every rated ladder game's WINNING perspective (Type-C, two passes: rated + hand-approved), "
-              "fine-tunes the chain head on the era-2 lineage recipe (HF corpus + Type-C, exp advantage + rating "
-              "weighting; GPU ~1.5 h), runs the ruler (vs base, vs era2) + type-eff gates, registers bcft_<date> as an "
-              "argmax candidate with a fixed share. The bot may stay UP (the GPU is idle otherwise). Design §12 B4.",
-         opts=[dict(name="base", type="choice", label="--base (learning = the chain head; incumbent = era2)",
-                    choices=["learning", "incumbent"], default="learning"),
-               dict(name="epochs", type="int", label="--epochs", default=8, min=1, max=60),
-               dict(name="lr", type="float", label="--lr", default=0.001, min=0.0, max=1.0),
-               dict(name="patience", type="int", label="--patience (epochs without val gain)", default=3, min=0, max=20),
-               dict(name="share", type="float", label="--share (fixed bandit share for the new arm; shares above 1 are scaled)",
-                    default=0.15, min=0.0, max=1.0),
-               dict(name="run-gates", type="flag", label="--run-gates (ruler vs base + vs era2, type-eff)", default=True),
-               dict(name="register", type="flag", label="--register (arm bcft_<date> when every gate passes)", default=True),
-               dict(name="no-export", type="flag", label="--no-export (reuse the current Jsonl_TypeC folder)"),
-               dict(name="dry-run", type="flag", label="--dry-run (counts + the exact commands; nothing runs)")],
-         note="Exit 0 ok · 2 refused · 3 a gate failed (candidate saved, NOT registered) · 4 training failed. Terminal-only "
-              "plumbing check: `python -m v_dance.ladder.bc_finetune --smoke` (CPU, ~2 min)."),
 
     # ---- DATA ----
     dict(id="scrape_pika", cat="data", heavy=True, title="Scrape Pikalytics (MANUAL only)",

@@ -65,7 +65,9 @@ for _k in ("VD_SERVE_TAU", "VD_SERVE_TOP_P", "VD_TP_TIE_EPS", "VD_PAIR_DECODE",
            # 2026-09-02 (USER): battle-timer mode at launch (1 = /timer on at every game's first frame)
            "VD_TIMER_IMMEDIATE",
            # 2026-09-03 (USER): open team sheets at launch (1 = accept the server's team-preview offer)
-           "VD_OTS_ACCEPT"):
+           "VD_OTS_ACCEPT",
+           # 2026-10-02: terrain encoder values (unset/0 = pre-v19d, what the served checkpoints know; 1 = v19d)
+           "VD_TERRAIN_V19D"):
     if _ENV.get(_k):
         os.environ.setdefault(_k, _ENV[_k])
 
@@ -1183,6 +1185,11 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path,
             _ob = _ots_banner(_pvhb.OTS_ACCEPT)
             print(_ob)
             _slog(session_log, "    " + _ob)
+            # 2026-10-02: which terrain values the battle net is fed (launch echo)
+            from v_dance.encoders.battle_mechanics import terrain_values_banner
+            _trb = "[online] " + terrain_values_banner()
+            print(_trb)
+            _slog(session_log, "    " + _trb)
 
             # 2026-07-10 (USER): local control server — ladder-run count / team pin / private
             # challenges / auto-accept, all without touching the bot window. Its HTTP API must keep

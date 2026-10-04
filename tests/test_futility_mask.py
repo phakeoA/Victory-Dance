@@ -95,6 +95,42 @@ def test_psychic_terrain_priority_block():
                 foes={0: _foe(grounded=None), 1: None}) == set()
 
 
+# ── 2026-10-02: the per-foe rules apply to FOE-targeted moves only ─────────────
+# The bisect of g50's Baltimore regression (~70 % → ~56 % vs era2): a self / ally / field move uses the canonical
+# bucket 0 too, and the per-foe loop dropped it as if it were "foe 0" — every Protect under Psychic Terrain.
+@pytest.mark.parametrize("move", ["Protect", "Detect", "Wide Guard", "Follow Me", "Rage Powder",
+                                  "Ally Switch", "Endure", "Helping Hand"])
+def test_psychic_terrain_never_blocks_self_or_ally_moves(move):
+    kw = dict(terrain="psychic", foes={0: _foe(grounded=True), 1: _foe(grounded=True)})
+    assert _ftb(move, **kw) == set()
+    assert _ftb("Fake Out", **kw) == {0, 1}                       # a foe-targeted priority move still is
+
+
+@pytest.mark.parametrize("move", ["Protect", "Substitute", "Trick Room"])
+def test_prankster_dark_immunity_only_for_moves_aimed_at_the_foe(move):
+    kw = dict(user_ability="prankster", foes={0: _foe(types=("dark",)), 1: _foe(types=("water",))})
+    assert _ftb(move, **kw) == set()
+    assert _ftb("Thunder Wave", **kw) == {0}
+
+
+def test_spread_status_move_needs_every_present_foe_futile():
+    asleep, awake = _foe(status="slp"), _foe()
+    assert _ftb("Dark Void", foes={0: asleep, 1: awake}) == set()  # still puts foe 1 to sleep
+    assert _ftb("Dark Void", foes={0: asleep, 1: asleep}) == {0}
+    assert _ftb("Dark Void", foes={0: asleep, 1: None}) == {0}
+
+
+def test_build_action_mask_keeps_protect_under_psychic_terrain():
+    indeedee = {"species": "Indeedee-F", "known_ability": "Psychic Surge",
+                "revealed_moves": ["Protect", "Expanding Force", "Follow Me", "Fake Out"], "volatiles": {}}
+    rilla = {"species": "Rillaboom", "runtime_types": ["grass"], "known_ability": "Grassy Surge",
+             "volatiles": {}}
+    row = build_action_mask(_snap(indeedee, rilla, field={"terrain": "psychic"}))["our_a"]
+    assert row[0 * 3 + 0] == 1                       # Protect legal under our own Psychic Terrain
+    assert row[2 * 3 + 0] == 1                       # Follow Me legal
+    assert row[3 * 3 + 0] == 0                       # Fake Out into the grounded Rillaboom: blocked
+
+
 # ── offline integration through build_action_mask ─────────────────────────────
 def _snap(our_mon, opp_a, field=None, sides=None):
     return {

@@ -13,10 +13,7 @@ from typing import Dict, List, Optional
 from v_dance.rl.schema import Trajectory
 
 # Sources that count as MODEL-DRIVEN (mirror gauntlet.py's report: model + replacement).
-# B1 (Level-C): a belief-weighted-SEARCH pick is tagged source="search" — it IS a model-grounded
-# decision (the search ranks candidates with the policy + value head), so it counts as model-driven.
-# A search FALLBACK runs the raw policy and returns source="model", so that path is already covered.
-_MODEL_DRIVEN_SOURCES = ("model", "forced_switch_model", "search")
+_MODEL_DRIVEN_SOURCES = ("model", "forced_switch_model")
 # BOOKKEEPING-only counters excluded from the MODEL-DRIVEN denominator (#21). `rejected_resample` is
 # incremented ALONGSIDE `model` when a Showdown-rejected MODEL order is re-sampled to a fresh legal
 # MODEL action (the executed pick is still model-driven), so leaving it in the "all non-tp" denominator

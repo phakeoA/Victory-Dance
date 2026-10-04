@@ -8,7 +8,7 @@ The single importable package for the project. Subpackages:
 - ``models``    network definitions (BC model, team-preview model, network)
 - ``training``  training + dataset + eval scripts (train_bc, bc_dataset, ...)
 - ``play``      the serve / decision core + local harnesses (vgc_base, live_vgc_base, player, model_io)
-- ``online``    the ladder bot + its ops (bot, panel, play_vs_human_browser, play_ladder, send_gate, browser/)
+- ``online``    the ladder bot + its ops (bot, panel, play_vs_human_browser, send_gate, browser/)
 - ``eval``      gauntlet + scripted opponents
 - ``rl``        the PPO core (schema, collector, store, reward, gae, pbrs, actor_critic, ppo, trainer)
 - ``selfplay``  the era loop, collection infra and the exploiter (uses ``rl``)

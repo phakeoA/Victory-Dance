@@ -349,6 +349,15 @@ _SIDECOND_MOVES = {"tailwind": "tailwind", "reflect": "reflect",
                    "lightscreen": "light_screen", "auroraveil": "aurora_veil",
                    "safeguard": "safeguard", "mist": "mist", "luckychant": "lucky_chant"}
 
+# 2026-10-02 (bisect of g50's Baltimore regression): the per-foe rules describe a move HITTING a foe, so they
+# apply only to these dex targets. A self / ally / side / field move also uses the canonical bucket 0, and the
+# loop used to drop that bucket as if it were 'foe 0' — Protect / Detect / Wide Guard / Follow Me / Rage Powder /
+# Ally Switch / Endure under Psychic Terrain (positive priority, grounded foe 0); a Prankster user's Protect /
+# Substitute / Trick Room facing a Dark foe 0. A SPREAD move (one canonical bucket) is futile only when it is
+# futile against EVERY present foe (Dark Void with one foe already asleep still hits the other).
+_FOE_SINGLE_TARGETS = frozenset({"normal", "adjacentFoe", "any", "randomNormal"})
+_FOE_SPREAD_TARGETS = frozenset({"allAdjacentFoes", "allAdjacent"})
+
 _STATUS_INFLICT: Optional[dict] = None     # move id -> major status it inflicts (pure status moves)
 _CONFUSE_MOVES: Optional[frozenset] = None
 
@@ -445,7 +454,11 @@ def futile_target_buckets(
             drop.add(0)
         return drop
 
-    # ── per-foe-bucket classes ──
+    # ── per-foe-bucket classes (FOE-targeted moves only — see _FOE_SINGLE_TARGETS) ──
+    target = data.get("target") or ""
+    spread = target in _FOE_SPREAD_TARGETS
+    if not spread and target not in _FOE_SINGLE_TARGETS:
+        return drop                                 # self / ally / side / field / unknown: no foe is hit
     inflict = _status_inflict_map().get(mid)        # major status this PURE status move inflicts
     confuses = mid in (_CONFUSE_MOVES or frozenset())
     powder = bool((data.get("flags") or {}).get("powder"))
@@ -487,6 +500,9 @@ def futile_target_buckets(
                 prio = max(prio, 0) + 1
             if prio > 0:
                 drop.add(b)
+    if spread:                                      # one canonical bucket: futile only vs EVERY present foe
+        present = [b for b in (0, 1) if foes.get(b) is not None]
+        return {0} if present and all(b in drop for b in present) else set()
     return drop
 
 

@@ -64,3 +64,18 @@ def test_prankster_into_dark_and_powder_into_grass_are_futile_live():
             1: {"types": ("grass",), "status": None, "encored": False, "confused": False, "grounded": True}}
     assert 0 in live_encore and live_encore == futile_target_buckets("encore", user_ability="prankster", foes=foes)
     assert 1 in live_spore and 1 in futile_target_buckets("spore", user_ability="effectspore", foes=foes)
+
+
+def test_protect_stays_legal_live_under_psychic_terrain():
+    # 2026-10-02 (the g50 Baltimore bisect): once the enum fix made the live terrain rule fire, every Protect /
+    # Follow Me under Psychic Terrain was masked (canonical bucket 0 read as 'foe 0'). Self moves are never futile
+    # here; a priority move aimed at a grounded foe still is.
+    b = _battle(["", "switch", "p1a: Indeedee", "Indeedee-F, L50, F", "100/100"],
+                ["", "switch", "p1b: Excadrill", "Excadrill, L50", "100/100"],
+                ["", "switch", "p2a: Rillaboom", "Rillaboom, L50", "100/100"],
+                ["", "switch", "p2b: Incineroar", "Incineroar, L50", "100/100"],
+                ["", "-fieldstart", "move: Psychic Terrain", "[from] ability: Psychic Surge", "[of] p1a: Indeedee"])
+    ind = b.get_pokemon("p1a: Indeedee")
+    for mv in ("protect", "followme", "detect", "wideguard"):
+        assert VB._futile_buckets_serve(b, ind, Move(mv, 9)) == set(), mv
+    assert 0 in VB._futile_buckets_serve(b, ind, Move("fakeout", 9))

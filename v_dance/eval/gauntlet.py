@@ -564,6 +564,8 @@ async def run_gauntlet(
     save_replays: bool = False,
     name_salt: str = "",
     own_team=None,
+    candidate_team_chooser: Optional[Path] = None,
+    opponent_team_chooser: Optional[Path] = None,
 ) -> Dict[str, Tuple[int, int]]:
     """Play the model vs each opponent over the rotating team pool and return
     ``{opponent_name: (model_wins, n_finished)}``.
@@ -583,9 +585,15 @@ async def run_gauntlet(
     ``""`` (the standalone-CLI default) keeps the legacy ``BC{uid}`` / ``OP{kind4}{uid}`` names.
 
     ``own_team`` (W2, 2026-09-03): the model seat plays THIS team every battle - scripted kinds vs
-    each pool team, the champion mirror own-vs-own (``eval_pairings``)."""
+    each pool team, the champion mirror own-vs-own (``eval_pairings``).
+
+    ``candidate_team_chooser`` / ``opponent_team_chooser`` (2026-10-03, picker in the self-play loop): a picker
+    PER SIDE — the candidate's co-trained picker and a past champion's own (the HoF veto); None = the shared
+    ``team_chooser`` for that side (byte-identical)."""
     import v_dance.play.run_local_battle as R
     from v_dance.play import parallel_battles as PB
+    _cand_tc = candidate_team_chooser or team_chooser
+    _opp_tc = opponent_team_chooser or team_chooser
     server = R.start_showdown() if manage_server else None
     acc: Dict[str, list] = {kind: [0, 0] for kind in opponents}   # kind -> [wins, finished]
     source_totals: Counter = Counter()      # model vs retry/default/forfeit fallbacks
@@ -623,12 +631,12 @@ async def run_gauntlet(
         model_player = opp = None
         try:
             model_player = R.make_player(
-                model_name, model_team, model_path=ckpt, team_chooser_path=team_chooser,
+                model_name, model_team, model_path=ckpt, team_chooser_path=_cand_tc,
                 live_dir=live_dir, save_replays=save_replays,   # #18b: eval match spectate
                 replay_dir=_rdir, replay_label=_label)
             opp = _make_opponent(
                 kind, opp_name, opp_team,
-                model_path=prev_best_ckpt, team_chooser_path=team_chooser)
+                model_path=prev_best_ckpt, team_chooser_path=_opp_tc)
             if spect["open"]:                 # atomic check+clear (no await between)
                 spect["open"] = False
                 asyncio.ensure_future(_open_spectator(model_player))

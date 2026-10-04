@@ -68,7 +68,10 @@ from v_dance.training.bc_dataset import (
 )
 
 _CACHE_DIRNAME = ".encoded_cache"
-_CACHE_SCHEMA = 6          # 6 (2026-10-02, mega audit): Fairy/Dark Aura + Fire Mane + Mega Sol + Dragonize ×1.2
+_CACHE_SCHEMA = 7          # 7 (2026-10-02, bisect): futility per-foe rules only for FOE-targeted moves — Protect &
+                           # co. under Psychic Terrain / a Prankster self-move vs a Dark foe were masked (and their
+                           # human labels SKIPPED as futile); spread status moves need EVERY foe futile.
+                           # 6 (2026-10-02, mega audit): Fairy/Dark Aura + Fire Mane + Mega Sol + Dragonize ×1.2
                            # in the damage band, Eelevate airborne / Ground-immune / type_immunity tag, Meowstic +
                            # Tatsugiri megas mega-capable in the gimmick mask (same dims, new values).
                            # 5 (2026-10-02): v19d terrain move mechanics — the terrain ×1.3 keys on the
@@ -95,9 +98,10 @@ _DTYPE_DT = "<U16"
 def folder_fingerprint(folder: str) -> str:
     """Content fingerprint of a corpus folder for cache keying."""
     from v_dance.encoders.mega_preview import TABLE_FINGERPRINT   # v20: the frozen stone shares the rows read
+    from v_dance.encoders.battle_mechanics import TERRAIN_V19D    # VD_TERRAIN_V19D=0 = pre-v19d terrain values
     h = hashlib.sha1()
     h.update(f"schema={_CACHE_SCHEMA};layout={get_state_layout_version()};"
-             f"dim={get_state_dim()};mega_stones={TABLE_FINGERPRINT}".encode())
+             f"dim={get_state_dim()};mega_stones={TABLE_FINGERPRINT};terrain_v19d={TERRAIN_V19D}".encode())
     base = Path(folder)
     for f in iter_jsonl_files(str(folder)):
         st = os.stat(f)

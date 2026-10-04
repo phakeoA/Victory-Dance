@@ -760,7 +760,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap.add_argument("--limit-files", type=int, default=None)
     # T4.1 + rename-wiring: default each --features mode to the dir its CONSUMER reads, so a default retrain is
     # never an orphan. sbda -> checkpoints/ (served by model_io.DEFAULT_TP_CHECKPOINT as teampreview_sbda.pt);
-    # legacy -> checkpoints_pre_sbda/ (read by v_dance/eval/tp_headtohead_eval.py TP_LEGACY as teampreview_base.pt).
+    # legacy -> checkpoints_pre_sbda/ (teampreview_base.pt; its old reader tp_headtohead_eval was removed 2026-10-04).
     # (Was a single checkpoints/ default, so a legacy retrain's teampreview_base.pt landed in a dir nothing read.)
     ap.add_argument("--out", default=None,
                     help="checkpoint output dir (default: checkpoints/ for --features sbda, "

@@ -44,7 +44,7 @@ class TrajectoryCollector:
         logprob: float = 0.0, value: float = 0.0,
         decision_type: str = "turn", turn: int = 0,
         mask_s0=None, mask_s1=None, gmask_s0=None, gmask_s1=None,
-        pair_first: Optional[int] = None,
+        pair_first: Optional[int] = None, is_weight: float = 1.0,
     ) -> None:
         """Append one decision step. ``logprob`` is the joint log-prob of the chosen
         (a0,g0,a1,g1) under the BEHAVIOUR policy; ``value`` is the critic V(s) at
@@ -60,6 +60,7 @@ class TrajectoryCollector:
             reward=0.0, done=False, decision_type=decision_type, turn=int(turn),
             mask_s0=mask_s0, mask_s1=mask_s1, gmask_s0=gmask_s0, gmask_s1=gmask_s1,
             pair_first=(None if pair_first is None else int(pair_first)),   # W3b-1b
+            is_weight=float(is_weight),                                     # 2026-10-03 mega-hold exploration
         ))
 
     def __len__(self) -> int:
@@ -79,7 +80,7 @@ class TrajectoryCollector:
         self, *, own_team: Sequence[str], opp_team: Sequence[str],
         tp_bring: Sequence[int], tp_leads: Sequence[int],
         won: Optional[bool], terminal_type, n_turns: Optional[int] = None,
-        sampling: Optional[dict] = None,
+        sampling: Optional[dict] = None, tp_learn: Optional[dict] = None,
     ) -> Trajectory:
         """Finalise: mark the last step ``done`` and attach ``EpisodeMeta``. Does NOT
         place the terminal reward (task 3a.3). ``n_turns`` defaults to the last step's
@@ -94,7 +95,7 @@ class TrajectoryCollector:
             own_team=list(own_team), opp_team=list(opp_team),
             tp_bring=[int(i) for i in tp_bring], tp_leads=[int(i) for i in tp_leads],
             won=won, terminal_type=str(TerminalType(terminal_type).value),
-            n_turns=int(n_turns), sampling=sampling,
+            n_turns=int(n_turns), sampling=sampling, tp_learn=tp_learn,
         )
         return Trajectory(meta=meta, transitions=list(self._steps))
 

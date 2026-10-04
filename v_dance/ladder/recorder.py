@@ -27,6 +27,13 @@ None -> 0, the slot passes via ``_safe_order``) and its effective mask is all-ze
 that to ``PASS_ACTION`` (``game_runner.resolve_action``); this recorder wrote the raw 0 — ~10 % of
 turn steps, every arm. ``_slot_action`` mirrors the self-play rule here (torch-free), and
 ``ladder.update.repair_pass_slots`` repairs the games already on disk at load time.
+
+2026-10-03 (the rain-leak analysis: 393/393 rain games 'brought' Salamence / Sneasler / Indeedee / Tyranitar and
+led Salamence + Sneasler while their replays showed other leads): ``tp_bring`` / ``tp_leads`` were the FIRST-4
+FALLBACK for every ladder game. The bot seals a game from its ``end_battle`` hook, which runs AFTER
+``vgc_base._battle_finished_callback`` has popped ``_tp_decision[tag]``. The decision is now SNAPSHOT at the game's
+first recorded step and ``sampling.tp_source`` says where the record came from ('decision' / 'first4_default');
+games recorded before the fix carry no ``tp_source`` and their bring / leads are the fallback.
 """
 from __future__ import annotations
 
@@ -96,6 +103,11 @@ class LadderRecorder:
         self.lp_steps = 0                           # turn steps whose log-prob came from the sampler
         self.lp_inexact = 0                         # ... of which cross-slot dedup re-decodes
         self.valid_games = 0                        # games sealed logprob_valid=true
+        # 2026-10-03: the team-preview decision, SNAPSHOT at the game's first recorded step. The live bot seals a
+        # game from its end_battle hook, AFTER vgc_base._battle_finished_callback has popped _tp_decision[tag] —
+        # so every ladder game used to seal the first-4 default as its bring / leads.
+        self._tp: Dict[str, dict] = {}
+        self.tp_default = 0                         # sealed games whose bring / leads are the first-4 FALLBACK
         self.install()
 
     # ── hooks ────────────────────────────────────────────────────────────────
@@ -159,6 +171,12 @@ class LadderRecorder:
             if isinstance(slp, dict):
                 lp = slp.pop((tag, decision_type), None)
             c = self._collector_for(battle)
+            if tag not in self._tp:                 # 2026-10-03: keep the TP decision while it still exists
+                d = (getattr(self.player, "_tp_decision", None) or {}).get(tag)
+                if d:
+                    self._tp[tag] = dict(d)
+                    if len(self._tp) > 512:         # abandoned games never seal — stay bounded
+                        self._tp.pop(next(iter(self._tp)))
             turn = int(getattr(battle, "turn", 0) or 0)
             last = c.last_step()
             if last is not None and last.turn == turn and last.decision_type == decision_type:
@@ -293,11 +311,16 @@ class LadderRecorder:
         """Seal ``tag``'s trajectory: ±1 terminal reward, per-game metadata, append to the store.
         Returns the Trajectory, or None when nothing was recorded for the game."""
         c = self._collectors.pop(tag, None)
+        snap = self._tp.pop(tag, None)
         if c is None or len(c) == 0:
             self.skipped_empty += 1
             self._lp.pop(tag, None)                 # W3b-1a: nothing to seal → drop its booking
             return None
-        tp = ((getattr(self.player, "_tp_decision", None) or {}).get(tag)) or {}
+        # the live decision if it is still there (tests / self-play order), else the snapshot taken at the first step
+        tp = ((getattr(self.player, "_tp_decision", None) or {}).get(tag)) or snap or {}
+        tp_source = "decision" if tp.get("bring") else "first4_default"
+        if tp_source != "decision":
+            self.tp_default += 1
         own_team = list(tp.get("own_team") or self._roster(battle, own=True))
         opp_team = list(tp.get("opp_team") or self._roster(battle, own=False))
         bring = list(tp.get("bring") or range(min(4, len(own_team))))
@@ -331,6 +354,9 @@ class LadderRecorder:
             # 2026-09-03 (USER): open team sheets — both sheets were revealed for this game (the battle
             # net played with the opponent's true sets stamped in)
             "ots": self._ots_known(tag),
+            # 2026-10-03: where tp_bring / tp_leads came from — 'decision' = the bot's real team-preview pick,
+            # 'first4_default' = the fallback (no decision seen; every ladder game before this fix)
+            "tp_source": tp_source,
             "opponent": opponent, "rating_before": rating_before,
             "opp_rating_before": opp_rating_before, "lane": lane,
             "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self._now())),
@@ -371,7 +397,9 @@ class LadderRecorder:
                 "open": len(self._collectors), "path": str(self.path),
                 # W3b-1a: how much of the session is PPO-trainable
                 "lp_steps": self.lp_steps, "lp_inexact": self.lp_inexact,
-                "valid_games": self.valid_games}
+                "valid_games": self.valid_games,
+                # 2026-10-03: sealed games whose bring / leads are the first-4 fallback (should stay ~0)
+                "tp_default": self.tp_default}
 
     def banner(self) -> str:
         try:

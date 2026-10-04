@@ -163,6 +163,32 @@ def test_roster_falls_back_to_the_battle_when_no_tp_decision(tmp_path: Path):
     assert t.meta.tp_bring == [0, 1, 2, 3] and t.meta.tp_leads == [0, 1]   # first-4 default
     s = t.meta.sampling                                                     # no arm_info → player defaults
     assert s["arm"] is None and s["tau"] == 0.3 and s["pair_decode"] is True
+    assert s["tp_source"] == "first4_default" and rec.summary()["tp_default"] == 1   # the fallback is LABELLED
+
+
+def test_the_tp_decision_survives_the_finished_callback_pop(tmp_path: Path):
+    """2026-10-03 regression (the live order): team preview stores _tp_decision[tag]; the game's decisions are
+    recorded; poke-env's |win| runs vgc_base._battle_finished_callback, which POPS _tp_decision[tag]; only THEN does
+    the bot's end_battle hook call finish. Before the fix every ladder game sealed the first-4 default."""
+    p = _player()
+    tag = f"battle-{FMT}-31"
+    p._tp_decision[tag] = {"bring": [5, 1, 2, 4], "leads": [5, 1],
+                           "own_team": ["A", "B", "C", "D", "E", "F"], "opp_team": ["X", "Y"]}
+    rec, _ = _recorder(tmp_path, p)
+    b = _battle(tag, turn=1)
+    for turn in (1, 2):
+        b.turn = turn
+        rec.record(b, _state(turn), 0, 0, 0, 0, "model", "turn")
+    p._tp_decision.pop(tag)                                  # _battle_finished_callback (before the seal)
+    t = rec.finish(tag, b, won=False, lost=True)
+    m = t.meta
+    assert m.tp_bring == [5, 1, 2, 4] and m.tp_leads == [5, 1] and m.own_team == ["A", "B", "C", "D", "E", "F"]
+    assert m.opp_team == ["X", "Y"] and m.sampling["tp_source"] == "decision"
+    assert tag not in rec._tp and rec.summary()["tp_default"] == 0           # the snapshot is released
+    # a game with no recorded step releases its snapshot too (nothing lingers)
+    tag2 = f"battle-{FMT}-32"
+    rec._tp[tag2] = {"bring": [0, 1, 2, 3]}
+    assert rec.finish(tag2, None) is None and tag2 not in rec._tp
 
 
 def test_hook_failures_never_raise(tmp_path: Path):

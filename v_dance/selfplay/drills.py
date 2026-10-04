@@ -201,7 +201,175 @@ def _focus_drill(args: Dict[str, str]) -> Drill:
                  build_pool=pool, score_game=score, aggregate=aggregate, pressure=None, refine=refine)
 
 
-_REGISTRY: Dict[str, Callable[[Dict[str, str]], Drill]] = {"field": _field_drill, "focus": _focus_drill}
+# ── the MEGATIME drill: hold the weather mega until their weather is up (2026-10-03) ─────────────────────────────
+_WEATHER_ID_KIND = {"sandstorm": "sand", "raindance": "rain", "sunnyday": "sun", "snowscape": "snow", "snow": "snow",
+                    "hail": "snow", "desolateland": "sun", "primordialsea": "rain"}
+
+
+def _megatime_score_factory(mon: str, setters: set, threat: set, weather_kind: str, guard=frozenset()):
+    def score(text: str, our_ids: set, ctx: dict) -> Optional[dict]:
+        """One game: did THEIR weather come up, when did OUR ``mon`` mega (before / after it), did the mega re-set
+        our weather over theirs, how many of ours did a weather-boosted Electro Shot KO under each weather — and the
+        GUARD (USER 10-03: other megas must not learn to delay): the first turn a ``guard`` mon starts on the field
+        while our mega is unused, did it mega that turn. ``guard`` None = ``ctx['guard']`` (guard=auto: build_pool
+        reads our team's megas that have no delay reason)."""
+        guard_ids = set(guard) if guard is not None else set((ctx or {}).get("guard") or ())
+        side = _our_side(text, our_ids)
+        won = _won(text, our_ids)
+        if side is None or won is None:
+            return None
+        other = "p2" if side == "p1" else "p1"
+        six, turn, weather = [], 0, None
+        their_weather_turn, mega_turn, mega_weather, mega_reset = None, None, None, False
+        pending_mega, es_pending = False, None
+        es_ko = {"rain": 0, "other": 0}
+        active: Dict[str, str] = {}
+        mega_used, guard_turn, guard_first = False, None, False
+        for ln in text.splitlines():
+            p = ln.split("|")
+            if len(p) < 2:
+                continue
+            k = p[1]
+            if k == "poke" and len(p) > 3 and p[2] == other:
+                six.append(_id(p[3].split(",")[0].split("-")[0]))
+            elif k in ("switch", "drag") and len(p) > 3 and p[2].startswith(side):
+                active[p[2][:3]] = _id(p[3].split(",")[0].split("-")[0])
+            elif k == "faint" and len(p) > 2 and p[2].startswith(side):
+                active.pop(p[2][:3], None)
+            elif k == "turn" and len(p) > 2:
+                turn = int(re.sub(r"\D", "", p[2]) or 0)
+                es_pending = None
+                if guard_ids and guard_turn is None and not mega_used and set(active.values()) & guard_ids:
+                    guard_turn = turn
+            elif k == "-weather" and len(p) > 2:
+                if "[upkeep]" in ln:
+                    continue
+                w = _id(p[2])
+                kind = None if w in ("none", "") else _WEATHER_ID_KIND.get(w, w)
+                m = re.search(r"\[of\] (p[12])", ln)
+                if pending_mega and m and m.group(1) == side and kind and weather == weather_kind:
+                    mega_reset = True                  # the mega's own ability wiped THEIR weather
+                pending_mega = False
+                if kind == weather_kind and m and m.group(1) == other and their_weather_turn is None:
+                    their_weather_turn = turn
+                weather = kind
+            elif k == "detailschange" and len(p) > 3 and p[2].startswith(side) and "-Mega" in p[3]:
+                _msp = _id(p[3].split(",")[0].split("-")[0])
+                if _msp in guard_ids and guard_turn == turn and not mega_used:
+                    guard_first = True
+                mega_used = True
+                if _msp == mon and mega_turn is None:
+                    mega_turn, mega_weather, pending_mega = turn, weather, True
+            elif k == "move" and len(p) > 3:
+                pending_mega = False
+                es_pending = (weather if p[2].startswith(other) and _id(p[3]) == "electroshot" else None)
+            elif k == "-damage" and len(p) > 3 and p[2].startswith(side) and p[3].startswith("0 fnt") \
+                    and "[from]" not in ln and es_pending is not None:
+                es_ko["rain" if es_pending == weather_kind else "other"] += 1
+        sixs = set(six)
+        hit = bool(sixs & setters) and (not threat or bool(sixs & threat))
+        return {"won": won, "hit": hit, "their_weather": their_weather_turn is not None,
+                "mega": mega_turn is not None, "mega_t1": mega_turn == 1,
+                "mega_after_weather": (mega_turn is not None and their_weather_turn is not None
+                                       and (mega_turn > their_weather_turn
+                                            or (mega_turn == their_weather_turn and mega_weather == weather_kind))),
+                "mega_reset": mega_reset, "es_ko_rain": es_ko["rain"], "es_ko_other": es_ko["other"],
+                "guard_chance": guard_turn is not None, "guard_first": guard_first}
+    return score
+
+
+def _no_delay_megas(paste: str) -> set:
+    """Our team's mega mons (a stone their species uses) with NO delay reason (``mega_hold.delay_reason``) — the
+    ``guard=auto`` set: their mega timing must not drift (USER 10-03)."""
+    from types import SimpleNamespace
+    from v_dance.dex.team_sheet import parse_showdown_team
+    from v_dance.selfplay.mega_hold import delay_reason, mega_info
+    out = set()
+    for m in parse_showdown_team(paste):
+        mon = SimpleNamespace(species=m.get("species"), base_species=m.get("species"), item=m.get("item"),
+                              ability=m.get("ability"))
+        sp = _id(str(m.get("species") or "").split("-")[0])
+        if mega_info(sp, _id(m.get("item"))) is not None and delay_reason(mon) is None:
+            out.add(sp)
+    return out
+
+
+def _megatime_aggregate(games: List[dict]) -> Dict[str, object]:
+    hit = [g for g in games if g["hit"]]
+    came = [g for g in hit if g["their_weather"]]
+    mega = [g for g in hit if g["mega"]]
+    return {"games": len(games), "win": _rate(sum(g["won"] for g in games), len(games)),
+            "hit_games": len(hit), "hit_win": _rate(sum(g["won"] for g in hit), len(hit)),
+            "mega_rate": _rate(len(mega), len(hit)),
+            "mega_t1": _rate(sum(g["mega_t1"] for g in mega), len(mega)),
+            # of the hit games where their weather came up AND we mega'd: did the mega wait for it?
+            "mega_after_weather": _rate(sum(g["mega_after_weather"] for g in came if g["mega"]),
+                                        sum(1 for g in came if g["mega"])),
+            "mega_reset": _rate(sum(g["mega_reset"] for g in came), len(came)),
+            "es_ko_rain_per_game": _rate(sum(g["es_ko_rain"] for g in hit), len(hit)),
+            "es_ko_other_per_game": _rate(sum(g["es_ko_other"] for g in hit), len(hit)),
+            # the GUARD over ALL games: a guard mon's mega at its first chance (should NOT fall — USER 10-03)
+            "guard_games": sum(1 for g in games if g.get("guard_chance")),
+            "guard_first_mega": _rate(sum(1 for g in games if g.get("guard_chance") and g.get("guard_first")),
+                                      sum(1 for g in games if g.get("guard_chance")))}
+
+
+def _megatime_drill(args: Dict[str, str]) -> Drill:
+    """``megatime[:threat=archaludon,setters=pelipper+politoed+kyogre,mon=tyranitar,weather=rain,share=0.35,cap=0.06,
+    guard=auto,pressure=off]`` — over-sample the teams that carry a THREAT and a weather SETTER (default: Archaludon
+    rain, the 10-03 rain leak: 36.7 % in 264 games) into the normal mix; opponents switch their setter back in (the
+    field pressure — exactly what punishes an early mega); the scoreboard tracks whether ``mon``'s mega waits for their
+    weather and re-sets ours, and GUARDS the other megas (``guard_first_mega``: a guard mon megas at its first chance —
+    must not fall). ``guard=auto`` (default) = our team's megas with NO delay reason (mega_hold.delay_reason: for
+    Baltimore, Salamence); ``guard=salamence+…`` names them; ``guard=`` = none. Pair it with --mega-hold-p-weather."""
+    threat = {_id(s) for s in str(args.get("threat", "archaludon")).split("+") if s}
+    setters = {_id(s) for s in str(args.get("setters", "pelipper+politoed+kyogre")).split("+") if s}
+    mon = _id(args.get("mon", "tyranitar"))
+    _g = str(args.get("guard", "auto"))                                                       # USER 10-03
+    guard = None if _g.strip().lower() == "auto" else frozenset(_id(s) for s in _g.split("+") if s)
+    weather_kind = str(args.get("weather", "rain"))
+    share = float(args.get("share", 0.35))
+    if not setters:
+        raise ValueError("megatime drill needs setters=<species>[+<species>…]")
+    if not (0.0 < share <= 1.0):
+        raise ValueError(f"megatime drill: share must be in (0, 1] (got {share})")
+    holder: Dict[str, object] = {}
+
+    def pool(team_pool: List[str], own_team: str) -> DrillPool:
+        from v_dance.eval.field_control_report import paste_species, team_setters
+        from v_dance.selfplay.drill_pool import unique_by_name
+        hits, rest = [], []
+        for p in unique_by_name(team_pool, exclude=own_team):
+            sp = {_id(s) for s in paste_species(_read_paste(p))}
+            (hits if (sp & setters and (not threat or sp & threat)) else rest).append(p)
+        if not hits:
+            raise ValueError(f"megatime drill: no pool team carries {sorted(threat)} + one of {sorted(setters)}")
+        h_share = share if rest else 1.0
+        raw = {p: h_share / len(hits) for p in hits}
+        raw.update({p: (1.0 - h_share) / len(rest) for p in rest})
+        weights = cap_weights(raw, float(args.get("cap", 0.06)))
+        holder["ours"] = team_setters(_read_paste(own_team))
+        if guard is None:                             # guard=auto: our megas that have NO reason to wait
+            holder["guard"] = sorted(_no_delay_megas(_read_paste(own_team)))
+        return DrillPool(pool=[p for p, w in weights.items() for _ in range(max(1, int(round(w * 200))))],
+                         ours=holder["ours"], teams=[DrillTeam(p, ()) for p in hits], weights=weights,
+                         shares={f"threat:{'+'.join(sorted(threat)) or 'any'}+setter": round(
+                                     sum(weights.get(p, 0) for p in hits), 6),
+                                 "other": round(sum(weights.get(p, 0) for p in rest), 6)})
+
+    drill = Drill(name="megatime",
+                  describe=(f"megatime: teams with {sorted(threat) or 'any'} + a {weather_kind} setter over-sampled "
+                            f"(share {share:g}); opponents switch their setter back in; scoreboard = does our "
+                            f"{mon}'s mega wait for their {weather_kind} and re-set ours"),
+                  build_pool=pool, score_game=_megatime_score_factory(mon, setters, threat, weather_kind, guard),
+                  aggregate=_megatime_aggregate,
+                  pressure=None if args.get("pressure") == "off" else "field")
+    drill.ctx = holder
+    return drill
+
+
+_REGISTRY: Dict[str, Callable[[Dict[str, str]], Drill]] = {"field": _field_drill, "focus": _focus_drill,
+                                                           "megatime": _megatime_drill}
 
 
 def parse_spec(spec: str) -> Tuple[str, Dict[str, str]]:

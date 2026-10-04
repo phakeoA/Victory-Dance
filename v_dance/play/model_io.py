@@ -136,6 +136,11 @@ _PAIR_ECHO_DONE = False    # 2b: the pair-decode load echo prints once per proce
 # nothing here feeds back into a decision, and a stash failure is swallowed.
 LAST_DECODE: dict = {}
 LAST_TP: dict = {}
+# 2026-10-03 (picker in the self-play loop): the EXPLORING set-head decode's decision record — the packed picker
+# inputs, the subsets / lead pairs, the chosen indices and their behaviour probabilities — for the self-play
+# learner (player._choose_team_order parks it on the battle; tp_learning trains on it). Kept OUT of LAST_TP:
+# that one feeds the JSON thought feed and this one carries feature arrays. Cleared by every team_order call.
+LAST_TP_EXPLORE: dict = {}
 
 
 def _stash(target: dict, **kw) -> None:
@@ -854,9 +859,26 @@ def _leads_with(brought, lead_logits, lead_k: int, require_lead: Sequence[int] =
     return req + rest[:max(0, lead_k - len(req))]
 
 
+def _softmax_np(x) -> np.ndarray:
+    x = np.asarray(x, dtype=np.float64)
+    e = np.exp(x - x.max())
+    return e / e.sum()
+
+
+def explore_probs(scores, tau: float, eps: float) -> np.ndarray:
+    """2026-10-03: the exploring picker's BEHAVIOUR distribution over candidates (subsets or lead pairs):
+    ``(1 - eps) * softmax(scores / tau) + eps / len(scores)``. tp_learning recomputes the same thing (in torch)
+    for the importance ratio, so keep the two in lockstep."""
+    tau = max(1e-6, float(tau))
+    eps = min(1.0, max(0.0, float(eps)))
+    p = _softmax_np(np.asarray(scores, dtype=np.float64) / tau)
+    mu = (1.0 - eps) * p + eps / len(p)
+    return mu / mu.sum()
+
+
 def _set_head_order(model, oi, of, pi, pf, aff_t, valid: int, bring_k: int, lead_k: int,
                     n: int, device: str, ctx_kw: Optional[dict] = None, require: Sequence[int] = (),
-                    require_lead: Sequence[int] = ()):
+                    require_lead: Sequence[int] = (), explore: Optional[dict] = None):
     """(order, True) via the contrastive set head, or (None, False) when not applicable
     (model has no set head / nothing to choose). ``require`` (matchup rules, 2026-10-01): only sets
     containing these roster indices are scored — the net still ranks them and picks the leads."""
@@ -878,6 +900,36 @@ def _set_head_order(model, oi, of, pi, pf, aff_t, valid: int, bring_k: int, lead
             aff_t, subsets=subsets, **(ctx_kw or {}))
     scores = np.asarray(scores[0].detach().cpu())
     ll = np.asarray(ll[0].detach().cpu())
+    if explore:
+        # 2026-10-03 (picker in the self-play loop): SAMPLE the set, then the lead pair inside it, from
+        # explore_probs (softmax / tau mixed with eps-uniform) and record everything the update needs to
+        # recompute the same probabilities with gradients (tp_learning.TPLearner).
+        rng = explore.get("rng") or np.random.default_rng()
+        tau = max(1e-6, float(explore.get("tau", 1.0)))      # = explore_probs' clamps, so the record is exact
+        e_eps = min(1.0, max(0.0, float(explore.get("eps", 0.0))))
+        mu_s = explore_probs(scores, tau, e_eps)
+        si = int(rng.choice(len(subsets), p=mu_s))
+        brought = list(subsets[si])
+        pairs = list(combinations(sorted(brought), min(lead_k, len(brought)))) or [tuple(brought)]
+        if require_lead:
+            pairs = [q for q in pairs if set(require_lead) & set(brought) <= set(q)] or pairs
+        pair_scores = np.asarray([float(ll[list(q)].sum()) for q in pairs])
+        mu_p = explore_probs(pair_scores, tau, e_eps)
+        pj = int(rng.choice(len(pairs), p=mu_p))
+        leads = sorted(pairs[pj], key=lambda i: -ll[i])
+        _stash(LAST_TP_EXPLORE, v=1, subsets=[list(s) for s in subsets], set_idx=si,
+               pairs=[list(q) for q in pairs], pair_idx=pj, mu_set=float(mu_s[si]), mu_pair=float(mu_p[pj]),
+               p_set=float(explore_probs(scores, tau, 0.0)[si]), p_pair=float(explore_probs(pair_scores, tau, 0.0)[pj]),
+               tau=tau, eps=e_eps, oi=[int(x) for x in oi], of=np.asarray(of, dtype=np.float32).copy(),
+               pi=[int(x) for x in pi], pf=np.asarray(pf, dtype=np.float32).copy(),
+               aff=(np.asarray(aff_t[0].detach().cpu(), dtype=np.float32) if aff_t is not None else None),
+               ctx=({k: np.asarray(v[0].detach().cpu(), dtype=np.float32) for k, v in ctx_kw.items()}
+                    if ctx_kw else None))
+        _stash(LAST_TP, path="set_head", subsets=[list(s) for s in subsets],
+               scores=[float(x) for x in scores], lead_logits=[float(x) for x in ll],
+               set=list(brought), leads=list(leads), eps=0.0, set_dev=si != int(np.argmax(scores)),
+               lead_dev=False, explore=True)
+        return (list(leads) + [b for b in brought if b not in leads])[:n], True
     eps = _tp_tie_eps()
     if eps <= 0:                                   # default: exact argmax, original path
         brought = list(subsets[int(np.argmax(scores))])
@@ -954,6 +1006,7 @@ def team_order(
     opp_set_ctx: Optional[np.ndarray] = None,
     require: Sequence[int] = (),
     require_lead: Sequence[int] = (),
+    explore: Optional[dict] = None,
 ) -> List[int]:
     """Return roster indices to bring, LEADS FIRST (matching how the trainer
     labels — the first two brought are the leads), capped at ``n``.
@@ -979,6 +1032,7 @@ def team_order(
     they serve byte-identically through the frozen extractor.
     """
     _stash(LAST_TP)                               # a fresh preview: no stale narration
+    _stash(LAST_TP_EXPLORE)                       # 2026-10-03: and no stale exploring record
     valid = min(len(our_species), 6)
     require = [int(i) for i in (require or ()) if 0 <= int(i) < valid]
     require_lead = [int(i) for i in (require_lead or ()) if int(i) in require]
@@ -1029,7 +1083,7 @@ def team_order(
     if TP_SET_HEAD and getattr(model, "use_set_head", False):
         order, ok = _set_head_order(model, oi, of, pi, pf, aff_t,
                                     valid, bring_k, lead_k, n, device, ctx_kw=ctx_kw, require=require,
-                                    require_lead=require_lead)
+                                    require_lead=require_lead, explore=explore)
         if ok:
             return order
 

@@ -76,18 +76,3 @@ class TestDossier:
         assert (g["item"], g["ability"], g["mega_seen"], g["mega"]) == \
             ("gardevoirite", "trace", 1, "Gardevoir-Mega")
         assert d["games"][-1]["megas"] == [] and g["times_seen"] == 2
-        # the backfill rewrites an OLD-shape record the same way (dry-run plan + rewrite)
-        from v_dance.datatools import dossier_mega_backfill as bf   # a package module since 2026-09-10
-        old = {"opponent": "Old", "games": [], "mons": {
-            "gardevoir": {"species": "gardevoir", "moves": [], "item": None, "ability": "pixilate", "times_seen": 2},
-            "latios": {"species": "latios", "moves": [], "item": None, "ability": "levitate", "times_seen": 1},
-            "garchomp": {"species": "garchomp", "moves": [], "item": "lifeorb", "ability": "roughskin", "times_seen": 1}}}
-        (tmp_path / "old.json").write_text(json.dumps(old), encoding="utf-8")
-        changes, scanned, bad = bf.plan(tmp_path)
-        assert scanned == 2 and bad == 0 and [(p.name, [s for s, _ in todo]) for p, _d, todo in changes] == \
-            [("old.json", ["gardevoir"])]                   # Latios Levitate is shared → untouched
-        bf.rewrite(changes[0][1], changes[0][2])
-        rec = changes[0][1]["mons"]["gardevoir"]
-        assert (rec["item"], rec["mega"], rec["mega_ability"], rec["ability"], rec["mega_seen"]) == \
-            ("gardevoirite", "Gardevoir-Mega", "pixilate", None, 1)
-        assert changes[0][1]["mons"]["latios"]["ability"] == "levitate"

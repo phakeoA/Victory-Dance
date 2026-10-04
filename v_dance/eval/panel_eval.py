@@ -33,6 +33,56 @@ def wilson(w: int, n: int, z: float = 1.96):
     return (c - h, c + h)
 
 
+def resolve_candidate_tp(cands: dict, candidate_tp, paired=None):
+    """2026-10-03 USER RULE — the PAIR ("treat them like 1 neural network"): ``(picker for the candidate seat, note)``.
+    An explicit ``--candidate-tp`` wins ('default' = the eval default picker, explicitly → None). Unset: a candidate
+    with a co-trained picker (its verified pairing sidecar) plays WITH it; candidates without one keep the eval
+    default. The candidate picker is ONE setting for the whole eval, so candidates that need DIFFERENT pickers raise
+    ValueError (evaluate them one per call). ``paired`` is injectable for tests."""
+    if candidate_tp is not None:
+        return (None, "candidate team picker: the eval default (explicit)") \
+            if str(candidate_tp).strip().lower() == "default" else (candidate_tp, "")
+    if paired is None:
+        from v_dance.selfplay.tp_learning import paired_tp_for as paired
+    pairs = {n: paired(p) for n, p in cands.items()}
+    got = {v for v in pairs.values() if v}
+    if not got:
+        return None, ""
+    if len(got) > 1 or any(v is None for v in pairs.values()):
+        raise ValueError("the PAIR rule: these candidates play with DIFFERENT pickers "
+                         f"({ {n: (Path(v).name if v else 'eval default') for n, v in pairs.items()} }) — evaluate one "
+                         "candidate per call, or pass --candidate-tp")
+    tp = got.pop()
+    return tp, f"the PAIR rule: the candidate plays with its co-trained picker {tp}"
+
+
+def filter_pool(teams, own_team, has=None, lacks=None, species_of=None):
+    """2026-10-03: keep the OPPONENT pool teams whose sheet shows any of ``has`` (all when empty) and none of
+    ``lacks``; the own team always stays (canonical_own_team needs it in the pool). ``species_of(team) ->
+    [species]`` is injectable for tests; default = the team paste parsed with the live encoder's parser."""
+    from v_dance.dex.pokedex import norm_species
+    if not has and not lacks:
+        return list(teams)
+    if species_of is None:
+        import v_dance.play.run_local_battle as R
+        from v_dance.encoders.live_state_encoder import team_species_from_paste
+
+        def species_of(t):
+            return team_species_from_paste(Path(R.resolve_team_path(t)).read_text(encoding="utf-8"))
+    want = {norm_species(s) for s in (has or ())}
+    ban = {norm_species(s) for s in (lacks or ())}
+    own = Path(str(own_team)).name.lower() if own_team else None
+    out = []
+    for t in teams:
+        if own and Path(str(t)).name.lower() == own:
+            out.append(t)
+            continue
+        sp = {norm_species(s) for s in species_of(t)}
+        if (not want or sp & want) and not (sp & ban):
+            out.append(t)
+    return out
+
+
 def main(argv=None) -> int:
     from v_dance.selfplay.generation import parse_panel
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -46,10 +96,41 @@ def main(argv=None) -> int:
     ap.add_argument("--servers", type=int, default=2)
     ap.add_argument("--seed", type=int, default=1000, help="matchup seed (self-play runs use 0 + generation)")
     ap.add_argument("--out", default=str(_REPO / "scratch" / "panel_eval.json"))
+    # 2026-10-03 diagnostics (USER: teach the Rillaboom lesson to both nets)
+    ap.add_argument("--opp-has", nargs="+", default=None, metavar="SPECIES",
+                    help="keep only opponent pool teams showing ANY of these species (own mode)")
+    ap.add_argument("--opp-lacks", nargs="+", default=None, metavar="SPECIES",
+                    help="drop opponent pool teams showing ANY of these species")
+    ap.add_argument("--candidate-tp", default=None,
+                    help="the CANDIDATE's team picker: 'none' = the first-4 roster heuristic (the self-play "
+                         "learner's team preview), a path = that picker, 'default' = the eval default picker; "
+                         "unset = the PAIR rule (2026-10-03): the candidate's co-trained picker when it has one, "
+                         "else the eval default")
+    ap.add_argument("--candidate-rules", default=None,
+                    help="comma-separated matchup rules for the CANDIDATE (e.g. rillaboom_salamence; needs a picker)")
     a = ap.parse_args(argv)
     if "own" in a.modes and not a.own_team:
         ap.error("--modes own needs --own-team")
     cands, opp = parse_panel(a.candidates), parse_panel([a.opponent])
+    import os
+    if a.candidate_rules:
+        from v_dance.play.matchup_rules import RULES
+        bad = [r for r in a.candidate_rules.split(",") if r.strip() and r.strip() not in RULES]
+        if bad:
+            ap.error(f"unknown matchup rule(s) {bad}; known: {sorted(RULES)}")
+        if (a.candidate_tp or "").strip().lower() == "none":
+            ap.error("--candidate-rules act through the team picker — drop --candidate-tp none")
+    try:                                               # 2026-10-03 USER RULE: a pair plays as a pair
+        a.candidate_tp, _note = resolve_candidate_tp(cands, a.candidate_tp)
+    except ValueError as exc:
+        ap.error(str(exc))
+    if _note:
+        print(f"[panel_eval] {_note}")
+    # set BEFORE the worker pool exists: spawned workers inherit the environment (mp_eval.candidate_overrides)
+    if a.candidate_tp:
+        os.environ["VD_EVAL_CANDIDATE_TP"] = a.candidate_tp
+    if a.candidate_rules:
+        os.environ["VD_EVAL_CANDIDATE_RULES"] = a.candidate_rules
 
     import v_dance.play.run_local_battle as R
     from v_dance.formats import default_format
@@ -57,9 +138,20 @@ def main(argv=None) -> int:
     from v_dance.selfplay import mp_collect as MP
     from v_dance.selfplay import mp_eval as ME
     teams = sorted(R.discover_teams(reg=default_format()))
+    if a.opp_has or a.opp_lacks:
+        _n0 = len(teams)
+        teams = filter_pool(teams, a.own_team, a.opp_has, a.opp_lacks)
+        print(f"[panel_eval] opponent pool filter has={a.opp_has} lacks={a.opp_lacks}: {_n0} -> {len(teams)} teams "
+              f"(own team kept)")
+        if len(teams) < 2:
+            ap.error("the opponent filter left no opponent team")
     (oname, _), = opp.items()
     print(f"[panel_eval] {len(cands)} candidate(s) x {a.modes} x {a.battles} games vs {oname}; {len(teams)} "
           f"{default_format()} teams; {a.procs} procs x {a.async_per_proc} async, {a.servers} server(s); seed {a.seed}")
+    from v_dance.encoders.battle_mechanics import terrain_values_banner
+    print("[panel_eval] " + terrain_values_banner())          # 2026-10-02 (VD_TERRAIN_V19D)
+    print(f"[panel_eval] candidate team picker: {a.candidate_tp or 'default (' + str(DEFAULT_TP_CHECKPOINT.name) + ')'}"
+          f" · candidate matchup rules: {a.candidate_rules or 'none'}")
     pool = MP.CollectionPool(a.procs)
     servers = R.ServerPool(max(1, a.servers), manage=True).start_all()
     ports = servers.ports if a.servers > 1 else None

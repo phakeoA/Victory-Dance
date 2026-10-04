@@ -68,6 +68,14 @@ class ChunkSpec:
     pressure: Optional[str] = None
     pressure_bias: float = 0.0
     score: bool = False
+    # 2026-10-03 (picker in the self-play loop): the LEARNER's team picker + its exploration. None = no picker
+    # (the first-4 roster heuristic every self-play run used before) — byte-identical.
+    learner_tp: Optional[str] = None
+    learner_tp_tau: float = 1.0
+    learner_tp_eps: float = 0.0
+    # 2026-10-03 MEGA-HOLD exploration (v_dance/selfplay/mega_hold.py): MegaHoldConfig.to_spec() for the RECORDING
+    # players (the learner + the 'latest' opponent); None = off — byte-identical.
+    mega_hold: Optional[dict] = None
 
 
 @dataclass
@@ -100,7 +108,9 @@ def build_chunk_specs(league, team_pool, n_games: int, *, chunk_size: int = 10,
                       matchup_seed: int = 0, seed: int = 0, gen: int = 0,
                       spawn_rooms: int = 0, own_team=None, own_mirror_frac: float = 0.2,
                       opp_weights=None, pressure: Optional[str] = None, pressure_bias: float = 0.0,
-                      score: bool = False, opp_draw: str = "largest_remainder") -> List[ChunkSpec]:
+                      score: bool = False, opp_draw: str = "largest_remainder",
+                      learner_tp: Optional[str] = None, learner_tp_tau: float = 1.0,
+                      learner_tp_eps: float = 0.0, mega_hold: Optional[dict] = None) -> List[ChunkSpec]:
     """Plan the collection batch as a flat list of PICKLABLE ChunkSpecs — the multiprocessing
     analogue of ``generation.build_collection_chunks``. League sampling + uid assignment happen
     HERE, in the main process (race-free), so the workers never touch league state. ``gen`` (22d)
@@ -127,6 +137,11 @@ def build_chunk_specs(league, team_pool, n_games: int, *, chunk_size: int = 10,
             spec = _spec_from_sample(sample, team_a, tb, cn, uid, gen)
             spec.spawn_rooms = max(0, int(spawn_rooms or 0))
             spec.score = bool(score)
+            if learner_tp:                     # 2026-10-03: every chunk's recording players pick with it
+                spec.learner_tp = str(learner_tp)
+                spec.learner_tp_tau, spec.learner_tp_eps = float(learner_tp_tau), float(learner_tp_eps)
+            if mega_hold:                      # 2026-10-03: and explore the mega hold (recording players only)
+                spec.mega_hold = dict(mega_hold)
             # drill pressure: only NON-recording model opponents (latest records what PPO trains on; scripted
             # has no model to bias)
             # review RL-2: and never a MIRROR chunk — a pressured copy of OUR team would distort the own-mirror
@@ -364,21 +379,38 @@ def _build_players_real(ac, spec: ChunkSpec, tau: float, seed: int, team_chooser
     else:
         _mcb = max(1, cn)
 
+    # 2026-10-03 (picker in the self-play loop): the recording players (the learner + the 'latest' opponent, both the
+    # live AC) pick their four with the learner picker and EXPLORE; None = the first-4 heuristic (byte-identical).
+    _ltp = getattr(spec, "learner_tp", None)
+
     def _sp(team, who, name, live=None):
-        return SelfPlayVGCPlayer(
+        p = SelfPlayVGCPlayer(
             ac, tau=tau, sample_seed=seed + who * 10_000 + uid, live_dir=live,
             save_replays=save_replays,
             replay_path=rb / f"{name}.jsonl",         # diagnostic trace keyed by the (gen-unique) name
             account_configuration=AccountConfiguration(name, None),
             battle_format=R.BATTLE_FORMAT, team=team, max_concurrent_battles=_mcb,
-            log_level=_logging.WARNING, **_server)
+            log_level=_logging.WARNING, **_server,
+            **({"team_chooser_path": _ltp} if _ltp else {}))
+        if _ltp:
+            import numpy as _np
+            p._tp_explore = {"tau": float(spec.learner_tp_tau), "eps": float(spec.learner_tp_eps),
+                             "rng": _np.random.default_rng(seed + who * 10_000 + uid + 7_777_777)}
+        _mh = getattr(spec, "mega_hold", None)
+        if _mh:                                       # 2026-10-03 mega-hold exploration (recording players only)
+            import numpy as _np
+            p._mega_hold = {**_mh, "rng": _np.random.default_rng(seed + who * 10_000 + uid + 9_191_919)}
+        return p
 
     our = _sp(ta, 0, our_name, live=live_dir)         # #18: worker publishes its battle to live_dir
     if spec.kind == "latest":
         opp = _sp(tb, 1, opp_name)
     elif spec.kind in ("snapshot", "clone"):
+        # 2026-10-03: a league SNAPSHOT of a picker-in-the-loop run plays with its co-trained picker (None → shared)
+        from v_dance.selfplay.tp_learning import paired_tp_for
+        _otc = (paired_tp_for(spec.opp_ref) if spec.kind == "snapshot" else None) or team_chooser
         opp = R.make_player(opp_name, tb, model_path=spec.opp_ref,
-                            team_chooser_path=team_chooser, max_concurrent_battles=_mcb,
+                            team_chooser_path=_otc, max_concurrent_battles=_mcb,
                             port=port,
                             # 2026-10-02 drill pressure (opponent-only; None/0 = off, byte-identical)
                             pressure=getattr(spec, "pressure", None),
@@ -578,7 +610,9 @@ def collect_with_pool(ac, league, n_games: int, *, team_pool, ckpt_path,
                       own_mirror_frac: float = 0.2, opp_weights=None,
                       pressure: Optional[str] = None, pressure_bias: float = 0.0, score: bool = False,
                       drill_sink: Optional[Callable[[list, dict], None]] = None,
-                      opp_draw: str = "largest_remainder"):
+                      opp_draw: str = "largest_remainder",
+                      learner_tp: Optional[str] = None, learner_tp_tau: float = 1.0,
+                      learner_tp_eps: float = 0.0, mega_hold: Optional[dict] = None):
     """Multiprocess analogue of ``generation.collect_with_league`` (task #14b.2).
 
     Plans the batch + samples the league in the MAIN process (race-free), freezes the current
@@ -600,7 +634,8 @@ def collect_with_pool(ac, league, n_games: int, *, team_pool, ckpt_path,
                               spawn_rooms=spawn_rooms, own_team=own_team,
                               own_mirror_frac=own_mirror_frac, opp_weights=opp_weights,
                               pressure=pressure, pressure_bias=pressure_bias, score=score,
-                              opp_draw=opp_draw)
+                              opp_draw=opp_draw, learner_tp=learner_tp, learner_tp_tau=learner_tp_tau,
+                              learner_tp_eps=learner_tp_eps, mega_hold=mega_hold)
     batches = partition_specs(specs, n_procs)
     _ld = str(live_dir) if live_dir else None
     # 22f: spread the worker batches round-robin across the pool servers (batch i -> ports[i % K]);

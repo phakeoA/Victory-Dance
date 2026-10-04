@@ -79,8 +79,7 @@ _FS_MONITOR_KEYS = ("forced_default", "retry", "retry_default", "forced_switch_e
                     "model_error", "no_model")
 # Mirror of reward._MODEL_DRIVEN_SOURCES (kept LOCAL so this module stays torch-free for --dry-run;
 # the set is stable — the complement is what makes the monitor robust to new edge labels).
-# B1: "search" is a model-grounded decision (see reward.py), so it is model-driven, NOT an edge event.
-_MODEL_DRIVEN_SOURCES = ("model", "forced_switch_model", "search")
+_MODEL_DRIVEN_SOURCES = ("model", "forced_switch_model")
 # Non-edge source keys excluded from the complement: model-driven decisions + bookkeeping counters.
 # audit: `rejected_resample` is BOOKKEEPING (incremented alongside a re-sampled MODEL pick whose executed
 # action is still model-driven, per reward._NON_DECISION_COUNTERS) — it is NOT an edge event, so a benign
@@ -99,9 +98,8 @@ def fs_monitor_counts(sources: dict) -> dict:
     fs = {k: 0 for k in _FS_MONITOR_KEYS}                      # stable core, seeded 0
     for k, v in (sources or {}).items():
         k = str(k)
-        # belief_*/search_* are DIAGNOSTIC feed/fire counters (A3/B1), not edge events — skip like tp_*.
-        if (k in _NON_EDGE_SOURCE_KEYS or k.startswith("tp_")
-                or k.startswith("belief_") or k.startswith("search_")):
+        # belief_* are DIAGNOSTIC feed counters (A3), not edge events — skip like tp_*.
+        if k in _NON_EDGE_SOURCE_KEYS or k.startswith("tp_") or k.startswith("belief_"):
             continue
         fs[k] = int(v or 0)                                    # known OR newly-seen non-model source
     fs["total"] = sum(fs.values())                            # fs holds only edge keys at this point
@@ -756,7 +754,9 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                          panel_patience: int = 5, panel_team_pool=None,
                          register_arms: bool = False,
                          register_prefix: str = "era5b_g",
-                         bandit_config=None, drill=None) -> dict:
+                         bandit_config=None, drill=None,
+                         learner_tp=None, tp_learn: bool = False, tp_cfg=None,
+                         mega_hold=None) -> dict:
     """Run real generations end-to-end (collect via the league -> PPO update -> gauntlet
     eval -> promotion gate -> admit/refresh/revert), RESUMABLY (3c.4 / #20): a PER-GENERATION
     snapshot (``snap_gen{N}.pt`` in ``archive/sub_checkpoints/``) is written after every generation, so a later run
@@ -787,6 +787,8 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
 
     archive = Path(archive_dir)
     archive.mkdir(parents=True, exist_ok=True)
+    from v_dance.encoders.battle_mechanics import terrain_values_banner
+    print("   " + terrain_values_banner())                # 2026-10-02 launch echo (VD_TERRAIN_V19D)
     # #18b spectate: a per-RUN folder live/<start-stamp>/gen_<N>/{replays,eval}. In-flight battles
     # write there; on finish they're SAVED (save_replays) or deleted. Each run = a fresh folder, so
     # no clearing needed; the dashboard recursively globs live/ for the currently-live battles.
@@ -814,6 +816,22 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
         print("[gen] FATAL: --drill needs --collect-procs >= 2 (the drill's pressure + scoreboard live in the "
               "multiprocess collector)", file=sys.stderr)
         sys.exit(2)
+    if learner_tp and not _mp:                         # 2026-10-03 the picker rides the multiprocess collector
+        print("[gen] FATAL: --learner-tp needs --collect-procs >= 2 (the learner's picker + its decision "
+              "records live in the multiprocess collector)", file=sys.stderr)
+        sys.exit(2)
+    if tp_learn and not learner_tp:
+        print("[gen] FATAL: --tp-learn needs --learner-tp (the picker it trains)", file=sys.stderr)
+        sys.exit(2)
+    _mh_on = bool(mega_hold is not None and getattr(mega_hold, "on", False))
+    if _mh_on and not _mp:                             # 2026-10-03 the mega-hold rides the multiprocess collector
+        print("[gen] FATAL: --mega-hold-p / --mega-hold-p-weather need --collect-procs >= 2 (the exploration lives "
+              "in the multiprocess collector's recording players)", file=sys.stderr)
+        sys.exit(2)
+    if _mh_on:
+        print("   MEGA-HOLD exploration ON: " + mega_hold.describe())
+    from v_dance.selfplay import mega_hold as MH
+    mh_stats: list = []                                # per-gen hold games / forced steps / importance weights
     _drill_gen: dict = {}                              # gen -> (drill rows, pressure stats) from collect_fn
     pool = MP.CollectionPool(int(collect_procs)) if _mp else None
     if _mp:
@@ -893,6 +911,38 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
         if _gone:
             print(f"[resume] ⚠ dropped {len(_gone)} league member(s) whose checkpoint no longer exists: "
                   f"{', '.join(s.snapshot_id for s in _gone)} (league={len(league.snapshots)})")
+    # 2026-10-03 the TEAM PICKER IN THE LOOP (v_dance/selfplay/tp_learning.py): the learner picks with tp_state["path"]
+    # + explores (Stage 1); with tp_learn the picker trains on each generation's results and is saved per gen as
+    # <archive>/tp/tp_gen{N}.pt (Stage 2). The eval / panel play every candidate with ITS picker.
+    from v_dance.selfplay import tp_learning as TPL
+    _tp_cfg = tp_cfg or TPL.TPLearnConfig()
+    tp_state = {"path": str(learner_tp) if learner_tp else None, "learner": None, "stats": []}
+    if learner_tp:
+        if _resume_path is not None and history.generation > 0:
+            _prev_tp = TPL.tp_path_for(archive, history.generation - 1)
+            if _prev_tp.exists():
+                tp_state["path"] = str(_prev_tp)
+                print(f"[resume] picker: {_prev_tp.relative_to(archive).as_posix()} (the resumed generation's pair)")
+            elif tp_learn:
+                print(f"[resume] ⚠ no {_prev_tp.name} — the picker restarts from --learner-tp {learner_tp}",
+                      file=sys.stderr)
+        if tp_learn:
+            _resumed_tp = tp_state["path"] != str(learner_tp)
+            tp_state["learner"] = TPL.TPLearner(tp_state["path"],
+                                                anchor_path=TPL.anchor_of(tp_state["path"]) or str(learner_tp),
+                                                cfg=_tp_cfg,
+                                                opt_state_path=(TPL.opt_path_for(tp_state["path"])
+                                                                if _resumed_tp else None))
+            if _resumed_tp:
+                print("[resume] picker optimizer: " + ("Adam state + shuffle RNG RESTORED"
+                                                       if tp_state["learner"].opt_restored
+                                                       else "no saved state — a fresh Adam"))
+        print(f"   TEAM PICKER IN THE LOOP (10-03): the learner picks with {tp_state['path']} "
+              f"(explore tau={_tp_cfg.tau} eps={_tp_cfg.eps}); "
+              + (f"LEARNING ON (lr={_tp_cfg.lr} epochs={_tp_cfg.epochs} kl={_tp_cfg.kl_coef} "
+                 f"ent={_tp_cfg.ent_coef}; anchor = {tp_state['learner'].anchor_path}) → <archive>/tp/tp_genN.pt"
+                 if tp_state["learner"] is not None else "learning OFF (Stage 1: the picker is fixed)")
+              + "; eval + panel play each candidate with its picker")
     if league_clones:                                  # league P1 (2026-09-30): behaviour-cloned human opponents
         league.clones = tuple(str(p) for p in league_clones)
         league.cfg.clone_frac = float(clone_frac)
@@ -956,7 +1006,11 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                     score=drill is not None,
                     opp_draw=("multinomial" if drill is not None else "largest_remainder"),
                     drill_sink=((lambda rows, ps, _g=gen: _drill_gen.__setitem__(_g, (rows, ps)))
-                                if drill is not None else None))
+                                if drill is not None else None),
+                    # 2026-10-03 picker in the loop (None = the first-4 heuristic, byte-identical)
+                    learner_tp=tp_state["path"], learner_tp_tau=_tp_cfg.tau, learner_tp_eps=_tp_cfg.eps,
+                    # 2026-10-03 mega-hold exploration (None = off, byte-identical)
+                    mega_hold=(mega_hold.to_spec() if _mh_on else None))
             finally:
                 # ALWAYS drop the per-gen ckpt — even if collection raised (Ctrl-C lands inside the
                 # blocking submit) — else a full-weight file orphans each crashed gen (review fix).
@@ -982,6 +1036,25 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
         # wall-clock; the measurement that gates the 3c.8b/c optimisations).
         print(f"   throughput: {gen_cfg.n_games} games in {dt:.1f}s = {gpm:.1f} games/min "
               f"(avg {avg:.1f}/min, {len(trajs)} trajs)")
+        if _mh_on:                                     # 2026-10-03 the mega-hold exploration's readout
+            _mhs = {"generation": gen, **MH.summarize_trajectories(trajs)}
+            mh_stats.append(_mhs)
+            print("        " + MH.format_stats(_mhs))
+        if tp_state["learner"] is not None:           # 2026-10-03 Stage 2: the picker learns from these games
+            _t1 = _time.perf_counter()
+            _st = tp_state["learner"].update(TPL.training_records(trajs))   # fallback games + twins dropped
+            _st["opt_restored"] = bool(tp_state["learner"].opt_restored)
+            # ALWAYS write this gen's file (a skipped update saves the unchanged weights) so the eval, the
+            # panel-pass copy and a later --resume-gen always find tp_gen{N}.pt
+            tp_state["path"] = tp_state["learner"].save(TPL.tp_path_for(archive, gen), gen)
+            _st["secs"] = round(_time.perf_counter() - _t1, 1)
+            tp_state["stats"].append({"generation": gen, **_st})
+            TPL.append_stats(archive, gen, _st)
+            print("        " + TPL.summarize(_st) + f" [{_st['secs']}s]")
+        elif tp_state["path"]:                         # Stage 1 only: the picker drives, nothing learns
+            _n_tp = sum(1 for t in trajs if getattr(getattr(t, "meta", None), "tp_learn", None))
+            print(f"        picker in the loop: {_n_tp}/{len(trajs)} trajectories carry a picker decision "
+                  f"(learning OFF)")
         return trajs, src
 
     def save_fn(ac_, gen):
@@ -992,6 +1065,8 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
         ckpt_dir.mkdir(parents=True, exist_ok=True)
         p = ckpt_dir / f"gen{gen}.pt"
         ac_.save(p, generation=gen)
+        if tp_state["path"]:                         # 2026-10-03: this checkpoint's picker (verified sidecar)
+            TPL.record_pair(p, tp_state["path"])
         return str(p)
 
     def eval_fn(path, prev_best_path=None):
@@ -1016,7 +1091,8 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                 ports=_pool_ports,               # 22f: spread eval workers across the pool
                 own_team=own_team,               # W2: own seat vs the eval pool, mirror own-vs-own
                 panel=panel, panel_battles=panel_battles,   # 10-01: the fixed PANEL, same parallel batch
-                panel_team_pool=panel_team_pool)
+                panel_team_pool=panel_team_pool,
+                candidate_team_chooser=tp_state["path"])  # 2026-10-03: the pair (None = the shared picker)
             out = (results, GA.model_elo(results))
             _eval_label = f"{int(collect_procs)} procs"
         else:
@@ -1049,7 +1125,9 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
             manage_server=False, matchup_seed=seed + history.generation,
             # task E: HoF past-champion battles spectate + save to eval/league/ too
             live_dir=_gen_kind_dir(live_run_dir, history.generation, "eval"),
-            save_replays=save_replays, own_team=own_team))
+            save_replays=save_replays, own_team=own_team,
+            # 2026-10-03 picker in the loop: the PAIR (None = the shared picker, byte-identical)
+            **({"candidate_team_chooser": tp_state["path"]} if tp_state["path"] else {})))
         dt = _time.perf_counter() - t0
         n = sum(g for _i, _w, g in out)
         print(f"   HoF eval: {len(out)} past champions, {n} games in {dt:.1f}s")
@@ -1062,11 +1140,28 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
         dst.parent.mkdir(parents=True, exist_ok=True)
         _sh.copy2(candidate_path, dst)
         print(f"        PANEL PASS -> kept a copy: {dst.relative_to(archive).as_posix()} (never evicted)")
+        if tp_state["path"] and Path(tp_state["path"]).exists():   # 2026-10-03: and ITS picker (the pair)
+            _tdst = archive / "panel_pass" / f"tp_gen{gen}.pt"
+            _sh.copy2(tp_state["path"], _tdst)
+            TPL.record_pair(dst, _tdst)
+            print(f"        PANEL PASS -> its picker: {_tdst.relative_to(archive).as_posix()}")
 
     def restore_fn(ac_, path):
         ac_.restore_from(path)        # reload champion policy + critic (collapse recovery)
         trainer.reset_optimizers()    # clear the stale Adam moments that drove the collapse,
                                       # so the next update doesn't re-shove the restored policy
+        if tp_state["path"]:           # 2026-10-03 review F: and the champion's PICKER (the pair)
+            _ptp = TPL.picker_after_restore(path, base_ckpt=ckpt, learner_tp=learner_tp)
+            if _ptp is None:
+                print(f"        revert: no recorded picker for {Path(path).name} — keeping {tp_state['path']}")
+            else:
+                tp_state["path"] = _ptp
+                if tp_state["learner"] is not None:
+                    _anc = tp_state["learner"].anchor_path
+                    _fresh = _ptp == str(learner_tp)
+                    tp_state["learner"] = TPL.TPLearner(_ptp, anchor_path=_anc, cfg=_tp_cfg,
+                                                        opt_state_path=(None if _fresh else TPL.opt_path_for(_ptp)))
+                print(f"        revert: the picker follows the champion -> {Path(_ptp).name}")
 
     def cleanup_fn(evicted):
         # Delete the checkpoint files of league snapshots that eviction dropped (sec 16) so the
@@ -1176,16 +1271,14 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                 # at ~40 games). NEVER fatal - a config problem must not kill a 6-hour run.
                 _gp = archive / "checkpoints" / f"gen{rep['generation']}.pt"
                 try:
-                    from v_dance.ladder.update import (DEFAULT_BANDIT_CONFIG,
-                                                                register_arm)
+                    from v_dance.ladder.update import DEFAULT_BANDIT_CONFIG
                     _cfg = bandit_config or DEFAULT_BANDIT_CONFIG   # a SMOKE points elsewhere
-                    _arm = f"{register_prefix}{rep['generation']}"
-                    register_arm(_cfg, name=_arm, battle_ckpt=_gp, tau=0.0,
-                                 note=(f"W2 era-5b: PROMOTED generation {rep['generation']} "
-                                       f"(own seat {Path(own_team).name if own_team else 'pool'}, "
-                                       f"base {Path(ckpt).parent.name}) - the ladder decides"))
-                    print(f"        bandit: registered arm {_arm} -> {_gp.name} "
-                          f"(restart the bot to serve it)")
+                    _entry = register_promoted_gen(_cfg, battle_ckpt=_gp, generation=rep["generation"],
+                                                   prefix=register_prefix, own_team=own_team, base_ckpt=ckpt)
+                    print(f"        bandit: registered arm {_entry['name']} -> {_gp.name}"
+                          + (f" + its picker {Path(_entry['tp_ckpt']).name}"
+                             if _entry.get("tp_ckpt") not in (None, "default") else "")
+                          + " (restart the bot to serve it)")
                 except Exception as exc:
                     print(f"        bandit: arm registration SKIPPED ({exc})")
             _hof = rep.get("hof")                   # Phase-2 HoF breadth-veto readout (P2.4)
@@ -1252,7 +1345,8 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
               f"{_passed if _passed else 'NO generation'}  (curve: "
               f"{[(r.generation, round(panel_pooled(r.panel)[0] / max(1, panel_pooled(r.panel)[1]) * 100)) for r in history.records if r.panel]})")
     return {"history": history, "league": league, "reports": reports,
-            "snapshot": str(_latest) if _latest else None}
+            "snapshot": str(_latest) if _latest else None,
+            "tp": tp_state["stats"], "tp_path": tp_state["path"], "mega_hold": mh_stats}
 
 
 # ── offline dry-run demo (no server): the loop logic over synthetic generations ─
@@ -1350,11 +1444,44 @@ def parse_panel(items) -> dict:
     return out
 
 
+def _resolve_picker_pair(args) -> None:
+    """2026-10-03 USER RULE — the PAIR: "keep team picker with the battle neural networks in reinforcement learning and
+    treat them like 1 neural network since they both work best when paired with the one they trained with" (the 10-03
+    split test: gen39's net + its picker 77.0 % = g50 + first-4, but either half swapped out loses it).
+
+    Every live RL run trains the battle net TOGETHER with its picker: ``--learner-tp`` defaults to ``--ckpt``'s
+    co-trained picker (its verified pairing sidecar, ``tp_learning.paired_tp_for``) and ``--tp-learn`` turns on with
+    it. No pair and no ``--learner-tp`` → FATAL (exit 2): pass a picker (it then trains with the net), or
+    ``--no-picker-in-loop`` to train the battle net alone ON PURPOSE. ``--tp-fixed`` keeps the paired picker frozen."""
+    from v_dance.selfplay.tp_learning import paired_tp_for
+    if getattr(args, "no_picker_in_loop", False):
+        if getattr(args, "learner_tp", None):
+            print("[gen] FATAL: --no-picker-in-loop contradicts --learner-tp", file=sys.stderr)
+            sys.exit(2)
+        print("[gen] ⚠ the PAIR rule is OFF (--no-picker-in-loop): the battle net trains WITHOUT a picker "
+              "(the first-4 roster heuristic) — it will then play best with first-4, not with any picker")
+        return
+    if not getattr(args, "learner_tp", None):
+        tp = paired_tp_for(args.ckpt) if getattr(args, "ckpt", None) else None
+        if not tp:
+            print(f"[gen] FATAL: the PAIR rule — --ckpt {args.ckpt} has no co-trained picker (no verified "
+                  f"<ckpt>.tp.json). Pass --learner-tp <picker> (it trains WITH the net from here on), or "
+                  f"--no-picker-in-loop to train the battle net alone on purpose.", file=sys.stderr)
+            sys.exit(2)
+        args.learner_tp = tp
+        print(f"[gen] the PAIR rule: --ckpt's co-trained picker {tp} → --learner-tp (the two train as one)")
+    if not getattr(args, "tp_learn", False) and not getattr(args, "tp_fixed", False):
+        args.tp_learn = True
+        print("[gen] the PAIR rule: --tp-learn ON — the picker learns with the battle net "
+              "(--tp-fixed keeps it frozen)")
+
+
 def _launch_live(args):
     """``--live`` / ``--wizard`` entry: the PREFLIGHT (2026-09-30, ``v_dance/selfplay/preflight.py``)
     first when wanted — a ~minutes-long mini run through every code path the long run will hit — and
     the real run only if it passes."""
     from v_dance.selfplay import preflight as PF
+    _resolve_picker_pair(args)                         # 2026-10-03 USER RULE: the picker + the net are ONE network
     if PF.wanted(args):
         if not PF.run_preflight(args, _launch_live_core):
             sys.exit(3)
@@ -1539,7 +1666,51 @@ def _launch_live_core(args):
         panel_patience=int(getattr(args, "panel_patience", 0) or 0), panel_team_pool=_panel_pool,
         register_arms=args.register_arms, register_prefix=args.register_prefix,
         bandit_config=args.bandit_config, drill=_drill,
+        learner_tp=getattr(args, "learner_tp", None), tp_learn=bool(getattr(args, "tp_learn", False)),
+        tp_cfg=_tp_cfg_from_args(args), mega_hold=_mega_hold_cfg_from_args(args),
         snapshot_path=args.snapshot, max_hours=args.hours)
+
+
+def register_promoted_gen(config_path, *, battle_ckpt, generation: int, prefix: str, own_team=None,
+                          base_ckpt=None) -> dict:
+    """W2: hand a PROMOTED generation to the serve-side bandit as an argmax arm. 2026-10-03 (picker in the loop):
+    the arm carries the generation's PAIRED picker (``<archive>/tp/tp_genN.pt``) as its ``tp_ckpt`` when it has
+    one, so the ladder serves the battle net with the picker it was trained with; otherwise the deployed picker."""
+    from v_dance.ladder.update import register_arm, repo_relative
+    from v_dance.selfplay.tp_learning import paired_tp_for
+    tp = paired_tp_for(battle_ckpt)
+    return register_arm(config_path, name=f"{prefix}{generation}", battle_ckpt=battle_ckpt, tau=0.0,
+                        note=(f"W2 era-5b: PROMOTED generation {generation} "
+                              f"(own seat {Path(own_team).name if own_team else 'pool'}, "
+                              f"base {Path(base_ckpt).parent.name if base_ckpt else '?'})"
+                              + (f" + its co-trained picker {Path(tp).name}" if tp else "")
+                              + " - the ladder decides"),
+                        **({"tp_ckpt": repo_relative(tp)} if tp else {}))
+
+
+def _mega_hold_cfg_from_args(args):
+    """2026-10-03: the mega-hold exploration knobs → MegaHoldConfig (None when both probabilities are 0 / unset)."""
+    p = float(getattr(args, "mega_hold_p", 0.0) or 0.0)
+    pw = getattr(args, "mega_hold_p_weather", None)
+    pw = p if pw is None else float(pw)
+    if p <= 0.0 and pw <= 0.0:
+        return None
+    from v_dance.selfplay.mega_hold import MegaHoldConfig
+    return MegaHoldConfig(p=p, p_weather=pw, kmin=int(getattr(args, "mega_hold_kmin", 2)),
+                          kmax=int(getattr(args, "mega_hold_kmax", 6)),
+                          end_on_weather=not bool(getattr(args, "mega_hold_keep_on_weather", False)),
+                          w_min=float(getattr(args, "mega_hold_w_min", 0.0) or 0.0))
+
+
+def _tp_cfg_from_args(args):
+    """2026-10-03: the picker-in-the-loop knobs → TPLearnConfig (None when no --learner-tp)."""
+    if not getattr(args, "learner_tp", None):
+        return None
+    from v_dance.selfplay.tp_learning import TPLearnConfig
+    return TPLearnConfig(tau=float(args.learner_tp_tau), eps=float(args.learner_tp_eps), lr=float(args.tp_lr),
+                         epochs=int(args.tp_epochs), batch=int(args.tp_batch), kl_coef=float(args.tp_kl_coef),
+                         ent_coef=float(args.tp_ent_coef), clip=float(args.tp_clip),
+                         seed=int(getattr(args, "seed", 0) or 0))
 
 
 def _wizard_eval_team_selection(args, ask, ask_yn, repo_root):
@@ -1929,6 +2100,44 @@ if __name__ == "__main__":
     ap.add_argument("--panel-patience", type=int, default=5,
                     help="end the run after this many generations in a row that do NOT beat the panel "
                          "(from the start, or since the last one that did). Default 5; 0 = never stop on it.")
+    # 2026-10-03 the TEAM PICKER IN THE LOOP (v_dance/selfplay/tp_learning.py)
+    ap.add_argument("--learner-tp", default=None, metavar="TP_CKPT",
+                    help="the self-play LEARNER picks its four with this team picker + explores (Stage 1). "
+                         "Default: none = the first-4 roster heuristic every earlier run trained on. "
+                         "Needs --collect-procs >= 2.")
+    ap.add_argument("--learner-tp-tau", type=float, default=0.5,
+                    help="sampling temperature over the picker's set / lead-pair scores (default 0.5: v9 on Baltimore "
+                         "plays its top set 58 %% of the time; 1.0 = 37 %%)")
+    ap.add_argument("--learner-tp-eps", type=float, default=0.15,
+                    help="eps-uniform exploration over the 15 bring sets / 6 lead pairs (default 0.15)")
+    ap.add_argument("--tp-learn", action="store_true",
+                    help="Stage 2: the picker TRAINS on each generation's results (PPO-clip, leave-one-out "
+                         "pairing baseline, KL to the start picker); saved as <archive>/tp/tp_genN.pt")
+    ap.add_argument("--tp-lr", type=float, default=3e-5)
+    ap.add_argument("--tp-epochs", type=int, default=2)
+    ap.add_argument("--tp-batch", type=int, default=128)
+    ap.add_argument("--tp-kl-coef", type=float, default=0.1)
+    ap.add_argument("--tp-ent-coef", type=float, default=0.01)
+    ap.add_argument("--tp-clip", type=float, default=0.2)
+    # 2026-10-03 USER RULE — the PAIR (_resolve_picker_pair): the picker trains with the battle net in every live run
+    ap.add_argument("--no-picker-in-loop", action="store_true",
+                    help="train the battle net WITHOUT a team picker on purpose (the pair rule's opt-out)")
+    ap.add_argument("--tp-fixed", action="store_true",
+                    help="keep the learner's picker FROZEN (the pair rule turns --tp-learn on by default)")
+    # 2026-10-03 MEGA-HOLD exploration (v_dance/selfplay/mega_hold.py): a learner game may HOLD every mega until turn k
+    # (or until a weather that is not ours is up), the forced steps importance-weighted in PPO
+    ap.add_argument("--mega-hold-p", type=float, default=0.0,
+                    help="P(a learner game is a mega-HOLD game) when the opponent's six has no weather setter that "
+                         "fights ours (0 = off)")
+    ap.add_argument("--mega-hold-p-weather", type=float, default=None,
+                    help="P(hold game) when the opponent's six CAN set a weather ours cannot (default = --mega-hold-p)")
+    ap.add_argument("--mega-hold-kmin", type=int, default=2, help="hold while battle turn < k, k ≥ this (2 = turn 1)")
+    ap.add_argument("--mega-hold-kmax", type=int, default=6, help="… and k ≤ this")
+    ap.add_argument("--mega-hold-keep-on-weather", action="store_true",
+                    help="keep holding after THEIR weather is up (default: the hold ends there, so the policy can "
+                         "mega to re-set ours)")
+    ap.add_argument("--mega-hold-w-min", type=float, default=0.0,
+                    help="floor on a forced step's importance weight π(none) (0 = exact, unbiased)")
     ap.add_argument("--preflight", default="auto", choices=["auto", "on", "off"],
                     help="before the real run, play a ~minutes-long mini run through every code path "
                          "(3 gens + a resume, every opponent incl. each clone, promote, HoF, save) and "

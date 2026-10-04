@@ -451,6 +451,14 @@ class VGCPlayer(VGCPlayerBase):
                      if getattr(self, "_collect_sample", False)
                      else _M.masked_argmax(glog[slot], gmask))
                 out.append(g if g is not None else GIMMICK_NONE)
+            # 2026-10-03 MEGA-HOLD exploration (self-play learner only — mp_collect sets ``_mega_hold``; None = off,
+            # byte-identical): in a held game every sampling slot that may mega plays GIMMICK_NONE until turn k / their
+            # weather is up; the step's importance weight is stashed for the recorder (v_dance/selfplay/mega_hold.py).
+            if getattr(self, "_mega_hold", None) and getattr(self, "_collect_sample", False):
+                from v_dance.selfplay import mega_hold as _MH
+                _MH.apply(self, battle, glog, out, (a0, a1), none=GIMMICK_NONE, mega=GIMMICK_MEGA,
+                          switch_offset=SWITCH_OFFSET, tau=float(self._temperature),
+                          build_mask=build_gimmick_legal_mask)
             # 2026-10-01 matchup rule (set at team preview for this battle): the rule's mon megas whenever it moves
             # and can; every other slot's mega is held until it has mega'd or fainted.
             _rule = (getattr(self, "_rule_battles", None) or {}).get(getattr(battle, "battle_tag", None))
@@ -667,7 +675,11 @@ class VGCPlayer(VGCPlayerBase):
                 opp_set_ctx=_ctx[1] if _ctx else None,
                 require=([_rule["bring_index"]] if _rule else ()),
                 require_lead=([_rule["bring_index"]] if _rule and _rule.get("lead") else ()),
+                # 2026-10-03 (picker in the self-play loop): the self-play learner samples + records its pick
+                explore=getattr(self, "_tp_explore", None),
             )
+            _tp_rec = (dict(_M.LAST_TP_EXPLORE)
+                       if getattr(self, "_tp_explore", None) and _M.LAST_TP_EXPLORE else None)
             if _rule:
                 self.__dict__.setdefault("_rule_battles", {})[battle.battle_tag] = _rule
                 log.info("Team-preview [%s] MATCHUP RULE %s: bring + mega %s", battle.battle_tag,
@@ -695,6 +707,16 @@ class VGCPlayer(VGCPlayerBase):
                          [s for s in opp_species if s][:6])
                 _TF.tap_tp(self, battle, our_species, opp_species, picks, lead_k,
                            stash=_M.LAST_TP)                            # thought feed
+                if _tp_rec is not None:
+                    # 2026-10-03 (picker in the self-play loop): park the decision record for vgc_base.teampreview's
+                    # capture (→ EpisodeMeta.tp_learn) — LAST, and only if it is exactly what is being SUBMITTED, so a
+                    # fallback / padding can never train the picker on a pick it did not make.
+                    if (set(picks) == set(_tp_rec["subsets"][_tp_rec["set_idx"]])
+                            and set(picks[:lead_k]) == set(_tp_rec["pairs"][_tp_rec["pair_idx"]])):
+                        self.__dict__.setdefault("_tp_learn_pending", {})[battle.battle_tag] = _tp_rec
+                    else:
+                        log.warning("Team-preview [%s]: the exploring record does not match the submitted picks "
+                                    "%s — NOT recorded for the picker", battle.battle_tag, picks)
                 return picks
             log.warning("Team-preview [%s] NET produced invalid indices %s — "
                         "FALLING BACK to heuristic.", battle.battle_tag, order)

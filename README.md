@@ -163,11 +163,10 @@ Three layers, in increasing order of what actually matters:
 
 ## 7. Serving & deployment
 
-Three transports, one decision core (encoder + net + team-preview model + belief splice):
+Two transports, one decision core (encoder + net + team-preview model + belief splice):
 
-- **`play/play_vs_human.py`** — challenge the bot on a local Showdown server.
 - **`play/play_vs_human_browser.py`** — two-browser-tab local play driven by **`BattleHost`**: a connection-less poke-env player fed raw websocket frames captured from a browser tab, its `/choose` commands shipped back in. The decision pipeline is reused byte-for-byte with no socket of its own.
-- **`play/play_online_browser.py`** — the same transport pointed at **play.pokemonshowdown.com**: logs into a real account, the human supervises matchmaking, the AI plays every battle that opens. **`play/play_ladder.py`** is the autonomous alternative (direct websocket, `.ladder()` search) for any server.
+- **`play/play_online_browser.py`** — the same transport pointed at **play.pokemonshowdown.com**: logs into a real account, the human supervises matchmaking, the AI plays every battle that opens.
 
 All transports record the benchmark data automatically. A separate **team-preview network** (SBDA architecture with self/cross-attention over both rosters) picks the bring-4 and leads — since 2026-07 through a **contrastive set-scoring head**: instead of ranking Pokémon individually (which mode-mixed brings on two-mode teams), it scores every complete 4-subset as a unit — a marginal-sum term plus explicit pairwise-compatibility and set-level terms, trained with a 15-way listwise loss against the human's actual pick. Zero-initialized so it *starts* at exactly the old greedy behavior and has to earn every deviation; it cleared the adoption gate at +3.8pp bring-set accuracy and +154 elo-adjusted performance in its measured online block. In **best-of-3 sets** it additionally receives each side's previous-game bring/leads as a zero-init side input (`bo3_state`), so game-2/3 previews can react to what the opponent actually showed.
 
@@ -236,8 +235,8 @@ Victory-Dance/
 │   ├── training/           # BC trainer, streaming memmap cache, advantage weights, z-archetypes
 │   ├── rl/                 # PPO core: schema, collector, store, reward, GAE, PBRS, actor-critic, trainer
 │   ├── selfplay/           # A/B game runner, league/gate machinery, multiprocess collection, exploiter
-│   ├── ladder/             # learning from the ladder (W3b): recorder, update, chain + B4 CLIs
-│   ├── play/               # the serve core: model_io, player, vgc_base, adapt_rules, search, dossiers, bandit
+│   ├── ladder/             # learning from the ladder (W3b): recorder, update, the chain CLI
+│   ├── play/               # the serve core: model_io, player, vgc_base, adapt_rules, dossiers, bandit
 │   ├── online/             # the ladder bot (bot), its :8777 panel, SendGate, the browser transport
 │   ├── eval/               # checkpoint ruler, human-benchmark report, gauntlet + Elo, probes
 │   ├── datatools/          # data prep, team generator/builder tools, HF ingest, corpus QA, scrapers/
@@ -272,7 +271,7 @@ cd pokemon-showdown && git checkout <commit from PINS.md> && npm install && cd .
 
 Teams live in `teams/Champions/<regulation>/` as Showdown paste files — drop any team you want the bot (or you) to use there; every harness discovers the pool automatically.
 
-**Option A — two-tab browser flow (recommended).** One command starts the server and opens two logged-in browser tabs with every pool team pre-imported into both Teambuilders. You challenge the AI from your tab; it auto-accepts and plays. The AI's team is `--ai-team <name>` if pinned, else whichever team you have *open* in the AI tab's Teambuilder, else random:
+**Two-tab browser flow.** One command starts the server and opens two logged-in browser tabs with every pool team pre-imported into both Teambuilders. You challenge the AI from your tab; it auto-accepts and plays. The AI's team is `--ai-team <name>` if pinned, else whichever team you have *open* in the AI tab's Teambuilder, else random:
 
 ```bash
 # The battle + team-preview checkpoints default to the deployed pair (model_io + .env), so you
@@ -281,13 +280,6 @@ python -m v_dance.online.play_vs_human_browser --ai-team maw_zard \
     --ckpt ai_train_scripts/BC_model/checkpoints_attn_era2/battle_base.pt \
     --tp-ckpt ai_train_scripts/teamPreview_model/checkpoints_set/teampreview_sbda.pt \
     --adapt-rules --bench-note my_session
-```
-
-**Option B — simple flow.** The AI connects as a normal player; you open the printed URL, import the printed team, and challenge `VictoryDanceAI`:
-
-```bash
-python -m v_dance.play.play_vs_human --mode choose --ai-team maw_zard --human-team <yours> \
-    --ckpt <battle.pt> --tp-ckpt <tp.pt>
 ```
 
 Every finished game is recorded automatically (result/teams/turns → `artifacts/human_benchmark/human_bench.jsonl`, a playable HTML replay, and a per-opponent dossier). Read the results any time:
@@ -330,8 +322,6 @@ python -m v_dance.online.bot --adapt-rules --bench-note online_v1
 ```
 
 Once it's live, a **control panel** comes up (its own local page, and mirrored into Mission Control's *Online bot* tab — which is also where you set the format + launch config and start the bot in the first place, with `--adapt-rules` and `--dossier` on by default) where you drive matchmaking without touching the browser: start a **ladder run of N rated games** (it re-queues after each finished game until the target is hit), toggle **auto-accept** for incoming challenges, send **private challenges** by username, pin the AI's team, and watch the live rating / W–L tally / activity feed. `--dossier` warm-starts the belief against opponents you've faced before; `VD_ROUTE_TEAMS=1` lets the bot pick its best-matchup pool team against a known opponent on challenge-accepts.
-
-There is also a fully-autonomous direct-websocket harness (`play/play_ladder.py`) that searches ladder matches by itself on any server (`--server-url`, `--username/--password`, `--games N`) — the browser flow above is the supervised default.
 
 **Training & evaluation** (the research side):
 

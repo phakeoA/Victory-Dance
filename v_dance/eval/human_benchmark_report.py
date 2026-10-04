@@ -1,6 +1,6 @@
 """Human-benchmark report — the GOAL METRIC readout (docs/human_benchmark_design.md).
 
-Reads ``artifacts/human_benchmark/human_bench.jsonl`` (rows appended by ``play_vs_human``) and
+Reads ``artifacts/human_benchmark/human_bench.jsonl`` (rows appended by the online bot) and
 prints: the overall tally with a Wilson CI, a per-session (per-set) table, and the
 **exploitability curve** — AI win% by game index within a session, pooled. A DROPPING curve
 means the human is learning the bot's habits faster than the bot copes (G3 fails); a FLAT
@@ -122,8 +122,8 @@ def main() -> None:
     args = ap.parse_args()
 
     if not args.log.is_file():
-        raise SystemExit(f"[bench] no log at {args.log} — play some benchmark sets first "
-                         f"(python -m v_dance.play.play_vs_human).")
+        raise SystemExit(f"[bench] no log at {args.log} — play some games first "
+                         f"(python -m v_dance.online.bot, or v_dance.online.play_vs_human_browser).")
     rows = load_rows(args.log)
     if args.note is not None:
         rows = [r for r in rows if r.get("note") == args.note]

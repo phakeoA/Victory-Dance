@@ -86,11 +86,13 @@ def test_parse_spec_splits_name_and_args():
 
 
 def test_known_drills_and_a_fresh_drill_has_an_empty_ctx():
-    assert known_drills() == ["field", "focus"]
+    assert known_drills() == ["field", "focus", "megatime"]                 # 2026-10-03: + the mega-timing drill
     d = get_drill("field")
     assert d.name == "field" and d.pressure == "field" and d.ctx == {}     # only build_pool fills it (main process)
     assert get_drill("field:pressure=off").pressure is None
     assert get_drill("focus:opp=rillaboom").pressure is None
+    m = get_drill("megatime")
+    assert m.name == "megatime" and m.pressure == "field" and m.ctx == {}
 
 
 def test_unknown_drill_and_an_empty_focus_raise_valueerror(teams):

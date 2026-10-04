@@ -190,10 +190,13 @@ def ppo_losses(
     atoms_logits: Optional[torch.Tensor] = None,
     support: Optional[torch.Tensor] = None,
     cfg: PPOConfig = PPOConfig(),
+    weights: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """The pure PPO loss. All tensors are (B,). ``new_logprob``/``entropy``/``kl`` carry
     actor gradient; ``value_pm`` carries critic gradient; ``old_*``/``advantages``/
-    ``returns`` are constants. Returns ``(total_loss, stats)``."""
+    ``returns`` are constants. Returns ``(total_loss, stats)``. ``weights`` (2026-10-03, (B,) or
+    None): per-step importance weights on the clipped surrogate — the mega-hold exploration's forced
+    steps (``Transition.is_weight``; v_dance/selfplay/mega_hold.py). None = every step weighs 1."""
     if new_logprob.numel() == 0:
         raise ValueError("ppo_losses: empty minibatch")
     adv = _standardize_adv(advantages, cfg.adv_eps) if cfg.standardize_adv else advantages.detach()
@@ -201,7 +204,10 @@ def ppo_losses(
     ratio = (new_logprob - old_logprob.detach()).exp()
     surr1 = ratio * adv
     surr2 = ratio.clamp(1.0 - cfg.clip_eps, 1.0 + cfg.clip_eps) * adv
-    policy_loss = -torch.min(surr1, surr2).mean()
+    surr = torch.min(surr1, surr2)
+    if weights is not None:
+        surr = surr * weights.detach().to(surr.dtype)
+    policy_loss = -surr.mean()
 
     value_loss = _value_loss(value_pm, old_value_pm, returns, cfg, atoms_logits=atoms_logits, support=support)
     entropy_mean = entropy.mean()
@@ -235,6 +241,8 @@ def ppo_losses(
             "ratio_mean": float(ratio.mean()),
             "adv_mean": float(adv.mean()),
             "adv_std": float(adv.std(unbiased=False)) if adv.numel() > 1 else 0.0,
+            # 2026-10-03: mean importance weight (1.0 = no forced mega-hold step in the minibatch)
+            "is_weight_mean": float(weights.mean()) if weights is not None else 1.0,
         }
     return loss, stats
 
@@ -264,11 +272,16 @@ def ppo_loss_from_batch(
     old_value_pm = _col(transitions, "value", device)
     adv = torch.as_tensor(np.asarray(advantages, np.float32), device=device)
     ret = torch.as_tensor(np.asarray(returns, np.float32), device=device)
+    # 2026-10-03 mega-hold exploration: forced steps carry an importance weight; a minibatch without one passes None
+    # (byte-identical to the unweighted loss)
+    w = np.asarray([float(getattr(t, "is_weight", 1.0)) for t in txns], np.float32)
+    weights = torch.as_tensor(w, device=device) if bool((w != 1.0).any()) else None
     loss, stats = ppo_losses(
         new_logprob=ev.logprob, old_logprob=old_logprob, advantages=adv,
         value_pm=ev.value_pm, old_value_pm=old_value_pm, returns=ret,
         entropy=ev.entropy, kl_to_ref=ev.kl_to_ref, opp_ce=ev.opp_ce,
         atoms_logits=ev.atoms_logits, support=getattr(ac.critic, "support", None), cfg=cfg,
+        weights=weights,
     )
     if ev.pair_flips is not None:
         stats["pair_flips"] = float(ev.pair_flips)

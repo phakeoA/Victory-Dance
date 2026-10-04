@@ -42,6 +42,7 @@ class EvalSpec:
     uid: int
     gen: int = 0
     opp_ckpt: Optional[str] = None     # PANEL (2026-10-01): a fixed checkpoint opponent; kind = "panel:<name>"
+    cand_tp: Optional[str] = None      # 2026-10-03: the CANDIDATE's own team picker (its co-trained pair); None = the shared one
 
 
 # ── the PANEL (2026-10-01) ─────────────────────────────────────────────────────
@@ -168,6 +169,20 @@ async def _eval_specs(candidate, prev_best, team_chooser, specs: List[EvalSpec],
     return {"acc": {k: (v[0], v[1]) for k, v in acc.items()}, "source": dict(source)}
 
 
+def candidate_overrides(team_chooser):
+    """2026-10-03 diagnostic knobs for the CANDIDATE side only (``panel_eval --candidate-tp / --candidate-rules``
+    set them as env vars, so every spawned worker sees them; unset = byte-identical). ``VD_EVAL_CANDIDATE_TP``:
+    ``none`` = no team picker → the first-4 roster heuristic (what the self-play LEARNER uses: both collection
+    paths build it without a team chooser), a path = that picker. ``VD_EVAL_CANDIDATE_RULES``: comma-separated
+    matchup rules (v_dance/play/matchup_rules.py) — they act through the team picker, so they need one.
+    Returns ``(team_chooser_path, rules_tuple)``."""
+    import os as _os
+    tp = (_os.environ.get("VD_EVAL_CANDIDATE_TP") or "").strip()
+    tc = team_chooser if not tp else (None if tp.lower() == "none" else tp)
+    rules = tuple(r.strip() for r in (_os.environ.get("VD_EVAL_CANDIDATE_RULES") or "").split(",") if r.strip())
+    return tc, rules
+
+
 def _build_eval_players_real(candidate, prev_best, team_chooser, spec: EvalSpec,
                              live_dir=None, save_replays: bool = False, port: Optional[int] = None):
     """The real per-kind eval players (poke-env). Mirrors ``run_gauntlet``'s ``_run`` exactly:
@@ -189,16 +204,23 @@ def _build_eval_players_real(candidate, prev_best, team_chooser, spec: EvalSpec,
         subdir, label = eval_replay_routing(spec.kind, _ckpt_gen(candidate),
                                             opp_ref=(prev_best if spec.kind == "prev_best" else None))
     rdir = str(Path(live_dir) / subdir) if (live_dir and save_replays) else None
+    cand_tc, cand_rules = candidate_overrides(getattr(spec, "cand_tp", None) or team_chooser)
     model_player = R.make_player(model_name, model_team, model_path=candidate,
-                                 team_chooser_path=team_chooser,
+                                 team_chooser_path=cand_tc,
                                  live_dir=live_dir, save_replays=save_replays,
                                  replay_dir=rdir, replay_label=label, port=port)
+    if cand_rules:
+        model_player._matchup_rules = cand_rules
+    # 2026-10-03: a past self (prev_best / the champion mirror, or a run ckpt on the panel) plays with ITS co-trained
+    # picker when it has one (picker-in-the-loop runs); every other opponent keeps the shared picker.
+    from v_dance.selfplay.tp_learning import paired_tp_for
     if spec.opp_ckpt:
         opp = R.make_player(opp_name, opp_team, model_path=spec.opp_ckpt,
-                            team_chooser_path=team_chooser, port=port)
+                            team_chooser_path=(paired_tp_for(spec.opp_ckpt) or team_chooser), port=port)
     else:
-        opp = _make_opponent(spec.kind, opp_name, opp_team,
-                             model_path=prev_best, team_chooser_path=team_chooser, port=port)
+        opp = _make_opponent(spec.kind, opp_name, opp_team, model_path=prev_best,
+                             team_chooser_path=((paired_tp_for(prev_best) if prev_best else None) or team_chooser),
+                             port=port)
     return model_player, opp
 
 
@@ -230,7 +252,8 @@ def eval_with_pool(candidate, *, opponents, team_pool, battles_per_opponent: int
                    n_procs: int = 4, async_per_proc: int = 3,
                    live_dir=None, save_replays: bool = False, generation: int = 0, ports=None,
                    own_team=None, panel: Optional[dict] = None, panel_battles: int = 0,
-                   panel_team_pool=None, panel_games_per_pairing: int = 4, panel_own_team=None):
+                   panel_team_pool=None, panel_games_per_pairing: int = 4, panel_own_team=None,
+                   candidate_team_chooser=None):
     """Multiprocess analogue of ``gauntlet.run_gauntlet`` (task #19). Pre-validates the candidate
     (+ prev_best) load LOUDLY in main, plans + partitions the gauntlet descriptors, ships them to
     the pool via the injected ``submit_fn`` (``pool.submit(payloads, worker_fn=eval_worker)``), and
@@ -253,6 +276,10 @@ def eval_with_pool(candidate, *, opponents, team_pool, battles_per_opponent: int
                                    uid_start=max((s.uid for s in specs), default=0),
                                    games_per_pairing=panel_games_per_pairing, own_team=panel_own_team)
         panel_kinds = [PANEL_PREFIX + str(n) for n in panel]
+    if candidate_team_chooser:                       # 2026-10-03: the candidate plays with ITS picker (the pair)
+        model_io.load_team_chooser(str(candidate_team_chooser))   # a broken picker fails LOUD in main
+        for s in specs:
+            s.cand_tp = str(candidate_team_chooser)
     batches = partition_specs(specs, n_procs)
     pb = str(prev_best) if prev_best else None
     tc = str(team_chooser) if team_chooser else None
