@@ -68,8 +68,10 @@ def assert_gae_identity(advantages, returns, values, tol: float = 1e-3) -> None:
 
 
 def assert_gae_value_space(advantages, returns, values, tol: float = 1e-3) -> None:
-    """The GAE identity PLUS the sparse-reward bound ``|return| <= 1`` (a ±1 terminal with gamma<=1 and pm
-    values can't discount past ±1; the reward is terminal-only — the PBRS shaping option was removed 2026-10-04)."""
+    """The GAE identity PLUS the bound ``|return| <= 1`` (a ±1 terminal with gamma<=1 and pm values can't discount
+    past ±1; the old PBRS option was removed 2026-10-04). REWARD v2 (reward.py) keeps every Monte-Carlo return inside
+    ±1 by its 1/1.2 scale; a GAE return that mixes in a critic not yet adapted to the field potential can step a
+    little past it, which the BCE value loss clamps — so the trainer does not assert this bound."""
     assert_gae_identity(advantages, returns, values, tol)
     assert_value_pm(returns, "GAE returns", tol=tol)
 

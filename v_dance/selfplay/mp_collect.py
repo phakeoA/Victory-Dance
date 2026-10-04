@@ -76,6 +76,9 @@ class ChunkSpec:
     # 2026-10-03 MEGA-HOLD exploration (v_dance/selfplay/mega_hold.py): MegaHoldConfig.to_spec() for the RECORDING
     # players (the learner + the 'latest' opponent); None = off — byte-identical.
     mega_hold: Optional[dict] = None
+    # 2026-10-04 REWARD v2 (v_dance/rl/reward.py + field_shaping.py): the RECORDING players record Φ per decision and
+    # the opponent's faints at the end, from their own side's team-sheet ownership. False = v1 — byte-identical.
+    reward_v2: bool = False
 
 
 @dataclass
@@ -110,7 +113,8 @@ def build_chunk_specs(league, team_pool, n_games: int, *, chunk_size: int = 10,
                       opp_weights=None, pressure: Optional[str] = None, pressure_bias: float = 0.0,
                       score: bool = False, opp_draw: str = "largest_remainder",
                       learner_tp: Optional[str] = None, learner_tp_tau: float = 1.0,
-                      learner_tp_eps: float = 0.0, mega_hold: Optional[dict] = None) -> List[ChunkSpec]:
+                      learner_tp_eps: float = 0.0, mega_hold: Optional[dict] = None,
+                      reward_v2: bool = False) -> List[ChunkSpec]:
     """Plan the collection batch as a flat list of PICKLABLE ChunkSpecs — the multiprocessing
     analogue of ``generation.build_collection_chunks``. League sampling + uid assignment happen
     HERE, in the main process (race-free), so the workers never touch league state. ``gen`` (22d)
@@ -142,6 +146,8 @@ def build_chunk_specs(league, team_pool, n_games: int, *, chunk_size: int = 10,
                 spec.learner_tp_tau, spec.learner_tp_eps = float(learner_tp_tau), float(learner_tp_eps)
             if mega_hold:                      # 2026-10-03: and explore the mega hold (recording players only)
                 spec.mega_hold = dict(mega_hold)
+            if reward_v2:                      # 2026-10-04: and record the reward-v2 inputs (recording players only)
+                spec.reward_v2 = True
             # drill pressure: only NON-recording model opponents (latest records what PPO trains on; scripted
             # has no model to bias)
             # review RL-2: and never a MIRROR chunk — a pressured copy of OUR team would distort the own-mirror
@@ -383,7 +389,7 @@ def _build_players_real(ac, spec: ChunkSpec, tau: float, seed: int, team_chooser
     # live AC) pick their four with the learner picker and EXPLORE; None = the first-4 heuristic (byte-identical).
     _ltp = getattr(spec, "learner_tp", None)
 
-    def _sp(team, who, name, live=None):
+    def _sp(team, who, name, live=None, opp_team=None):
         p = SelfPlayVGCPlayer(
             ac, tau=tau, sample_seed=seed + who * 10_000 + uid, live_dir=live,
             save_replays=save_replays,
@@ -400,11 +406,19 @@ def _build_players_real(ac, spec: ChunkSpec, tau: float, seed: int, team_chooser
         if _mh:                                       # 2026-10-03 mega-hold exploration (recording players only)
             import numpy as _np
             p._mega_hold = {**_mh, "rng": _np.random.default_rng(seed + who * 10_000 + uid + 9_191_919)}
+        if getattr(spec, "reward_v2", False):         # 2026-10-04 reward v2: ownership from THIS side's view
+            from v_dance.selfplay.field_shaping import owners as _fs_owners
+            try:
+                _own = _fs_owners(team, opp_team or "")
+            except Exception:                         # never lose the chunk: Φ ≡ 0 (neutral) for it instead
+                _warn_once("owners", "reward v2: team-sheet ownership failed — this chunk records a neutral Φ")
+                _own = {"weather": {}, "terrain": {}}
+            p._reward_v2 = {"owners": _own}
         return p
 
-    our = _sp(ta, 0, our_name, live=live_dir)         # #18: worker publishes its battle to live_dir
+    our = _sp(ta, 0, our_name, live=live_dir, opp_team=tb)   # #18: worker publishes its battle to live_dir
     if spec.kind == "latest":
-        opp = _sp(tb, 1, opp_name)
+        opp = _sp(tb, 1, opp_name, opp_team=ta)
     elif spec.kind in ("snapshot", "clone"):
         # 2026-10-03: a league SNAPSHOT of a picker-in-the-loop run plays with its co-trained picker (None → shared)
         from v_dance.selfplay.tp_learning import paired_tp_for
@@ -612,7 +626,8 @@ def collect_with_pool(ac, league, n_games: int, *, team_pool, ckpt_path,
                       drill_sink: Optional[Callable[[list, dict], None]] = None,
                       opp_draw: str = "largest_remainder",
                       learner_tp: Optional[str] = None, learner_tp_tau: float = 1.0,
-                      learner_tp_eps: float = 0.0, mega_hold: Optional[dict] = None):
+                      learner_tp_eps: float = 0.0, mega_hold: Optional[dict] = None,
+                      reward_v2: bool = False):
     """Multiprocess analogue of ``generation.collect_with_league`` (task #14b.2).
 
     Plans the batch + samples the league in the MAIN process (race-free), freezes the current
@@ -635,7 +650,7 @@ def collect_with_pool(ac, league, n_games: int, *, team_pool, ckpt_path,
                               own_mirror_frac=own_mirror_frac, opp_weights=opp_weights,
                               pressure=pressure, pressure_bias=pressure_bias, score=score,
                               opp_draw=opp_draw, learner_tp=learner_tp, learner_tp_tau=learner_tp_tau,
-                              learner_tp_eps=learner_tp_eps, mega_hold=mega_hold)
+                              learner_tp_eps=learner_tp_eps, mega_hold=mega_hold, reward_v2=reward_v2)
     batches = partition_specs(specs, n_procs)
     _ld = str(live_dir) if live_dir else None
     # 22f: spread the worker batches round-robin across the pool servers (batch i -> ports[i % K]);

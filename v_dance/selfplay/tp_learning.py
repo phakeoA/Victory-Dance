@@ -14,7 +14,8 @@ as usual, so it practises what the picker brings.
 
 STAGE 2 (this module, ``--tp-learn``): after each generation's collection the picker takes a PPO-clip step on its set
 head + lead logits from the games' results.
-  · reward = +1 won / -1 lost (draws, fallbacks and unrecorded previews are skipped);
+  · reward = +1 won / -1 lost (draws, fallbacks and unrecorded previews are skipped); 2026-10-04 under --reward-v2 a
+    loss is -1 + the loss margin (the battle net's own terminal value, ``reward.terminal_reward``; no field credit);
   · baseline = the LEAVE-ONE-OUT mean reward of the other games of the SAME pairing (own team, opponent team) — it
     never depends on this game's pick, so the advantage stays unbiased (a turn-1 critic value would already contain
     the pick and cancel the signal);
@@ -68,6 +69,17 @@ class TPLearnConfig:
 
 
 # ── records ───────────────────────────────────────────────────────────────────────────────────────────────
+def _record_reward(m) -> float:
+    """The picker's reward: the SAME terminal value the battle net gets (2026-10-04 REWARD v2 — a loss earns back the
+    margin; no field credit: the picker is never shaped), ±1 for a v1 trajectory (byte-identical)."""
+    try:
+        from v_dance.rl.reward import terminal_reward
+        r = terminal_reward(m)
+    except Exception:
+        r = None
+    return float(r) if r is not None else (1.0 if m.won else -1.0)
+
+
 def records_from_trajectories(trajectories) -> list:
     """One training record per trajectory whose preview an EXPLORING picker drove and whose result is a real win /
     loss. ``key`` = (own roster, sorted opponent roster) — the pairing the leave-one-out baseline groups by."""
@@ -78,7 +90,7 @@ def records_from_trajectories(trajectories) -> list:
         if not rec or m.won is None or not getattr(m, "is_trainable", True):
             continue
         key = (tuple(str(s) for s in (m.own_team or ())), tuple(sorted(str(s) for s in (m.opp_team or ()))))
-        out.append({**rec, "won": bool(m.won), "key": key,
+        out.append({**rec, "won": bool(m.won), "reward": _record_reward(m), "key": key,
                     "battle_id": str(getattr(m, "battle_id", "") or ""),
                     "own_team": [str(s) for s in (m.own_team or ())],
                     "opp_team": [str(s) for s in (m.opp_team or ())]})
@@ -205,7 +217,7 @@ class TPLearner:
         n = len(records)
         if n < int(cfg.min_records):
             return {"n": n, "skipped": f"fewer than {cfg.min_records} records"}
-        rew = np.asarray([1.0 if r["won"] else -1.0 for r in records], dtype=np.float32)
+        rew = np.asarray([float(r.get("reward", 1.0 if r["won"] else -1.0)) for r in records], dtype=np.float32)
         base = np.asarray(loo_baselines(list(rew), [r["key"] for r in records],
                                         [r.get("battle_id") or f"#{i}" for i, r in enumerate(records)]),
                           dtype=np.float32)

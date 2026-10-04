@@ -44,7 +44,7 @@ class TrajectoryCollector:
         logprob: float = 0.0, value: float = 0.0,
         decision_type: str = "turn", turn: int = 0,
         mask_s0=None, mask_s1=None, gmask_s0=None, gmask_s1=None,
-        pair_first: Optional[int] = None, is_weight: float = 1.0,
+        pair_first: Optional[int] = None, is_weight: float = 1.0, phi: Optional[float] = None,
     ) -> None:
         """Append one decision step. ``logprob`` is the joint log-prob of the chosen
         (a0,g0,a1,g1) under the BEHAVIOUR policy; ``value`` is the critic V(s) at
@@ -61,6 +61,7 @@ class TrajectoryCollector:
             mask_s0=mask_s0, mask_s1=mask_s1, gmask_s0=gmask_s0, gmask_s1=gmask_s1,
             pair_first=(None if pair_first is None else int(pair_first)),   # W3b-1b
             is_weight=float(is_weight),                                     # 2026-10-03 mega-hold exploration
+            phi=(None if phi is None else float(phi)),                      # 2026-10-04 reward v2 field potential
         ))
 
     def __len__(self) -> int:
@@ -81,11 +82,14 @@ class TrajectoryCollector:
         tp_bring: Sequence[int], tp_leads: Sequence[int],
         won: Optional[bool], terminal_type, n_turns: Optional[int] = None,
         sampling: Optional[dict] = None, tp_learn: Optional[dict] = None,
+        reward_mode: Optional[str] = None, opp_fainted: Optional[int] = None,
+        guard: Optional[dict] = None,
     ) -> Trajectory:
         """Finalise: mark the last step ``done`` and attach ``EpisodeMeta``. Does NOT
         place the terminal reward (task 3a.3). ``n_turns`` defaults to the last step's
         turn (the shared clock used by the symmetry / discount checks). ``sampling``
-        labels the behaviour-policy params (tau/top_p) the recorded logprobs assume."""
+        labels the behaviour-policy params (tau/top_p) the recorded logprobs assume.
+        ``reward_mode`` / ``opp_fainted`` / ``guard``: reward v2 (None = v1, byte-identical)."""
         if self._steps:
             self._steps[-1].done = True
         if n_turns is None:
@@ -96,6 +100,8 @@ class TrajectoryCollector:
             tp_bring=[int(i) for i in tp_bring], tp_leads=[int(i) for i in tp_leads],
             won=won, terminal_type=str(TerminalType(terminal_type).value),
             n_turns=int(n_turns), sampling=sampling, tp_learn=tp_learn,
+            reward_mode=reward_mode, opp_fainted=(None if opp_fainted is None else int(opp_fainted)),
+            guard=guard,
         )
         return Trajectory(meta=meta, transitions=list(self._steps))
 

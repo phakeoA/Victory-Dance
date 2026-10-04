@@ -44,6 +44,16 @@ from v_dance.rl.schema import PASS_ACTION, Transition, Trajectory
 from v_dance.rl.store import assert_terminal_rewards_clean, write_trajectories
 
 log = logging.getLogger(__name__)
+_WARNED: set = set()
+
+
+def _warn_once(key: str, msg: str) -> None:
+    """WARNING with the traceback the first time per process (spawn workers never configure logging), DEBUG after."""
+    if key in _WARNED:
+        log.debug(msg, exc_info=True)
+        return
+    _WARNED.add(key)
+    log.warning(msg, exc_info=True)
 
 
 # ── pure recording helpers (no poke-env) ──────────────────────────────────────
@@ -68,12 +78,14 @@ def resolve_action(a, mask) -> int:
 
 def record_decision(collector: TrajectoryCollector, actor_critic, *, state,
                     a0, a1, g0=0, g1=0, mask0=None, mask1=None, gmask0=None,
-                    gmask1=None, decision_type="turn", turn=0, tau=1.0, is_weight: float = 1.0):
+                    gmask1=None, decision_type="turn", turn=0, tau=1.0, is_weight: float = 1.0,
+                    phi: Optional[float] = None):
     """Build one RL step from a model decision and append it to ``collector`` with the
     behaviour log-prob + critic value (``value_pm``) computed via ``actor_critic`` (one
     no-grad forward). Returns ``(resolved_a0, resolved_a1)``. ``is_weight`` (2026-10-03): the
     mega-hold exploration's importance weight for a step whose gimmick was FORCED (1.0 = the
-    policy's own step; v_dance/selfplay/mega_hold.py)."""
+    policy's own step; v_dance/selfplay/mega_hold.py). ``phi`` (2026-10-04): reward v2's field
+    potential at this decision (None = v1, not recorded)."""
     ra0 = resolve_action(a0, mask0)
     ra1 = resolve_action(a1, mask1)
     m0, m1 = _aslist(mask0), _aslist(mask1)
@@ -92,7 +104,8 @@ def record_decision(collector: TrajectoryCollector, actor_critic, *, state,
                        gimmick_s0=int(g0), gimmick_s1=int(g1),
                        logprob=(float(lp[0]) if tau > 0 else 0.0), value=float(vpm[0]),
                        mask_s0=m0, mask_s1=m1, gmask_s0=gm0, gmask_s1=gm1,
-                       decision_type=decision_type, turn=int(turn), is_weight=float(is_weight))
+                       decision_type=decision_type, turn=int(turn), is_weight=float(is_weight),
+                       phi=phi)
     return ra0, ra1
 
 
@@ -119,17 +132,23 @@ def finalize_trajectory(collector: TrajectoryCollector, *, won: Optional[bool],
                         tp_leads: Optional[Sequence[int]] = None,
                         opp_team: Sequence[str] = (),
                         sampling: Optional[dict] = None,
-                        tp_learn: Optional[dict] = None) -> Trajectory:
+                        tp_learn: Optional[dict] = None,
+                        reward_mode: Optional[str] = None,
+                        opp_fainted: Optional[int] = None,
+                        guard: Optional[dict] = None) -> Trajectory:
     """Finalise a collector into a Trajectory and place the terminal reward. ``n_turns``
     is the battle's real final Showdown turn (NOT the step count) so both perspectives
     share the clock even if one skipped a non-model turn (zero-sum stays valid).
-    ``sampling`` labels the behaviour params (tau/top_p) the recorded logprobs assume."""
+    ``sampling`` labels the behaviour params (tau/top_p) the recorded logprobs assume.
+    ``reward_mode`` / ``opp_fainted`` / ``guard`` (2026-10-04): reward v2 — the loss margin's
+    input and the logged-only per-game readouts (None = v1, byte-identical)."""
     bring = list(tp_bring) if tp_bring is not None else list(range(min(4, len(own_team))))
     leads = list(tp_leads) if tp_leads is not None else bring[:2]
     traj = collector.finish(own_team=list(own_team), opp_team=list(opp_team),
                             tp_bring=bring, tp_leads=leads, won=won,
                             terminal_type=terminal_type, n_turns=int(n_turns),
-                            sampling=sampling, tp_learn=tp_learn)
+                            sampling=sampling, tp_learn=tp_learn,
+                            reward_mode=reward_mode, opp_fainted=opp_fainted, guard=guard)
     # T3.1: a FALLBACK trajectory (backstop-forfeit) carries no terminal reward — it must be
     # discarded from the batch, not rewarded. place_terminal_reward asserts is_trainable, so skip it.
     if traj.meta.is_trainable:
@@ -177,6 +196,9 @@ class SelfPlayVGCPlayer(VGCPlayer):
         self._tau = float(tau)
         self._collectors: dict = {}                  # battle_tag -> TrajectoryCollector
         self._finished: dict = {}                    # battle_tag -> Trajectory
+        # 2026-10-04 REWARD v2 (v_dance/selfplay/field_shaping.py): {"owners": …} from THIS player's side, set by the
+        # collector (mp_collect) for a --reward-v2 run; None = v1 — nothing extra is recorded (byte-identical)
+        self._reward_v2: Optional[dict] = None
 
     def _collector_for(self, battle) -> TrajectoryCollector:
         tag = battle.battle_tag
@@ -218,10 +240,20 @@ class SelfPlayVGCPlayer(VGCPlayer):
             # 2026-10-03 mega-hold exploration: a FORCED gimmick carries its importance weight (else 1.0; a stash
             # left by a discarded step of another turn never applies)
             from v_dance.selfplay.mega_hold import stashed_weight as _mh_w
+            # 2026-10-04 reward v2: the field potential of THIS decision state, from our side (None = v1)
+            _rv2 = getattr(self, "_reward_v2", None)
+            _phi = None
+            if _rv2:
+                try:                                  # a Φ failure must never drop the step itself
+                    from v_dance.selfplay.field_shaping import phi as _fs_phi
+                    _phi = _fs_phi(battle, _rv2["owners"])
+                except Exception:
+                    _warn_once("phi", "reward v2: the field potential failed — this step records no Φ (neutral)")
             record_decision(c, self._ac, state=state_vec, a0=a0, a1=a1, g0=g0, g1=g1,
                             mask0=m0, mask1=m1, gmask0=gm0, gmask1=gm1,
                             decision_type=decision_type, turn=battle.turn, tau=self._tau,
-                            is_weight=_mh_w(self, battle.battle_tag, decision_type, battle.turn))
+                            is_weight=_mh_w(self, battle.battle_tag, decision_type, battle.turn),
+                            phi=_phi)
         except Exception:
             log.debug("self-play record failed (non-fatal)", exc_info=True)
 
@@ -272,6 +304,22 @@ class SelfPlayVGCPlayer(VGCPlayer):
                 _forfeited = _norm_tag(tag) in getattr(self, "_forfeited_tags", ())
                 _tt = "fallback" if _forfeited else terminal_type_for(
                     battle.won, getattr(battle, "lost", False))
+                # 2026-10-04 reward v2: their brought mons fainted (the loss margin) + the logged-only guards
+                _rv2 = {}
+                if getattr(self, "_reward_v2", None):
+                    from v_dance.selfplay import field_shaping as _FS
+                    try:                              # a guard failure must never drop the game itself
+                        _g = _FS.game_guard(battle)
+                    except Exception:
+                        _warn_once("guard", "reward v2: the per-game guard failed — this game logs no guards")
+                        _g = None
+                    try:
+                        _k = _g["opp_fainted"] if _g else _FS.fainted_count(getattr(battle, "opponent_team", None))
+                    except Exception:
+                        _warn_once("opp_fainted", "reward v2: their faints could not be counted — the loss margin "
+                                                  "of this game is 0")
+                        _k = None
+                    _rv2 = {"reward_mode": _FS.REWARD_V2, "opp_fainted": _k, "guard": _g}
                 self._finished[tag] = finalize_trajectory(
                     c, won=None if _forfeited else won, terminal_type=_tt,
                     own_team=own_team, n_turns=getattr(battle, "turn", len(c)),
@@ -280,7 +328,8 @@ class SelfPlayVGCPlayer(VGCPlayer):
                     tp_learn=tp.get("learn"),         # 2026-10-03: the exploring picker's record (else None)
                     sampling={"tau": float(getattr(self, "_tau", 1.0)),
                               "top_p": float(getattr(self, "_top_p", 1.0)),
-                              **({"mega_hold": _mh} if _mh else {})})
+                              **({"mega_hold": _mh} if _mh else {})},
+                    **_rv2)
         except Exception:
             # A finalize failure silently drops this game from self._finished → it can't be paired →
             # it vanishes from the A/B win-rate DENOMINATOR with no trace. Surface it (WARNING + a counted,

@@ -4,13 +4,80 @@ Implements docs/ppo_reward_design.md sec 1: the terminal reward goes on the LAST
 only (sparse), driven by the terminal type; FALLBACK trajectories are discarded; and
 the collector HARD-FAILS if MODEL-DRIVEN% drops below threshold (a self-play corpus
 with fallbacks is corrupted — fallbacks reward the wrong action and break on-policy
-assumptions). No shaping: the reward is terminal-only (the gated PBRS option, sec 4, was removed 2026-10-04).
+assumptions). The default (v1) reward is terminal-only ±1 (the gated PBRS option, sec 4, was removed 2026-10-04).
+
+REWARD v2 (2026-10-04, USER: "better than +1 win -1 losing while not being harmful to pokemon playstyles … make sure
+that winning and losing is overall the biggest punishment and reward"; memory 14 'REWARD v2: DESIGN DECIDED'), only for
+a trajectory collected under ``--reward-v2`` (``meta.reward_mode == "v2"``; anything else is v1, byte-identical):
+  · the LOSS MARGIN — a win is +1 however it was won; a loss is -1 + 0.25 × (their brought mons we fainted) / 4, so a
+    close loss beats a wipe-out but every loss stays ≥ 1.75 below every win; our own faints / sacrifices never count;
+  · the FIELD POTENTIAL — each step pays the CHANGE of Φ (``Transition.phi``, 0.1 × weather owner + 0.1 × terrain
+    owner, v_dance/selfplay/field_shaping.py): F = κ·(γ·Φ(s') − Φ(s)), Φ(terminal) = 0 (potential-based shaping —
+    it telescopes, so it cannot be farmed and cannot change which policy is best); κ fades to 0 over the run's last
+    third (``field_fade``);
+  · every v2 reward is × 1/(1 + 0.2) so a return stays inside the critic's [-1, 1].
+The terminal value goes on the last step at collection (``place_terminal_reward``); the shaping and the scale are
+applied when the trainer computes GAE (``shaped_rewards``), so a stored v2 trajectory still holds sparse rewards.
 """
 from __future__ import annotations
 
 from typing import Dict, List, Optional
 
+import numpy as np
+
 from v_dance.rl.schema import Trajectory
+
+REWARD_V2 = "v2"
+LOSS_MARGIN = 0.25           # the most a loss earns back (all four of their brought mons fainted — impossible on a loss)
+BRING = 4                    # VGC brings four
+FIELD_STRENGTH = 0.1         # Φ per domain (weather, terrain): a full theirs → ours swing in one domain = +0.2
+V2_SCALE = 1.0 / (1.0 + 2.0 * FIELD_STRENGTH)   # |r_T| ≤ 1 and |Φ| ≤ 0.2 → every v2 return within [-1, 1]
+
+
+def is_v2(meta) -> bool:
+    return getattr(meta, "reward_mode", None) == REWARD_V2
+
+
+def terminal_reward(meta) -> Optional[float]:
+    """The reward placed on a trajectory's LAST step (unscaled). v1 = ``outcome_reward()`` (±1 / draw 0 / None). v2 =
+    the same, except a loss (outright or adjudicated) earns back ``LOSS_MARGIN × opp_fainted / BRING`` — a win is +1
+    however it was won (our sacrifices never count). ``opp_fainted`` unknown on a v2 loss counts as 0."""
+    r = meta.outcome_reward()
+    if r is None or r >= 0.0 or not is_v2(meta):          # v1 · a win · a draw · a horizon cut
+        return r
+    k = min(max(int(getattr(meta, "opp_fainted", None) or 0), 0), BRING)
+    return -1.0 + LOSS_MARGIN * k / BRING
+
+
+def field_fade(gen: int, total_generations: Optional[int]) -> float:
+    """κ for generation ``gen`` of a reward-v2 run whose generations are 0 .. ``total_generations`` − 1: full strength
+    through the first two thirds, then linear to 0 at the last generation (40 gens → 1.0 through gen 26, 12/13 at gen
+    27, … 0 at gen 39). Counted from gen 0, so a resume whose launch ends at the same generation (``--generations`` =
+    the generations LEFT) continues the original schedule. ``total_generations`` None / ≤ 0 (an open-ended run) →
+    never fades."""
+    if not total_generations or int(total_generations) <= 0:
+        return 1.0
+    total = int(total_generations)
+    end = total - 1                                       # the last generation: κ = 0
+    start = int(round(2.0 * total / 3.0)) - 1             # the last full-strength generation
+    if end <= start or gen <= start:
+        return 1.0
+    if gen >= end:
+        return 0.0
+    return float(end - gen) / float(end - start)
+
+
+def shaped_rewards(traj: Trajectory, gamma: float, field_kappa: float = 1.0) -> np.ndarray:
+    """The per-step rewards GAE uses. v1: the stored rewards, untouched. v2: ``V2_SCALE × (r_t + κ·(γ·Φ_{t+1} − Φ_t))``
+    with Φ_T = 0 after a real terminal (a horizon cut — never produced today — keeps its last Φ, like its value
+    bootstrap). A step with no recorded Φ counts as 0 (neutral)."""
+    ts = traj.transitions
+    r = np.array([t.reward for t in ts], dtype=np.float64)
+    if not ts or not is_v2(traj.meta):
+        return r
+    phi = np.array([float(t.phi) if getattr(t, "phi", None) is not None else 0.0 for t in ts], dtype=np.float64)
+    nxt = np.append(phi[1:], phi[-1] if traj.meta.bootstraps else 0.0)
+    return V2_SCALE * (r + float(field_kappa) * (float(gamma) * nxt - phi))
 
 # Sources that count as MODEL-DRIVEN (mirror gauntlet.py's report: model + replacement).
 _MODEL_DRIVEN_SOURCES = ("model", "forced_switch_model")
@@ -28,7 +95,7 @@ _NON_DECISION_COUNTERS = ("rejected_resample", "abandon_forfeit", "finalize_fail
 
 def place_terminal_reward(traj: Trajectory) -> Trajectory:
     """Put the sec 1 terminal reward on the LAST step (in place):
-      win / loss / adjudicated -> +-1   (via meta.won)
+      win / loss / adjudicated -> +-1   (via meta.won; v2: a loss -1 + the margin, ``terminal_reward``)
       draw                     ->  0    (real terminal, NO bootstrap)
       horizon_cut              ->  0 on the last step; GAE BOOTSTRAPS gamma*V(s_cut)
                                    from the recorded value + meta.bootstraps (NOT +-1)
@@ -38,7 +105,7 @@ def place_terminal_reward(traj: Trajectory) -> Trajectory:
         return traj
     assert traj.meta.is_trainable, \
         "place_terminal_reward got a FALLBACK trajectory — discard it first (sec 1)"
-    r = traj.meta.outcome_reward()          # None for horizon_cut (bootstrap, not +-1)
+    r = terminal_reward(traj.meta)          # None for horizon_cut (bootstrap, not +-1)
     traj.transitions[-1].reward = 0.0 if r is None else float(r)
     return traj
 

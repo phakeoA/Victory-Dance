@@ -754,7 +754,7 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                          register_prefix: str = "era5b_g",
                          bandit_config=None, drill=None,
                          learner_tp=None, tp_learn: bool = False, tp_cfg=None,
-                         mega_hold=None) -> dict:
+                         mega_hold=None, reward_v2: bool = False) -> dict:
     """Run real generations end-to-end (collect via the league -> PPO update -> gauntlet
     eval -> promotion gate -> admit/refresh/revert), RESUMABLY (3c.4 / #20): a PER-GENERATION
     snapshot (``snap_gen{N}.pt`` in ``archive/sub_checkpoints/``) is written after every generation, so a later run
@@ -826,6 +826,11 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
         sys.exit(2)
     if _mh_on:
         print("   MEGA-HOLD exploration ON: " + mega_hold.describe())
+    if reward_v2 and not _mp:                          # 2026-10-04 reward v2 rides the multiprocess collector
+        print("[gen] FATAL: --reward-v2 needs --collect-procs >= 2 (the field potential + the loss margin are recorded "
+              "by the multiprocess collector's recording players)", file=sys.stderr)
+        sys.exit(2)
+    rv2_stats: list = []                               # 2026-10-04 reward v2: the per-gen readout (κ, margin, field, guards)
     from v_dance.selfplay import mega_hold as MH
     mh_stats: list = []                                # per-gen hold games / forced steps / importance weights
     _drill_gen: dict = {}                              # gen -> (drill rows, pressure stats) from collect_fn
@@ -921,6 +926,19 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                  f"ent={_tp_cfg.ent_coef}; anchor = {tp_state['learner'].anchor_path}) → <archive>/tp/tp_genN.pt"
                  if tp_state["learner"] is not None else "learning OFF (Stage 1: the picker is fixed)")
               + "; eval + panel play each candidate with its picker")
+    # 2026-10-04 REWARD v2 (v_dance/rl/reward.py): the fade spans gens 0 .. (where this launch ends) — a resume continues
+    # the original schedule when --generations = the generations left
+    _rv2_total = (int(history.generation) + int(n_generations)) if n_generations else None   # gens 0 .. total-1
+    if reward_v2:
+        from v_dance.rl import reward as _RW
+        _end = (_rv2_total - 1) if _rv2_total else None
+        _full = [g for g in range(0, (_end or 0) + 1) if _RW.field_fade(g, _rv2_total) >= 1.0]
+        print(f"   REWARD v2 ON (10-04): a win +1 · a loss -1 + {_RW.LOSS_MARGIN:g} × (their brought mons fainted)/"
+              f"{_RW.BRING} · a draw 0 · field potential {_RW.FIELD_STRENGTH:g} per side (weather + terrain, ownership "
+              f"= who can set it) paid as γΦ(s') − Φ(s) on battle-net steps · every reward × {_RW.V2_SCALE:.4f} · "
+              + (f"field credit full strength through gen {max(_full)}, linear to 0 at gen {_end}"
+                 if _end is not None and _full else "field credit NEVER fades (open-ended run)")
+              + " · the picker gets the same terminal value, no field credit")
     if league_clones:                                  # league P1 (2026-09-30): behaviour-cloned human opponents
         league.clones = tuple(str(p) for p in league_clones)
         league.cfg.clone_frac = float(clone_frac)
@@ -950,6 +968,9 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
         # KL grows as a stronger champion drifts; default relax=0 → unchanged).
         trainer.tcfg.target_kl_from_bc = target_kl_for_generation(
             gen, _base_target_kl, trainer.tcfg.target_kl_relax_per_gen, trainer.tcfg.target_kl_max)
+        if reward_v2:                                  # 2026-10-04: this gen's field-potential strength (the fade)
+            from v_dance.rl.reward import field_fade as _fade
+            trainer.field_kappa = _fade(gen, _rv2_total)
         # 3c.8b: collection runs on CPU (sec 20) — use a CPU inference-copy when the trainer
         # lives on the GPU; the copy reflects the latest trained weights (remade each gen).
         status.phase("collecting", generation=gen, games_total=gen_cfg.n_games)
@@ -988,7 +1009,8 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
                     # 2026-10-03 picker in the loop (None = the first-4 heuristic, byte-identical)
                     learner_tp=tp_state["path"], learner_tp_tau=_tp_cfg.tau, learner_tp_eps=_tp_cfg.eps,
                     # 2026-10-03 mega-hold exploration (None = off, byte-identical)
-                    mega_hold=(mega_hold.to_spec() if _mh_on else None))
+                    mega_hold=(mega_hold.to_spec() if _mh_on else None),
+                    reward_v2=bool(reward_v2))                   # 2026-10-04 (False = v1, byte-identical)
             finally:
                 # ALWAYS drop the per-gen ckpt — even if collection raised (Ctrl-C lands inside the
                 # blocking submit) — else a full-weight file orphans each crashed gen (review fix).
@@ -1018,6 +1040,17 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
             _mhs = {"generation": gen, **MH.summarize_trajectories(trajs)}
             mh_stats.append(_mhs)
             print("        " + MH.format_stats(_mhs))
+        if reward_v2:                                  # 2026-10-04 the reward-v2 readout (logged-only guards)
+            from v_dance.selfplay import field_shaping as _FS
+            _rvs = {"generation": gen, **_FS.summarize_trajectories(trajs, trainer.field_kappa)}
+            rv2_stats.append(_rvs)
+            print("        " + _FS.format_stats(_rvs))
+            try:
+                import json as _json
+                with open(archive / "reward_v2_stats.jsonl", "a", encoding="utf-8") as _f:
+                    _f.write(_json.dumps(_rvs) + "\n")
+            except OSError:
+                pass
         if tp_state["learner"] is not None:           # 2026-10-03 Stage 2: the picker learns from these games
             _t1 = _time.perf_counter()
             _st = tp_state["learner"].update(TPL.training_records(trajs))   # fallback games + twins dropped
@@ -1324,7 +1357,8 @@ def run_live_generations(ckpt, *, n_generations=None, team_pool, team_chooser,
               f"{[(r.generation, round(panel_pooled(r.panel)[0] / max(1, panel_pooled(r.panel)[1]) * 100)) for r in history.records if r.panel]})")
     return {"history": history, "league": league, "reports": reports,
             "snapshot": str(_latest) if _latest else None,
-            "tp": tp_state["stats"], "tp_path": tp_state["path"], "mega_hold": mh_stats}
+            "tp": tp_state["stats"], "tp_path": tp_state["path"], "mega_hold": mh_stats,
+            "reward_v2": rv2_stats}
 
 
 # ── offline dry-run demo (no server): the loop logic over synthetic generations ─
@@ -1644,6 +1678,7 @@ def _launch_live_core(args):
         bandit_config=args.bandit_config, drill=_drill,
         learner_tp=getattr(args, "learner_tp", None), tp_learn=bool(getattr(args, "tp_learn", False)),
         tp_cfg=_tp_cfg_from_args(args), mega_hold=_mega_hold_cfg_from_args(args),
+        reward_v2=bool(getattr(args, "reward_v2", False)),
         snapshot_path=args.snapshot, max_hours=args.hours)
 
 
@@ -2111,6 +2146,13 @@ if __name__ == "__main__":
                          "mega to re-set ours)")
     ap.add_argument("--mega-hold-w-min", type=float, default=0.0,
                     help="floor on a forced step's importance weight π(none) (0 = exact, unbiased)")
+    # 2026-10-04 REWARD v2 (v_dance/rl/reward.py + v_dance/selfplay/field_shaping.py; memory 14 'REWARD v2')
+    ap.add_argument("--reward-v2", action="store_true",
+                    help="REWARD v2: a loss earns back 0.25 × (their brought mons fainted)/4 (a win is +1 however it "
+                         "was won) + a potential-based weather / terrain credit (0.1 per side; ownership = who can set "
+                         "it from the two team sheets; fades to 0 over the run's last third) + every reward × 1/1.2; "
+                         "the picker gets the same terminal value. Needs --collect-procs >= 2. Default OFF = the ±1 "
+                         "reward, byte-identical.")
     ap.add_argument("--preflight", default="auto", choices=["auto", "on", "off"],
                     help="before the real run, play a ~minutes-long mini run through every code path "
                          "(3 gens + a resume, every opponent incl. each clone, promote, HoF, save) and "

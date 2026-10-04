@@ -11,6 +11,8 @@ Invariants (docs/ppo_reward_design.md sec 3 / sec 13):
     TRUNCATION, not a termination -> bootstrap gamma*V(s_cut) (NEVER a +-1 terminal).
   - Advantages are standardized to zero-mean/unit-std PER BATCH (affine, sign-safe),
     with BOTH perspectives of a game in the same batch (the caller concatenates).
+  - 2026-10-04 REWARD v2: a v2 trajectory's rewards go through ``reward.shaped_rewards`` first (the field
+    potential's γΦ(s') − Φ(s) at strength ``field_kappa`` + the 1/1.2 scale); a v1 trajectory is untouched.
 """
 from __future__ import annotations
 
@@ -18,6 +20,7 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 
+from v_dance.rl.reward import shaped_rewards
 from v_dance.rl.schema import Trajectory
 
 DEFAULT_GAMMA = 0.997   # sec 13 FLOOR — do not lower
@@ -29,6 +32,7 @@ def compute_gae(
     gamma: float = DEFAULT_GAMMA,
     lam: float = DEFAULT_LAM,
     bootstrap_value: Optional[float] = None,
+    field_kappa: float = 1.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Return ``(advantages, returns)`` for one trajectory (one perspective).
 
@@ -36,14 +40,15 @@ def compute_gae(
     used ONLY for a HORIZON_CUT truncation. If None on a truncated episode we fall back
     to the last recorded value as a proxy (off-by-one but fine — the cut is set above
     the 99th-pct game length so it almost never fires). Ignored for real terminals
-    (they bootstrap with 0). ``returns = advantages + values`` (the critic target)."""
+    (they bootstrap with 0). ``returns = advantages + values`` (the critic target).
+    ``field_kappa`` = this generation's field-potential strength (reward v2 only)."""
     ts = traj.transitions
     n = len(ts)
     if n == 0:
         empty = np.zeros(0, dtype=np.float32)
         return empty, empty.copy()
 
-    rewards = np.array([t.reward for t in ts], dtype=np.float64)
+    rewards = shaped_rewards(traj, gamma, field_kappa)      # v1: the stored rewards, untouched
     values = np.array([t.value for t in ts], dtype=np.float64)
 
     if traj.meta.bootstraps:                       # HORIZON_CUT truncation -> bootstrap
@@ -83,6 +88,7 @@ def compute_batch_gae(
     gamma: float = DEFAULT_GAMMA,
     lam: float = DEFAULT_LAM,
     standardize_adv: bool = True,
+    field_kappa: float = 1.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """GAE over a batch: per-trajectory advantages/returns, concatenated in order, with
     advantages standardized ACROSS THE WHOLE BATCH (sec 3 — pass both perspectives of
@@ -92,7 +98,7 @@ def compute_batch_gae(
     advs: List[np.ndarray] = []
     rets: List[np.ndarray] = []
     for tr in trajectories:
-        a, r = compute_gae(tr, gamma, lam)
+        a, r = compute_gae(tr, gamma, lam, field_kappa=field_kappa)
         if a.size:
             advs.append(a)
             rets.append(r)

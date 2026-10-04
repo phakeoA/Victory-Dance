@@ -77,6 +77,9 @@ class Transition:
     # the exploration carries the importance weight w = Π π_old(none) over its forced slots; PPO multiplies the step's
     # clipped surrogate by it. 1.0 = the policy's own step (every other step, every ladder / legacy step).
     is_weight: float = 1.0
+    # 2026-10-04 REWARD v2 (v_dance/rl/reward.py): the field potential Φ(s) at this decision, from THIS perspective
+    # (v_dance/selfplay/field_shaping.py). None = not recorded (every v1 / ladder / legacy step).
+    phi: Optional[float] = None
 
     def to_obj(self) -> dict:
         d = {
@@ -94,6 +97,8 @@ class Transition:
             d["pair_first"] = int(self.pair_first)
         if float(self.is_weight) != 1.0:                 # 2026-10-03: only a forced (mega-hold) step writes it
             d["is_weight"] = float(self.is_weight)
+        if self.phi is not None:                         # 2026-10-04: only a reward-v2 step writes it
+            d["phi"] = float(self.phi)
         return d
 
     @classmethod
@@ -111,6 +116,7 @@ class Transition:
             gmask_s0=_mask_to_list(d.get("gmask_s0")), gmask_s1=_mask_to_list(d.get("gmask_s1")),
             pair_first=(None if d.get("pair_first") is None else int(d["pair_first"])),
             is_weight=float(d.get("is_weight", 1.0)),
+            phi=(None if d.get("phi") is None else float(d["phi"])),
         )
 
 
@@ -136,9 +142,16 @@ class EpisodeMeta:
     # (model_io._set_head_order). IN-MEMORY ONLY (it carries feature arrays): to_obj never writes it, so the
     # RL store is unchanged. None = no exploring picker drove this preview.
     tp_learn: Optional[dict] = None
+    # 2026-10-04 REWARD v2 (v_dance/rl/reward.py): the reward this trajectory was collected under ("v2" = the loss margin
+    # + the field potential; None = v1 ±1) and the opponent's brought mons fainted at the end (the margin's input; None
+    # = not recorded). Written only when set, so a v1 record is byte-identical. ``guard`` = the logged-only per-game
+    # readouts (our faints, Protect / Trick Room uses …) — IN-MEMORY ONLY like tp_learn (never written).
+    reward_mode: Optional[str] = None
+    opp_fainted: Optional[int] = None
+    guard: Optional[dict] = None
 
     def to_obj(self) -> dict:
-        return {
+        d = {
             "battle_id": self.battle_id, "own_role": self.own_role,
             "own_team": list(self.own_team), "opp_team": list(self.opp_team),
             "tp_bring": [int(i) for i in self.tp_bring],
@@ -147,6 +160,11 @@ class EpisodeMeta:
             "n_turns": int(self.n_turns),
             "sampling": self.sampling,
         }
+        if self.reward_mode is not None:
+            d["reward_mode"] = str(self.reward_mode)
+        if self.opp_fainted is not None:
+            d["opp_fainted"] = int(self.opp_fainted)
+        return d
 
     @classmethod
     def from_obj(cls, d: dict) -> "EpisodeMeta":
@@ -158,6 +176,8 @@ class EpisodeMeta:
             won=d.get("won"), terminal_type=d["terminal_type"],
             n_turns=int(d.get("n_turns", 0)),
             sampling=d.get("sampling"),
+            reward_mode=d.get("reward_mode"),
+            opp_fainted=(None if d.get("opp_fainted") is None else int(d["opp_fainted"])),
         )
 
     @property

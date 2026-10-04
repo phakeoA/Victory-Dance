@@ -94,6 +94,9 @@ class PPOTrainer:
         self.rng = np.random.default_rng(seed)
         self.updates = 0
         self.warmups = 0
+        # 2026-10-04 REWARD v2: this generation's field-potential strength κ (the generation loop sets the fade before
+        # each update; only reward-v2 trajectories read it — v1 GAE never does)
+        self.field_kappa = 1.0
 
     def _make_actor_opt(self):
         """The actor optimiser. W3b-2 options: AdamW (``actor_weight_decay`` > 0) and a backbone
@@ -130,7 +133,8 @@ class PPOTrainer:
         """GAE (UN-standardised — per-minibatch standardisation happens in the loss) +
         the flattened transition list, aligned 1:1 with the concatenated adv/returns."""
         adv, ret = compute_batch_gae(trajectories, self.tcfg.gamma, self.tcfg.lam,
-                                     standardize_adv=False)
+                                     standardize_adv=False,
+                                     field_kappa=float(getattr(self, "field_kappa", 1.0)))
         txns = [t for tr in trajectories for t in tr.transitions]
         assert len(txns) == len(adv) == len(ret), \
             f"flatten misalignment: {len(txns)} txns vs {len(adv)} adv (GAE order mismatch)"

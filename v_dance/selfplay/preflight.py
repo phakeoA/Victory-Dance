@@ -93,7 +93,8 @@ def check(fresh: Optional[dict], resumed: Optional[dict], *, hof_on: bool = Fals
           arm_names: Optional[List[str]] = None, register_on: bool = False,
           panel_names: Optional[List[str]] = None, drill_on: bool = False,
           pressure_on: bool = False, tp_learn_on: bool = False,
-          learner_tp_on: bool = False, mega_hold_on: bool = False) -> Tuple[List[str], List[str], dict]:
+          learner_tp_on: bool = False, mega_hold_on: bool = False,
+          reward_v2_on: bool = False) -> Tuple[List[str], List[str], dict]:
     """``(problems, warnings, played)`` from the two run results. Any problem = FAIL."""
     problems: List[str] = []
     warns: List[str] = []
@@ -188,6 +189,27 @@ def check(fresh: Optional[dict], resumed: Optional[dict], *, hof_on: bool = Fals
         if st and sum(int(s.get("conflict", 0) or 0) for s in st) <= 0:
             warns.append("mega-hold: no learner game met a weather setter that fights ours — the weather rate "
                          "(--mega-hold-p-weather) was not exercised")
+    if reward_v2_on:                                   # 2026-10-04 reward v2: every gen collected under it, wired
+        for res, label in ((fresh, "fresh"), (resumed, "resumed")):
+            st = (res or {}).get("reward_v2") or []
+            if not st:
+                problems.append(f"{label} run: reward v2 reported nothing (not wired?)")
+                continue
+            for s in st:
+                g = s.get("generation")
+                if int(s.get("v2", 0) or 0) <= 0:
+                    problems.append(f"{label} gen {g}: no trajectory was collected under reward v2")
+                elif int(s.get("steps_phi", 0) or 0) < int(s.get("steps", 0) or 0):
+                    problems.append(f"{label} gen {g}: {int(s['steps']) - int(s['steps_phi'])} of {s['steps']} "
+                                    f"reward-v2 steps carry no field potential")
+                if int(s.get("games_lost", 0) or 0) > int(s.get("lost_margin_recorded", 0) or 0):
+                    problems.append(f"{label} gen {g}: a reward-v2 loss carries no opponent faint count (the margin)")
+        st = [s for res in (fresh, resumed) for s in ((res or {}).get("reward_v2") or [])]
+        if st and sum(int(s.get("ours", 0) or 0) + int(s.get("theirs", 0) or 0) for s in st) <= 0:
+            warns.append("reward v2: no decision ever had an OWNED weather / terrain up (Φ ≡ 0) — the field credit "
+                         "was not exercised")
+        if st and not any(float(s.get("kappa", 1.0)) < 1.0 for s in st):
+            warns.append("reward v2: the field-credit fade never ran (κ stayed 1)")
     return problems, warns, played
 
 
@@ -262,7 +284,8 @@ def run_preflight(args, launch_fn) -> bool:
                                     pressure_on=_drill_has_pressure(args),
                                     tp_learn_on=bool(getattr(args, "tp_learn", False)),
                                     learner_tp_on=bool(getattr(args, "learner_tp", None)),
-                                    mega_hold_on=_mega_hold_on(args))
+                                    mega_hold_on=_mega_hold_on(args),
+                                    reward_v2_on=bool(getattr(args, "reward_v2", False)))
     mins = (time.perf_counter() - t0) / 60.0
     print("\n" + "=" * 78)
     print(f"PREFLIGHT {'PASS' if not problems else 'FAIL'} in {mins:.1f} min")

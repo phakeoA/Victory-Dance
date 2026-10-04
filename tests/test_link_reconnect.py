@@ -687,3 +687,87 @@ def test_a_parked_battle_gets_leave_and_rejoin_then_gives_up_after_the_retries()
     assert sent == [tag, tag, tag]                 # resync_retries = 3, only the battle parked past 8 s
     assert host.touched == [tag, tag, tag]
     assert sum("giving up" in line for line in logs) == 1
+
+
+# ── 2026-10-04: ad / tracker sockets in the page are never the link ────────────────────────────────────────────
+# The live sequence (online_20261004-160024-28444.log): the client's SockJS socket opens, then the page's ad iframes
+# open their own sockets; one of those closes a few seconds later, and that close used to read as a dropped link.
+SD_URL = "wss://sim3.psim.us/showdown/801/dyqbvnsm/websocket"
+AD_URL = "wss://transparency.peer-39.com/ws/v/6845t8qo4yd8s4f4if8a?FORMAT=display&TAG_TYPE=impression&DSP_ID=8"
+
+
+class FakeWS:
+    def __init__(self, url):
+        self.url = url
+        self.handlers = {}
+
+    def on(self, event, fn):
+        self.handlers.setdefault(event, []).append(fn)
+
+
+def test_is_showdown_socket_on_the_real_urls():
+    assert pob._is_showdown_socket(SD_URL)
+    assert pob._is_showdown_socket("ws://localhost:8000/showdown/123/abcdefgh/websocket")   # the local server
+    assert pob._is_showdown_socket("wss://sim3.psim.us/showdown/websocket")                 # the raw endpoint
+    assert not pob._is_showdown_socket(AD_URL)
+    assert not pob._is_showdown_socket("wss://api.b2c.com/api/init-1")
+    assert not pob._is_showdown_socket("wss://ads.example/ws?next=/showdown/1/2/websocket")  # only the PATH counts
+    assert pob._is_showdown_socket("") and pob._is_showdown_socket(None)                    # unknown = the old rule
+
+
+def _ad_close_sequence(w):
+    sd, ad1, ad2 = FakeWS(SD_URL), FakeWS(AD_URL), FakeWS(AD_URL)
+    for ws in (sd, ad1, ad2):
+        w.on_ws_open(ws)
+    w.on_raw_frame('a["|updatesearch|{}"]')          # the Showdown socket is alive
+    w.on_ws_close(ad2)                              # the ad socket's routine close
+    return sd
+
+
+def test_an_ad_socket_closing_never_reconnects():
+    w, page, host, clock, logs = _watch(host=FakeHost(live=[TAG]))
+    sd = _ad_close_sequence(w)
+    asyncio.run(w.tick())
+    assert page.reloads == 0 and w.closed_at is None and host.forgotten == []
+    assert w.ws is sd and w.status()["foreign_sockets"] == 2
+    assert sum("ignoring a non-Showdown websocket" in s and "transparency.peer-39.com" in s for s in logs) == 1
+    assert not any("websocket CLOSED" in s or "LINK DOWN" in s for s in logs)
+
+
+def test_the_real_socket_still_reconnects_after_an_ad_socket_opened():
+    w, page, host, clock, logs = _watch()
+    sd, ad = FakeWS(SD_URL), FakeWS(AD_URL)
+    w.on_ws_open(sd)
+    w.on_ws_open(ad)
+    w.on_ws_close(sd)
+    asyncio.run(w.tick())
+    assert page.reloads == 1
+    assert any("websocket CLOSED (wss://sim3.psim.us/showdown/" in s for s in logs)
+    assert any("LINK RECONNECTED" in s for s in logs)
+
+
+def test_calibration_the_old_rule_fails_both_ways(monkeypatch):
+    """Every socket = the link (the rule before 2026-10-04) reproduces both faults on the same sequences."""
+    monkeypatch.setattr(pob, "_is_showdown_socket", lambda url: True)
+    w, page, host, clock, logs = _watch(host=FakeHost(live=[TAG]))
+    _ad_close_sequence(w)
+    asyncio.run(w.tick())
+    assert page.reloads == 1 and host.forgotten == [TAG]          # the ad's close → a reload (the USER's symptom)
+    w2, page2, *_ = _watch()
+    sd, ad = FakeWS(SD_URL), FakeWS(AD_URL)
+    w2.on_ws_open(sd)
+    w2.on_ws_open(ad)
+    w2.on_ws_close(sd)
+    asyncio.run(w2.tick())
+    assert page2.reloads == 0                                     # the REAL close ignored as a stale socket's
+
+
+def test_an_ad_socket_gets_no_handlers_and_never_feeds_frames():
+    w, page, host, clock, logs = _watch()
+    fed = []
+    sd, ad = FakeWS(SD_URL), FakeWS(AD_URL)
+    assert pob._wire_socket(sd, w, fed.append, lambda p: None) is True
+    assert pob._wire_socket(ad, w, fed.append, lambda p: None) is False
+    assert set(sd.handlers) == {"framereceived", "close", "socketerror", "framesent"}
+    assert ad.handlers == {}                         # no close → no reconnect; no frames → no feed, no raw clock
+    assert w.ws is sd

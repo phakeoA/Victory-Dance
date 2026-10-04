@@ -116,6 +116,7 @@ import logging                                     # noqa: E402
 import sys                                         # noqa: E402
 import time                                        # noqa: E402
 from collections import deque                    # noqa: E402
+from urllib.parse import urlsplit                 # noqa: E402
 
 import v_dance                                     # noqa: F401,E402  (Selector policy for POKE_LOOP)
 import v_dance.online.play_vs_human_browser as _pvhb  # noqa: E402  (the reused local transport)
@@ -207,6 +208,40 @@ def _sockjs_unwrap(payload: str) -> list:
     if payload in ("o", "h") or payload.startswith("c["):
         return []
     return [payload]
+
+
+def _is_showdown_socket(url) -> bool:
+    """2026-10-04 (USER: "5 reconnects within 3 minutes"): the client page carries ad / tracker iframes that open
+    their OWN websockets (``wss://transparency.peer-39.com/…``, ``api.b2c.com``), and Playwright's
+    ``page.on("websocket")`` reports those too. LinkWatch adopted every new socket as THE link, so an ad socket's
+    routine close read as a dropped link → a page reload. In the logs since 09-29, all 89 "websocket CLOSED" lines
+    came right after a non-Showdown socket opened, every session without one had 0, and the page's own close
+    recorder never saw the Showdown socket close ("no hook data"). Only the client's socket is the link: SockJS
+    ``…/showdown/<server>/<session>/websocket`` (psim.us online, ``ws://localhost:8000/showdown/…`` locally). An
+    unknown URL counts as Showdown (the old behaviour)."""
+    u = str(url or "")
+    if not u:
+        return True
+    try:
+        path = urlsplit(u).path
+    except ValueError:
+        return False
+    return path == "/showdown" or path.startswith("/showdown/")
+
+
+def _wire_socket(ws, link, on_frame, on_sent) -> bool:
+    """``page.on("websocket")``: attach the transport handlers to the Showdown client's socket. An ad / tracker
+    socket (2026-10-04) gets NONE — its close is not a link drop, its frames never reach the feed or the raw-frame
+    clock (they would hide a silent Showdown socket from the probe). True when the socket was wired."""
+    if not link.on_ws_open(ws):
+        return False
+    ws.on("framereceived", on_frame)
+    ws.on("close", link.on_ws_close)       # a server/network close → reconnect within ~1 s
+    ws.on("socketerror", link.on_ws_error)
+    # outgoing: the USER's avatar picks send `/avatar <x>` — the only reliable
+    # signal (the server sends no updateuser on avatar changes; see the sync's doc).
+    ws.on("framesent", on_sent)
+    return True
 
 
 # 2026-10-02 (two accounts): the .env key this process's avatar lives under — PS_AVATAR for account 1,
@@ -380,7 +415,8 @@ class LinkWatch:
     consumer could not tell a dead socket from a slow opponent (no close handler; the SockJS
     heartbeats were dropped before the queue). This watches the RAW frame clock and the socket:
 
-      * ``ws.on("close")`` / readyState != 1  → reconnect on the next idle tick (~1 s).
+      * ``ws.on("close")`` / readyState != 1  → reconnect on the next idle tick (~1 s). Only the Showdown
+        client's own socket counts (``_is_showdown_socket``); the page's ad / tracker sockets are ignored.
       * no raw frame (SockJS ``h`` counts) for ``probe_s`` → send ``/cmd userdetails`` (a reply IS
         a frame); still nothing at ``dead_s`` → half-open socket → reconnect.
 
@@ -432,6 +468,8 @@ class LinkWatch:
         self.reconnect_enabled = bool(reconnect)
         self.prefs, self.ctrl_ref = prefs, ctrl_ref
         self.ws = None                          # the CURRENT websocket (a stale socket's close is noise)
+        self.foreign_sockets = 0                # 2026-10-04: ad / tracker sockets in the page, ignored (never the link)
+        self._foreign_hosts: set = set()
         self.last_rx = self._now()              # raw-frame clock (heartbeats included)
         self.closed_at = None                   # set by a close event / failed reconnect → down
         self.probe_sent_at = None
@@ -443,11 +481,24 @@ class LinkWatch:
         self._last_off_warn = -1e9
 
     # ── transport callbacks (Playwright event thread = the bot loop) ─────────
-    def on_ws_open(self, ws) -> None:
+    def on_ws_open(self, ws) -> bool:
+        """Adopt the Showdown client's socket as the link; True when adopted. Any other socket in the page (an
+        ad / tracker iframe's) is ignored and returns False — the caller attaches no handlers to it."""
+        url = str(getattr(ws, "url", "") or "")
+        if not _is_showdown_socket(url):
+            self.foreign_sockets += 1
+            try:
+                host = urlsplit(url).netloc or url[:60]
+            except ValueError:                  # a malformed URL (the rule already called it foreign)
+                host = url[:60]
+            if host not in self._foreign_hosts:
+                self._foreign_hosts.add(host)
+                self.log(f"[online] ignoring a non-Showdown websocket in the page (ad / tracker): {host} — never "
+                         f"the link (logged once per host)")
+            return False
         self.ws = ws
         self.closed_at = None
         self.last_rx = self._now()
-        url = str(getattr(ws, "url", "") or "")
         self.log(f"[online] websocket opened{' (reconnect #%d)' % self.reconnects if self.reconnects else ''}"
                  + (f" — {url[:100]}" if url else ""))
         if self._loop is not None:                      # 2026-09-06: remember the close code / reason on the page
@@ -455,6 +506,7 @@ class LinkWatch:
                 self._loop.create_task(self._install_close_hook())
             except Exception:
                 pass
+        return True
 
     async def _install_close_hook(self) -> None:
         try:
@@ -495,11 +547,15 @@ class LinkWatch:
             pass
 
     def on_ws_close(self, ws=None) -> None:
+        if ws is not None and not _is_showdown_socket(getattr(ws, "url", "")):
+            return                              # 2026-10-04: an ad / tracker socket in the page — never the link
         if ws is not None and self.ws is not None and ws is not self.ws:
             return                              # an OLD socket closing after we already reconnected
         if self.closed_at is None:
             self.closed_at = self._now()
-            self.log("[online] websocket CLOSED — reconnect pending (the client only shows a popup)")
+            url = str(getattr(ws, "url", "") or "")
+            self.log("[online] websocket CLOSED" + (f" ({url[:100]})" if url else "")
+                     + " — reconnect pending (the client only shows a popup)")
 
     def on_ws_error(self, err=None) -> None:
         self.log(f"[online] websocket error: {str(err)[:120]}")
@@ -758,7 +814,8 @@ class LinkWatch:
                 "idle_s": round(max(0.0, self._now() - self.last_rx), 1),
                 "reconnects": self.reconnects, "probes": self.probes, "frames": self.frames,
                 "page_crashes": self.page_crashes, "rejoin_retries": self.rejoin_retries_sent,
-                "rejoin_refused": sorted(_pvhb.REJOIN_REFUSED), "last_close": self.last_close}
+                "rejoin_refused": sorted(_pvhb.REJOIN_REFUSED), "last_close": self.last_close,
+                "foreign_sockets": self.foreign_sockets}
 
 
 def _write_session_summary(session_log: Path, note: str, tally: dict) -> None:
@@ -1129,13 +1186,7 @@ async def run(args, username: str, password: str, ckpt: Path, tp_ckpt: Path,
                         c.tap_frame(msg)
 
             def _on_ws(ws) -> None:
-                link.on_ws_open(ws)
-                ws.on("framereceived", _on_frame)
-                ws.on("close", link.on_ws_close)   # a server/network close → reconnect within ~1 s
-                ws.on("socketerror", link.on_ws_error)
-                # outgoing: the USER's avatar picks send `/avatar <x>` — the only reliable
-                # signal (the server sends no updateuser on avatar changes; see the sync's doc).
-                ws.on("framesent", _sync_avatar_from_send)
+                _wire_socket(ws, link, _on_frame, _sync_avatar_from_send)
 
             page.on("websocket", _on_ws)
             page.on("crash", link.on_page_crash)   # 2026-09-06: the "Aw, Snap!" tab → navigate back (LinkWatch)
