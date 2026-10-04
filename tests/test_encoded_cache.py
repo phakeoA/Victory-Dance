@@ -160,13 +160,3 @@ def test_bcdataset_lazy_x_items_identical(corpus_dir):
         BCDataset(eager, with_opp=True, augment_move_order=True, aug_seed=7),
         BCDataset(lazy, with_opp=True, augment_move_order=True, aug_seed=7,
                   lazy_x=True))
-
-
-def test_lazy_x_rejects_sequence_mode(corpus_dir):
-    """No silent defer: sequence BC needs the in-RAM X matrix, so lazy_x must
-    refuse it loudly instead of crashing later (or silently degrading)."""
-    from v_dance.training.bc_dataset import BCDataset
-    cached_examples_from_folders([str(corpus_dir)])                      # warm
-    ex, _ = cached_examples_from_folders([str(corpus_dir)], mmap=True)
-    with pytest.raises(ValueError, match="sequence_len"):
-        BCDataset(ex, sequence_len=4, lazy_x=True)

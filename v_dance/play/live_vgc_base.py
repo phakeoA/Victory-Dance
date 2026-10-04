@@ -202,15 +202,6 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
         # _battle_finished_callback. Empty + unused unless use_match_belief is on.
         self._use_match_belief = bool(use_match_belief)
         self._match_belief: Dict[str, "MatchBelief"] = {}
-        # Phase-3 serve-time MEMORY CARRY (frame-stacked, no hidden state): with a
-        # memory model (checkpoint memory_dim>0) every decision runs on the battle's
-        # per-tag frame ring buffer [(turn, decision_type, state_vec), …] via
-        # forward_with_memory; a stateless model never populates this (zero cost).
-        # Frames key on (turn, decision_type) so poke-env's same-turn re-calls
-        # (rejected orders) REPLACE the frame instead of stacking duplicates —
-        # mirroring the trajectory collector's rejected-resample discipline.
-        # Reset per battle in _battle_finished_callback.
-        self._mem_frames: Dict[str, list] = {}
         # A3 idempotency: the last turn whose prev-turn events were fed into each battle's MatchBelief.
         # poke-env re-invokes choose_move for the SAME turn on a rejected/re-requested order, so without
         # this guard the same damage/speed events would be appended (and the Bayesian product double-
@@ -293,46 +284,6 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
             log.debug("from-move guard failed (non-fatal)", exc_info=True)
         return await super()._handle_battle_message(split_messages)
 
-    def _memory_stack(self, battle, state_vec, decision_type: str):
-        """The model input for THIS decision: the raw ``state_vec`` for a
-        stateless model, or the battle's frame-stack ``(T, STATE_DIM)`` (this
-        decision appended last) for a memory model — the Phase-3 serve-time
-        memory carry.  Recording paths keep the single frame; only the model
-        input is stacked."""
-        mdl = getattr(self, "_model", None)
-        if state_vec is None or mdl is None or not int(getattr(mdl, "memory_dim", 0) or 0):
-            return state_vec
-        try:
-            import numpy as _np
-            tag = _norm_tag(getattr(battle, "battle_tag", None))
-            frames = self._mem_frames.setdefault(tag, [])
-            key = (int(getattr(battle, "turn", 0) or 0), decision_type)
-            vec = _np.asarray(state_vec, dtype=_np.float32)
-            if frames and frames[-1][0][:2] == key:
-                if _np.array_equal(frames[-1][1], vec):
-                    frames[-1] = (frames[-1][0], vec)   # same-decision re-call → replace, don't stack
-                else:
-                    # Same (turn, type) but the STATE moved on — e.g. a SECOND
-                    # forced replacement after the first resolved. That is a
-                    # distinct decision: sub-index it so it never overwrites the
-                    # first one's frame (training sees both as separate examples).
-                    frames.append(((key[0], key[1], frames[-1][0][2] + 1), vec))
-            else:
-                frames.append(((key[0], key[1], 0), vec))
-            # Cap at the TRAINED window (model_io stamps _sequence_len), not just
-            # max_mem_len — ages beyond the trained window would read untrained
-            # positional rows (audit 2026-07-02).
-            maxlen = int(getattr(mdl, "max_mem_len", 64) or 64)
-            trained = int(getattr(mdl, "_sequence_len", 0) or 0)
-            if trained > 1:
-                maxlen = min(maxlen, trained)
-            if len(frames) > maxlen:
-                del frames[: len(frames) - maxlen]
-            return _np.stack([f[1] for f in frames])
-        except Exception:
-            log.debug("memory-stack build failed — single-frame fallback", exc_info=True)
-            return state_vec
-
     # ── Decision: encode with the spliced opponent snapshot ─────────────────────
     def choose_move(self, battle: DoubleBattle):
         """Same control flow as the root base, but the normal-turn state vector
@@ -357,16 +308,13 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
             opp_snapshot = apply_dossier(opp_snapshot, battle)
         opp_snapshot = self._apply_match_belief(opp_snapshot, battle)   # A3: within-game belief (no-op unless on)
         state_vec = self._encoder.encode(battle, opp_snapshot=opp_snapshot)
-        # Phase-3 memory carry: decisions run on the frame-stack for a memory model
-        # (no-op single frame otherwise). Recording below keeps the RAW state_vec.
-        state_in = self._memory_stack(battle, state_vec, "turn")
         # gap-#6 reconstructed opponent slot occupancy → lets the codec target
         # opp_a vs opp_b DELIBERATELY when a same-species illusion makes poke-env
         # lose a foe slot (#15).  None when no reconstruction (legacy targeting).
         _oa = (opp_snapshot or {}).get("opp_active") or {}
         opp_present_recon = ({0: bool(_oa.get("opp_a")), 1: bool(_oa.get("opp_b"))}
                              if opp_snapshot else None)
-        action_s0, action_s1, source = self._select_actions(battle, state_in)
+        action_s0, action_s1, source = self._select_actions(battle, state_vec)
 
         # ── Forced-move escape (no representable legal action) ──────────────
         # If an ACTIVE, non-fainted slot has an EMPTY legal mask, its only usable order is one
@@ -399,7 +347,7 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
                 self._think_note(battle, f"⚠ forced-move turn rejected {fa_n}× → '/choose default' "
                                          f"(the net is NOT driving this turn)")
                 return DefaultBattleOrder()
-            g0, g1 = self._select_gimmicks(battle, state_in, action_s0, action_s1)
+            g0, g1 = self._select_gimmicks(battle, state_vec, action_s0, action_s1)
             order = self._forced_aware_double_order(battle, action_s0, action_s1, g0, g1,
                                                     opp_present_recon)
             forced_kind = ("forced_default" if isinstance(order, DefaultBattleOrder)
@@ -497,7 +445,7 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
         if source == "retry":
             g0 = g1 = GIMMICK_NONE
         else:
-            g0, g1 = self._select_gimmicks(battle, state_in, action_s0, action_s1)
+            g0, g1 = self._select_gimmicks(battle, state_vec, action_s0, action_s1)
 
         self._source_counts[source] += 1
 
@@ -956,10 +904,7 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
         repl = None
         if state_vec is not None:
             try:
-                # Phase-3 memory carry: replacement decisions are frames too (they
-                # are trajectory steps in the 1b dataset); recording keeps the raw vec.
-                state_in = self._memory_stack(battle, state_vec, "replacement")
-                repl = self._select_replacement_actions(battle, state_in)
+                repl = self._select_replacement_actions(battle, state_vec)
             except Exception:
                 log.debug("replacement selection failed (→ random)", exc_info=True)
                 repl = None
@@ -1051,8 +996,6 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
                 self._match_belief.pop(_t, None)
             if isinstance(getattr(self, "_belief_fed_turn", None), dict):
                 self._belief_fed_turn.pop(_t, None)
-            if isinstance(getattr(self, "_mem_frames", None), dict):     # Phase-3: drop this battle's frame stack
-                self._mem_frames.pop(_t, None)
         except Exception:
             log.debug("proto-log prune on finish failed (non-fatal)", exc_info=True)
         return super()._battle_finished_callback(battle)
@@ -1060,12 +1003,12 @@ class SplicingVGCPlayerBase(_RootVGCPlayerBase):
     def reset_battle_state(self, tag: str) -> None:
         """Forget every per-battle buffer for ``tag`` WITHOUT the finish bookkeeping (no replay
         save, no RL finalize). Used by the browser host's ``forget_battle`` on a link reconnect
-        (2026-09-01): the server replays the whole battle log, so the splice / belief / memory /
+        (2026-09-01): the server replays the whole battle log, so the splice / belief /
         retry buffers must start empty or they would double-count. ``_tp_decision`` is kept on
         purpose (the team-preview choice already happened server-side)."""
         t = _norm_tag(tag)
         for name in ("_proto_log", "_last_error", "_match_belief", "_belief_fed_turn",
-                     "_mem_frames", "_fs_battle_count", "_fs_attempts", "_tried_actions"):
+                     "_fs_battle_count", "_fs_attempts", "_tried_actions"):
             d = getattr(self, name, None)
             if not isinstance(d, dict):
                 continue

@@ -171,18 +171,6 @@ class SelfPlayVGCPlayer(VGCPlayer):
                          live_dir=live_dir, save_replays=save_replays, **kwargs)
         self._ac = actor_critic
         self._model = actor_critic.policy            # drive with the live actor
-        # Memory ckpt under RECORDING self-play (scan 2026-07-02): decisions run
-        # on the frame-stack, but evaluate_actions has no memory path, so the
-        # recorded behaviour logprob/value are SINGLE-FRAME approximations.
-        # Win-rate A/Bs stay valid (gameplay is correct); the recorded store
-        # must not feed importance-sampled offline RL without recomputation —
-        # warn once and stamp the trajectory meta so it can never be mistaken.
-        self._memory_single_frame = bool(int(getattr(self._model, "memory_dim", 0) or 0))
-        if self._memory_single_frame:
-            log.warning(
-                "recording self-play with a MEMORY checkpoint: recorded logprob/value "
-                "are single-frame approximations of stack-driven decisions — valid for "
-                "win-rate A/Bs, NOT for importance-sampled offline RL (meta-stamped).")
         self._collect_sample = True                  # #9/#9b: sample gimmick + forced-replacement at tau (match recorded log-prob)
         self._record_masks = True                    # #10/#11: log the deduped behaviour mask the model sampled under
         self._model_heads = actor_critic.head_names
@@ -292,9 +280,6 @@ class SelfPlayVGCPlayer(VGCPlayer):
                     tp_learn=tp.get("learn"),         # 2026-10-03: the exploring picker's record (else None)
                     sampling={"tau": float(getattr(self, "_tau", 1.0)),
                               "top_p": float(getattr(self, "_top_p", 1.0)),
-                              **({"memory_single_frame": True}
-                                 if getattr(self, "_memory_single_frame", False)
-                                 else {}),
                               **({"mega_hold": _mh} if _mh else {})})
         except Exception:
             # A finalize failure silently drops this game from self._finished → it can't be paired →
@@ -682,8 +667,8 @@ def main(argv=None) -> int:
                     help="team names from the served format's Champions pool (default: The_Big_6 + the "
                          "first three other teams discovered for the format)")
     ap.add_argument("--ckpt", default=None,
-                    help="battle net to warm-start the actor-critic from (default: the served incumbent "
-                         "checkpoints_attn_era4_2b/battle_base.pt, else model_io's DEFAULT_BC_CHECKPOINT)")
+                    help="battle net to warm-start the actor-critic from (default: model_io's "
+                         "DEFAULT_BC_CHECKPOINT = era2, the ladder control)")
     ap.add_argument("--tau", type=float, default=1.0, help="collection temperature (>0)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--matchup-seed", type=int, default=0)
@@ -712,8 +697,7 @@ def main(argv=None) -> int:
 
     if args.ckpt is None:
         from v_dance.play.model_io import DEFAULT_BC_CHECKPOINT
-        _inc = _REPO_ROOT / "ai_train_scripts" / "BC_model" / "checkpoints_attn_era4_2b" / "battle_base.pt"
-        args.ckpt = str(_inc if _inc.is_file() else DEFAULT_BC_CHECKPOINT)
+        args.ckpt = str(DEFAULT_BC_CHECKPOINT)
     if not args.teams:
         import v_dance.play.run_local_battle as _R
         _pool = [Path(p).name for p in _R.discover_teams(reg=_R.BATTLE_FORMAT)]

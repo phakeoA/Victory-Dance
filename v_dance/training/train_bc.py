@@ -284,12 +284,6 @@ def run_epoch(
             sample_weight = (batch["weight"].to(device)
                              if sample_weighted and "weight" in batch else None)
 
-            # Phase-2 z: archetype ids ride the batch when the trainer joined
-            # them (--z-archetypes); absent → None (models without z ignore it).
-            aid = batch.get("archetype")
-            if aid is not None:
-                aid = aid.to(device)
-
             # Era-4 2b: teacher-forced partner conditioning (TRAIN only; eval stays
             # zero-cond so the printed val metric remains armB-comparable — the
             # teacher-forced val gap is bc_val_report's go/no-go, not this one).
@@ -309,18 +303,7 @@ def run_epoch(
                 partner_actions = {"our_a": oh[:, 1] * gate_a,   # our_a conditions on our_b's action
                                    "our_b": oh[:, 0] * gate_b}   # our_b conditions on our_a's action
 
-            # Phase 1b: sequence batches carry x_seq (B, T, D) — feed the memory
-            # path, supervising the LAST frame (targets are the item's own).
-            if "x_seq" in batch:
-                actions, gimmicks, value = model.forward_with_memory(
-                    batch["x_seq"].to(device),
-                    frame_padding_mask=batch["frame_padding_mask"].to(device),
-                    archetype_id=aid,
-                    partner_actions=partner_actions,
-                )
-            else:
-                actions, gimmicks, value = model(x, archetype_id=aid,
-                                                 partner_actions=partner_actions)
+            actions, gimmicks, value = model(x, partner_actions=partner_actions)
             v_target = batch["value_target"].to(device)    # (B,) win=1/loss=0
             v_valid = batch["value_valid"].to(device)      # (B,) 1 where known
 
@@ -467,10 +450,6 @@ def train(args: argparse.Namespace) -> dict:
         sys.exit("[train_bc] --mmap-cache requires the encoded cache "
                  "(drop --no-encoded-cache): without a cache there is no "
                  "on-disk X to page from")
-    if args.mmap_cache and args.sequence_len > 1:
-        sys.exit("[train_bc] --mmap-cache does not support --sequence-len > 1 "
-                 "(the sequence path gathers history frames from the in-RAM X "
-                 "matrix)")
     if args.mmap_cache:
         print("[train_bc] mmap cache: ON — X pages from the on-disk encoded "
               "caches; dataset rows fetch lazily (one-row copy per item)")
@@ -633,42 +612,12 @@ def train(args: argparse.Namespace) -> dict:
               f"combined weight min {train_weights.min():.3f} "
               f"max {train_weights.max():.3f} mean {train_weights.mean():.3f}")
 
-    # ── Phase-2 z: archetype-id join (TRAIN AND VAL — the conditioned model is
-    # evaluated with its real ids; examples missing from the artifact get the
-    # UNKNOWN id k, which trains the "no plan info" embedding) ─────────────────
-    z_art = None
-    train_z = val_z = None
-    if args.z_archetypes:
-        from v_dance.datatools.team_archetypes import (
-            load_archetype_assignments, load_artifact)
-        z_art = load_artifact(args.z_archetypes)
-        asg = load_archetype_assignments(args.z_archetypes)
-        k_unknown = int(z_art["k"])
-        train_z = [asg.get((e["replay_id"], e.get("perspective")), k_unknown)
-                   for e in train_ex]
-        val_z = [asg.get((e["replay_id"], e.get("perspective")), k_unknown)
-                 for e in val_ex]
-        n_unk = sum(1 for a in train_z if a == k_unknown)
-        print(f"[train_bc] archetype-z: k={z_art['k']} z_dim={args.z_dim} "
-              f"({len(train_z) - n_unk}/{len(train_z)} train examples labelled, "
-              f"{n_unk} → UNKNOWN)")
-        if n_unk == len(train_z):
-            print("[train_bc] WARNING: NO train example matched the artifact's "
-                  "assignments — z will only ever see the UNKNOWN embedding "
-                  "(wrong artifact for this corpus?)")
-
     # Move-slot permutation augmentation is TRAIN-ONLY (val stays raw so its
     # metrics are true).  It makes the policy order-invariant — see task #22.
     train_ds = BCDataset(train_ex, augment_move_order=args.augment_move_order,
                          aug_seed=args.seed, with_opp=args.aux_opp_head,
-                         weights=train_weights, sequence_len=args.sequence_len,
-                         archetype_ids=train_z, lazy_x=args.mmap_cache)
-    val_ds = BCDataset(val_ex, with_opp=args.aux_opp_head,
-                       sequence_len=args.sequence_len,
-                       archetype_ids=val_z, lazy_x=args.mmap_cache)
-    if args.sequence_len > 1:
-        print(f"[train_bc] sequence BC: T={args.sequence_len} frames per item "
-              f"(memory_dim={args.memory_dim})")
+                         weights=train_weights, lazy_x=args.mmap_cache)
+    val_ds = BCDataset(val_ex, with_opp=args.aux_opp_head, lazy_x=args.mmap_cache)
     print(f"[train_bc] move-slot permutation augmentation: "
           f"{'ON' if args.augment_move_order else 'OFF'} (train only)")
     # M6 loader-workers (2026-07-11): the feed is Python-bound (GPU ~20% on the
@@ -694,15 +643,10 @@ def train(args: argparse.Namespace) -> dict:
     # Era-5 W1: the own-team val slice (same val examples, same stamps → same loader settings).
     own_val_loader = None
     if own_val_idx:
-        if args.sequence_len > 1:
-            print("[train_bc] own-team val slice skipped: sequence BC needs whole trajectories")
-        else:
-            own_val_ds = BCDataset([val_ex[i] for i in own_val_idx], with_opp=args.aux_opp_head,
-                                   sequence_len=args.sequence_len,
-                                   archetype_ids=([val_z[i] for i in own_val_idx] if val_z else None),
-                                   lazy_x=args.mmap_cache)
-            own_val_loader = DataLoader(own_val_ds, batch_size=args.batch_size, shuffle=False,
-                                        **loader_kw)
+        own_val_ds = BCDataset([val_ex[i] for i in own_val_idx], with_opp=args.aux_opp_head,
+                               lazy_x=args.mmap_cache)
+        own_val_loader = DataLoader(own_val_ds, batch_size=args.batch_size, shuffle=False,
+                                    **loader_kw)
 
     # ── Auxiliary opponent head (task #9): adds opp_a/opp_b ACTION heads (no opp
     # gimmick head).  OUR action/gimmick heads + reported our top1 are unchanged,
@@ -714,22 +658,6 @@ def train(args: argparse.Namespace) -> dict:
               f"weight {args.aux_opp_weight})")
 
     # ── Model / optimizer (#27 attn-only: the per-mon set-attention AttnBCPolicy) ──
-    if args.opp_cond and not args.aux_opp_head:
-        sys.exit("[train_bc] --opp-cond (Level B) requires --aux-opp-head (the opp_a/opp_b heads it "
-                 "conditions on). Re-run with both, or drop --opp-cond.")
-    if args.opp_cond:
-        print("[train_bc] Level-B opp-conditioning: ON (the OUR heads read the detached predicted opp action)")
-    if args.sequence_len > 1 and args.memory_dim <= 0:
-        sys.exit("[train_bc] --sequence-len > 1 requires --memory-dim > 0 (the "
-                 "match-memory core that consumes the frame stack).")
-    if args.sequence_len > args.max_mem_len:
-        sys.exit(f"[train_bc] --sequence-len {args.sequence_len} exceeds --max-mem-len "
-                 f"{args.max_mem_len}: forward_with_memory would SILENTLY truncate every "
-                 f"window to {args.max_mem_len} frames while the logs and the checkpoint "
-                 f"stamp claim {args.sequence_len}. Raise --max-mem-len or shrink the window.")
-    if args.memory_dim > 0 and args.sequence_len <= 1:
-        print("[train_bc] WARNING: --memory-dim set but --sequence-len is 1 — the "
-              "memory core will train on zero history (memory columns stay unused).")
     model = build_attn_model(
         d_model=args.d_model,
         n_heads=args.n_heads,
@@ -739,47 +667,26 @@ def train(args: argparse.Namespace) -> dict:
         heads=train_heads,
         gimmick_heads=list(HEADS),
         value_readout=args.value_readout,
-        opp_cond=args.opp_cond,
-        memory_dim=args.memory_dim,
-        mem_layers=args.mem_layers,
-        mem_heads=args.mem_heads,
-        max_mem_len=args.max_mem_len,
-        n_archetypes=(int(z_art["k"]) if z_art else 0),
-        z_dim=(args.z_dim if z_art else 0),
         pair_cond=args.pair_cond,
         device=device,
     )
-    # Warm start (Phase 1b memory / Phase 2 z): initialise from a NARROWER
-    # checkpoint with zero-padded trailing head columns for whatever widening
-    # features (memory and/or z) this model adds over the checkpoint —
-    # forward(x) reproduces the checkpoint's logits exactly at epoch 0, so an
-    # A/B isolates the new feature's value.  Same-width → plain strict load.
+    # Warm start: same-width → plain strict load; a pair_cond model from an UNCONDITIONED
+    # checkpoint (2b) → its OUR heads grow by zero-padded trailing pair columns, so
+    # forward(x) reproduces the checkpoint's logits exactly at epoch 0.
     if args.warm_start:
-        from v_dance.models.bc_model_attn import (
-            init_extended_model_from_ckpt, init_pair_model_from_ckpt)
+        from v_dance.models.bc_model_attn import init_pair_model_from_ckpt
         ck = torch.load(args.warm_start, map_location=device, weights_only=False)
         from v_dance.models import layout_upgrade as _LU          # 2026-10-02: a v19 donor lifts to v20
         if not _LU.upgrade_checkpoint(ck):
             _LU.upgrade_state_dict(ck.get("model_state", ck) if isinstance(ck, dict) else None)
         state = ck.get("model_state", ck)
         ck_cfg = (ck.get("config") or {}) if isinstance(ck, dict) else {}
-        extra = ((model.memory_dim + model.z_dim)
-                 - (int(ck_cfg.get("memory_dim", 0) or 0)
-                    + int(ck_cfg.get("z_dim", 0) or 0)))
         pair_extra = (model.pair_cond and not bool(ck_cfg.get("pair_cond", False)))
-        if pair_extra and extra > 0:
-            sys.exit("[train_bc] warm-starting pair_cond AND memory/z growth in one step is "
-                     "unsupported (the OUR heads would grow by a different width than the other "
-                     "heads — the uniform zero-pad surgery can't express that). Stage the "
-                     "widenings across two warm-starts.")
         if pair_extra:
             init_pair_model_from_ckpt(model, state)      # 2b: our heads +action_dim, zeroed
-        elif extra > 0:
-            init_extended_model_from_ckpt(model, state, extra_cols=extra)
         else:
             model.load_state_dict(state, strict=True)
         print(f"[train_bc] warm-started from {args.warm_start}"
-              + (f" (zero-padded {extra} new trailing head columns)" if extra > 0 else "")
               + (" (pair_cond: our heads +action_dim zero-padded — zero-cond forwards "
                  "reproduce the donor bit-exactly)" if pair_extra else ""))
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -843,7 +750,6 @@ def train(args: argparse.Namespace) -> dict:
         "gimmick_heads": list(model.gimmick_head_names),
         "aux_opp_head": bool(args.aux_opp_head),
         "aux_opp_weight": args.aux_opp_weight,
-        "opp_cond": bool(args.opp_cond),               # Level B: our heads read the predicted opp action
         # Era-4 2b: our heads read the PARTNER slot's action (teacher-forced at train,
         # sequentially decoded at serve). model_io rebuilds + pair-decodes off this stamp.
         "pair_cond": bool(args.pair_cond),
@@ -878,21 +784,9 @@ def train(args: argparse.Namespace) -> dict:
         "n_layers": args.n_layers,
         "ff_mult": args.ff_mult,
         "value_readout": args.value_readout,
-        # Phase 1a/1b match-memory core — model_io rebuilds from these; absent
-        # (pre-memory) checkpoints default to 0/stateless.
-        "memory_dim": args.memory_dim,
-        "mem_layers": args.mem_layers,
-        "mem_heads": args.mem_heads,
-        "max_mem_len": args.max_mem_len,
-        "sequence_len": args.sequence_len,
         "warm_start": args.warm_start,
         "encoded_cache": bool(args.encoded_cache),
         "mmap_cache": bool(args.mmap_cache),
-        # Phase-2 archetype-z — model_io rebuilds from these; absent (pre-z)
-        # checkpoints default to 0/off.
-        "n_archetypes": (int(z_art["k"]) if z_art else 0),
-        "z_dim": (args.z_dim if z_art else 0),
-        "z_archetypes": args.z_archetypes,
         # Era-5 W1 own-team specialist weighting (audit trail; serve behaviour unchanged)
         "own_team": args.own_team,
         "own_team_species": own_species,
@@ -900,12 +794,6 @@ def train(args: argparse.Namespace) -> dict:
         "own_team_min_overlap": (args.own_team_min_overlap if args.own_team else None),
         "select_own_slice": bool(args.select_own_slice and args.own_team),
     })
-    # The serve-side nearest-centroid lookup needs the centroid table — embed
-    # it in the checkpoint so serve is self-contained (no sidecar artifact).
-    z_artifact_slim = None
-    if z_art:
-        from v_dance.datatools.team_archetypes import artifact_slim
-        z_artifact_slim = artifact_slim(z_art)
 
     # ── Train loop (val-weighting OFF so val loss/acc stay true) ───────────────
     best_top1 = -1.0
@@ -986,7 +874,6 @@ def train(args: argparse.Namespace) -> dict:
                     "epoch": epoch,
                     "val_metrics": va,
                     "val_own_metrics": own_va,
-                    "z_artifact": z_artifact_slim,
                 },
                 ckpt_path,
             )
@@ -1086,10 +973,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                          "aux signal (task #9). Default OFF (the A/B baseline).")
     ap.add_argument("--aux-opp-weight", type=float, default=0.3,
                     help="weight on the auxiliary opponent CE term (default 0.3).")
-    ap.add_argument("--opp-cond", action=argparse.BooleanOptionalAction, default=False,
-                    help="Level B: feed the DETACHED predicted opp-action distribution into the OUR "
-                         "action heads (best-response to anticipated opp). Requires --aux-opp-head. "
-                         "Default OFF (the Level-A baseline).")
     ap.add_argument("--pair-cond", action=argparse.BooleanOptionalAction, default=False,
                     help="Era-4 2b: OUR heads read the PARTNER slot's action (trailing "
                          "action_dim one-hot; teacher-forced at train with random decode "
@@ -1137,37 +1020,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap.add_argument("--adv-value-ckpt", default=None,
                     help="checkpoint whose TRAINED value head scores V(s) for the "
                          "advantage (defaults to --warm-start when omitted)")
-    ap.add_argument("--z-archetypes", default=None,
-                    help="Phase-2 z: team-archetype artifact (.npz from "
-                         "datatools.team_archetypes). Joins each example's own-team "
-                         "archetype id by (replay_id, perspective) and conditions "
-                         "every head on a learned per-archetype embedding; the "
-                         "centroids are embedded into the checkpoint for serve.")
-    ap.add_argument("--z-dim", type=int, default=24,
-                    help="archetype embedding width (only with --z-archetypes)")
     ap.add_argument("--loss-weight", type=float, default=0.5,
                     help="weight on decisions from games our side LOST when "
                          "--outcome-weight is on (default 0.5).")
-    # ── Phase 1a/1b: match-memory core + sequence BC ───────────────────────────
-    ap.add_argument("--sequence-len", type=int, default=1,
-                    help="frames per training item (the last sequence-len decision "
-                         "states of the same replay+perspective; the LAST frame is "
-                         "supervised). 1 = stateless BC (unchanged default). "
-                         ">1 requires --memory-dim.")
-    ap.add_argument("--memory-dim", type=int, default=0,
-                    help="width of the match-memory feature every head reads "
-                         "(frame-stacked causal time-axis transformer). 0 = build "
-                         "the exact stateless architecture (default).")
-    ap.add_argument("--mem-layers", type=int, default=2,
-                    help="memory core: causal transformer layers")
-    ap.add_argument("--mem-heads", type=int, default=4,
-                    help="memory core: attention heads")
-    ap.add_argument("--max-mem-len", type=int, default=64,
-                    help="memory core: maximum frames attended (positional table)")
     ap.add_argument("--warm-start", default=None,
-                    help="path to a STATELESS BC checkpoint to initialise from "
-                         "(with --memory-dim the new memory columns are zero-padded "
-                         "so epoch-0 single-turn behaviour equals the checkpoint's).")
+                    help="path to a BC checkpoint to initialise from (same architecture → strict "
+                         "load; with --pair-cond from an unconditioned checkpoint the new pair "
+                         "columns are zero-padded so epoch-0 behaviour equals the checkpoint's).")
     ap.add_argument("--encoded-cache", action=argparse.BooleanOptionalAction,
                     default=True,
                     help="per-folder disk cache of ENCODED examples (~35 min load → "
@@ -1180,8 +1039,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                          "caches (np.load mmap_mode='r') and fetch dataset rows "
                          "lazily instead of materializing the (N, STATE_DIM) matrix "
                          "in RAM. Needed for the full 77.8k MA-Bo3 corpus (~26 GB X) "
-                         "on 32 GB RAM. Requires the encoded cache; incompatible "
-                         "with --sequence-len > 1.")
+                         "on 32 GB RAM. Requires the encoded cache.")
     ap.add_argument("--loader-workers", type=int, default=0,
                     help="M6 (2026-07-11): DataLoader worker processes for the feed. "
                          "0 (default) = in-process, byte-identical legacy path. >0 "

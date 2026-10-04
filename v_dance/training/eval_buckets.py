@@ -19,7 +19,7 @@ frozen action heads over the held-out states, and reports — it never trains.
 
 CLI (repo root):
     .venv\\Scripts\\python.exe -m v_dance.training.eval_buckets \\
-        --ckpt ai_train_scripts/BC_model/checkpoints_attn/battle_selfplay_gen141.pt
+        --ckpt ai_train_scripts/BC_model/checkpoints_attn_era2/battle_base.pt
 """
 
 from __future__ import annotations

@@ -129,13 +129,6 @@ class AttnBCPolicy(nn.Module):
         gimmick_heads: Optional[Sequence[str]] = None,
         value_readout: str = "mean",
         n_value_atoms: int = 0,
-        opp_cond: bool = False,
-        memory_dim: int = 0,
-        mem_layers: int = 2,
-        mem_heads: int = 4,
-        max_mem_len: int = 64,
-        n_archetypes: int = 0,
-        z_dim: int = 0,
         pair_cond: bool = False,
     ):
         super().__init__()
@@ -217,90 +210,26 @@ class AttnBCPolicy(nn.Module):
             nn.GELU(),
         )
 
-        # ── Phase 1a: MATCH-MEMORY core (frame-stacked causal time-axis transformer,
-        # per VGC-Bench arXiv:2506.10326 — NOT an LSTM: no hidden-state carry, no
-        # BPTT; serve keeps the last n state vectors and recomputes each turn).
-        # memory_dim=0 (default) builds NO new modules → state_dict keys, param
-        # count and forward output stay byte-identical to the stateless model, so
-        # every existing checkpoint loads unchanged (n_value_atoms precedent).
-        # With memory_dim>0 every head reads an extra ``mem`` feature appended
-        # LAST in its input (zeros in single-turn forward; the causal summary of
-        # the match so far in forward_with_memory) — appended last so a stateless
-        # checkpoint warm-starts by zero-padding the new columns
-        # (init_memory_model_from_stateless) and reproduces its logits exactly.
-        self.memory_dim = int(memory_dim)
-        self.mem_layers = int(mem_layers)
-        self.mem_heads = int(mem_heads)
-        self.max_mem_len = int(max_mem_len)
-        if self.memory_dim:
-            # Turn summary = [masked-mean(present mon tokens) || global] → d_mem.
-            self.mem_proj = nn.Linear(2 * d_model, self.memory_dim)
-            self.mem_pos_emb = nn.Parameter(torch.zeros(self.max_mem_len, self.memory_dim))
-            mem_layer = nn.TransformerEncoderLayer(
-                d_model=self.memory_dim,
-                nhead=self.mem_heads,
-                dim_feedforward=ff_mult * self.memory_dim,
-                dropout=dropout,
-                activation="gelu",
-                batch_first=True,
-                norm_first=True,
-            )
-            self.mem_attn = nn.TransformerEncoder(
-                mem_layer, num_layers=self.mem_layers, enable_nested_tensor=False
-            )
-
-        # ── Phase 2 (z v1): discrete own-team ARCHETYPE conditioning.  z = OUR
-        # game plan (constant per battle, from the own 6-mon roster — see
-        # datatools/team_archetypes.py); memory = THIS match — deliberately
-        # disjoint roles (design §1).  n_archetypes=0 (default) builds NO new
-        # modules → byte-identical to the pre-z model, every checkpoint loads
-        # unchanged.  With z on, every head reads a z_dim embedding appended
-        # LAST (after the memory feature), so a narrower checkpoint warm-starts
-        # by zero-padding the trailing columns (init_extended_model_from_ckpt)
-        # and reproduces its logits exactly.  Embedding index n_archetypes is
-        # the UNKNOWN archetype (unlabelled examples / missing serve lookup).
-        if (n_archetypes > 0) != (z_dim > 0):
-            raise ValueError(
-                f"n_archetypes ({n_archetypes}) and z_dim ({z_dim}) must be "
-                f"both 0 (z off) or both > 0 (z on)")
-        self.n_archetypes = int(n_archetypes)
-        self.z_dim = int(z_dim)
-        # Explicit per-forward archetype ids win; else this per-instance default
-        # (the serve player stamps it at teampreview — one team per player);
-        # else UNKNOWN.  None = unset.
-        self._default_archetype_id: Optional[int] = None
-        if self.z_dim:
-            self.z_emb = nn.Embedding(self.n_archetypes + 1, self.z_dim)
-
-        # Heads read [mon token (d) || global context (d)] = 2*d_model
-        # (+ memory_dim, then z_dim, appended LAST when those cores are on).
+        # Heads read [mon token (d) || global context (d)] = 2*d_model. (The closed match-memory core,
+        # archetype-z and Level-B opp-conditioning inputs were removed 2026-10-04 — cleanup pass 2; no
+        # served checkpoint used them.)
         head_in = 2 * d_model
-        # Level B (opp-conditioning): the OUR action heads (DEFAULT_HEADS) ALSO read the DETACHED predicted
-        # opp-action distribution [softmax(opp_a) || softmax(opp_b)] (one softmax per aux opp head, each
-        # action_dim wide) so the policy best-responds to its own opp prediction. Requires the aux opp heads
-        # to be present. opp_cond=False (default) -> the our heads keep head_in (byte-identical arch).
-        self.opp_cond = bool(opp_cond)
+        # The auxiliary OPP-action heads (task #9 A/B) — computed first, the order the action dict keeps.
         self._opp_head_names = tuple(h for h in self.head_names if h not in DEFAULT_HEADS)
-        if self.opp_cond and not self._opp_head_names:
-            raise ValueError("opp_cond=True requires aux opp heads (e.g. opp_a/opp_b) in `heads`; none present")
-        opp_feat_dim = len(self._opp_head_names) * action_dim if self.opp_cond else 0
         # Era-4 2b (pair_cond): each OUR action head ALSO reads the PARTNER slot's action as an
         # action_dim one-hot (teacher-forced at train, sequentially decoded at serve), turning the
         # joint policy p(a)·p(b) into p(a)·p(b|a) — the structure the N1 serve-tau refutation
-        # blames for wasted Helping Hand / uncoordinated TR turns. Appended LAST (after mem/z), so
+        # blames for wasted Helping Hand / uncoordinated TR turns. Appended LAST, so
         # an armB checkpoint warm-starts via init_extended_model_from_ckpt with ZEROED pair columns
         # and reproduces its logits bit-exactly when the cond input is zeros — the kill switch.
         self.pair_cond = bool(pair_cond)
         pair_dim = action_dim if self.pair_cond else 0
         self.heads = nn.ModuleDict(
-            {name: nn.Linear(head_in + (opp_feat_dim if name in DEFAULT_HEADS else 0)
-                             + self.memory_dim + self.z_dim
-                             + (pair_dim if name in DEFAULT_HEADS else 0), action_dim)
+            {name: nn.Linear(head_in + (pair_dim if name in DEFAULT_HEADS else 0), action_dim)
              for name in self.head_names}
         )
         self.gimmick_heads = nn.ModuleDict(
-            {name: nn.Linear(head_in + self.memory_dim + self.z_dim, gimmick_dim)
-             for name in self.gimmick_head_names}
+            {name: nn.Linear(head_in, gimmick_dim) for name in self.gimmick_head_names}
         )
         # 23-valhead: the value readout is a MEASURED choice (the masked-mean default mixes
         # own/opp/fainted/unseen token roles + averages away the per-slot pos_emb; the RL critic
@@ -311,7 +240,6 @@ class AttnBCPolicy(nn.Module):
             val_in = 3 * d_model                       # own_a token || own_b token || global
         else:
             val_in = 2 * d_model                       # readout vector || global
-        val_in += self.memory_dim + self.z_dim  # memory then z appended LAST (zeros single-turn / z off)
         if value_readout == "cls_query":
             self.value_query = nn.Parameter(torch.zeros(1, 1, d_model))
             self.value_attn = nn.MultiheadAttention(
@@ -329,9 +257,8 @@ class AttnBCPolicy(nn.Module):
     def _encode_single_turn(self, x: torch.Tensor):
         """PER-TURN encoder body: (B, state_dim) | (state_dim,) -> (enc, present, g, single).
 
-        Factored out of ``forward`` so the C51 value-atoms head and the Phase-1a
-        match-memory path (``forward_with_memory``) reuse the IDENTICAL mon-encoder
-        + self-attention + global stack without duplicating it."""
+        Factored out of ``forward`` so the C51 value-atoms head reuses the IDENTICAL
+        mon-encoder + self-attention + global stack without duplicating it."""
         single = x.dim() == 1
         if single:
             x = x.unsqueeze(0)
@@ -385,34 +312,8 @@ class AttnBCPolicy(nn.Module):
         g = self.glob_enc(glob)                                     # (B, d)
         return enc, present, g, single
 
-    def set_default_archetype(self, archetype_id: Optional[int]) -> None:
-        """Per-instance default archetype id for forwards that pass none — the
-        serve path (one team per player instance, so the id is constant).  None
-        clears it (forwards fall back to the UNKNOWN embedding)."""
-        if archetype_id is not None and not (0 <= int(archetype_id) <= self.n_archetypes):
-            raise ValueError(
-                f"archetype_id {archetype_id} out of range [0, {self.n_archetypes}] "
-                f"(index {self.n_archetypes} = UNKNOWN)")
-        self._default_archetype_id = None if archetype_id is None else int(archetype_id)
-
-    def _resolve_z(self, B: int, device, archetype_id=None) -> Optional[torch.Tensor]:
-        """(B, z_dim) archetype embedding, or None when z is off.  Resolution:
-        explicit ``archetype_id`` (int or (B,) tensor) > the per-instance
-        default (serve) > the UNKNOWN embedding."""
-        if not self.z_dim:
-            return None
-        if archetype_id is None:
-            archetype_id = (self._default_archetype_id
-                            if self._default_archetype_id is not None
-                            else self.n_archetypes)                     # UNKNOWN
-        ids = torch.as_tensor(archetype_id, dtype=torch.long, device=device)
-        if ids.dim() == 0:
-            ids = ids.expand(B)
-        ids = ids.clamp(0, self.n_archetypes)
-        return self.z_emb(ids)                                          # (B, z_dim)
-
     def forward(
-        self, x: torch.Tensor, archetype_id=None,
+        self, x: torch.Tensor,
         partner_actions: Optional[Dict[str, torch.Tensor]] = None,
     ) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor], torch.Tensor]:
         """x: (B, state_dim) -> (actions, gimmicks, value).
@@ -425,139 +326,31 @@ class AttnBCPolicy(nn.Module):
         Accepts an unbatched (state_dim,) input too — the serve helpers
         (model_io.value_logit / head_logits / bc_action_indices) pass one state
         vector — matching BCPolicy's nn.Linear broadcasting (1-D in -> unbatched out)
-        so AttnBCPolicy is a true drop-in.
-
-        Memory-core note: with memory_dim>0 the per-head memory feature is ZEROS
-        here (no match history in a single-turn call) — with the zero-padded
-        warm-start (init_memory_model_from_stateless) the logits equal the
-        stateless model's exactly.
-
-        ``archetype_id`` (Phase-2 z): optional int or (B,) tensor of own-team
-        archetype ids; omitted → the per-instance default (set_default_archetype)
-        or the UNKNOWN embedding.  Ignored when z is off."""
+        so AttnBCPolicy is a true drop-in."""
         enc, present, g, single = self._encode_single_turn(x)
-        mem = (enc.new_zeros(enc.shape[0], self.memory_dim)
-               if self.memory_dim else None)
-        z = self._resolve_z(enc.shape[0], enc.device, archetype_id)
-        return self._heads_from(enc, present, g, mem, single, z=z,
-                                partner_actions=partner_actions)
-
-    def forward_with_memory(
-        self, x_seq: torch.Tensor, frame_padding_mask: Optional[torch.Tensor] = None,
-        archetype_id=None,
-        partner_actions: Optional[Dict[str, torch.Tensor]] = None,
-    ) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor], torch.Tensor]:
-        """Frame-stacked sequence forward: heads answer for the LAST frame,
-        conditioned on a causal memory over the whole (in-window) match so far.
-
-        x_seq: (B, T, state_dim) or (T, state_dim) — one replay's consecutive
-            turn states in order (the caller must never cross replay
-            boundaries; the 1b dataset groups frames by replay_id).  Only the
-            most recent ``max_mem_len`` frames are kept.
-        frame_padding_mask: optional (B, T) bool, True = PADDING frame to be
-            ignored by the memory attention (for left-padded batches of
-            unequal-length histories).  The LAST frame must never be padding.
-
-        Returns the same ``(actions, gimmicks, value)`` contract as ``forward``,
-        for the final frame of each sequence.
-        """
-        if not self.memory_dim:
-            raise RuntimeError("forward_with_memory requires memory_dim>0 "
-                               "(this model was built stateless)")
-        single = x_seq.dim() == 2
-        if single:
-            x_seq = x_seq.unsqueeze(0)
-        if x_seq.dim() != 3 or x_seq.shape[-1] != self.state_dim:
-            raise ValueError(
-                f"expected (B, T, {self.state_dim}) or (T, {self.state_dim}), "
-                f"got {tuple(x_seq.shape)}")
-        if x_seq.shape[1] > self.max_mem_len:               # keep the most recent window
-            x_seq = x_seq[:, -self.max_mem_len:, :]
-            if frame_padding_mask is not None:
-                frame_padding_mask = frame_padding_mask[:, -self.max_mem_len:]
-        B, T, _ = x_seq.shape
-
-        enc, present, g, _ = self._encode_single_turn(x_seq.reshape(B * T, self.state_dim))
-
-        # Turn-summary tokens: [masked-mean(present mon tokens) || global] -> d_mem.
-        summ = torch.cat([self._masked_mean(enc, present), g], dim=-1)   # (B*T, 2d)
-        # Positional indexing is RELATIVE TO THE PRESENT (flip): the LAST frame
-        # always reads mem_pos_emb[0], the one before it [1], … — so training's
-        # fixed-T LEFT-padded windows and serve's growing UNPADDED stacks are
-        # positionally IDENTICAL (audit 2026-07-02: absolute/left-aligned
-        # indexing put the supervised frame at T-1 in training but at 0,1,2,…
-        # live, feeding never-trained pos rows into every serve decision).
-        # Left-padding lands at the LARGEST ages — masked out anyway.
-        tok = (self.mem_proj(summ.reshape(B, T, -1))
-               + self.mem_pos_emb[:T].flip(0).unsqueeze(0))
-        causal = torch.triu(
-            torch.ones(T, T, dtype=torch.bool, device=tok.device), diagonal=1)
-        if frame_padding_mask is None:
-            mem_seq = self.mem_attn(tok, mask=causal)                     # (B, T, d_mem)
-        else:
-            # Merge causality + padding into one per-batch attn mask instead of
-            # src_key_padding_mask: a LEFT-padding query would otherwise have
-            # zero attendable keys → softmax NaN → 0·NaN poisons every later
-            # layer.  Each padding query attends to ITSELF instead — its output
-            # is meaningless but finite, and it stays key-masked for all real
-            # queries, so the garbage never propagates.
-            blocked = causal.unsqueeze(0) | frame_padding_mask.unsqueeze(1)  # (B, T, T)
-            self_diag = (torch.eye(T, dtype=torch.bool, device=tok.device)
-                         .unsqueeze(0) & frame_padding_mask.unsqueeze(-1))
-            blocked = blocked & ~self_diag
-            attn_mask = blocked.repeat_interleave(self.mem_heads, dim=0)     # (B·nhead, T, T)
-            mem_seq = self.mem_attn(tok, mask=attn_mask)
-        mem = mem_seq[:, -1, :]                                           # (B, d_mem)
-
-        # Final frame's per-mon tokens / presence / global feed the heads.
-        enc_last = enc.reshape(B, T, self.n_mon_slots, self.d_model)[:, -1]
-        present_last = present.reshape(B, T, self.n_mon_slots)[:, -1]
-        g_last = g.reshape(B, T, self.d_model)[:, -1]
-        z = self._resolve_z(B, enc_last.device, archetype_id)
-        return self._heads_from(enc_last, present_last, g_last, mem, single, z=z,
-                                partner_actions=partner_actions)
+        return self._heads_from(enc, present, g, single, partner_actions=partner_actions)
 
     def _heads_from(
         self,
         enc: torch.Tensor,
         present: torch.Tensor,
         g: torch.Tensor,
-        mem: Optional[torch.Tensor],
         single: bool,
-        z: Optional[torch.Tensor] = None,
         partner_actions: Optional[Dict[str, torch.Tensor]] = None,
     ) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor], torch.Tensor]:
-        """Shared head stack over one turn's tokens (+ optional match memory
-        and archetype embedding).
+        """Shared head stack over one turn's tokens.
 
-        Feature order per head is [mon || global || (opp_feat) || mem || z || pair] —
-        the widening features LAST so a narrower checkpoint's weights occupy
-        the leading columns verbatim under the zero-pad warm-start."""
+        Feature order per head is [mon || global || pair] — the 2b pair columns LAST so an
+        unconditioned checkpoint's weights occupy the leading columns verbatim under the
+        zero-pad warm-start."""
         actions: Dict[str, torch.Tensor] = {}
-        # Opp-PREDICTION heads first, so the OUR heads can (Level B) condition on the predicted opp action.
+        # Opp-PREDICTION heads first (the order the action dict has always had).
         for name in self._opp_head_names:
-            parts = [enc[:, HEAD_SLOT[name], :], g]
-            if mem is not None:
-                parts.append(mem)
-            if z is not None:
-                parts.append(z)
-            actions[name] = self.heads[name](torch.cat(parts, dim=-1))
-        # Level B: the DETACHED predicted opp-action distribution(s) fed into the OUR heads. Detached so the
-        # our-policy gradient never corrupts the predictor (the opp heads learn only from the aux CE).
-        opp_feat = None
-        if self.opp_cond and self._opp_head_names:
-            opp_feat = torch.cat([torch.softmax(actions[n], dim=-1)
-                                  for n in self._opp_head_names], dim=-1).detach()
+            actions[name] = self.heads[name](torch.cat([enc[:, HEAD_SLOT[name], :], g], dim=-1))
         for name in self.head_names:
             if name in self._opp_head_names:
                 continue                                    # opp heads already computed above
             parts = [enc[:, HEAD_SLOT[name], :], g]
-            if opp_feat is not None and name in DEFAULT_HEADS:
-                parts.append(opp_feat)
-            if mem is not None:
-                parts.append(mem)
-            if z is not None:
-                parts.append(z)
             if self.pair_cond and name in DEFAULT_HEADS:    # 2b: partner action, appended LAST
                 pa = None if partner_actions is None else partner_actions.get(name)
                 if pa is None:
@@ -571,18 +364,9 @@ class AttnBCPolicy(nn.Module):
 
         gimmicks: Dict[str, torch.Tensor] = {}
         for name, head in self.gimmick_heads.items():
-            parts = [enc[:, HEAD_SLOT[name], :], g]
-            if mem is not None:
-                parts.append(mem)
-            if z is not None:
-                parts.append(z)
-            gimmicks[name] = head(torch.cat(parts, dim=-1))
+            gimmicks[name] = head(torch.cat([enc[:, HEAD_SLOT[name], :], g], dim=-1))
 
         val_feat = self._value_feature(enc, present, g)
-        if mem is not None:
-            val_feat = torch.cat([val_feat, mem], dim=-1)
-        if z is not None:
-            val_feat = torch.cat([val_feat, z], dim=-1)
         value = self.value_head(val_feat).squeeze(-1)       # (B,)
 
         if single:                                          # 1-D in -> unbatched out (BCPolicy parity)
@@ -599,11 +383,6 @@ class AttnBCPolicy(nn.Module):
                 "value_atoms_logits: no atoms head (construct with n_value_atoms>0)")
         enc, present, g, single = self._encode_single_turn(x)
         feat = self._value_feature(enc, present, g)
-        if self.memory_dim:                        # single-turn call — no match history
-            feat = torch.cat([feat, feat.new_zeros(feat.shape[0], self.memory_dim)], dim=-1)
-        z = self._resolve_z(feat.shape[0], feat.device)
-        if z is not None:
-            feat = torch.cat([feat, z], dim=-1)
         logits = self.value_atoms_head(feat)                                   # (B, n_atoms)
         return logits.squeeze(0) if single else logits
 
@@ -637,10 +416,8 @@ class AttnBCPolicy(nn.Module):
 
     @staticmethod
     def _masked_mean(enc: torch.Tensor, present: torch.Tensor) -> torch.Tensor:
-        """Masked mean over PRESENT mon tokens: (B, slots, d) -> (B, d).
-
-        Shared by the 'mean' value readout and the memory core's turn-summary
-        tokens (identical semantics: absent slots never poison the pool)."""
+        """Masked mean over PRESENT mon tokens: (B, slots, d) -> (B, d) — the 'mean' value
+        readout (absent slots never poison the pool)."""
         pmask = present.unsqueeze(-1)                               # (B, slots, 1)
         enc_present = enc.masked_fill(~pmask, 0.0)
         denom = present.sum(dim=1, keepdim=True).clamp(min=1).to(enc.dtype)  # (B,1)
@@ -655,12 +432,6 @@ class AttnBCPolicy(nn.Module):
         nn.init.normal_(self.pos_emb, mean=0.0, std=0.02)
         if hasattr(self, "value_query"):               # cls_query readout only
             nn.init.normal_(self.value_query, mean=0.0, std=0.02)
-        if hasattr(self, "mem_pos_emb"):               # memory core only
-            nn.init.normal_(self.mem_pos_emb, mean=0.0, std=0.02)
-        if hasattr(self, "z_emb"):                     # Phase-2 z only — fresh init;
-            # the warm-start zeroes the heads' z COLUMNS instead (exactly one
-            # side non-zero, so gradients flow and init stays byte-compatible).
-            nn.init.normal_(self.z_emb.weight, mean=0.0, std=0.02)
 
     def count_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -670,17 +441,13 @@ def init_extended_model_from_ckpt(
     model: AttnBCPolicy, ckpt_state: Dict[str, torch.Tensor], extra_cols: int
 ) -> AttnBCPolicy:
     """Warm-start a model whose head Linears grew by exactly ``extra_cols``
-    TRAILING input columns (memory and/or z — both append LAST) from a
+    TRAILING input columns (the 2b pair columns append LAST) from a
     narrower checkpoint.
 
     Every shared tensor is copied verbatim; each widened head Linear
-    (action/gimmick/value) gets the checkpoint's weights in its LEADING
-    columns and ZEROS in the new trailing columns, so a forward whose new
-    features are zeros — or enter only through zeroed columns — reproduces the
-    checkpoint's logits bit-exactly at init.  New-module keys the checkpoint
-    lacks (mem_proj / mem_attn / mem_pos_emb / z_emb) keep their fresh init:
-    their output reaches the heads through the zeroed columns, so they are
-    invisible until trained.
+    gets the checkpoint's weights in its LEADING columns and ZEROS in the new
+    trailing columns, so a forward whose new features are zeros — or enter only
+    through zeroed columns — reproduces the checkpoint's logits bit-exactly at init.
 
     Returns ``model`` (mutated in place) for chaining.
     """
@@ -715,18 +482,6 @@ def init_extended_model_from_ckpt(
     return model
 
 
-def init_memory_model_from_stateless(
-    mem_model: AttnBCPolicy, ckpt_state: Dict[str, torch.Tensor]
-) -> AttnBCPolicy:
-    """Warm-start a memory model (memory_dim>0, z off) from a STATELESS
-    checkpoint — the Phase-1b wrapper over ``init_extended_model_from_ckpt``
-    (the memory columns are the only growth)."""
-    if not mem_model.memory_dim:
-        raise ValueError("init_memory_model_from_stateless: model has memory_dim=0")
-    return init_extended_model_from_ckpt(
-        mem_model, ckpt_state, extra_cols=mem_model.memory_dim + mem_model.z_dim)
-
-
 def init_pair_model_from_ckpt(
     pair_model: AttnBCPolicy, ckpt_state: Dict[str, torch.Tensor]
 ) -> AttnBCPolicy:
@@ -751,13 +506,6 @@ def build_attn_model(
     device: str = "cpu",
     gimmick_heads: Optional[Sequence[str]] = None,
     value_readout: str = "mean",
-    opp_cond: bool = False,
-    memory_dim: int = 0,
-    mem_layers: int = 2,
-    mem_heads: int = 4,
-    max_mem_len: int = 64,
-    n_archetypes: int = 0,
-    z_dim: int = 0,
     pair_cond: bool = False,
 ) -> AttnBCPolicy:
     """Build an AttnBCPolicy on ``device`` and print a one-line summary.
@@ -778,13 +526,6 @@ def build_attn_model(
         heads=heads,
         gimmick_heads=gimmick_heads,
         value_readout=value_readout,
-        opp_cond=opp_cond,
-        memory_dim=memory_dim,
-        mem_layers=mem_layers,
-        mem_heads=mem_heads,
-        max_mem_len=max_mem_len,
-        n_archetypes=n_archetypes,
-        z_dim=z_dim,
         pair_cond=pair_cond,
     ).to(device)
     print(
@@ -792,7 +533,6 @@ def build_attn_model(
         f"state_dim={model.state_dim} action_dim={model.action_dim} "
         f"gimmick_dim={model.gimmick_dim} d_model={d_model} n_layers={n_layers} "
         f"ff_mult={ff_mult} value_readout={value_readout} heads={model.head_names} "
-        f"gimmick_heads={model.gimmick_head_names} memory_dim={memory_dim} "
-        f"n_archetypes={n_archetypes} z_dim={z_dim} pair_cond={pair_cond} device={device}"
+        f"gimmick_heads={model.gimmick_head_names} pair_cond={pair_cond} device={device}"
     )
     return model

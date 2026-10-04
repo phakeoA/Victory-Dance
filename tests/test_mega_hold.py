@@ -437,6 +437,51 @@ def test_megatime_counts_an_electro_shot_ko_under_rain():
     assert g["es_ko_rain"] == 1 and not g["mega"]
 
 
+def test_megatime_also_group_gets_its_share_and_rejects_bad_specs(tmp_path):
+    # 2026-10-04 (USER "B"): a SECOND over-sampled group (e.g. Raichu teams) beside the threat + setter hits
+    from v_dance.selfplay.drills import get_drill
+    own = tmp_path / "Baltimore"
+    own.write_text("Tyranitar @ Tyranitarite\nAbility: Sand Stream\n- Rock Slide\n", encoding="utf-8")
+    hit = _team(tmp_path, "ArchRain", ["Pelipper", "Archaludon", "Incineroar", "Gholdengo"])
+    rai = _team(tmp_path, "Raichu", ["Raichu", "Rillaboom", "Incineroar", "Gholdengo"])
+    rai_rain = _team(tmp_path, "RaichuRain", ["Raichu", "Politoed", "Archaludon", "Gholdengo"])   # a hit first
+    other = _team(tmp_path, "Other", ["Garchomp", "Incineroar", "Gholdengo", "Sinistcha"])
+    d = get_drill("megatime:share=0.4,also=raichu,also_share=0.3,cap=1")
+    dp = d.build_pool([hit, rai, rai_rain, other], str(own))
+    assert dp.weights[hit] == pytest.approx(0.2) and dp.weights[rai_rain] == pytest.approx(0.2)   # hits: 0.4 / 2
+    assert dp.weights[rai] == pytest.approx(0.3) and dp.weights[other] == pytest.approx(0.3)
+    assert dp.shares == {"threat:archaludon+setter": pytest.approx(0.4), "also:raichu": pytest.approx(0.3),
+                         "other": pytest.approx(0.3)}
+    with pytest.raises(ValueError):                                     # no team carries the also species
+        get_drill("megatime:also=kyogre").build_pool([hit, rai, other], str(own))
+    with pytest.raises(ValueError):
+        get_drill("megatime:share=0.8,also=raichu,also_share=0.3")       # > 1 in total
+    # no 'also' = the unchanged two-group pool
+    assert set(get_drill("megatime:cap=1").build_pool([hit, rai, other], str(own)).shares) == {
+        "threat:archaludon+setter", "other"}
+
+
+def test_megatime_watch_rows_count_matchups_and_the_picker_brings():
+    from v_dance.selfplay.drills import get_drill
+    d = get_drill("megatime:watch=rillaboom+raichu,bring=salamence+sneasler")
+    rilla = _LOG.replace("|poke|p2|Archaludon, L50, M|\n", "|poke|p2|Archaludon, L50, M|\n|poke|p2|Rillaboom, L50, M|\n")
+    rilla = rilla.replace("|switch|p2a: Archaludon|", "|switch|p1b: Salamence|Salamence, L50, M|100/100\n"
+                                                      "|switch|p2a: Archaludon|", 1)
+    g = d.score_game(rilla, {"ourbot"}, d.ctx)
+    assert g["watch"] == {"raichu": False, "rillaboom": True} and "salamence" in g["brought"]
+    plain = d.score_game(_LOG, {"ourbot"}, d.ctx)
+    agg = d.aggregate([g, plain])
+    assert agg["vs_rillaboom_games"] == 1 and agg["vs_rillaboom_win"] == 1.0
+    assert agg["salamence_vs_rillaboom"] == 1.0 and agg["sneasler_vs_rillaboom"] == 0.0
+    assert agg["vs_raichu_games"] == 0 and agg["vs_raichu_win"] is None
+    # refine: the TEAM PREVIEW's pick replaces the log's entered list (a benched Sneasler was still brought)
+    r = d.refine(dict(g), {"tp_brought": ["tyranitar", "indeedee", "sneasler", "excadrill"]})
+    assert "sneasler" in r["brought"] and "salamence" not in r["brought"] and "salamence" in r["entered"]
+    # a drill that watches nothing adds no rows
+    m = get_drill("megatime")
+    assert not any(k.startswith("vs_") for k in m.aggregate([m.score_game(_LOG, {"ourbot"}, m.ctx)]))
+
+
 # ── the probe ─────────────────────────────────────────────────────────────────────────────────────────────
 def test_probe_snapshots_label_the_situations():
     from v_dance.eval import mega_hold_probe as P

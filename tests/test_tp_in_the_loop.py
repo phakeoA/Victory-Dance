@@ -101,9 +101,6 @@ def test_teampreview_capture_carries_the_pending_record():
         _tp_learn_pending = {"battle-x-1": {"set_idx": 3}}
         _tp_decision: dict = {}
 
-        def _ensure_archetype(self, team):
-            pass
-
         def _choose_team_order(self, battle, team, n):
             return [0, 1, 2, 3]
 

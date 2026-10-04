@@ -27,7 +27,7 @@ signal_delta ~ noise_delta (or negative) the policy is type-eff INSENSITIVE => t
 justified.
 
   .venv/Scripts/python.exe -m v_dance.eval.type_eff_probe \
-      --ckpt ai_train_scripts/BC_model/checkpoints_attn/battle_selfplay_gen141.pt --max-samples 800
+      --ckpt ai_train_scripts/BC_model/checkpoints_attn_era2/battle_base.pt --max-samples 800
 """
 from __future__ import annotations
 
@@ -302,9 +302,9 @@ def _aggregate(rows: List[dict], n_points: int, ckpt: str) -> dict:
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="#25 type-effectiveness sensitivity probe")
-    _attn = _REPO / "ai_train_scripts" / "BC_model" / "checkpoints_attn" / "battle_selfplay_gen141.pt"
+    from v_dance.play.model_io import DEFAULT_BC_CHECKPOINT    # 2026-10-04: was the deleted v17 gen141 file
     _prep = _REPO / "data" / "vods" / "Prepared_training_data" / "Regulation_MA" / "Jsonl_TypeB"
-    ap.add_argument("--ckpt", default=str(_attn))
+    ap.add_argument("--ckpt", default=str(DEFAULT_BC_CHECKPOINT))
     ap.add_argument("--data", nargs="+", default=[str(_prep)])
     ap.add_argument("--max-samples", type=int, default=800)
     ap.add_argument("--limit-files", type=int, default=None)

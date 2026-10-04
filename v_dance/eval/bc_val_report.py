@@ -1,9 +1,9 @@
 """
 bc_val_report.py — fine-grained BC checkpoint comparison on the PINNED val set
 ==============================================================================
-The A/B ruler for data-expansion and memory-model runs.  Pooled val top1 alone
-is the wrong instrument: most VGC decisions need no history and no extra data,
-so real improvements (adaptation, late-game reads) hide inside the pooled mean.
+The A/B ruler for BC / fine-tune runs.  Pooled val top1 alone is the wrong
+instrument: most VGC decisions need no history and no extra data, so real
+improvements (adaptation, late-game reads) hide inside the pooled mean.
 This report scores one or more checkpoints on the SAME fixed val split
 (replays chosen exactly like ``train_bc --val-data``: ``split_by_replay`` over
 the reference corpus with the given seed/val-frac) and breaks accuracy down:
@@ -11,7 +11,7 @@ the reference corpus with the given seed/val-frac) and breaks accuracy down:
   * pooled top1 / top3 (masked argmax — mirrors train_bc's metric),
   * per head (our_a / our_b),
   * per TURN bucket (1, 2-3, 4-6, 7-10, 11+) — late buckets are where
-    accumulated information (and therefore memory) should show up,
+    accumulated information should show up,
   * per decision type (turn vs post-faint replacement),
   * value head: Brier score + outcome accuracy (where the outcome is known),
   * sharpness panel (era-4 pillar 0b): legal-masked policy entropy, top1-top2
@@ -21,14 +21,11 @@ the reference corpus with the given seed/val-frac) and breaks accuracy down:
     lower determinism mass, lower KL.
 
 Multiple --ckpt args print side by side with deltas vs the FIRST checkpoint.
-Memory checkpoints (config memory_dim>0) are automatically evaluated through
-``forward_with_memory`` with ``--sequence-len`` frames (default 16); stateless
-checkpoints use the plain single-turn forward.
 
 Usage (defaults target the 0.585-anchor val corpus):
     python -m v_dance.eval.bc_val_report \
         --ckpt ai_train_scripts/BC_model/checkpoints_attn_pre_gen141/battle_base.pt \
-        --ckpt ai_train_scripts/BC_model/checkpoints_attn_hfdata/battle_base.pt \
+        --ckpt ai_train_scripts/BC_model/checkpoints_attn_era2/battle_base.pt \
         [--val-data <folders>] [--val-frac 0.1] [--seed 0] [--device cpu]
 
 CPU-safe by design (default --device cpu): the report must be runnable while a
@@ -188,14 +185,11 @@ def evaluate_checkpoint(
     val_ex: List[dict],
     device: str = "cpu",
     batch_size: int = 256,
-    sequence_len: int = 16,
-    archetype_ids: Optional[List[int]] = None,
     slice_labels: Optional[List[str]] = None,
 ) -> Dict:
     """Score one checkpoint on the fixed val examples.
 
     Returns a dict of accumulators: pooled/head/turn-bucket/decision-type
-    (+ per-ARCHETYPE when ids are supplied — the Phase-2 z success metric)
     action accuracy + value Brier/accuracy + the 0b sharpness/habit-KL
     accumulators + metadata.
     """
@@ -203,23 +197,8 @@ def evaluate_checkpoint(
 
     model, _head_names = load_bc_policy(ckpt_path, device=device)
     model.eval()
-    memory_dim = int(getattr(model, "memory_dim", 0) or 0)
-    if int(getattr(model, "n_archetypes", 0) or 0) and archetype_ids is None:
-        print(f"[val-report] WARNING: {ckpt_path} is a z-conditioned checkpoint "
-              f"but no --z-archetypes was given — scoring with the UNKNOWN "
-              f"embedding (unconditioned; understates the conditioned model)")
-    # Eval at the checkpoint's TRAINED window (config sequence_len stamp) — a
-    # mismatched T would shift every window off the trained positional regime
-    # and depress the memory model's numbers for reasons unrelated to quality
-    # (audit 2026-07-02). The CLI --sequence-len is only the fallback for a
-    # memory checkpoint that predates the stamp.
-    ckpt_T = int(getattr(model, "_sequence_len", 1) or 1)
-    seq_len = (ckpt_T if ckpt_T > 1 else sequence_len) if memory_dim > 0 else 1
-    if memory_dim > 0 and ckpt_T > 1 and ckpt_T != sequence_len:
-        print(f"[val-report] using the checkpoint's trained sequence_len={ckpt_T} "
-              f"(CLI --sequence-len {sequence_len} ignored)")
 
-    ds = BCDataset(val_ex, sequence_len=seq_len, archetype_ids=archetype_ids)
+    ds = BCDataset(val_ex)
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False)
 
     # Per-example metadata arrays, index-aligned with the dataset (shuffle=False).
@@ -234,7 +213,6 @@ def evaluate_checkpoint(
     pair_tf_head = {h: _Acc() for h in HEADS} if pair_cond else None
     by_bucket = {label: _Acc() for label, _, _ in _TURN_BUCKETS}
     by_dtype: Dict[str, _Acc] = {}
-    by_arch: Dict[str, _Acc] = {}
     by_slice: Dict[str, _Acc] = {}
     # 0b sharpness + habit accumulators (same masked softmax as the accuracy rows).
     sharp = _Sharp()
@@ -252,18 +230,7 @@ def evaluate_checkpoint(
     with torch.no_grad():
         for batch in loader:
             bsz = batch["target"].shape[0]
-            aid_b = batch.get("archetype")
-            if aid_b is not None:
-                aid_b = aid_b.to(device)
-            if "x_seq" in batch:
-                actions, _gimmicks, value = model.forward_with_memory(
-                    batch["x_seq"].to(device),
-                    frame_padding_mask=batch["frame_padding_mask"].to(device),
-                    archetype_id=aid_b,
-                )
-            else:
-                actions, _gimmicks, value = model(batch["x"].to(device),
-                                                  archetype_id=aid_b)
+            actions, _gimmicks, value = model(batch["x"].to(device))
             target = batch["target"].to(device)          # (B, 2)
             mask = batch["mask"].to(device)              # (B, 2, A)
             valid = batch["valid"].to(device)            # (B, 2)
@@ -276,15 +243,7 @@ def evaluate_checkpoint(
                     target.clamp(min=0), act_dim).float()            # (B, 2, A)
                 pa = {"our_a": oh[:, 1] * (valid[:, 1] > 0.5).float().unsqueeze(1),
                       "our_b": oh[:, 0] * (valid[:, 0] > 0.5).float().unsqueeze(1)}
-                if "x_seq" in batch:
-                    actions_tf, _g_tf, _v_tf = model.forward_with_memory(
-                        batch["x_seq"].to(device),
-                        frame_padding_mask=batch["frame_padding_mask"].to(device),
-                        archetype_id=aid_b, partner_actions=pa)
-                else:
-                    actions_tf, _g_tf, _v_tf = model(batch["x"].to(device),
-                                                     archetype_id=aid_b,
-                                                     partner_actions=pa)
+                actions_tf, _g_tf, _v_tf = model(batch["x"].to(device), partner_actions=pa)
                 for h_idx, head in enumerate(HEADS):
                     ml_tf = masked_logits(actions_tf[head], mask[:, h_idx])
                     vb_tf = valid[:, h_idx] > 0.5
@@ -334,9 +293,6 @@ def evaluate_checkpoint(
                     by_head[head].add(o1i, o3i, 1)
                     by_bucket[bl].add(o1i, o3i, 1)
                     by_dtype.setdefault(dtypes[gi], _Acc()).add(o1i, o3i, 1)
-                    if archetype_ids is not None:
-                        by_arch.setdefault(f"z={archetype_ids[gi]}", _Acc()) \
-                            .add(o1i, o3i, 1)
                     if slice_labels is not None:
                         by_slice.setdefault(slice_labels[gi], _Acc()) \
                             .add(o1i, o3i, 1)
@@ -380,14 +336,11 @@ def evaluate_checkpoint(
 
     return {
         "ckpt": str(ckpt_path),
-        "memory_dim": memory_dim,
-        "sequence_len": seq_len,
         "pooled": pooled,
         "by_head": by_head,
         "pair_tf_head": pair_tf_head,
         "by_bucket": by_bucket,
         "by_dtype": by_dtype,
-        "by_arch": by_arch,
         "by_slice": by_slice,
         "sharp": sharp,
         "sharp_head": sharp_head,
@@ -413,8 +366,7 @@ def print_report(results: List[Dict]) -> None:
     print("\n" + "═" * 72)
     for i, r in enumerate(results):
         tag = "BASE" if i == 0 else f"CAND{i}"
-        mem = f" memory_dim={r['memory_dim']} T={r['sequence_len']}" if r["memory_dim"] else ""
-        print(f"  [{tag}] {r['ckpt']}{mem}")
+        print(f"  [{tag}] {r['ckpt']}")
     print("═" * 72)
 
     def _row(label: str, get) -> None:
@@ -460,14 +412,6 @@ def print_report(results: List[Dict]) -> None:
     print("  ── per decision type ──")
     for dt in sorted(base["by_dtype"]):
         _row(dt, lambda r, dt=dt: r["by_dtype"].get(dt) or _Acc())
-    if any(r.get("by_arch") for r in results):
-        # Phase-2 z metric: the conditioning must lift MINORITY archetypes
-        # (the mush-average harm concentrates there), not just the pooled mean.
-        print("  ── per archetype ──")
-        arch_keys = sorted({k for r in results for k in (r.get("by_arch") or {})},
-                           key=lambda s: (len(s), s))
-        for ak in arch_keys:
-            _row(ak, lambda r, ak=ak: (r.get("by_arch") or {}).get(ak) or _Acc())
     if any(r.get("by_slice") for r in results):
         # G2 metric: accuracy on val teams the training corpus NEVER saw — "plays a
         # team it never saw" quantified. A big seen-vs-HELD-OUT gap = the model leans
@@ -561,17 +505,11 @@ def main(argv=None) -> int:
                     help="reference corpus folders that define the val split")
     ap.add_argument("--val-frac", type=float, default=0.1)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--sequence-len", type=int, default=16,
-                    help="frames for memory checkpoints (ignored for stateless)")
     ap.add_argument("--batch-size", type=int, default=256)
     ap.add_argument("--device", default="cpu",
                     help="cpu by default — must be runnable while training owns the GPU")
     ap.add_argument("--limit-files", type=int, default=None,
                     help="cap JSONL files read (smoke runs)")
-    ap.add_argument("--z-archetypes", default=None,
-                    help="team-archetype artifact: joins archetype ids onto the val "
-                         "examples (required to fairly score a z-conditioned ckpt; "
-                         "adds the per-archetype breakdown)")
     ap.add_argument("--held-out-slice", nargs="*", default=None, metavar="TRAIN_FOLDER",
                     help="add the G2 seen-vs-HELD-OUT own-team slice: val examples whose "
                          "roster never occurs in the TRAIN folders (no folders given = the "
@@ -591,20 +529,6 @@ def main(argv=None) -> int:
     print(f"[val-report] val set: {len(val_ex)} examples / "
           f"{len({e['replay_id'] for e in val_ex})} replays "
           f"({time.time()-t0:.1f}s)")
-
-    # Phase-2 z: join archetype ids so a conditioned checkpoint is scored with
-    # its real z (and the per-archetype breakdown gets printed).
-    arch_ids = None
-    if args.z_archetypes:
-        from v_dance.datatools.team_archetypes import (
-            load_archetype_assignments, load_artifact)
-        k_unknown = int(load_artifact(args.z_archetypes)["k"])
-        asg = load_archetype_assignments(args.z_archetypes)
-        arch_ids = [asg.get((e["replay_id"], e.get("perspective")), k_unknown)
-                    for e in val_ex]
-        n_unk = sum(1 for a in arch_ids if a == k_unknown)
-        print(f"[val-report] archetype ids joined: {len(arch_ids) - n_unk}/"
-              f"{len(arch_ids)} labelled ({n_unk} → UNKNOWN)")
 
     # G2 held-out-team slice: label each val example by whether its OWN roster ever
     # occurs in the train folders (team_keys_for_folders is JSON-cached per folder set).
@@ -639,8 +563,6 @@ def main(argv=None) -> int:
         t1 = time.time()
         r = evaluate_checkpoint(c, val_ex, device=args.device,
                                 batch_size=args.batch_size,
-                                sequence_len=args.sequence_len,
-                                archetype_ids=arch_ids,
                                 slice_labels=slice_labels)
         print(f"[val-report] scored {c} in {time.time()-t1:.1f}s")
         results.append(r)

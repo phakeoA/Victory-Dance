@@ -231,9 +231,9 @@ def test_live_spawned_self_play_collects_pairs_and_reports_throughput(tmp_path: 
     from v_dance.rl.actor_critic import ActorCritic
     from v_dance.selfplay.game_runner import run_self_play_games
     repo = Path(__file__).resolve().parents[1]
-    ckpt = repo / "ai_train_scripts" / "BC_model" / "checkpoints_attn_era4_2b" / "battle_base.pt"
+    ckpt = repo / "ai_train_scripts" / "BC_model" / "checkpoints_attn_era2" / "battle_base.pt"
     if not ckpt.is_file():
-        pytest.skip("served checkpoint not present")
+        pytest.skip("era2 (the ladder control) checkpoint not present")
     ac = ActorCritic.from_bc_checkpoint(ckpt)
     rooms = int(os.environ.get("VD_SPAWN_LIVE_ROOMS", "4"))
     n = int(os.environ.get("VD_SPAWN_LIVE_GAMES", "6"))

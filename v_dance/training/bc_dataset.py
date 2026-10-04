@@ -799,33 +799,14 @@ class BCDataset(Dataset):
     def __init__(self, examples: Sequence[dict], augment_move_order: bool = False,
                  aug_seed: int = 0, with_opp: bool = False,
                  weights: Optional[Sequence[float]] = None,
-                 sequence_len: int = 1,
-                 archetype_ids: Optional[Sequence[int]] = None,
                  lazy_x: bool = False):
         if not _HAS_TORCH:  # pragma: no cover
             raise RuntimeError("torch is required for BCDataset")
         # Step B low-RAM mode (train_bc --mmap-cache): keep each example's x as
         # a reference (typically a read-only row view of the folder's mmap'd
         # cache X) instead of materializing the (N, STATE_DIM) matrix here —
-        # ~26 GB for the full MA-Bo3 corpus.  __getitem__ copies ONE row per
-        # fetch.  Sequence mode gathers history frames through the in-RAM
-        # matrix, so it is unsupported (memory-seq is a closed null anyway).
+        # ~26 GB for the full MA-Bo3 corpus.  __getitem__ copies ONE row per fetch.
         self.lazy_x = bool(lazy_x)
-        if self.lazy_x and int(sequence_len) > 1:
-            raise ValueError(
-                f"lazy_x does not support sequence_len > 1 (got {sequence_len}): "
-                "the sequence path gathers history frames from the in-RAM X matrix")
-        # Phase 1b sequence BC: with sequence_len > 1 each item ALSO carries
-        # ``x_seq`` (T, STATE_DIM) — the last ``sequence_len`` decision states
-        # of the SAME (replay_id, perspective) trajectory ending at this item —
-        # plus ``frame_padding_mask`` (T,) bool, True on the LEFT-padded zero
-        # frames of early-game items.  Targets stay the item's own (the LAST
-        # frame is supervised).  Never crosses a replay/perspective boundary by
-        # construction.  sequence_len == 1 keeps every item byte-identical to
-        # the stateless dataset (no x_seq key at all).
-        self.sequence_len = int(sequence_len)
-        if self.sequence_len < 1:
-            raise ValueError(f"sequence_len must be >= 1, got {sequence_len}")
         # Train-only move-slot permutation augmentation (task #22): when True,
         # each fetch independently permutes every own active mon's 4 move blocks
         # AND remaps that head's action target + mask, so the net learns move
@@ -887,37 +868,16 @@ class BCDataset(Dataset):
                 raise ValueError(
                     f"weights length {wv.shape[0]} != number of examples {n}")
             self.weight = wv
-        # Phase-2 z: per-example own-team archetype id (team_archetypes join).
-        # None (default) → the "archetype" item key is not emitted at all, so
-        # the batch shape stays byte-identical for every non-z training run.
-        self.archetype: Optional[np.ndarray] = None
-        if archetype_ids is not None:
-            av = np.asarray(archetype_ids, dtype=np.int64).ravel()
-            if av.shape[0] != n:
-                raise ValueError(
-                    f"archetype_ids length {av.shape[0]} != number of examples {n}")
-            self.archetype = av
         if self.with_opp:
             self.opp_target = np.full((n, len(OPP_HEADS)), -1, dtype=np.int64)
             self.opp_mask = np.zeros((n, len(OPP_HEADS), ACTIONS_PER_SLOT), dtype=np.float32)
             self.opp_valid = np.zeros((n, len(OPP_HEADS)), dtype=np.float32)
         self.replay_ids: List[str] = []
-        # Per-example trajectory bookkeeping (sequence mode): examples arrive in
-        # file order = temporal order within each (replay_id, perspective), so
-        # grouping by key while preserving order reconstructs each trajectory.
-        self._traj_of: List[Tuple[str, Optional[str]]] = []
-        self._traj_indices: Dict[Tuple[str, Optional[str]], List[int]] = {}
-        self._pos_in_traj = np.zeros(n, dtype=np.int64)
 
         for i, ex in enumerate(examples):
             if not self.lazy_x:
                 self.X[i] = ex["x"]
             self.replay_ids.append(ex["replay_id"])
-            tkey = (ex["replay_id"], ex.get("perspective"))
-            traj = self._traj_indices.setdefault(tkey, [])
-            self._pos_in_traj[i] = len(traj)
-            traj.append(i)
-            self._traj_of.append(tkey)
             won = ex.get("won")
             if won is not None:
                 self.value_target[i] = 1.0 if won else 0.0
@@ -954,8 +914,6 @@ class BCDataset(Dataset):
         self.value_target_t = torch.from_numpy(self.value_target)
         self.value_valid_t = torch.from_numpy(self.value_valid)
         self.weight_t = torch.from_numpy(self.weight)
-        self.archetype_t = (torch.from_numpy(self.archetype)
-                            if self.archetype is not None else None)
         if self.with_opp:
             self.opp_target_t = torch.from_numpy(self.opp_target)
             self.opp_mask_t = torch.from_numpy(self.opp_mask)
@@ -990,11 +948,11 @@ class BCDataset(Dataset):
     # What crosses to a spawned worker: the torch tensors (shared memory — no
     # copy) + the small config fields + _x_files/_x_src. What must NOT cross:
     # memmap row views (materialize X), the numpy twins of the tensors (would
-    # copy; rebuilt as tensor views), and the per-example python bookkeeping the
-    # fetch path never touches when sequence_len == 1 (lazy forbids >1 anyway).
+    # copy; rebuilt as tensor views), and the per-example replay ids the fetch
+    # path never touches.
     _NUMPY_TWINS = ("X", "target", "mask", "valid", "gimmick_target",
                     "gimmick_mask", "gimmick_valid", "value_target",
-                    "value_valid", "weight", "archetype",
+                    "value_valid", "weight",
                     "opp_target", "opp_mask", "opp_valid")
 
     def __getstate__(self):
@@ -1008,10 +966,7 @@ class BCDataset(Dataset):
         st["_x_open"] = {}
         for k in self._NUMPY_TWINS:
             st.pop(k, None)
-        if self.sequence_len <= 1:      # fetch path never reads these when T == 1
-            st["replay_ids"] = []
-            st["_traj_of"] = []
-            st["_traj_indices"] = {}
+        st["replay_ids"] = []           # the fetch path never reads them
         return st
 
     def __setstate__(self, st):
@@ -1027,8 +982,6 @@ class BCDataset(Dataset):
         self.value_target = self.value_target_t.numpy()
         self.value_valid = self.value_valid_t.numpy()
         self.weight = self.weight_t.numpy()
-        self.archetype = (self.archetype_t.numpy()
-                          if self.archetype_t is not None else None)
         if self.with_opp:
             self.opp_target = self.opp_target_t.numpy()
             self.opp_mask = self.opp_mask_t.numpy()
@@ -1046,43 +999,12 @@ class BCDataset(Dataset):
             "opp_valid": self.opp_valid_t[idx],
         }
 
-    def _z_fields(self, idx: int) -> dict:
-        """Phase-2 archetype id (empty unless archetype_ids were supplied)."""
-        if self.archetype_t is None:
-            return {}
-        return {"archetype": self.archetype_t[idx]}
-
-    def _seq_fields(self, idx: int, x_last: "torch.Tensor") -> dict:
-        """``x_seq`` (T, D) + ``frame_padding_mask`` (T,) in sequence mode.
-
-        History frames come from the STORED (never-augmented) X — only the
-        supervised LAST frame is ``x_last`` (the possibly-augmented fetch), so
-        the action labels always match the frame they were remapped for.
-        Early-game items are LEFT-padded with zero frames + a True mask (the
-        model's memory attention ignores them)."""
-        T = self.sequence_len
-        if T <= 1:
-            return {}
-        traj = self._traj_indices[self._traj_of[idx]]
-        pos = int(self._pos_in_traj[idx])
-        hist = traj[max(0, pos - T + 1): pos]          # frames strictly before idx
-        n_pad = T - 1 - len(hist)
-        x_seq = torch.zeros(T, self.X_t.shape[1], dtype=torch.float32)
-        if hist:
-            x_seq[n_pad: T - 1] = self.X_t[hist]
-        x_seq[T - 1] = x_last
-        fpm = torch.zeros(T, dtype=torch.bool)
-        if n_pad:
-            fpm[:n_pad] = True
-        return {"x_seq": x_seq, "frame_padding_mask": fpm}
-
     def __getitem__(self, idx: int) -> dict:
         if not self.augment_move_order:
             x_t = (torch.from_numpy(self._x_np(idx)) if self.lazy_x
                    else self.X_t[idx])
             return {
                 "x": x_t,
-                **self._seq_fields(idx, x_t),
                 "target": self.target_t[idx],
                 "mask": self.mask_t[idx],
                 "valid": self.valid_t[idx],
@@ -1093,7 +1015,6 @@ class BCDataset(Dataset):
                 "value_valid": self.value_valid_t[idx],
                 "weight": self.weight_t[idx],
                 **self._opp_fields(idx),
-                **self._z_fields(idx),
             }
 
         # Augmented fetch: permute each own active slot's move blocks + remap the
@@ -1112,7 +1033,6 @@ class BCDataset(Dataset):
         x_aug = torch.from_numpy(x)
         return {
             "x": x_aug,
-            **self._seq_fields(idx, x_aug),
             "target": torch.from_numpy(target),
             "mask": torch.from_numpy(mask),
             "valid": self.valid_t[idx],
@@ -1123,7 +1043,6 @@ class BCDataset(Dataset):
             "value_valid": self.value_valid_t[idx],
             "weight": self.weight_t[idx],
             **self._opp_fields(idx),
-            **self._z_fields(idx),
         }
 
 

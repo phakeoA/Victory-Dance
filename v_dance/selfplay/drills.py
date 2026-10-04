@@ -206,13 +206,16 @@ _WEATHER_ID_KIND = {"sandstorm": "sand", "raindance": "rain", "sunnyday": "sun",
                     "hail": "snow", "desolateland": "sun", "primordialsea": "rain"}
 
 
-def _megatime_score_factory(mon: str, setters: set, threat: set, weather_kind: str, guard=frozenset()):
+def _megatime_score_factory(mon: str, setters: set, threat: set, weather_kind: str, guard=frozenset(),
+                            watch: Tuple[str, ...] = (), bring: Tuple[str, ...] = ()):
     def score(text: str, our_ids: set, ctx: dict) -> Optional[dict]:
         """One game: did THEIR weather come up, when did OUR ``mon`` mega (before / after it), did the mega re-set
         our weather over theirs, how many of ours did a weather-boosted Electro Shot KO under each weather — and the
         GUARD (USER 10-03: other megas must not learn to delay): the first turn a ``guard`` mon starts on the field
         while our mega is unused, did it mega that turn. ``guard`` None = ``ctx['guard']`` (guard=auto: build_pool
-        reads our team's megas that have no delay reason)."""
+        reads our team's megas that have no delay reason). 2026-10-04 (USER "B"): ``watch`` species → which of them
+        their six showed (the per-matchup rows), ``brought`` = the mons we fielded (``refine`` swaps in the team
+        preview's real pick), ``bring`` = the mons whose bring rate the scoreboard tracks per watched matchup."""
         guard_ids = set(guard) if guard is not None else set((ctx or {}).get("guard") or ())
         side = _our_side(text, our_ids)
         won = _won(text, our_ids)
@@ -268,7 +271,9 @@ def _megatime_score_factory(mon: str, setters: set, threat: set, weather_kind: s
                 es_ko["rain" if es_pending == weather_kind else "other"] += 1
         sixs = set(six)
         hit = bool(sixs & setters) and (not threat or bool(sixs & threat))
-        return {"won": won, "hit": hit, "their_weather": their_weather_turn is not None,
+        return {"won": won, "hit": hit, "watch": {s: s in sixs for s in watch}, "bring": tuple(bring),
+                "brought": _brought_and_led(text, side)[0],
+                "their_weather": their_weather_turn is not None,
                 "mega": mega_turn is not None, "mega_t1": mega_turn == 1,
                 "mega_after_weather": (mega_turn is not None and their_weather_turn is not None
                                        and (mega_turn > their_weather_turn
@@ -311,7 +316,23 @@ def _megatime_aggregate(games: List[dict]) -> Dict[str, object]:
             # the GUARD over ALL games: a guard mon's mega at its first chance (should NOT fall — USER 10-03)
             "guard_games": sum(1 for g in games if g.get("guard_chance")),
             "guard_first_mega": _rate(sum(1 for g in games if g.get("guard_chance") and g.get("guard_first")),
-                                      sum(1 for g in games if g.get("guard_chance")))}
+                                      sum(1 for g in games if g.get("guard_chance"))),
+            **_watch_rows(games)}
+
+
+def _watch_rows(games: List[dict]) -> Dict[str, object]:
+    """2026-10-04 (USER "B"): per WATCHED opponent species (their six showed it) — games, our win rate, and how often
+    we brought each ``bring`` mon (e.g. Salamence vs Rillaboom). Empty when the drill watches nothing."""
+    out: Dict[str, object] = {}
+    watch = sorted({s for g in games for s in (g.get("watch") or {})})
+    bring = sorted({b for g in games for b in (g.get("bring") or ())})
+    for s in watch:
+        vs = [g for g in games if (g.get("watch") or {}).get(s)]
+        out[f"vs_{s}_games"] = len(vs)
+        out[f"vs_{s}_win"] = _rate(sum(g["won"] for g in vs), len(vs))
+        for b in bring:
+            out[f"{b}_vs_{s}"] = _rate(sum(1 for g in vs if b in (g.get("brought") or ())), len(vs))
+    return out
 
 
 def _megatime_drill(args: Dict[str, str]) -> Drill:
@@ -321,7 +342,13 @@ def _megatime_drill(args: Dict[str, str]) -> Drill:
     field pressure — exactly what punishes an early mega); the scoreboard tracks whether ``mon``'s mega waits for their
     weather and re-sets ours, and GUARDS the other megas (``guard_first_mega``: a guard mon megas at its first chance —
     must not fall). ``guard=auto`` (default) = our team's megas with NO delay reason (mega_hold.delay_reason: for
-    Baltimore, Salamence); ``guard=salamence+…`` names them; ``guard=`` = none. Pair it with --mega-hold-p-weather."""
+    Baltimore, Salamence); ``guard=salamence+…`` names them; ``guard=`` = none. Pair it with --mega-hold-p-weather.
+
+    2026-10-04 (USER "B" — the g39 leak review: vs Rillaboom 49.5 % with the default bring at 39.7 %, Mega Raichu
+    28.6 %): ``also=raichu[+…]`` + ``also_share=0.25`` over-sample a SECOND group (teams carrying any ``also``
+    species and not already a threat hit) into the mix; ``watch=rillaboom+raichu`` adds per-matchup scoreboard rows
+    (``vs_<species>_games / _win``) and ``bring=salamence+sneasler`` how often we BROUGHT those mons in each watched
+    matchup (the team preview's real pick — ``refine``)."""
     threat = {_id(s) for s in str(args.get("threat", "archaludon")).split("+") if s}
     setters = {_id(s) for s in str(args.get("setters", "pelipper+politoed+kyogre")).split("+") if s}
     mon = _id(args.get("mon", "tyranitar"))
@@ -329,40 +356,74 @@ def _megatime_drill(args: Dict[str, str]) -> Drill:
     guard = None if _g.strip().lower() == "auto" else frozenset(_id(s) for s in _g.split("+") if s)
     weather_kind = str(args.get("weather", "rain"))
     share = float(args.get("share", 0.35))
+    also = {_id(s) for s in str(args.get("also", "")).split("+") if s}
+    also_share = float(args.get("also_share", 0.25 if also else 0.0))
+    watch = tuple(sorted({_id(s) for s in str(args.get("watch", "")).split("+") if s}))
+    bring = tuple(sorted({_id(s) for s in str(args.get("bring", "")).split("+") if s}))
     if not setters:
         raise ValueError("megatime drill needs setters=<species>[+<species>…]")
     if not (0.0 < share <= 1.0):
         raise ValueError(f"megatime drill: share must be in (0, 1] (got {share})")
+    if also and not (0.0 < also_share < 1.0):
+        raise ValueError(f"megatime drill: also_share must be in (0, 1) (got {also_share})")
+    if also and share + also_share > 1.0:
+        raise ValueError(f"megatime drill: share {share:g} + also_share {also_share:g} > 1")
     holder: Dict[str, object] = {}
 
     def pool(team_pool: List[str], own_team: str) -> DrillPool:
         from v_dance.eval.field_control_report import paste_species, team_setters
         from v_dance.selfplay.drill_pool import unique_by_name
-        hits, rest = [], []
+        hits, extra, rest = [], [], []
         for p in unique_by_name(team_pool, exclude=own_team):
             sp = {_id(s) for s in paste_species(_read_paste(p))}
-            (hits if (sp & setters and (not threat or sp & threat)) else rest).append(p)
+            if sp & setters and (not threat or sp & threat):
+                hits.append(p)
+            elif also and sp & also:
+                extra.append(p)
+            else:
+                rest.append(p)
         if not hits:
             raise ValueError(f"megatime drill: no pool team carries {sorted(threat)} + one of {sorted(setters)}")
-        h_share = share if rest else 1.0
-        raw = {p: h_share / len(hits) for p in hits}
-        raw.update({p: (1.0 - h_share) / len(rest) for p in rest})
+        if also and not extra:
+            raise ValueError(f"megatime drill: no pool team carries one of also={sorted(also)}")
+        # the three groups' shares; a missing group hands its share to the others pro rata
+        parts = [(hits, share), (extra, also_share if extra else 0.0), (rest, max(0.0, 1.0 - share - also_share))]
+        tot = sum(s for g, s in parts if g)
+        raw = {}
+        for g, s in parts:
+            for p in g:
+                raw[p] = (s / tot) / len(g)
         weights = cap_weights(raw, float(args.get("cap", 0.06)))
         holder["ours"] = team_setters(_read_paste(own_team))
         if guard is None:                             # guard=auto: our megas that have NO reason to wait
             holder["guard"] = sorted(_no_delay_megas(_read_paste(own_team)))
+        shares = {f"threat:{'+'.join(sorted(threat)) or 'any'}+setter": round(sum(weights.get(p, 0) for p in hits), 6)}
+        if also:
+            shares[f"also:{'+'.join(sorted(also))}"] = round(sum(weights.get(p, 0) for p in extra), 6)
+        shares["other"] = round(sum(weights.get(p, 0) for p in rest), 6)
         return DrillPool(pool=[p for p, w in weights.items() for _ in range(max(1, int(round(w * 200))))],
                          ours=holder["ours"], teams=[DrillTeam(p, ()) for p in hits], weights=weights,
-                         shares={f"threat:{'+'.join(sorted(threat)) or 'any'}+setter": round(
-                                     sum(weights.get(p, 0) for p in hits), 6),
-                                 "other": round(sum(weights.get(p, 0) for p in rest), 6)})
+                         shares=shares)
 
+    def refine(g: dict, row: dict) -> dict:
+        # as the focus drill (review F6): 'brought' = the TEAM PREVIEW's pick when the row carries it (a back-line
+        # mon that never switched in is still brought); rows without the pick keep the log's entered list
+        if row.get("tp_brought") is not None:
+            g["entered"] = g.get("brought")
+            g["brought"] = list(row.get("tp_brought") or [])
+        return g
+
+    extra_desc = (f"; also over-sampled: teams with {sorted(also)} (share {also_share:g})" if also else "")
+    watch_desc = (f"; per-matchup rows for {list(watch)}" + (f" (+ our {list(bring)} bring rate)" if bring else "")
+                  if watch else "")
     drill = Drill(name="megatime",
                   describe=(f"megatime: teams with {sorted(threat) or 'any'} + a {weather_kind} setter over-sampled "
-                            f"(share {share:g}); opponents switch their setter back in; scoreboard = does our "
-                            f"{mon}'s mega wait for their {weather_kind} and re-set ours"),
-                  build_pool=pool, score_game=_megatime_score_factory(mon, setters, threat, weather_kind, guard),
-                  aggregate=_megatime_aggregate,
+                            f"(share {share:g}){extra_desc}; opponents switch their setter back in; scoreboard = does "
+                            f"our {mon}'s mega wait for their {weather_kind} and re-set ours{watch_desc}"),
+                  build_pool=pool,
+                  score_game=_megatime_score_factory(mon, setters, threat, weather_kind, guard, watch=watch,
+                                                     bring=bring),
+                  aggregate=_megatime_aggregate, refine=refine,
                   pressure=None if args.get("pressure") == "off" else "field")
     drill.ctx = holder
     return drill

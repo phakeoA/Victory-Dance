@@ -45,7 +45,6 @@ def test_evaluate_and_print_stateless(tmp_path, capsys):
                            heads=("our_a", "our_b"), gimmick_heads=("our_a", "our_b"))
     val_ex = _val_examples()
     r = evaluate_checkpoint(str(ckpt), val_ex, device="cpu", batch_size=4)
-    assert r["memory_dim"] == 0 and r["sequence_len"] == 1
     assert r["pooled"].n == len(val_ex)          # one valid head per example
     assert r["value"]["n"] == len(val_ex)
     assert 0.0 <= r["pooled"].rate() <= 1.0
@@ -54,28 +53,3 @@ def test_evaluate_and_print_stateless(tmp_path, capsys):
     print_report([r, r])                          # self-comparison: deltas all zero
     out = capsys.readouterr().out
     assert "per turn bucket" in out and "(+0.0000)" in out
-
-
-def test_evaluate_memory_checkpoint(tmp_path):
-    from v_dance.models.bc_model_attn import AttnBCPolicy
-    from v_dance.encoders.state_encoder import (
-        get_action_dim, get_gimmick_dim, get_state_layout_version)
-    m = AttnBCPolicy(d_model=32, n_heads=4, n_layers=1, dropout=0.0,
-                     memory_dim=16, mem_heads=2)
-    cfg = {"model_type": "attn", "state_dim": get_state_dim(),
-           "action_dim": get_action_dim(), "gimmick_dim": get_gimmick_dim(),
-           "state_layout_version": get_state_layout_version(),
-           "d_model": 32, "n_heads": 4, "n_layers": 1, "ff_mult": 2, "dropout": 0.0,
-           "value_readout": "mean", "heads": ["our_a", "our_b"],
-           "gimmick_heads": ["our_a", "our_b"],
-           "value_trained": True, "gimmick_trained": True,
-           "memory_dim": 16, "mem_layers": 2, "mem_heads": 2, "max_mem_len": 64,
-           "sequence_len": 4}
-    p = tmp_path / "mem.pt"
-    torch.save({"model_state": m.state_dict(), "config": cfg}, p)
-    # the checkpoint's TRAINED window (4) must win over the CLI value (16) —
-    # a mismatched T shifts every window off the trained positional regime
-    r = evaluate_checkpoint(str(p), _val_examples(), device="cpu",
-                            batch_size=4, sequence_len=16)
-    assert r["memory_dim"] == 16 and r["sequence_len"] == 4
-    assert r["pooled"].n == 12

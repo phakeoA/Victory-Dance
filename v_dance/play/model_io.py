@@ -38,12 +38,12 @@ import numpy as np
 #      mean-1393 opposition — artifacts/logs/tp_set_ab_gate.log).
 #    Era-chain rule: warm-start + adv-value base for era N+1 = the gated era-N net; the
 #    pre_gen141 anchor FILE (val 0.5853) stays untouched as the fixed historical reference.
-#    Era-3 promoted 2026-07-20; same-day upgraded to ARM B (M2 closed-strip: ruler sweep-win
-#    0.6111 pooled, t1 recovered + late-game kept; gates green). Rollback chain:
-#    ``checkpoints_attn_era3_cand`` (50g-laddered) → ``checkpoints_attn_era2/battle_base.pt`` ·
-#    ``checkpoints/teampreview_sbda.pt`` (v6). Legacy 46-dim TP at ``checkpoints_pre_sbda/``.
+#    2026-10-04 (cleanup): the BC default is era2 again — the ladder CONTROL / incumbent arm (era3_armB, the
+#    stale default since 07-20, was retired with the old era chain). The SERVED pair is .env + the serve
+#    bandit (gen39 + its co-trained picker) — a flag-less caller gets era2 + the default TP, a consistent pair.
+#    Legacy 46-dim TP at ``checkpoints_pre_sbda/``; the v6 TP at ``checkpoints/teampreview_sbda.pt``.
 _AI_TRAIN = Path(__file__).resolve().parents[2] / "ai_train_scripts"
-DEFAULT_BC_CHECKPOINT = _AI_TRAIN / "BC_model" / "checkpoints_attn_era3_armB" / "battle_base.pt"
+DEFAULT_BC_CHECKPOINT = _AI_TRAIN / "BC_model" / "checkpoints_attn_era2" / "battle_base.pt"
 DEFAULT_TP_CHECKPOINT = _AI_TRAIN / "teamPreview_model" / "checkpoints_set" / "teampreview_sbda.pt"
 
 try:
@@ -239,6 +239,18 @@ def load_bc_policy(path, device: str = "cpu", _ckpt=None):
             f"{cfg.get('model_type')!r}). The flat BCPolicy was retired in the attn-only refactor "
             f"(#27) — retrain on the attn architecture."
         )
+    # 2026-10-04 (cleanup pass 2): the closed match-memory core, archetype-z and Level-B opp-conditioning were
+    # REMOVED from AttnBCPolicy — a checkpoint stamped with one cannot be rebuilt; say so instead of failing deep
+    # in load_state_dict with a shape error. (No served / league checkpoint ever used them.)
+    _removed = [k for k, on in (("memory_dim", int(cfg.get("memory_dim", 0) or 0) > 0),
+                                ("n_archetypes", int(cfg.get("n_archetypes", 0) or 0) > 0),
+                                ("z_dim", int(cfg.get("z_dim", 0) or 0) > 0),
+                                ("opp_cond", bool(cfg.get("opp_cond", False)))) if on]
+    if _removed:
+        raise ValueError(
+            f"BC checkpoint at {path} uses a REMOVED feature ({', '.join(_removed)}): the match-memory core, "
+            f"archetype-z and Level-B opp-conditioning were closed experiments, removed 2026-10-04 (cleanup "
+            f"pass 2; the code is in git history before that date).")
     from v_dance.models.bc_model_attn import AttnBCPolicy
     model = AttnBCPolicy(
         state_dim=cfg["state_dim"],
@@ -254,17 +266,6 @@ def load_bc_policy(path, device: str = "cpu", _ckpt=None):
         # the own slots — pass the saved set so the strict load matches.
         gimmick_heads=cfg.get("gimmick_heads"),
         value_readout=cfg.get("value_readout", "mean"),
-        opp_cond=cfg.get("opp_cond", False),    # Level B: rebuild the opp-conditioned our heads if stamped
-        # Phase 1a match-memory core — absent keys (every pre-memory checkpoint)
-        # default to 0/stateless, so old checkpoints rebuild byte-identically.
-        memory_dim=cfg.get("memory_dim", 0),
-        mem_layers=cfg.get("mem_layers", 2),
-        mem_heads=cfg.get("mem_heads", 4),
-        max_mem_len=cfg.get("max_mem_len", 64),
-        # Phase 2 archetype-z — absent keys (every pre-z checkpoint) default to
-        # 0/off, rebuilding byte-identically.
-        n_archetypes=cfg.get("n_archetypes", 0),
-        z_dim=cfg.get("z_dim", 0),
         # Era-4 2b — absent key (every pre-2b checkpoint) defaults to False,
         # rebuilding byte-identically.
         pair_cond=cfg.get("pair_cond", False),
@@ -287,14 +288,6 @@ def load_bc_policy(path, device: str = "cpu", _ckpt=None):
     model._gimmick_trained = bool(has_gimmick and cfg.get("gimmick_trained", True))
     # Value head usable only if present AND trained on outcome-labelled data.
     model._value_trained = bool(has_value and cfg.get("value_trained", False))
-    # Memory models: the TRAINED window length (train_bc --sequence-len stamp).
-    # Serve/eval must not exceed it — frames at ages >= the trained window would
-    # read never-trained mem_pos_emb rows (audit 2026-07-02). 1 = stateless.
-    model._sequence_len = int(cfg.get("sequence_len", 1) or 1)
-    # Phase-2 z checkpoints embed the archetype centroids (centroids/mu/sd/
-    # mon_feature_dim) so serve-time nearest-centroid assignment needs no
-    # sidecar file — the checkpoint is self-contained. None for pre-z ckpts.
-    model._z_artifact = ckpt.get("z_artifact")
     # Era-4 2b: sequential pair decode rides the checkpoint stamp; VD_PAIR_DECODE=0
     # is the serve kill switch (zero-cond forwards reproduce the unconditioned donor
     # bit-exactly by the zero-pad warm-start construction). Echo per the standing
@@ -327,22 +320,12 @@ def _head_logits(out, head_names) -> Tuple[np.ndarray, np.ndarray]:
 
 
 def _policy_forward(model, state_input, device: str = "cpu", partner_actions=None):
-    """One policy forward for ONE decision, single-frame or frame-stacked.
-
-    ``state_input``: a 1-D ``(STATE_DIM,)`` vector → the plain single-turn
-    forward (unchanged behaviour), or a 2-D ``(T, STATE_DIM)`` MATCH FRAME-STACK
-    → ``forward_with_memory`` on a memory model (Phase-3 serve-time memory
-    carry; the outputs answer for the LAST frame).  A 2-D input handed to a
-    STATELESS model degrades gracefully to the last frame alone, so callers may
-    stack unconditionally.  ``partner_actions`` (2b pair decode): only passed on
-    when set, so legacy pickled modules never see the kwarg."""
+    """One policy forward for ONE decision: ``state_input`` = one ``(STATE_DIM,)`` state vector.
+    ``partner_actions`` (2b pair decode): only passed on when set, so legacy pickled modules never
+    see the kwarg. (The 2-D match frame-stack path went with the memory core, 2026-10-04.)"""
     t = torch.as_tensor(np.asarray(state_input, dtype=np.float32), device=device)
     kw = {"partner_actions": partner_actions} if partner_actions is not None else {}
     with torch.no_grad():
-        if t.dim() == 2:
-            if int(getattr(model, "memory_dim", 0) or 0):
-                return model.forward_with_memory(t, **kw)
-            return model(t[-1], **kw)
         return model(t, **kw)
 
 
@@ -352,9 +335,8 @@ def bc_action_indices(
     temperature: float = 0.0, top_p: float = 1.0, rng=None,
     bias0=None, bias1=None, pair_futility=None,
 ) -> Tuple[Optional[int], Optional[int]]:
-    """Run the policy on one state (vector OR frame-stack — see _policy_forward)
-    and return a LEGAL action index for each active slot (None where no legal
-    action exists).
+    """Run the policy on one state vector and return a LEGAL action index for
+    each active slot (None where no legal action exists).
 
     Defaults (``temperature=0``) → masked argmax, byte-identical to the original.
     Pass ``temperature > 0`` (and optionally ``top_p`` < 1) for serve-side
@@ -469,7 +451,7 @@ def head_logits(
     (slot 0 = our_a, slot 1 = our_b).  Used when the caller needs the logits
     directly — e.g. the forced-replacement path applies a per-slot switch-only
     mask with cross-slot dedup, which a single bc_action_indices call can't
-    express.  Accepts a (T, STATE_DIM) frame-stack for memory models."""
+    express."""
     out = _policy_forward(model, state_vec, device)
     # forward now returns (actions, gimmicks); back-compat with an action-only dict.
     actions = out[0] if isinstance(out, tuple) else out
@@ -481,8 +463,7 @@ def gimmick_logits(
 ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
     """Run the policy once and return the two per-head raw GIMMICK logit vectors
     (slot 0 = our_a, slot 1 = our_b), or None for a legacy action-only model.
-    The caller masked-argmaxes these over the per-slot gimmick legal mask.
-    Accepts a (T, STATE_DIM) frame-stack for memory models."""
+    The caller masked-argmaxes these over the per-slot gimmick legal mask."""
     out = _policy_forward(model, state_vec, device)
     if not (isinstance(out, tuple) and len(out) >= 2):
         return None
@@ -499,30 +480,13 @@ def gimmick_trained(model) -> bool:
 def value_logit(model, state_vec: np.ndarray, device: str = "cpu") -> Optional[float]:
     """Win PROBABILITY in [0,1] for one state from the value head, or None for a
     legacy (pre-value) model.  Runs the policy once and applies sigmoid to the
-    scalar value logit — the basis for a 1-ply value lookahead at serve (#2).
-    Accepts a (T, STATE_DIM) frame-stack for memory models (NOT a batch — batch
-    scoring is value_logit_batch)."""
+    scalar value logit — the basis for a 1-ply value lookahead at serve (#2)."""
     import math
     out = _policy_forward(model, state_vec, device)
     if not (isinstance(out, tuple) and len(out) >= 3):
         return None
     v = float(np.asarray(out[2].detach().cpu()).ravel()[0])
     return 1.0 / (1.0 + math.exp(-v))
-
-
-def value_logit_batch(model, state_vecs, device: str = "cpu"):
-    """Win-prob ∈ [0,1] for a BATCH of states — ONE model forward over an (N, STATE_DIM) stack (the Level-C
-    search's leaf evaluator; uses the GPU when ``device='cuda'``). Returns an np.ndarray (N,) or None for a
-    legacy (pre-value) model."""
-    arr = np.asarray(state_vecs, dtype=np.float32)
-    if arr.ndim == 1:
-        arr = arr[None, :]
-    with torch.no_grad():
-        out = model(torch.as_tensor(arr, device=device))
-    if not (isinstance(out, tuple) and len(out) >= 3):
-        return None
-    v = np.asarray(out[2].detach().cpu(), dtype=np.float64).ravel()
-    return 1.0 / (1.0 + np.exp(-v))
 
 
 def value_trained(model) -> bool:

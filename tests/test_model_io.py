@@ -122,7 +122,6 @@ def test_masked_sample_logp_top_p_reports_the_truncated_distribution():
 
 class _FakeNet:
     """A two-head 'model' for the independent decode path (no pair_cond flag)."""
-    memory_dim = 0
 
     def __init__(self, l0, l1):
         import torch
@@ -331,3 +330,23 @@ def test_team_order_leads_are_within_brought(tp_loaded):
     leads = set(order[:lead_k])
     assert leads <= set(order)        # leads are part of the bring
     assert len(set(order)) == len(order)
+
+
+# ── removed features (cleanup pass 2, 2026-10-04) ──────────────────────────────
+@pytest.mark.parametrize("stamp", [{"memory_dim": 64}, {"n_archetypes": 10, "z_dim": 24}, {"opp_cond": True}])
+def test_a_checkpoint_stamped_with_a_removed_feature_is_refused_clearly(tmp_path, stamp):
+    """The match-memory core, archetype-z and Level-B opp-conditioning were removed: a checkpoint that used
+    one cannot be rebuilt, and the loader must say WHICH feature instead of a deep load_state_dict shape error.
+    The off values (0 / False — every served checkpoint carries them) still load."""
+    torch = pytest.importorskip("torch")
+    from conftest import write_attn_ckpt
+    p = write_attn_ckpt(tmp_path / "x.pt")
+    ck = torch.load(p, weights_only=False)
+    ck["config"].update(stamp)
+    torch.save(ck, p)
+    with pytest.raises(ValueError, match="REMOVED feature"):
+        M.load_bc_policy(p)
+    ck["config"].update({k: (False if isinstance(v, bool) else 0) for k, v in stamp.items()})
+    torch.save(ck, p)
+    model, heads = M.load_bc_policy(p)
+    assert heads == ("our_a", "our_b")
